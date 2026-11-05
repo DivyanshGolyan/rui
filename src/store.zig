@@ -15,6 +15,7 @@ const store_schema = @import("store/schema.zig");
 const store_testing = @import("store/testing.zig");
 
 pub const Store = store_core.Store;
+pub const ActivityTool = reads_domain.ActivityTool;
 pub const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
 pub const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 pub const AgentDelivery = command_domain.AgentDelivery;
@@ -60,6 +61,7 @@ pub const SessionReport = report_domain.SessionReport;
 pub const SessionReportExecution = report_domain.SessionReportExecution;
 pub const SessionStopReply = command_domain.SessionStopReply;
 pub const settleCompactionForTesting = store_testing.settleCompactionForTesting;
+pub const setLoadedToolsForTesting = store_testing.setLoadedToolsForTesting;
 pub const setHistoryFloorForTesting = store_testing.setHistoryFloorForTesting;
 pub const settleAnswerItemsForTesting = store_testing.settleItemsForTesting;
 pub const turnEndedForTesting = store_testing.turnEndedForTesting;
@@ -71,6 +73,7 @@ pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 test {
     _ = @import("store/domain/history_floor.zig");
     _ = @import("store/tests.zig");
+    _ = @import("store/find_tools_tests.zig");
     _ = @import("store/sqlite_tests.zig");
     _ = @import("store/mysql_dialect_check.zig");
     _ = @import("store/mysql_literal.zig");

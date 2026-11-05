@@ -679,13 +679,13 @@ fn readHistoricalSettingsHeld(self: *Store, view: *HistoricalView, out: *Histori
 /// The settings an Operation's request froze, with its Session's binding.
 /// The texts decode straight into the caller's settings.
 const historical_settings = rsql.Read(.{
-    .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,r.tool_set_id,tool_set.member_count," ++
+    .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,coalesce(r.loaded_tool_set_id,r.tool_set_id) AS tool_set_id,tool_set.member_count," ++
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE member.tool_set_id=r.tool_set_id AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
+        "WHERE member.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
         "o.reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first WHERE first.session_ref=o.session_ref ORDER BY first.admission_position LIMIT 1) AS starting_effort " ++
         "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
-        "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=r.tool_set_id JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
+        "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
     .Args = struct { operation: u64 },
     .Row = struct {
         model: *protocol.Bounded(protocol.max_model_bytes),
@@ -1028,8 +1028,8 @@ const historical_entries = rsql.Read(.{
         // Every earlier Operation of the Session above the floor, whatever
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,earlier.reasoning_effort,revision.tool_set_id," ++
-        "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("revision.tool_set_id", "earlier.admission_position", "?6") ++ ") " ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,earlier.reasoning_effort,coalesce(revision.loaded_tool_set_id,revision.tool_set_id)," ++
+        "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("coalesce(revision.loaded_tool_set_id,revision.tool_set_id)", "earlier.admission_position", "?6") ++ ") " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
         "WHERE current.operation_id=?1 AND earlier.admission_position>?2 AND earlier.admission_position<current.admission_position " ++
@@ -1075,7 +1075,7 @@ const declared_members_from = "tool_set_member member JOIN tool_record tool ON t
 fn declared_members_where(comptime set: []const u8, comptime position: []const u8, comptime anchor: []const u8) []const u8 {
     return "member.tool_set_id=" ++ set ++ " AND tool.owner!='provider' AND member.tool_record_id NOT IN (" ++
         "SELECT previous_member.tool_record_id FROM tool_set_member previous_member WHERE previous_member.tool_set_id=coalesce((" ++
-        "SELECT previous_revision.tool_set_id FROM model_operation previous JOIN session_revision previous_revision " ++
+        "SELECT coalesce(previous_revision.loaded_tool_set_id,previous_revision.tool_set_id) FROM model_operation previous JOIN session_revision previous_revision " ++
         "ON previous_revision.session_ref=previous.session_ref AND previous_revision.revision=previous.settings_revision " ++
         "WHERE previous.session_ref=current.session_ref AND previous.admission_position<" ++ position ++
         " AND previous.admission_position>=" ++ anchor ++ " ORDER BY previous.admission_position DESC LIMIT 1),0))";

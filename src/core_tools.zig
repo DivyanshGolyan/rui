@@ -15,6 +15,151 @@ pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     std.fmt.comptimePrint("\"text\":{{\"type\":\"string\",\"description\":\"The Message: nonempty UTF-8, at most {d} bytes.\"}}", .{message_agent_max_text_bytes}) ++
     "},\"required\":[\"id\",\"text\"],\"additionalProperties\":false}";
 
+// Prompt text: written here, and given no tests (D141).
+pub const find_tools_description = "Find and load tools available to this Session but not yet loaded. Give one to eight space-separated search words, at most 64 bytes each; a tool matches any word in its name or description, ignoring ASCII case. Loads at most eight matches in name order. Loaded tools become available on your next request.";
+pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces; each word is at most 64 bytes.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
+
+pub const find_tools_max_word_bytes = 64;
+/// Eight words of 64 bytes fit with room for JSON escapes and spacing; a
+/// larger payload is refused before it is read or parsed.
+pub const find_tools_max_argument_bytes = 4096;
+pub const find_tools_too_long = std.fmt.comptimePrint("words must fit arguments of at most {d} bytes", .{find_tools_max_argument_bytes});
+
+pub const FindTools = struct {
+    words: [8][]const u8 = @splat(""),
+    count: usize = 0,
+};
+
+/// Checked when the core call runs, not when its model output settles.
+pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindTools) error{OutOfMemory}!StartAgentCheck {
+    if (bytes.len > find_tools_max_argument_bytes) return refused(find_tools_too_long);
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return refused("words must be the only field of one well-formed JSON object"),
+    };
+    if (root != .object or root.object.count() != 1) return refused("words must be the only field of one JSON object");
+    const words = root.object.get("words") orelse return refused("words is required");
+    if (words != .string) return refused("words must be a string");
+    out.* = .{};
+    var pieces = std.mem.splitScalar(u8, words.string, ' ');
+    while (pieces.next()) |piece| {
+        if (piece.len == 0) continue;
+        if (piece.len > find_tools_max_word_bytes) return refused("words must contain words of at most 64 bytes each");
+        if (out.count == out.words.len) return refused("words must contain one to eight space-separated words");
+        // The shared streaming Matcher folds the query, not this parser.
+        out.words[out.count] = piece;
+        out.count += 1;
+    }
+    if (out.count == 0) return refused("words must contain one to eight space-separated words");
+    return .accepted;
+}
+
+/// Read arguments are deliberately small; content is read in bounded windows.
+pub const read_transcript_max_argument_bytes = 4096;
+
+// Prompt text: written here, and given no tests (D141).
+pub const read_transcript_description = "Read any Rui Session's public transcript, newest first. Omit id to read your own. Outline lines give entry addresses, kinds, people or tools, call notes, result codes, byte sizes and quoted first-line previews (at most 100 bytes). Use before to page older entries. Open an entry with full and continue its 16 KiB text windows with offset; call entries show the tool name and arguments JSON. Use query for ASCII-case-insensitive word search with quoted snippets; query cannot be combined with full. Private content is never shown.";
+const transcript_kind_schema = blk: {
+    var names: []const u8 = "";
+    for (std.enums.values(protocol.ActivityItem.Kind), 0..) |kind, index| {
+        names = names ++ (if (index == 0) "" else ",") ++ "\"" ++ @tagName(kind) ++ "\"";
+    }
+    break :blk "{\"type\":\"string\",\"enum\":[" ++ names ++ "]}";
+};
+pub const read_transcript_schema = "{\"type\":\"object\",\"properties\":{" ++
+    "\"id\":{\"type\":\"string\",\"description\":\"Session ID; omitted means your own Session.\"}," ++
+    "\"query\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":256,\"description\":\"Search public text (1 to 256 UTF-8 bytes); not with full.\"}," ++
+    "\"kinds\":{\"type\":\"array\",\"items\":" ++ transcript_kind_schema ++ ",\"minItems\":1,\"description\":\"Public feed kind names, exactly as on the wire. Omitted means all kinds.\"}," ++
+    "\"before\":{\"type\":\"string\",\"description\":\"List entries strictly older than this P or P.O address.\"}," ++
+    "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":16}," ++
+    "\"full\":{\"type\":\"string\",\"description\":\"Open entry P.O instead of listing; omit kinds, before and limit.\"}," ++
+    "\"offset\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Byte offset, only with full.\"}" ++
+    "},\"additionalProperties\":false}";
+
+pub const TranscriptAddress = struct { position: u64, ordinal: ?u64 = null };
+pub const ReadTranscriptCheck = StartAgentCheck;
+
+pub const ReadTranscript = struct {
+    id: ?protocol.Bounded(protocol.session_id_bytes) = null,
+    kinds: protocol.ActivityPage.Kinds = .full,
+    before: ?TranscriptAddress = null,
+    limit: u8 = protocol.ActivityPage.items,
+    full: ?TranscriptAddress = null,
+    query: ?protocol.Bounded(256) = null,
+    offset: u64 = 0,
+};
+
+pub fn transcriptAddress(text: []const u8, require_ordinal: bool) ?TranscriptAddress {
+    var parts = std.mem.splitScalar(u8, text, '.');
+    const position = addressNumber(parts.next().?) orelse return null;
+    if (position == 0) return null;
+    const ordinal = if (parts.next()) |part| addressNumber(part) orelse return null else null;
+    if (parts.next() != null or (require_ordinal and ordinal == null)) return null;
+    return .{ .position = position, .ordinal = ordinal };
+}
+
+fn addressNumber(text: []const u8) ?u64 {
+    if (text.len == 0) return null;
+    for (text) |byte| if (byte < '0' or byte > '9') return null;
+    const value = std.fmt.parseInt(u64, text, 10) catch return null;
+    return if (value <= std.math.maxInt(i64)) value else null;
+}
+
+pub fn checkReadTranscript(arena: std.mem.Allocator, bytes: []const u8, out: *ReadTranscript) error{OutOfMemory}!ReadTranscriptCheck {
+    if (bytes.len > read_transcript_max_argument_bytes) return refused("the arguments take more than 4096 bytes");
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.DuplicateField => return refused("a field appears more than once"),
+        else => return refused("the arguments are not one well-formed JSON object"),
+    };
+    const top = switch (root) {
+        .object => |object| object,
+        else => return refused("the arguments are not one JSON object"),
+    };
+    if (unknownField(top, &.{ "id", "kinds", "before", "limit", "full", "offset", "query" })) |name| return refusedField(arena, name, "is not a read_transcript field");
+    out.* = .{};
+    if (top.get("id")) |value| {
+        var id: protocol.Bounded(protocol.session_id_bytes) = .{};
+        if (value != .string) return refused("id must be a Session ID");
+        id.set(value.string) catch return refused("id must be a Session ID");
+        if (!protocol.validSessionId(id.slice())) return refused("id must be a Session ID");
+        out.id = id;
+    }
+    if (top.get("query")) |value| {
+        if (value != .string or value.string.len == 0 or value.string.len > 256 or !std.unicode.utf8ValidateSlice(value.string)) return refused("query must be 1 to 256 bytes of UTF-8");
+        out.query = .{};
+        out.query.?.set(value.string) catch unreachable;
+    }
+    if (top.get("kinds")) |value| {
+        if (value != .array or value.array.items.len == 0) return refused("kinds must be a nonempty array of feed kind names");
+        out.kinds = .empty;
+        for (value.array.items) |item| {
+            if (item != .string) return refused("kinds must contain feed kind names");
+            const kind = std.meta.stringToEnum(protocol.ActivityItem.Kind, item.string) orelse return refused("kinds contains an unknown feed kind name");
+            out.kinds.insert(kind);
+        }
+    }
+    if (top.get("before")) |value| {
+        if (value != .string) return refused("before must be an entry address P or P.O");
+        out.before = transcriptAddress(value.string, false) orelse return refused("before must be an entry address P or P.O");
+    }
+    if (top.get("limit")) |value| {
+        if (value != .integer or value.integer < 1 or value.integer > protocol.ActivityPage.items) return refused("limit must be 1 to 16");
+        out.limit = @intCast(value.integer);
+    }
+    if (top.get("full")) |value| {
+        if (value != .string) return refused("full must be an entry address P.O");
+        out.full = transcriptAddress(value.string, true) orelse return refused("full must be an entry address P.O");
+        inline for (.{ "kinds", "before", "limit", "query" }) |name| if (top.get(name) != null) return refused(name ++ " must be absent with full");
+    }
+    if (top.get("offset")) |value| {
+        if (out.full == null) return refused("offset is only accepted with full");
+        if (value != .integer or value.integer < 0) return refused("offset must be a nonnegative integer");
+        out.offset = @intCast(value.integer);
+    }
+    return .accepted;
+}
+
 /// The most bytes a `start_agent` call's arguments take: its task, at most
 /// `message_agent_max_text_bytes` once decoded and six times that escaped
 /// (`\u0001` for each byte), and its spec.
@@ -22,14 +167,12 @@ pub const start_agent_max_argument_bytes = 6 * message_agent_max_text_bytes + 16
 
 // Prompt text: written here, and given no tests (D141).
 pub const start_agent_description = "Start another Rui agent on a task. It creates the agent's Session, gives it the task as its first Message and returns the agent's ID at once, before any answer. " ++
-    "An attached agent is your child: it inherits your Bash environment, and stops when you are stopped or run out of context. A standalone agent has its own lifetime. " ++
+    "An attached agent is your child: it works in your Workspace with your provider and Bash environment, and stops when you are stopped or run out of context. A standalone agent has its own lifetime. " ++
     "The spec may only narrow your own tools and permission mode.";
 pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     std.fmt.comptimePrint("\"task\":{{\"type\":\"string\",\"description\":\"The agent's first Message: nonempty UTF-8, at most {d} bytes.\"}},", .{message_agent_max_text_bytes}) ++
     "\"attached\":{\"type\":\"boolean\",\"description\":\"true starts your child, which stops with you; false starts a standalone agent.\"}," ++
     "\"spec\":{\"type\":\"object\",\"properties\":{" ++
-    "\"provider\":{\"type\":\"string\"}," ++
-    "\"workspace\":{\"type\":\"string\",\"description\":\"Required when Bash is enabled.\"}," ++
     "\"model\":{\"type\":\"string\"}," ++
     "\"effort\":{\"type\":[\"string\",\"null\"],\"enum\":[null,\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}," ++
     "\"compactAt\":{\"type\":\"integer\",\"description\":\"Tokens of context at which the agent compacts.\"}," ++
@@ -42,7 +185,8 @@ pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     "},\"required\":[\"task\",\"attached\",\"spec\"],\"additionalProperties\":false}";
 
 /// A `start_agent` call's checked arguments: the task, whether the agent
-/// is attached, and its spec as a creating Configuration.
+/// is attached, and its spec as a creating Configuration without the
+/// Workspace and provider, which come from the calling Session (D122, D221).
 pub const StartAgent = struct {
     task: []const u8,
     instructions: ?[]const u8 = null,
@@ -101,20 +245,18 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartA
         .object => |object| object,
         else => return refused("spec must be an object"),
     };
-    // D113/D133: provider defaults at the Host; workspace is required for Bash.
-    if (unknownField(spec, &.{ "model", "effort", "compactAt", "tools", "permissionMode", "label", "instructions", "outputSchema", "provider", "workspace" })) |name|
+    // An agent works where its parent does, with its provider (D140, D221).
+    if (spec.get("workspace") != null) return refused("spec.workspace: an agent always works in your Workspace");
+    if (spec.get("provider") != null) return refused("spec.provider: an agent always uses your provider");
+    if (unknownField(spec, &.{ "model", "effort", "compactAt", "tools", "permissionMode", "label", "instructions", "outputSchema" })) |name|
         return refusedField(arena, name, "is not a spec field");
     out.configuration = .{};
     const configuration = &out.configuration;
-    if (spec.contains("provider")) configuration.provider = stringField(spec, "provider", @TypeOf(configuration.provider)) orelse
-        return refused("spec.provider must be a provider name");
-    if (spec.contains("workspace")) configuration.workspace = stringField(spec, "workspace", @TypeOf(configuration.workspace)) orelse
-        return refused("spec.workspace must be a Workspace path");
-    configuration.model = stringField(spec, "model", @TypeOf(configuration.model)) orelse return refused("spec.model must be a model name");
+    if (!stringField(spec, "model", &configuration.model)) return refused("spec.model must be a model name");
     switch (spec.get("effort") orelse return refused("spec.effort is required")) {
         .null => configuration.reasoning_effort.state = .explicit_null,
         .string => {
-            configuration.reasoning_effort = stringField(spec, "effort", @TypeOf(configuration.reasoning_effort)) orelse
+            if (!stringField(spec, "effort", &configuration.reasoning_effort))
                 return refused("spec.effort must be null, none, low, medium, high, xhigh or max");
             if (std.meta.stringToEnum(protocol.ReasoningEffort, configuration.reasoning_effort.value.slice()) == null)
                 return refused("spec.effort must be null, none, low, medium, high, xhigh or max");
@@ -135,12 +277,7 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartA
         error.Refused => return refused("spec.tools must be a list of distinct tool names"),
         error.UnknownTool => return refusedField(arena, unknown, "is not a Rui tool (spec.tools)"),
     };
-    var selected_tools = configuration.tools.iterator();
-    while (selected_tools.next()) |name| {
-        if (std.mem.eql(u8, name, "bash") and configuration.workspace.state != .value)
-            return refused("spec.workspace is required when spec.tools includes bash");
-    }
-    configuration.permission_mode = stringField(spec, "permissionMode", @TypeOf(configuration.permission_mode)) orelse
+    if (!stringField(spec, "permissionMode", &configuration.permission_mode))
         return refused("spec.permissionMode must be ask or bypass");
     if (!configuration.permission_mode.value.eql("ask") and !configuration.permission_mode.value.eql("bypass"))
         return refused("spec.permissionMode must be ask or bypass");
@@ -164,13 +301,13 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartA
     };
     if (out.instructions) |bytes_value| configuration.instructions = .{
         .state = .value,
-        .borrowed_bytes = bytes_value,
+        .borrowed = bytes_value.ptr,
         .length = bytes_value.len,
         .digest = protocol.contentDigest(bytes_value),
     };
     if (out.output_schema) |bytes_value| configuration.output_schema = .{
         .state = .value,
-        .borrowed_bytes = bytes_value,
+        .borrowed = bytes_value.ptr,
         .length = bytes_value.len,
         .digest = protocol.contentDigest(bytes_value),
     };
@@ -199,15 +336,17 @@ fn unknownField(object: std.json.ObjectMap, comptime known: []const []const u8) 
 
 /// A nonempty string field as the Configuration field type `T`, or null
 /// when it is absent, not a string, or too long.
-fn stringField(object: std.json.ObjectMap, comptime name: []const u8, comptime T: type) ?T {
-    const text = switch (object.get(name) orelse return null) {
+/// Sets `field` in place from the nonempty string `name`, since a returned
+/// copy of a path-sized field would sit in the caller's frame.
+fn stringField(object: std.json.ObjectMap, comptime name: []const u8, field: anytype) bool {
+    const text = switch (object.get(name) orelse return false) {
         .string => |value| value,
-        else => return null,
+        else => return false,
     };
-    if (text.len == 0) return null;
-    var field: T = .{ .state = .value };
-    field.value.set(text) catch return null;
-    return field;
+    if (text.len == 0) return false;
+    field.value.set(text) catch return false;
+    field.state = .value;
+    return true;
 }
 
 /// The tool list `value` names, sorted; `unknown` is set to a name no
@@ -487,8 +626,8 @@ test "a message_agent text over its bound is rejected, across chunk boundaries" 
     }
 }
 
-test "a start_agent call's arguments carry a task and a whole spec with an optional provider and Bash Workspace" {
-    const spec = "\"spec\":{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[\"start_agent\",\"bash\"],\"workspace\":\"/\",\"provider\":\"codex\",\"permissionMode\":\"ask\",\"label\":null}";
+test "a start_agent call's arguments carry a task and a whole spec without a provider or Workspace" {
+    const spec = "\"spec\":{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[\"start_agent\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}";
     const Case = struct { arguments: []const u8, refusal: ?[]const u8 = null };
     for ([_]Case{
         .{ .arguments = "{\"task\":\"read\",\"attached\":true," ++ spec ++ "}" },
@@ -500,7 +639,9 @@ test "a start_agent call's arguments carry a task and a whole spec with an optio
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"bash\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.tools must be a list of distinct tool names" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":0,\"tools\":[],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.compactAt must be a positive number of tokens" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"never\",\"label\":null}}", .refusal = "spec.permissionMode must be ask or bypass" },
-        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"}}", .refusal = "spec.workspace is required when spec.tools includes bash" },
+        // D221: a child inherits both, so a spec naming either is refused.
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"workspace\":\"/\"}}", .refusal = "spec.workspace: an agent always works in your Workspace" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"provider\":\"codex\"}}", .refusal = "spec.provider: an agent always uses your provider" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"note\":1," ++ spec ++ "}", .refusal = "note is not a start_agent field" },
         .{ .arguments = "{\"task\":\"read\",\"task\":\"again\",\"attached\":true," ++ spec ++ "}", .refusal = "a field appears more than once" },
         .{ .arguments = "[]", .refusal = "the arguments are not one JSON object" },
@@ -520,7 +661,7 @@ test "a start_agent call's arguments carry a task and a whole spec with an optio
             try std.testing.expectEqualStrings("100000", start.configuration.compaction_trigger.value.slice());
             // Sorted, as the Store's tool list requires.
             try std.testing.expectEqualStrings("bash start_agent", start.configuration.tools.names.slice());
-            try std.testing.expect(start.configuration.workspace.state == .value and start.configuration.provider.state == .value and start.configuration.label.state != .value);
+            try std.testing.expect(start.configuration.workspace.state != .value and start.configuration.provider.state != .value and start.configuration.label.state != .value);
         }
     }
 }
@@ -599,12 +740,12 @@ test "core_tools start_agent optional instructions and output schema" {
             try std.testing.expect(result == .accepted);
             try std.testing.expect(start.instructions != null);
             try std.testing.expectEqual(.value, start.configuration.instructions.state);
-            try std.testing.expectEqualStrings(start.instructions.?, start.configuration.instructions.borrowed_bytes.?);
+            try std.testing.expectEqualStrings(start.instructions.?, start.configuration.instructions.borrowedBytes().?);
             try std.testing.expectEqual(start.instructions.?.len, start.configuration.instructions.length);
             try std.testing.expectEqual(protocol.contentDigest(start.instructions.?), start.configuration.instructions.digest);
             if (start.output_schema) |schema| {
                 try std.testing.expectEqual(.value, start.configuration.output_schema.state);
-                try std.testing.expectEqualStrings(schema, start.configuration.output_schema.borrowed_bytes.?);
+                try std.testing.expectEqualStrings(schema, start.configuration.output_schema.borrowedBytes().?);
                 try std.testing.expectEqual(protocol.contentDigest(schema), start.configuration.output_schema.digest);
             } else try std.testing.expectEqual(.omitted, start.configuration.output_schema.state);
             if (start.instructions.?.len != 0) {
@@ -628,4 +769,159 @@ test "core_tools start_agent bounds nested output schema before serialization" {
     const start = try allocator.create(StartAgent);
     const result = try checkStartAgent(allocator, json.written(), start);
     try std.testing.expectEqualStrings("the arguments exceed the maximum JSON nesting depth", result.rejected);
+}
+
+test "read_transcript arguments defaults filters addresses and every refusal" {
+    const Case = struct { bytes: []const u8, refusal: ?[]const u8 = null };
+    for ([_]Case{
+        .{ .bytes = "{}" },
+        .{ .bytes = "{\"id\":\"k7m2qx\",\"kinds\":[\"assistant\",\"user\",\"assistant\"],\"before\":\"42.0\",\"limit\":1}" },
+        .{ .bytes = "{\"before\":\"42\",\"limit\":16}" },
+        .{ .bytes = "{\"full\":\"42.0\",\"offset\":16384}" },
+        .{ .bytes = "[]", .refusal = "the arguments are not one JSON object" },
+        .{ .bytes = "{", .refusal = "the arguments are not one well-formed JSON object" },
+        .{ .bytes = "{} {}", .refusal = "the arguments are not one well-formed JSON object" },
+        .{ .bytes = "{\"id\":\"k7m2qx\",\"id\":\"k7m2qx\"}", .refusal = "a field appears more than once" },
+        .{ .bytes = "{\"query\":\"\"}", .refusal = "query must be 1 to 256 bytes of UTF-8" },
+        .{ .bytes = "{\"query\":7}", .refusal = "query must be 1 to 256 bytes of UTF-8" },
+        .{ .bytes = "{\"query\":\"word\",\"full\":\"42.0\"}", .refusal = "query must be absent with full" },
+        .{ .bytes = "{\"id\":7}", .refusal = "id must be a Session ID" },
+        .{ .bytes = "{\"id\":\"TOOLONG\"}", .refusal = "id must be a Session ID" },
+        .{ .bytes = "{\"id\":\"K7M2QX\"}", .refusal = "id must be a Session ID" },
+        .{ .bytes = "{\"id\":\"\"}", .refusal = "id must be a Session ID" },
+        .{ .bytes = "{\"kinds\":[]}", .refusal = "kinds must be a nonempty array of feed kind names" },
+        .{ .bytes = "{\"kinds\":\"user\"}", .refusal = "kinds must be a nonempty array of feed kind names" },
+        .{ .bytes = "{\"kinds\":[7]}", .refusal = "kinds must contain feed kind names" },
+        .{ .bytes = "{\"kinds\":[\"\"]}", .refusal = "kinds contains an unknown feed kind name" },
+        .{ .bytes = "{\"kinds\":[\"User\"]}", .refusal = "kinds contains an unknown feed kind name" },
+        .{ .bytes = "{\"before\":7}", .refusal = "before must be an entry address P or P.O" },
+        .{ .bytes = "{\"before\":\"0\"}", .refusal = "before must be an entry address P or P.O" },
+        .{ .bytes = "{\"before\":\"1.2.3\"}", .refusal = "before must be an entry address P or P.O" },
+        .{ .bytes = "{\"before\":\"1.\"}", .refusal = "before must be an entry address P or P.O" },
+        .{ .bytes = "{\"before\":\"+1\"}", .refusal = "before must be an entry address P or P.O" },
+        .{ .bytes = "{\"before\":\"9223372036854775808\"}", .refusal = "before must be an entry address P or P.O" },
+        .{ .bytes = "{\"before\":\"1.9223372036854775808\"}", .refusal = "before must be an entry address P or P.O" },
+        .{ .bytes = "{\"limit\":0}", .refusal = "limit must be 1 to 16" },
+        .{ .bytes = "{\"limit\":17}", .refusal = "limit must be 1 to 16" },
+        .{ .bytes = "{\"limit\":1.5}", .refusal = "limit must be 1 to 16" },
+        .{ .bytes = "{\"limit\":\"2\"}", .refusal = "limit must be 1 to 16" },
+        .{ .bytes = "{\"full\":7}", .refusal = "full must be an entry address P.O" },
+        .{ .bytes = "{\"full\":\"42\"}", .refusal = "full must be an entry address P.O" },
+        .{ .bytes = "{\"full\":\"0.0\"}", .refusal = "full must be an entry address P.O" },
+        .{ .bytes = "{\"full\":\"1.0\",\"limit\":16}", .refusal = "limit must be absent with full" },
+        .{ .bytes = "{\"full\":\"1.0\",\"before\":\"2\"}", .refusal = "before must be absent with full" },
+        .{ .bytes = "{\"full\":\"1.0\",\"kinds\":[\"user\"]}", .refusal = "kinds must be absent with full" },
+        .{ .bytes = "{\"offset\":0}", .refusal = "offset is only accepted with full" },
+        .{ .bytes = "{\"full\":\"1.0\",\"offset\":-1}", .refusal = "offset must be a nonnegative integer" },
+        .{ .bytes = "{\"full\":\"1.0\",\"offset\":0.5}", .refusal = "offset must be a nonnegative integer" },
+        .{ .bytes = "{\"full\":\"1.0\",\"offset\":null}", .refusal = "offset must be a nonnegative integer" },
+    }) |case| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var read: ReadTranscript = .{};
+        const check = try checkReadTranscript(arena.allocator(), case.bytes, &read);
+        errdefer std.debug.print("arguments: {s}\n", .{case.bytes});
+        if (case.refusal) |expected| {
+            try std.testing.expect(check == .rejected);
+            try std.testing.expectEqualStrings(expected, check.rejected);
+        } else {
+            try std.testing.expect(check == .accepted);
+            if (std.mem.eql(u8, case.bytes, "{}")) {
+                try std.testing.expect(read.id == null and read.before == null and read.full == null);
+                try std.testing.expectEqual(@as(u8, 16), read.limit);
+                try std.testing.expectEqual(@as(u64, 0), read.offset);
+                try std.testing.expect(read.kinds.eql(.full));
+            } else if (read.full != null) {
+                try std.testing.expectEqual(@as(u64, 42), read.full.?.position);
+                try std.testing.expectEqual(@as(?u64, 0), read.full.?.ordinal);
+                try std.testing.expectEqual(@as(u64, 16384), read.offset);
+            } else if (read.id) |id| {
+                try std.testing.expectEqualStrings("k7m2qx", id.slice());
+                try std.testing.expect(read.kinds.eql(.initMany(&.{ .assistant, .user })));
+                try std.testing.expectEqual(@as(u8, 1), read.limit);
+                try std.testing.expectEqual(@as(?u64, 0), read.before.?.ordinal);
+            } else try std.testing.expectEqual(@as(?u64, null), read.before.?.ordinal);
+        }
+    }
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var read: ReadTranscript = .{};
+    const oversized = try arena.allocator().alloc(u8, read_transcript_max_argument_bytes + 1);
+    @memset(oversized, ' ');
+    const check = try checkReadTranscript(arena.allocator(), oversized, &read);
+    try std.testing.expectEqualStrings("the arguments take more than 4096 bytes", check.rejected);
+    // Wire kind tags are the single vocabulary, including kinds introduced later.
+    for (std.enums.values(protocol.ActivityItem.Kind)) |kind| {
+        const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"kinds\":[\"{s}\"]}}", .{@tagName(kind)});
+        try std.testing.expect(try checkReadTranscript(arena.allocator(), bytes, &read) == .accepted);
+        try std.testing.expect(read.kinds.eql(.initOne(kind)));
+    }
+}
+
+test "read_transcript query accepts UTF-8 byte bounds" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var read: ReadTranscript = .{};
+    for ([_]usize{ 1, 256, 257 }) |length| {
+        const query = try arena.alloc(u8, length);
+        @memset(query, 'a');
+        const args = try std.fmt.allocPrint(arena, "{{\"query\":\"{s}\"}}", .{query});
+        const check = try checkReadTranscript(arena, args, &read);
+        if (length <= 256) {
+            try std.testing.expect(check == .accepted);
+            try std.testing.expectEqualStrings(query, read.query.?.slice());
+        } else try std.testing.expect(check == .rejected);
+    }
+    const multibyte = try arena.alloc(u8, 256);
+    for (0..128) |index| @memcpy(multibyte[index * 2 ..][0..2], "é");
+    const args = try std.fmt.allocPrint(arena, "{{\"query\":\"{s}\"}}", .{multibyte});
+    try std.testing.expect(try checkReadTranscript(arena, args, &read) == .accepted);
+    try std.testing.expectEqualStrings(multibyte, read.query.?.slice());
+    try std.testing.expect(try checkReadTranscript(arena, "{\"query\":\"\xff\"}", &read) == .rejected);
+}
+
+test "find_tools checks words at execution time" {
+    const utf8_word: [64]u8 = @bitCast(@as([32][2]u8, @splat("é".*)));
+    const Case = struct { bytes: []const u8, count: ?usize = null };
+    for ([_]Case{
+        .{ .bytes = "{\"words\":\"one\"}", .count = 1 },
+        .{ .bytes = "{\"words\":\"  OnE   TWO  \"}", .count = 2 },
+        .{ .bytes = "{\"words\":\"1 2 3 4 5 6 7 8\"}", .count = 8 },
+        .{ .bytes = "{\"words\":\"one\\ttwo\"}", .count = 1 },
+        .{ .bytes = "{\"words\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}", .count = 1 },
+        .{ .bytes = "{\"words\":\"" ++ @as([65]u8, @splat('a')) ++ "\"}" },
+        .{ .bytes = "{\"words\":\"" ++ utf8_word ++ "\"}", .count = 1 },
+        .{ .bytes = "{\"words\":\"" ++ utf8_word ++ "é" ++ "\"}" },
+        .{ .bytes = "{\"words\":\"" ++ @as([64]u8, @splat('a')) ++ " " ++ @as([64]u8, @splat('b')) ++ "\"}", .count = 2 },
+        .{ .bytes = "{\"words\":\"\"}" },
+        .{ .bytes = "{\"words\":\"   \"}" },
+        .{ .bytes = "{\"words\":\"1 2 3 4 5 6 7 8 9\"}" },
+        .{ .bytes = "{}" },
+        .{ .bytes = "[]" },
+        .{ .bytes = "{" },
+        .{ .bytes = "{\"words\":7}" },
+        .{ .bytes = "{\"words\":null}" },
+        .{ .bytes = "{\"words\":[]}" },
+        .{ .bytes = "{\"words\":\"one\",\"extra\":true}" },
+        .{ .bytes = "{\"words\":\"one\",\"words\":\"two\"}" },
+        .{ .bytes = "{\"words\":\"one\"} {}" },
+        .{ .bytes = "{\"words\":\"one" ++ @as([find_tools_max_argument_bytes]u8, @splat(' ')) ++ "\"}" },
+    }) |case| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var arguments: FindTools = .{};
+        const check = try checkFindTools(arena.allocator(), case.bytes, &arguments);
+        if (case.count) |count| {
+            try std.testing.expect(check == .accepted);
+            try std.testing.expectEqual(count, arguments.count);
+            const parsed = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), case.bytes, .{});
+            var pieces = std.mem.tokenizeScalar(u8, parsed.object.get("words").?.string, ' ');
+            for (arguments.words[0..count]) |word| try std.testing.expectEqualStrings(pieces.next().?, word);
+            try std.testing.expect(pieces.next() == null);
+        } else {
+            try std.testing.expect(check == .rejected);
+            try std.testing.expect(std.mem.indexOf(u8, check.rejected, "words") != null);
+        }
+    }
 }

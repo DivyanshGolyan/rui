@@ -3,13 +3,15 @@
 // D171). Every call is one request to a Host route that exists today.
 import { randomUUID } from "node:crypto";
 
+import type { SessionNotifications } from "./notifications.ts";
 import { RuiRequestError } from "./errors.ts";
-import { FEED_KINDS, listActivity, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { FEED_KINDS, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
 /** What a Session handle needs from the client. */
 export interface Link {
+	readonly activity?: SessionNotifications;
 	exchange(path: string, build: (store: string) => string, environment?: Buffer, limits?: ReplyLimits): Promise<Buffer>;
 }
 
@@ -29,7 +31,7 @@ export interface SessionSpec {
 	/** Tool names the Host offers, such as `bash` and `web_search`. */
 	tools: readonly string[];
 	permissionMode: "ask" | "bypass";
-	/** Reasoning effort. `null` sends none, so the provider uses its own (D111). */
+	/** Reasoning effort. `null` sends none, so the provider uses its own; only for a model Rui does not list (D111). */
 	effort: string | null;
 	/** Compact the conversation at this many tokens. */
 	compactAt: number;
@@ -56,7 +58,6 @@ export interface SessionSummary {
 	label: string | null;
 	/** The Session's work state, such as `idle`, `working` or `approval`. */
 	state: string;
-	/** Always `null` until Sessions have parents. */
 	parent: string | null;
 }
 
@@ -141,10 +142,17 @@ export class Session {
 
 	/**
 	 * The Session's feed, in order, as an async iterator (D9). Without `follow`
-	 * it ends at the current end of the feed; with it, it never ends.
+	 * it ends at the current end. With it, busy Sessions poll with backoff; idle Sessions
+	 * wait for a local write on this Rui instance (not writes from another process).
+	 * See `ListActivityOptions.follow`; `signal` abort also ends an idle wait.
 	 */
 	listActivity(options?: ListActivityOptions): AsyncGenerator<FeedEntry, void, undefined> {
 		return listActivity(this.#link, this.id, options);
+	}
+
+	/** Search public feed text newest first, with bounded snippets. */
+	searchActivity(query: string, options?: SearchActivityOptions): AsyncGenerator<ActivitySearchEntry, void, undefined> {
+		return searchActivity(this.#link, this.id, query, options);
 	}
 
 	/** The whole text of an entry (D134). Past about 512 MiB a string cannot hold it and this throws: use `readContentBytes`. */
@@ -171,7 +179,9 @@ export class Session {
 				text: { state: "value", value: text },
 			} satisfies Schemas["MessageRequest"]);
 		const reply = parse<Schemas["MessageReply"]>(await this.#link.exchange("/v1/message", body, environmentBytes(options.env)));
-		return { messageId: accepted(reply.answer).admission };
+		const messageId = accepted(reply.answer).admission;
+		this.#link.activity?.notify(this.id);
+		return { messageId };
 	}
 
 	/** Changes settings. Omitted fields stay as they are. Resolves once the Host accepted the change (D7). */
@@ -181,6 +191,7 @@ export class Session {
 			await this.#link.exchange("/v1/configure", (store) => configureBody(store, idempotencyKey, this.id, fields)),
 		);
 		accepted(reply.answer);
+		this.#link.activity?.notify(this.id);
 	}
 
 	/** Stops the current and queued work. The Session stays usable (D14). */
@@ -195,6 +206,7 @@ export class Session {
 				session: this.id,
 			} satisfies Schemas["SessionStopRequest"]);
 		accepted(parse<Schemas["SessionStopReply"]>(await this.#link.exchange("/v1/control/session-stop", body)).answer);
+		this.#link.activity?.notify(this.id);
 	}
 
 	/**
@@ -223,7 +235,10 @@ export class Session {
 			),
 		);
 		const { turn, operation } = page.work;
-		if (turn === null || operation === null || !modelCallCurrent(page.work.state.kind)) return;
+		if (turn === null || operation === null || !modelCallCurrent(page.work.state.kind)) {
+			this.#link.activity?.notify(this.id);
+			return;
+		}
 		const idempotencyKey = randomUUID();
 		const body = (store: string) =>
 			JSON.stringify({
@@ -240,6 +255,7 @@ export class Session {
 			const gone = error instanceof RuiRequestError && (error.code === "operation_resolved" || error.code === "target_mismatch");
 			if (!gone) throw error;
 		}
+		this.#link.activity?.notify(this.id);
 	}
 
 	/** Answers an approval. `requestId` is the Action id of the `approval_requested` entry (D15). */
@@ -257,6 +273,7 @@ export class Session {
 				decision: wire,
 			} satisfies Schemas["PermissionDecisionRequest"]);
 		accepted(parse<Schemas["PermissionDecisionReply"]>(await this.#link.exchange("/v1/control/permission-decision", body)).answer);
+		this.#link.activity?.notify(this.id);
 	}
 }
 
@@ -302,7 +319,7 @@ export class Sessions {
 				),
 			);
 			for (const row of page.sessions) {
-				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, parent: null });
+				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, parent: row.parent });
 			}
 			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;

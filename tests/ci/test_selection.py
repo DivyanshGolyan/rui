@@ -160,6 +160,14 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(core=core):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
 
+    def test_cli_value_cores_keep_their_native_consumers(self):
+        for core in ("caller_error", "caller_exit", "cli_value", "retention_capacity"):
+            with self.subTest(core=core):
+                result = select([f"src/{core}.zig"], "review", AVAILABLE)
+                self.assertIn("test-logic", result["targets"])
+                self.assertIn("check", result["targets"])
+                self.assertIn("check", result["native_targets"])
+
     def test_http2_client_selects_its_own_tests(self):
         result = select(["src/h2/Engine.zig"], "review", AVAILABLE)
         self.assertEqual(result["targets"], ["stack-frames", "test-h2"])

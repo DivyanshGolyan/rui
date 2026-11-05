@@ -1574,6 +1574,12 @@ test "real preparation consumes the configured allowance across multiple advance
     try configuration.configuration.provider.value.set("codex");
     configuration.configuration.model.state = .value;
     try configuration.configuration.model.value.set("model-a");
+    configuration.configuration.tools = try .of(&.{ "bash", "web_search" });
+    configuration.configuration.permission_mode.state = .value;
+    try configuration.configuration.permission_mode.value.set("bypass");
+    configuration.configuration.compaction_trigger.state = .value;
+    try configuration.configuration.compaction_trigger.value.set("115200");
+    configuration.configuration.reasoning_effort.state = .explicit_null;
     const configured = storage.configure(&configuration, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
@@ -1711,6 +1717,12 @@ const PreparationTestSetup = struct {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         const configured = self.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         try std.testing.expect(protocol.validSessionId(configured.accepted.session.slice()));
@@ -2086,6 +2098,9 @@ fn establishComposedHistory(setup: *PreparationTestSetup) !struct { binding: sto
         command.configuration.tools = try .of(&.{"bash"});
         command.configuration.permission_mode.state = .value;
         try command.configuration.permission_mode.value.set("ask");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         command.configuration.output_schema = .{
             .state = .value,
             .file = file,
@@ -2382,6 +2397,12 @@ test "request preparation escapes instructions and user content" {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         command.configuration.instructions = .{
             .state = .value,
             .file = file,
@@ -2437,6 +2458,12 @@ test "request preparation escapes instructions and user content" {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         command.configuration.instructions = .{
             .state = .value,
             .file = file,
@@ -2515,10 +2542,16 @@ test "request preparation keeps the starting effort at the top and changes it at
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set(case.model);
-        if (case.override) |effort| {
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        // D111: the test client states the effort explicitly.
+        if (case.override orelse case.expected) |effort| {
             command.configuration.reasoning_effort.state = .value;
             try command.configuration.reasoning_effort.value.set(effort);
-        }
+        } else command.configuration.reasoning_effort.state = .explicit_null;
         const configured = setup.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session;
@@ -3785,7 +3818,11 @@ fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []co
     command.configuration.tools = try .of(&.{"bash"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
-    command.configuration.reasoning_effort.state = .explicit_null;
+    // D111: test clients supply an explicit effort using the client product choice.
+    if (if (@import("model_capability.zig").supportsModel(model)) @import("client.zig").defaultStartEffort(model, null).value else null) |effort| {
+        command.configuration.reasoning_effort.state = .value;
+        try command.configuration.reasoning_effort.value.set(effort);
+    } else command.configuration.reasoning_effort.state = .explicit_null;
     command.configuration.compaction_trigger.state = .value;
     try command.configuration.compaction_trigger.value.set("115200");
     const reply = setup.storage.configure(&command, .{});
@@ -4012,6 +4049,118 @@ test "a tool change keeps each request's input a prefix of the next" {
         try std.testing.expectEqual(round == 4, std.mem.startsWith(u8, top, default_top_tools_json));
         if (round != 4) try std.testing.expect(std.mem.startsWith(u8, top, "]"));
     }
+}
+
+test "a loaded tools revision adds exactly the newly loaded tool without a cache miss" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const donor = try configureMemoSessionForTesting(&setup);
+    const session = try setup.configure("loaded-memo-main");
+    var configure: protocol.ConfigureCommand = .{};
+    try configure.key.set("loaded-memo-tools");
+    configure.session = session;
+    configure.configuration.tools = try .of(&.{ "bash", "message_agent" });
+    configure.configuration.permission_mode.state = .value;
+    try configure.configuration.permission_mode.value.set("ask");
+    try std.testing.expect(setup.storage.configure(&configure, .{}) == .accepted);
+    // This intentionally unreachable subset exercises the legacy NULL/set
+    // representation independently of the loader. Configured tools stay fixed.
+    try store.setLoadedToolsForTesting(&setup.storage, session.slice(), donor.slice());
+    try setup.submit("loaded-memo-first", "loaded-memo-first", session.slice(), "start work");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    const first = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(first.bytes);
+    try std.testing.expectEqual(@as(usize, 0), first.copied);
+    try std.testing.expect(std.mem.indexOf(u8, first.bytes, declared_bash_json) != null);
+    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "message_agent") == null);
+    const covered = heldMemoLength(&memos, session.slice());
+    try std.testing.expect(covered > 0);
+
+    var grow: protocol.ConfigureCommand = .{};
+    try grow.key.set("loaded-memo-grow");
+    grow.session = session;
+    grow.configuration.loaded_tools = try .of(&.{ "bash", "message_agent" });
+    try std.testing.expect(setup.storage.configure(&grow, .{}) == .accepted);
+    binding = try advanceHistoryForTesting(&setup, session, binding, 1, 1);
+    // The old request's history is still a valid prefix and the memo is hit.
+    try std.testing.expectEqual(covered, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+    const request = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(request.bytes);
+    const input_end = std.mem.indexOf(u8, first.bytes, "],\"tools\":[").?;
+    try std.testing.expectStringStartsWith(request.bytes, first.bytes[0..input_end]);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, request.bytes, .{});
+    defer parsed.deinit();
+    var declarations: usize = 0;
+    for (parsed.value.object.get("input").?.array.items) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "additional_tools")) continue;
+        const added = item.object.get("tools").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), added.len);
+        try std.testing.expectEqualStrings(if (declarations == 0) "bash" else "message_agent", added[0].object.get("name").?.string);
+        declarations += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), declarations);
+}
+
+test "find_tools declares a found tool on the next request without losing the memo prefix" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    const session = try setup.configure("find-codec");
+    var configure: protocol.ConfigureCommand = .{};
+    try configure.key.set("find-codec-tools");
+    configure.session = session;
+    configure.configuration.tools = try .of(&.{ "find_tools", "read_transcript" });
+    configure.configuration.loaded_tools = try .of(&.{"find_tools"});
+    try std.testing.expect(setup.storage.configure(&configure, .{}) == .accepted);
+    try setup.submit("find-codec-input", "find-codec-input", session.slice(), "read the transcript");
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    const first = try prepareMemoForTesting(&setup, binding, &memos, .{});
+    defer std.testing.allocator.free(first.bytes);
+    const covered = heldMemoLength(&memos, session.slice());
+    try std.testing.expect(covered > 0);
+    try std.testing.expect(std.mem.indexOf(u8, first.bytes, "read_transcript") == null);
+    try settleItemsForTesting(&setup, binding, "find-codec-call", &.{
+        "{\"type\":\"function_call\",\"id\":\"find-item\",\"call_id\":\"find-call\",\"name\":\"find_tools\",\"arguments\":\"{\\\"words\\\":\\\"TRANSCRIPT\\\"}\"}",
+    });
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const find = (try setup.storage.nextCoreWork()).?.action;
+    try @import("find_tools.zig").run(&setup.storage, arena.allocator(), &find, .{});
+    admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    binding = try admitted.permit.consume();
+    try std.testing.expectEqual(covered, try expectMemoRebuildEqual(&setup, binding, &memos, .{}));
+    const next = try prepareMemoForTesting(&setup, binding, null, .{});
+    defer std.testing.allocator.free(next.bytes);
+    const input_end = std.mem.indexOf(u8, first.bytes, "],\"tools\":[").?;
+    try std.testing.expectStringStartsWith(next.bytes, first.bytes[0..input_end]);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, next.bytes, .{});
+    defer parsed.deinit();
+    var declarations: usize = 0;
+    for (parsed.value.object.get("input").?.array.items) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (!std.mem.eql(u8, kind.string, "additional_tools")) continue;
+        const added = item.object.get("tools").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), added.len);
+        try std.testing.expectEqualStrings(if (declarations == 0) "find_tools" else "read_transcript", added[0].object.get("name").?.string);
+        declarations += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), declarations);
+    try settleItemsForTesting(&setup, binding, "find-codec-found", &.{
+        "{\"type\":\"function_call\",\"id\":\"read-item\",\"call_id\":\"read-call\",\"name\":\"read_transcript\",\"arguments\":\"{}\"}",
+    });
+    const read = (try setup.storage.nextCoreWork()).?.action;
+    try std.testing.expect(read.tool == .read_transcript);
+    try @import("read_transcript.zig").run(&setup.storage, arena.allocator(), &read, .{});
 }
 
 test "a full rebuild must begin with the Session's prefix seal" {

@@ -3596,7 +3596,7 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     try held.self.line.model.set("gpt-5.5");
     try showStatus(held, true, "fix-safari-export");
     var storage: [512]u8 = undefined;
-    try std.testing.expectEqualStrings(" › Effort          high  model default", rowWith(held.screen, "Effort ", &storage).?);
+    try std.testing.expectEqualStrings(" › Effort          high  Session override", rowWith(held.screen, "Effort ", &storage).?);
     try std.testing.expectEqualStrings("   Permissions     bypass · Bash runs without asking", rowWith(held.screen, "Permissions", &storage).?);
     // Shift-Down scrolls as before; the mark stays.
     try sendKeys(&held.self, "\x1b[1;2B");

@@ -13,6 +13,7 @@ const output_decode = @import("../output_decode.zig");
 const store_core = @import("Store.zig");
 const rsql = @import("rsql.zig");
 const sqlite = @import("sqlite.zig");
+const mysql_testing = @import("mysql_testing.zig");
 const mysql_dialect_check = @import("mysql_dialect_check.zig");
 const required_engines = @import("wire/required_engines.zig");
 const Store = store_core.Store;
@@ -25,7 +26,7 @@ const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
 
 /// The engines a conformance test runs on, each in this one process.
-pub const Engine = enum { sqlite };
+pub const Engine = enum { sqlite, mysql };
 
 /// One run of a conformance test's body, on one engine.
 pub const Case = struct {
@@ -49,11 +50,8 @@ pub fn requiredEngines() !std.EnumSet(EngineName) {
     return names;
 }
 
-/// Engines a test in this binary reaches without an `Engine`: Postgres
-/// through pg_tests.zig's wire tests, and MySQL through
-/// mysql_dialect_check.zig, which fails when `RUI_TEST_REQUIRE_ENGINES`
-/// lists mysql and no server answers.
-pub const checked_elsewhere: std.EnumSet(EngineName) = .initMany(&.{ .postgres, .mysql });
+/// Engines reached outside Store conformance: Postgres wire tests.
+pub const checked_elsewhere: std.EnumSet(EngineName) = .initMany(&.{.postgres});
 
 /// The first of `names` that no test reaches, neither an `Engine` nor
 /// one of `elsewhere`, or null.
@@ -76,11 +74,14 @@ pub fn forEachEngine(comptime run: anytype) !void {
         return error.RequiredEngineNotBuilt;
     }
     inline for (comptime std.enums.values(Engine)) |engine| {
-        var case: Case = .{ .engine = engine };
-        run(&case) catch |err| {
-            std.debug.print("conformance test failed on engine {s}\n", .{@tagName(engine)});
-            return err;
-        };
+        if (engine != .mysql or try mysql_testing.available()) {
+            var case: Case = .{ .engine = engine };
+            run(&case) catch |err| {
+                std.debug.print("conformance test failed on engine {s}\n", .{@tagName(engine)});
+                return err;
+            };
+            if (engine == .mysql) mysql_dialect_check.conformancePassed();
+        }
     }
 }
 
@@ -105,6 +106,7 @@ pub const TestingStoreOptions = struct {
 /// `testingStore` with `options`.
 pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: TestingStoreOptions) !void {
     switch (case.engine) {
+        .mysql => return mysql_testing.open(storage, tmp, io, options),
         .sqlite => {
             var root_buffer: [protocol.max_store_bytes]u8 = undefined;
             const root_length = try tmp.dir.realPath(io, &root_buffer);
@@ -255,15 +257,29 @@ fn fixtureText(comptime text: [:0]const u8) [:0]const u8 {
 /// point touches what it changes. With empty `args`, `sql` may hold several
 /// statements; otherwise it is one statement whose `?1`, `?2`... take
 /// `args` in order: integers, `Blob`s as blobs, and byte slices as text.
-/// The fixtures run on SQLite, the only engine today.
+/// MySQL fixtures use the root connection; application grants stay restricted.
 pub fn exec(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
-    return sqliteExec(storage.sqliteDatabase(), fixtureText(sql), args);
+    _ = fixtureText(sql);
+    if (storage.engine == .mysql) return mysql_testing.exec(storage, sql, args);
+    return sqliteExec(storage.sqliteDatabase(), sql, args);
+}
+
+/// Seeds a loaded subset for visibility tests before find_tools exists.
+/// `source` supplies its configured set; `session` and all its revisions
+/// load that set. Only fixtures bypass configure's reachability check.
+pub fn setLoadedToolsForTesting(storage: *Store, session: []const u8, source: []const u8) !void {
+    // MySQL refuses an UPDATE that reads its own target table, so read first.
+    const set = try queryU64(storage, "SELECT tool_set_id FROM session WHERE session_ref=?1", .{source});
+    try exec(storage, "UPDATE session SET loaded_tool_set_id=?1 WHERE session_ref=?2", .{ set, session });
+    try exec(storage, "UPDATE session_revision SET loaded_tool_set_id=(SELECT loaded_tool_set_id FROM session WHERE session_ref=?1) WHERE session_ref=?1", .{session});
 }
 
 /// The first column of `sql`'s first row: `QueryFailed` with no row, and
 /// `CorruptStore` when it is negative. `args` binds as in `exec`.
 pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {
-    return sqliteQueryU64(storage.sqliteDatabase(), fixtureText(sql), args);
+    _ = fixtureText(sql);
+    if (storage.engine == .mysql) return mysql_testing.queryU64(storage, sql, args);
+    return sqliteQueryU64(storage.sqliteDatabase(), sql, args);
 }
 
 /// `exec` on a SQLite connection, for any SQLite text: sqlite_tests.zig's
@@ -295,13 +311,17 @@ pub fn zeroContent(storage: *Store, comptime ids: [:0]const u8) !void {
     _ = fixtureText("UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")");
     const sql = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (" ++ ids ++ ")";
     if (comptime fixtureTextError(sql)) |message| @compileError(message ++ ": " ++ sql);
+    if (storage.engine == .mysql) return mysql_testing.exec(storage, "UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")", .{});
     return sqliteExec(storage.sqliteDatabase(), sql, .{});
 }
 
-/// `exec` with foreign keys unchecked for `sql` alone: on SQLite, the only
-/// engine today, PRAGMA foreign_keys is OFF around it and ON after it, also
-/// when it fails.
+/// `exec` with foreign keys unchecked for `sql` alone, restored on failure.
 pub fn withoutForeignKeys(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
+    if (storage.engine == .mysql) {
+        try mysql_testing.rawExec(storage, "SET foreign_key_checks=0");
+        defer mysql_testing.rawExec(storage, "SET foreign_key_checks=1") catch @panic("foreign keys stayed off");
+        return exec(storage, sql, args);
+    }
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     defer sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON") catch @panic("foreign keys stayed off");
     try exec(storage, sql, args);
@@ -328,9 +348,9 @@ pub const sqlite_only = struct {
 
 /// Leaves `table` preparing normally but failing at the first step of a
 /// statement that reads it, the shape of an I/O or corruption fault after
-/// a statement compiled. On SQLite, the only engine today, `table` is
-/// renamed and a view whose filter overflows `abs` takes its name.
+/// a statement compiled: a renamed table and an overflowing view.
 pub fn failReadsOf(storage: *Store, comptime table: []const u8) !void {
+    if (storage.engine == .mysql) return mysql_testing.rawExec(storage, "RENAME TABLE " ++ table ++ " TO " ++ table ++ "_unreadable;CREATE VIEW " ++ table ++ " AS SELECT * FROM " ++ table ++ "_unreadable WHERE abs(-9223372036854775808) IS NOT NULL");
     try sqlite.exec(storage.sqliteDatabase(), "ALTER TABLE " ++ table ++ " RENAME TO " ++ table ++ "_unreadable");
     try sqlite.exec(storage.sqliteDatabase(), "CREATE VIEW " ++ table ++ " AS SELECT * FROM " ++ table ++ "_unreadable " ++
         "WHERE abs(-9223372036854775808) IS NOT NULL");
@@ -367,7 +387,11 @@ pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace
         try command.configuration.permission_mode.value.set("bypass");
         command.configuration.compaction_trigger.state = .value;
         try command.configuration.compaction_trigger.value.set("115200");
-        command.configuration.reasoning_effort.state = .explicit_null;
+        // Test clients use the same effort choice as the CLI.
+        if (if (@import("../model_capability.zig").supportsModel(model)) @import("../client.zig").defaultStartEffort(model, null).value else null) |effort| {
+            command.configuration.reasoning_effort.state = .value;
+            try command.configuration.reasoning_effort.value.set(effort);
+        } else command.configuration.reasoning_effort.state = .explicit_null;
     }
     return command;
 }

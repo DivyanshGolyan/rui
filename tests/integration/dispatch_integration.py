@@ -168,9 +168,9 @@ def failed_response_export_case(state, processes, endpoints):
         export(operation, "body", target=other_session, error="ContentNotFound")
         export(operation, "body", attempt="2", error="ContentNotFound")
     export("999999", "metadata", error="ContentNotFound")
-    export(records[0][0]["operation"], "body", extra=("--profile", "full"), error="conflicting")
-    export(records[0][0]["operation"], "unknown", error="InvalidArguments")
-    export("0", "body", error="InvalidTarget")
+    export(records[0][0]["operation"], "body", extra=("--profile", "full"), error="[profile_excludes_failed_response]")
+    export(records[0][0]["operation"], "unknown", error="Accepted: body, metadata.")
+    export("0", "body", error="--operation 0: That is not an ID.")
     stop_host(host)
     processes.remove(host)
     assert snapshot() == before, "export mutated canonical data, retained bytes or write timestamps"
@@ -1460,7 +1460,7 @@ def main(mode="all", correlation_case="all"):
         stale = command(
             "action", "deny", "--store", proposal_store, "--record", state / "proposal-stale.json",
             "--key", "proposal-stale", "--session", proposal_session, "--action", second["action"],
-            expect=1,
+            expect=3,
         )
         assert stale["answer"]["status"] == "rejected" and stale["answer"]["code"] == "action_not_pending", stale
         assert not forbidden_effect.exists()
@@ -1508,7 +1508,7 @@ def main(mode="all", correlation_case="all"):
                 gate_release = proposal_milestones.wait("control_gate_released", subject=first_key)[0]
                 first_result = finish_command(first_process)
                 second_lock = proposal_milestones.wait("control_lock_acquired", subject=second_key)[0]
-                second_result = finish_command(second_process, expect=1 if order == "stop-first" else 0)
+                second_result = finish_command(second_process, expect=3 if order == "stop-first" else 0)
                 assert int(first_lock["at_ns"]) < int(second_request["at_ns"])
                 assert int(second_request["at_ns"]) < int(gate_release["at_ns"])
                 assert int(gate_release["at_ns"]) < int(second_lock["at_ns"])
@@ -1747,7 +1747,7 @@ def main(mode="all", correlation_case="all"):
             "--record", state / "continuation-stale-denial.json",
             "--key", "continuation-stale-denial", "--session", continuation_session,
             "--action", continuation_actions[0]["action"],
-            expect=1,
+            expect=3,
         )
         assert stale_denial["answer"]["status"] == "rejected", stale_denial
         assert stale_denial["answer"]["code"] == "action_not_pending", stale_denial
@@ -1977,7 +1977,7 @@ def main(mode="all", correlation_case="all"):
             "--tools",
             "bash",
         )
-        incompatible = command(*incompatible_args, expect=1)
+        incompatible = command(*incompatible_args, expect=3)
         assert incompatible["answer"]["status"] == "rejected", incompatible
         assert incompatible["answer"]["code"] == "model_is_immutable", incompatible
         replayed_incompatible = command(
@@ -1988,7 +1988,7 @@ def main(mode="all", correlation_case="all"):
             state / "incompatible-model.json",
             "--kind",
             "configure",
-            expect=1,
+            expect=3,
         )
         assert replayed_incompatible["answer"]["status"] == "rejected", replayed_incompatible
         assert replayed_incompatible["answer"]["replayed"] is True, replayed_incompatible
@@ -3478,7 +3478,7 @@ def main(mode="all", correlation_case="all"):
             "gpt-6.1-sol",
             "--tools",
             "none",
-            expect=1,
+            expect=3,
         ))
         assert active_model_change["answer"]["status"] == "rejected", active_model_change
         assert active_model_change["answer"]["code"] == "model_is_immutable"
@@ -3537,7 +3537,7 @@ def main(mode="all", correlation_case="all"):
             "gpt-6.1-sol",
             "--permission-mode",
             "bypass",
-            expect=1,
+            expect=3,
         ))
         assert post_failure_model_change["answer"]["status"] == "rejected"
         assert post_failure_model_change["answer"]["code"] == "model_is_immutable"

@@ -19,7 +19,7 @@ async function connect(): Promise<Rui> {
 	});
 }
 
-const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: null, compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
+const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
 
 test("create, list, send, update, interrupt and stop a Session", { skip }, async () => {
 	const rui = await connect();
@@ -36,7 +36,7 @@ test("create, list, send, update, interrupt and stop a Session", { skip }, async
 		);
 
 		const listed = await rui.sessions.list();
-		assert.deepEqual(listed.map((each) => [each.id, each.label]), [[session.id, "first"]]);
+		assert.deepEqual(listed.map((each) => [each.id, each.label, each.parent]), [[session.id, "first", null]]);
 
 		const receipt = await session.send("hello", { idempotencyKey: "msg:1", env: { PATH: "/usr/bin" } });
 		assert.match(receipt.messageId, /^[0-9]+$/);
@@ -101,7 +101,10 @@ test("the feed lists entries, continues after a cursor, and reads long text", { 
 		await session.send(long, { idempotencyKey: "msg:b" });
 
 		const all = [];
-		for await (const entry of session.listActivity({ kinds: ["admission"] })) all.push(entry);
+		for await (const entry of session.listActivity({ kinds: ["admission"] })) {
+			assert.equal(entry.kind, "admission");
+			if (entry.kind === "admission") all.push(entry);
+		}
 		assert.equal(all.length, 2);
 		assert.equal(all[0]?.kind, "admission");
 		assert.equal(all[0]?.text, "first");
@@ -115,11 +118,13 @@ test("the feed lists entries, continues after a cursor, and reads long text", { 
 		for await (const entry of session.listActivity({ kinds: ["admission"], after: all[0]?.cursor as string })) rest.push(entry);
 		assert.deepEqual(rest.map((entry) => entry.cursor), [all[1]?.cursor]);
 
-		// Following never ends: it yields what arrives and stops when the consumer does.
+		// Following waits for local writes when idle and ends when the consumer stops.
 		const followed = session.listActivity({ kinds: ["admission"], after: all[1]?.cursor as string, follow: true });
 		const next = followed.next();
 		await session.send("third", { idempotencyKey: "msg:c" });
-		assert.equal((await next).value?.text, "third");
+		const third = (await next).value;
+		assert.ok(third && third.kind === "admission");
+		assert.equal(third.text, "third");
 		await followed.return(undefined);
 	} finally {
 		await rui.close();

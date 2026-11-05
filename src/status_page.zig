@@ -5,6 +5,7 @@ const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const built_in_tool = @import("built_in_tool.zig");
 const command_value = @import("command_value.zig");
+const client = @import("client.zig");
 const model_capability = @import("model_capability.zig");
 const product_defaults = @import("product_defaults.zig");
 const Provider = @import("provider_name.zig").Provider;
@@ -107,7 +108,7 @@ pub const Session = struct {
     workspace: Bounded(max_path_bytes),
     provider: Provider,
     model: Bounded(max_model_bytes),
-    /// Null when the model has no catalog effort, so none is sent.
+    /// The saved spec's effort; null omits reasoning.
     effort: ?ReasoningEffort,
     effort_override: bool,
     permission: enum { ask, bypass },
@@ -284,7 +285,9 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
                 return "no catalog value; reasoning omitted";
             };
             try out.writeAll(@tagName(effort));
-            return if (session.effort_override) "Session override" else "model default";
+            // D111/D209: compare with the client product choice, not a catalog default.
+            const default = client.defaultStartEffort(session.model.slice(), null).value;
+            return if (default != null and std.mem.eql(u8, @tagName(effort), default.?)) "model default" else "Session override";
         },
         // The bypass default is stated where it is inspected, without alert weight.
         .permissions => try out.writeAll(switch (session.permission) {
@@ -305,7 +308,9 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
                 try out.writeAll(" · now ");
                 try writeGrouped(out, estimate);
             }
-            return if (session.compaction_override) "Session override" else if (model_capability.supportsModel(session.model.slice())) "model default" else "assumed for an unlisted model";
+            // D111/D207: compare against the provider-aware client default.
+            const client_default = client.defaultCompactionTrigger(session.provider, session.model.slice());
+            return if (session.compaction_override and tokens != client_default) "Session override" else if (model_capability.supportsModel(session.model.slice())) "model default" else "assumed for an unlisted model";
         },
         .headroom => {
             try writeTokens(out, session.output_reservation);
@@ -495,7 +500,7 @@ test "the page shows the approved rows, `›` on the selected one, then the work
     try std.testing.expectEqualStrings(
         " Status · fix-safari-export · k7m2qx\n" ++
             " This Session\n" ++
-            " › Effort          high" ++ grey ++ "model default" ++ end ++
+            " › Effort          high" ++ grey ++ "Session override" ++ end ++
             "   Permissions     bypass · Bash runs without asking\n" ++
             "   Tools           bash, web search\n" ++
             "   Name            fix-safari-export\n" ++
@@ -692,4 +697,19 @@ test "the page's Session changes with any fact it shows, its unused bytes aside"
     try std.testing.expect(!held.session.eql(&other));
     try other.work.current_message.?.set("m");
     try std.testing.expect(!held.session.eql(&other));
+}
+
+test "status defaults compare the provider-aware client product choices" {
+    const held = testSample();
+    held.session.effort = .low;
+    var bytes: [128]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try std.testing.expectEqualStrings("model default", (try writeValue(.effort, held.facts(), &out)).?);
+    held.session.compaction_override = true;
+    held.session.compaction_trigger = 244800;
+    try std.testing.expectEqualStrings("model default", (try writeValue(.compact_at, held.facts(), &out)).?);
+    held.session.provider = .openai;
+    try std.testing.expectEqualStrings("Session override", (try writeValue(.compact_at, held.facts(), &out)).?);
+    held.session.compaction_trigger = 945000;
+    try std.testing.expectEqualStrings("model default", (try writeValue(.compact_at, held.facts(), &out)).?);
 }
