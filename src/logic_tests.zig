@@ -13,6 +13,7 @@ const cores = .{
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "built_in_tool.zig", @import("built_in_tool.zig") },
     .{ "change_ring.zig", @import("change_ring.zig") },
+    .{ "caller_exit.zig", @import("caller_exit.zig") },
     .{ "caller_error.zig", @import("caller_error.zig") },
     .{ "cli_args.zig", @import("cli_args.zig") },
     .{ "cli_value.zig", @import("cli_value.zig") },

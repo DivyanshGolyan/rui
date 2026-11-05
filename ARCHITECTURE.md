@@ -1913,7 +1913,33 @@ Failure after upload begins leaves admission unconfirmed; inspection or recovery
 #### Help and prerequisites
 
 Root help (`rui --help` or `rui -h`), resource help and operation help succeed with useful stdout and zero exit without a Host, credentials, preferences, TTY or state changes.
-Invalid invocation is nonzero with a stderr diagnostic and relevant help path.
+Invalid fresh invocation exits 2 with a stderr diagnostic and relevant help path.
+
+The CLI derives exit status from admission certainty and the catalog remedy, not the rejection code alone:
+
+| Exit | Caller action |
+| --- | --- |
+| 0 | Done. |
+| 1 | Failed for a cause not classified above; stderr names it. Treat it as unknown: do not assume the request was or was not sent unless stderr says so. |
+| 2 | Invalid fresh invocation; nothing was sent. Fix the invocation. |
+| 3 | Rui answered with a saved refusal. Correct the request; a resend needs a new key. |
+| 4 | Admission unconfirmed. Run `rui request recover HANDLE` (or the printed explicit-record recovery); never resubmit with a new key. |
+| 5 | Retry the same request unchanged later (Host busy or result not ready). |
+| 6 | Repair the environment, then retry unchanged (known stopped/unreachable Host, sign-in required or locked Store). |
+
+An error enters 2-6 only once its cause is mapped; every other failure stays exit 1 until it is.
+
+Uncertainty takes precedence over remedy: a busy-looking mutation response without a confirmed admission remains exit 4, not 5.
+Multiple outcomes, including `session stop --all`, aggregate in cautious order **4 > 1 > 6 > 5 > 3 > 2 > 0**, never numeric maximum or first failure.
+A nonzero exit may follow acceptance; it does not authorize a new identity.
+
+Saved rejections render one catalog line on stderr with their existing wire code, input flags or fields, accepted values and repair.
+The ending says the rejection was saved, replays as saved and needs a new key for a resend; stdout JSON is unchanged.
+Replay advice uses the saved code, never current argv values, current Session settings or a live accepted subset.
+Today's ambiguous saved codes remain honest about every possible cause; splitting them and saving witnesses belongs to the later wire/Store change.
+The static saved-code facts are replay-affecting and must not be silently reinterpreted in a compatible Store.
+HTTP statuses and wire spellings are independent of this CLI exit policy and remain unchanged.
+
 Command/option definitions own syntax and scoped help; public types and goldens own semantic fields.
 There is no second catalog, generic JSON-command input mode, schema generator or registry.
 Ordinary non-interactive calls never implicitly start a Host, sign in or enter setup.
