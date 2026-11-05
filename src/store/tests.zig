@@ -6742,7 +6742,7 @@ test "compaction defaults nullable overrides and frozen retry survive reopen" {
                 try std.testing.expect(created_session_0_reply == .accepted);
                 const created_session_0 = created_session_0_reply.accepted.session;
                 // An unlisted model compacts at 90% of the window Rui assumes for it.
-                const expected: ?u64 = if (model_index < supported_ids.len) 244800 else 115200;
+                const expected: ?u64 = if (model_index >= supported_ids.len) 115200 else if (std.mem.eql(u8, model, "gpt-6.1-terra")) 450000 else 244800;
                 const initial = try storage.inspectSessionForTesting(created_session_0.slice());
                 try std.testing.expectEqual(expected, initial.compaction_trigger);
                 try std.testing.expectEqual(@as(u64, 0), initial.output_reservation);
