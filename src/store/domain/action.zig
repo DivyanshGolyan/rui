@@ -91,18 +91,106 @@ pub const CoreActionInput = struct {
 /// The next core tool call to run, or null. It writes nothing: the core
 /// command that runs it resolves it in one transaction, so a call read
 /// here and never run is simply read again.
-pub fn nextCoreAction(a: anytype) !?CoreActionInput {
+/// A stop an attached child owes (D38), as the Host runs it: the child's
+/// own Session stop under a key its cause names, so a stop read here and
+/// never run is run again under the same key.
+pub const OwedStop = struct {
+    session: protocol.Bounded(protocol.session_id_bytes),
+    key: protocol.Bounded(protocol.max_key_bytes),
+};
+
+/// An attached child's Turn ending its parent is owed as a Message (D39),
+/// as `Store.deliverChildEnding` delivers it: the child's saved answer
+/// itself when it is done. `quiet` when the child's parent stopping ended
+/// it, which delivers nothing (D139) and only settles the row.
+pub const OwedEnding = struct {
+    turn_id: u64,
+    child: protocol.Bounded(protocol.session_id_bytes),
+    ending: protocol.TurnEnding,
+    answer: ?ContentReference,
+    quiet: bool,
+};
+
+/// The core's next piece of work: a stop a child owes comes first, so
+/// none of its calls runs after its parent stopped, then an ending a
+/// parent is owed.
+pub const CoreWork = union(enum) {
+    stop: OwedStop,
+    ending: OwedEnding,
+    action: CoreActionInput,
+};
+
+/// Whether a stop selected the owed ending `e`'s Turn, and whether that
+/// stop is one its parent caused: an owed stop's key starts
+/// `rui.core/stop/`, and the bytewise range finds one on any engine (D139).
+pub const ending_stop_sql = "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id) AS stopped," ++
+    "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id AND st.command_key>='rui.core/stop/' AND st.command_key<'rui.core/stop0') AS quiet";
+
+/// The oldest owed ending.
+const owed_ending = rsql.Read(.{
+    .sql = "SELECT e.turn_id,t.session_ref,t.outcome_code,t.outcome_content_id,c.byte_length,c.digest," ++ ending_stop_sql ++ " " ++
+        "FROM session_ending_owed e @index(session_ending_open) JOIN turn t ON t.turn_id=e.turn_id LEFT JOIN content c ON c.content_id=t.outcome_content_id " ++
+        "WHERE e.delivered=0 ORDER BY e.turn_id LIMIT 1",
+    .Args = struct {},
+    .Row = struct {
+        turn_id: rsql.Positive,
+        session_ref: protocol.Bounded(protocol.session_id_bytes),
+        outcome_code: protocol.Bounded(protocol.max_code_bytes),
+        outcome_content_id: ?rsql.Positive,
+        byte_length: ?u64,
+        digest: ?[32]u8,
+        stopped: bool,
+        quiet: bool,
+    },
+    .cardinality = .optional,
+});
+
+const owed_stop = rsql.Read(.{
+    .sql = "SELECT child_ref,cause_ref,cause_position FROM session_stop_owed ORDER BY child_ref LIMIT 1",
+    .Args = struct {},
+    .Row = struct { child_ref: protocol.Bounded(protocol.session_id_bytes), cause_ref: protocol.Bounded(protocol.session_id_bytes), cause_position: u64 },
+    .cardinality = .optional,
+});
+
+/// The key an owed stop runs under: the child, and the stop or context
+/// full ending of its parent that owes it, so a newer obligation of the
+/// same child has another key.
+pub fn owedStopKey(buffer: []u8, child: []const u8, cause: []const u8, position: u64) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "rui.core/stop/{s}/{s}/{d}", .{ child, cause, position });
+}
+
+pub fn nextCoreWork(a: anytype) !?CoreWork {
+    var stop: owed_stop.Result = undefined;
     var next: next_core_action.Result = undefined;
     const names: CoreNames = .of();
+    var ending: owed_ending.Result = undefined;
+    a.read(owed_stop, .{}, &stop);
+    a.read(owed_ending, .{}, &ending);
     a.read(next_core_action, .{ .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &next);
     try a.run();
+    if (stop) |owed| {
+        var work: OwedStop = .{ .session = owed.child_ref, .key = .{} };
+        var buffer: [protocol.max_key_bytes]u8 = undefined;
+        try work.key.set(try owedStopKey(&buffer, owed.child_ref.slice(), owed.cause_ref.slice(), owed.cause_position));
+        return .{ .stop = work };
+    }
+    if (ending) |owed| {
+        const outcome = try turn_domain.TurnOutcome.decode(owed.outcome_code.slice(), if (owed.outcome_content_id) |id| @intCast(id.get()) else null);
+        return .{ .ending = .{
+            .turn_id = owed.turn_id.get(),
+            .child = owed.session_ref,
+            .ending = outcome.ending(owed.stopped),
+            .answer = if (outcome == .completed) .{ .length = owed.byte_length orelse return error.CorruptStore, .digest = owed.digest orelse return error.CorruptStore } else null,
+            .quiet = owed.quiet,
+        } };
+    }
     const found = next orelse return null;
-    return .{
+    return .{ .action = .{
         .binding = .{ .turn_id = found.turn_id.get(), .parent_operation_id = found.parent_operation_id.get(), .action_id = found.action_id.get() },
         .tool = if (found.starts) .start_agent else .message_agent,
         .session = found.session,
         .arguments = try actionContent(a, found.session.slice(), found.action_id.get(), .arguments),
-    };
+    } };
 }
 
 const attempt_action = rsql.Write(.{
@@ -270,10 +358,12 @@ pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *B
 }
 
 /// The core tool call `binding` names while it waits to run: its Session
-/// and whether a stop selected its Turn.
+/// and whether a stop selected its Turn, or its Session owes one (D38),
+/// which runs first and resolves the call.
 pub const core_facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position," ++
-        "EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) AS stopped " ++
+        "(EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
+        "OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref)) AS stopped " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 " ++

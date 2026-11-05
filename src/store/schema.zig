@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 53;
+pub const schema_version: u32 = 54;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -32,6 +32,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
+    .{ .schema_version = 54, .digest = 0x6ed9b1d6cf75e1cb },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -120,6 +121,50 @@ pub const migrations = [_]Migration{
         },
         .mysql = &.{
             "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
+        },
+    },
+    // Schema 54: the stops an attached child owes (D38) and the endings
+    // its parent is owed (D39).
+    // Then (8b): each Store gets a random store_id. On MySQL,
+    // store_owner and content_chunk are new; each content's payload moves
+    // into chunks of content_chunk_bytes (chunk.i reaches 9999, past the
+    // 8192 chunks of the largest content) before the column goes; each
+    // leading partial index gets its generated first column; store_meta's
+    // one CHECK and content's fourth are the ones replaced. session_parent
+    // gets its plain twin first, since parent_ref's foreign key needs an
+    // index that leads with it.
+    .{
+        .from = 53,
+        .sqlite = &.{
+            "CREATE TABLE session_stop_owed(\n child_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n cause_ref TEXT NOT NULL REFERENCES session(session_ref),\n cause_position INTEGER NOT NULL CHECK(cause_position>0)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX session_parent ON session(parent_ref) WHERE parent_ref IS NOT NULL",
+            "ALTER TABLE store_meta RENAME TO store_meta_before_54",
+            "CREATE TABLE store_meta(\n meta_key TEXT PRIMARY KEY NOT NULL CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id')),\n meta_value TEXT NOT NULL\n) STRICT",
+            "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_before_54",
+            "DROP TABLE store_meta_before_54",
+            "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
+            "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
+        },
+        .mysql = &.{
+            "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n PRIMARY KEY(child_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX session_parent ON session(parent_ref)",
+            "ALTER TABLE store_meta DROP CHECK store_meta_chk_1, ADD CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id'))",
+            "CREATE TABLE store_owner(\n owner_key BIGINT NOT NULL,\n epoch BIGINT NOT NULL,\n commit_seq BIGINT NOT NULL,\n PRIMARY KEY(owner_key),\n CHECK(owner_key=1),\n CHECK(epoch>=0),\n CHECK(commit_seq>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE content_chunk(\n content_id BIGINT NOT NULL,\n chunk_index BIGINT NOT NULL,\n bytes LONGBLOB NOT NULL,\n PRIMARY KEY(content_id,chunk_index),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n CHECK(chunk_index>=0),\n CHECK(length(bytes) BETWEEN 1 AND 131072)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "INSERT INTO content_chunk(content_id,chunk_index,bytes) WITH digit(d) AS (SELECT 0 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9), chunk(i) AS (SELECT a.d+10*b.d+100*c.d+1000*e.d FROM digit a CROSS JOIN digit b CROSS JOIN digit c CROSS JOIN digit e) SELECT content.content_id,chunk.i,SUBSTRING(content.payload,chunk.i*131072+1,131072) FROM content JOIN chunk ON chunk.i*131072<content.byte_length",
+            "ALTER TABLE content DROP CHECK content_chk_4, DROP COLUMN payload",
+            "ALTER TABLE message_admission ADD COLUMN message_admission_pending_lead BIGINT GENERATED ALWAYS AS (CASE WHEN turn_id IS NULL THEN admission_id END) STORED, ADD COLUMN message_admission_session_pending_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN turn_id IS NULL THEN session_ref END) STORED, ADD COLUMN message_admission_person_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN sender_session_ref IS NULL THEN session_ref END) STORED, ADD COLUMN message_admission_unpositioned_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN admission_position IS NULL THEN session_ref END) STORED, DROP INDEX message_admission_pending, ADD INDEX message_admission_pending(message_admission_pending_lead,session_ref), DROP INDEX message_admission_session_pending, ADD INDEX message_admission_session_pending(message_admission_session_pending_lead,admission_id), DROP INDEX message_admission_person, ADD INDEX message_admission_person(message_admission_person_lead,admission_position), DROP INDEX message_admission_unpositioned, ADD INDEX message_admission_unpositioned(message_admission_unpositioned_lead)",
+            "ALTER TABLE turn ADD COLUMN turn_tool_continuation_lead BIGINT GENERATED ALWAYS AS (CASE WHEN outcome_code IS NULL AND continuation_operation_id=operation_id THEN operation_id END) STORED, ADD COLUMN turn_unpositioned_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN (outcome_code IS NULL)!=(outcome_position IS NULL) THEN session_ref END) STORED, DROP INDEX turn_tool_continuation, ADD INDEX turn_tool_continuation(turn_tool_continuation_lead), DROP INDEX turn_unpositioned, ADD INDEX turn_unpositioned(turn_unpositioned_lead)",
+            "ALTER TABLE session_stop ADD COLUMN session_stop_unpositioned_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN position IS NULL THEN session_ref END) STORED, DROP INDEX session_stop_unpositioned, ADD INDEX session_stop_unpositioned(session_stop_unpositioned_lead)",
+            "ALTER TABLE model_operation ADD COLUMN model_operation_retry_due_lead BIGINT GENERATED ALWAYS AS (CASE WHEN resolution_code IS NULL AND attempt_ordinal<4 THEN retry_due_at_ms END) STORED, ADD COLUMN model_operation_retry_exhausted_lead BIGINT GENERATED ALWAYS AS (CASE WHEN resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_ordinal=4 THEN operation_id END) STORED, ADD COLUMN model_operation_context_history_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN (resolution_code='answer' OR resolution_code='compacted' OR resolution_code='tool_proposals') THEN session_ref END) STORED, ADD COLUMN model_operation_compaction_bases_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN purpose=1 AND resolution_code='compacted' THEN session_ref END) STORED, DROP INDEX model_operation_retry_due, ADD INDEX model_operation_retry_due(model_operation_retry_due_lead,operation_id), DROP INDEX model_operation_retry_exhausted, ADD INDEX model_operation_retry_exhausted(model_operation_retry_exhausted_lead), DROP INDEX model_operation_context_history, ADD INDEX model_operation_context_history(model_operation_context_history_lead,admission_position), DROP INDEX model_operation_compaction_bases, ADD INDEX model_operation_compaction_bases(model_operation_compaction_bases_lead,admission_position)",
+            "ALTER TABLE model_output_item ADD COLUMN model_output_call_history_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN item_kind=3 THEN session_ref END) STORED, ADD COLUMN model_output_hosted_history_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN item_kind=5 THEN session_ref END) STORED, ADD COLUMN model_output_compaction_history_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN item_kind=4 THEN session_ref END) STORED, ADD COLUMN model_output_compaction_anchor_lead BIGINT GENERATED ALWAYS AS (CASE WHEN item_kind=4 THEN operation_id END) STORED, DROP INDEX model_output_call_history, ADD INDEX model_output_call_history(model_output_call_history_lead,session_position), DROP INDEX model_output_hosted_history, ADD INDEX model_output_hosted_history(model_output_hosted_history_lead,session_position), DROP INDEX model_output_compaction_history, ADD INDEX model_output_compaction_history(model_output_compaction_history_lead,session_position), DROP INDEX model_output_compaction_anchor, ADD INDEX model_output_compaction_anchor(model_output_compaction_anchor_lead,item_ordinal)",
+            "ALTER TABLE model_tool_call ADD COLUMN model_tool_call_session_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL THEN session_ref END) STORED, ADD COLUMN model_tool_call_acceptance_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL THEN session_ref END) STORED, DROP INDEX model_tool_call_session_results, ADD INDEX model_tool_call_session_results(model_tool_call_session_results_lead,operation_id,acceptance_position), DROP INDEX model_tool_call_acceptance, ADD INDEX model_tool_call_acceptance(model_tool_call_acceptance_lead,acceptance_position)",
+            "ALTER TABLE action_operation ADD COLUMN action_operation_session_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL THEN session_ref END) STORED, ADD COLUMN action_operation_approval_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN approval_position IS NOT NULL THEN session_ref END) STORED, ADD COLUMN action_operation_executable_lead BIGINT GENERATED ALWAYS AS (CASE WHEN authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0 THEN action_id END) STORED, ADD COLUMN action_operation_unresolved_attempt_lead BIGINT GENERATED ALWAYS AS (CASE WHEN resolution_code IS NULL AND attempt_ordinal=1 THEN action_id END) STORED, DROP INDEX action_operation_session_results, ADD INDEX action_operation_session_results(action_operation_session_results_lead,parent_operation_id,acceptance_position), DROP INDEX action_operation_approval, ADD INDEX action_operation_approval(action_operation_approval_lead,approval_position), DROP INDEX action_operation_executable, ADD INDEX action_operation_executable(action_operation_executable_lead), DROP INDEX action_operation_unresolved_attempt, ADD INDEX action_operation_unresolved_attempt(action_operation_unresolved_attempt_lead)",
+            "ALTER TABLE session ADD COLUMN session_parent_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN parent_ref IS NOT NULL THEN parent_ref END) STORED, ADD INDEX parent_ref(parent_ref)",
+            "ALTER TABLE session DROP INDEX session_parent, ADD INDEX session_parent(session_parent_lead)",
+            "CREATE TABLE session_ending_owed(\n turn_id BIGINT NOT NULL,\n delivered BIGINT NOT NULL,\n PRIMARY KEY(turn_id),\n FOREIGN KEY(turn_id) REFERENCES turn(turn_id),\n CHECK(turn_id>0),\n CHECK(delivered BETWEEN 0 AND 1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
         },
     },
 };
@@ -219,6 +264,23 @@ pub const Column = struct {
     /// two (`sessionColumns`). Every other table's one Session reads all
     /// of its columns, and leaves this `.recipient`.
     read_by: ReadBy = .recipient,
+    engines: Engines = .all,
+};
+
+/// The engines a table or column exists on. Each engine's DDL, catalog
+/// and rendered INSERTs hold only its own (`on`).
+pub const Engines = enum {
+    all,
+    sqlite,
+    mysql,
+
+    pub fn on(engines: Engines, dialect: rsql.Dialect) bool {
+        return switch (engines) {
+            .all => true,
+            .sqlite => dialect == .sqlite,
+            .mysql => dialect == .mysql,
+        };
+    }
 };
 
 /// The Sessions whose pages read a column of a table that names two
@@ -247,6 +309,7 @@ pub const Table = struct {
     /// Rui SQL.
     checks: []const []const u8 = &.{},
     without_rowid: bool = false,
+    engines: Engines = .all,
 };
 
 pub const Index = struct {
@@ -278,8 +341,13 @@ const reasoning_effort_column: Column = .{ .name = "reasoning_effort", .type = .
 const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1, .max = 100 } }, .nullable = true };
 
 /// store_meta's keys, as bootstrap writes them: a closed set, so a key is
-/// a tag, which MySQL can key.
-const meta_keys = [_][]const u8{ "wire_version", "store_selector", "format" };
+/// a tag, which MySQL can key. `store_id` is the Store's own random id,
+/// drawn once when it is created and never changed (D204, format 54).
+const meta_keys = [_][]const u8{ "wire_version", "store_selector", "format", "store_id" };
+
+/// The bytes of one MySQL `content_chunk` row; the last of a content's
+/// chunks holds the rest. Under 16 MiB, so a chunk is one packet.
+pub const content_chunk_bytes = 128 * 1024;
 
 pub const tables = [_]Table{
     .{
@@ -290,6 +358,20 @@ pub const tables = [_]Table{
         },
         .primary_key = &.{"meta_key"},
     },
+    // The Host that owns a MySQL Store (one row): open bumps `epoch`, and
+    // each write transaction bumps `commit_seq` only where both still
+    // read as this Host left them, so a lost session or a restored backup
+    // fences it. SQLite's file lock owns its Store instead.
+    .{
+        .name = "store_owner",
+        .columns = &.{
+            .{ .name = "owner_key", .type = .int, .check = "owner_key=1" },
+            .{ .name = "epoch", .type = .int, .check = "epoch>=0" },
+            .{ .name = "commit_seq", .type = .int, .check = "commit_seq>=0" },
+        },
+        .primary_key = &.{"owner_key"},
+        .engines = .mysql,
+    },
     .{
         .name = "content",
         .columns = &.{
@@ -297,10 +379,25 @@ pub const tables = [_]Table{
             .{ .name = "digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "byte_length", .type = .int, .check = "byte_length>=0 AND byte_length<=1073737728" },
             .{ .name = "private", .type = .flag },
-            .{ .name = "payload", .type = .{ .bytes = null }, .check = "length(payload)=byte_length" },
+            // MySQL holds the bytes in `content_chunk` instead.
+            .{ .name = "payload", .type = .{ .bytes = null }, .check = "length(payload)=byte_length", .engines = .sqlite },
         },
         .primary_key = &.{"content_id"},
         .uniques = &.{&.{ "digest", "byte_length", "private" }},
+    },
+    // A MySQL content's bytes, `content_chunk_bytes` per row from index
+    // 0, so no statement carries more than one chunk; an empty content
+    // has none.
+    .{
+        .name = "content_chunk",
+        .columns = &.{
+            .{ .name = "content_id", .type = .int },
+            .{ .name = "chunk_index", .type = .int, .check = "chunk_index>=0" },
+            .{ .name = "bytes", .type = .{ .bytes = .{ .min = 1, .max = content_chunk_bytes } } },
+        },
+        .primary_key = &.{ "content_id", "chunk_index" },
+        .foreign_keys = &.{references("content_id", "content", content_reference)},
+        .engines = .mysql,
     },
     // One tool as the model is told about it (D48): its name, who owns it
     // (`rui`; `provider` for a tool the provider runs, whose text the codec
@@ -574,6 +671,40 @@ pub const tables = [_]Table{
             references("command_key", "core_command", command_reference),
             references("session_ref", "session", session_reference),
             references("selected_turn_id", "turn", &.{"turn_id"}),
+        },
+        .without_rowid = true,
+    },
+    .{
+        // An attached child owes a stop because its parent stopped or ran
+        // out of context (D38); the Host runs it as the child's own stop,
+        // which deletes the row. The first cause names the stop's key. Host
+        // work, not a Session's state: no reader of a Session reads it.
+        .name = "session_stop_owed",
+        .columns = &.{
+            .{ .name = "child_ref", .type = .{ .text = null } },
+            .{ .name = "cause_ref", .type = .{ .text = null } },
+            .{ .name = "cause_position", .type = .int, .check = "cause_position>0" },
+        },
+        .primary_key = &.{"child_ref"},
+        .foreign_keys = &.{
+            references("child_ref", "session", session_reference),
+            references("cause_ref", "session", session_reference),
+        },
+        .without_rowid = true,
+    },
+    .{
+        // An attached child's Turn ended, and its parent is owed a Message
+        // saying how (D39, D139); the Host delivers it, which marks the row
+        // delivered (the Store never deletes, D202). Host work, not a
+        // Session's state: no reader of a Session reads it.
+        .name = "session_ending_owed",
+        .columns = &.{
+            .{ .name = "turn_id", .type = .int, .check = "turn_id>0" },
+            .{ .name = "delivered", .type = .int, .check = "delivered BETWEEN 0 AND 1" },
+        },
+        .primary_key = &.{"turn_id"},
+        .foreign_keys = &.{
+            references("turn_id", "turn", &.{"turn_id"}),
         },
         .without_rowid = true,
     },
@@ -867,6 +998,9 @@ pub const indexes = [_]Index{
     .{ .name = "session_stop_unpositioned", .table = "session_stop", .columns = &.{"session_ref"}, .where = "position IS NULL" },
     .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
     .{ .name = "session_stop_turn", .table = "session_stop", .columns = &.{"selected_turn_id"} },
+    .{ .name = "session_parent", .table = "session", .columns = &.{"parent_ref"}, .where = "parent_ref IS NOT NULL" },
+    // The Host's next owed ending, among the delivered ones.
+    .{ .name = "session_ending_open", .table = "session_ending_owed", .columns = &.{ "delivered", "turn_id" } },
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
     .{ .name = "action_operation_sender_handle", .table = "action_operation", .columns = &.{"sender_handle"}, .unique = true, .where = "sender_handle IS NOT NULL" },
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },
@@ -921,9 +1055,21 @@ fn tableCarriesSessions(comptime table: Table) bool {
     return false;
 }
 
+/// Whether `table` has `column` only on engines other than `dialect`.
+pub fn lacks(comptime dialect: rsql.Dialect, comptime table: []const u8, comptime column: []const u8) bool {
+    comptime {
+        @setEvalBranchQuota(10_000);
+        for (tables) |candidate| if (std.mem.eql(u8, candidate.name, table)) {
+            for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return !each.engines.on(dialect);
+        };
+        return false;
+    }
+}
+
 /// Whether `table` has a column named `column`.
 pub fn hasColumn(comptime table: []const u8, comptime column: []const u8) bool {
     comptime {
+        @setEvalBranchQuota(10_000);
         for (tables) |candidate| {
             if (!std.mem.eql(u8, candidate.name, table)) continue;
             for (candidate.columns) |each| if (std.mem.eql(u8, each.name, column)) return true;
@@ -1020,6 +1166,23 @@ pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     };
 }
 
+/// The tables of `all` on `dialect`, each with only its columns there.
+fn onEngine(comptime all: []const Table, comptime dialect: rsql.Dialect) []const Table {
+    comptime {
+        var result: []const Table = &.{};
+        for (all) |table| if (table.engines.on(dialect)) {
+            var columns: []const Column = &.{};
+            for (table.columns) |column| if (column.engines.on(dialect)) {
+                columns = columns ++ .{column};
+            };
+            var kept = table;
+            kept.columns = columns;
+            result = result ++ .{kept};
+        };
+        return result;
+    }
+}
+
 /// `foreign_key`: only on MySQL (`mysqlObjects`).
 pub const Object = struct { kind: enum { table, index, foreign_key }, name: []const u8, sql: []const u8 };
 
@@ -1033,7 +1196,7 @@ pub fn objects(comptime dialect: rsql.Dialect) []const Object {
             .objects => |result| result,
         };
         var result: []const Object = &.{};
-        for (tables) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(table) }};
+        for (onEngine(&tables, .sqlite)) |table| result = result ++ .{Object{ .kind = .table, .name = table.name, .sql = createTable(table) }};
         for (indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createIndex(index) }};
         break :blk result;
     };
@@ -1059,9 +1222,10 @@ const MysqlObjects = union(enum) { refused: []const u8, objects: []const Object 
 /// that names another column. A foreign key to a table created later
 /// (the turn and admission cycle) is an ALTER TABLE after every table and
 /// index. Each index takes its `mysqlIndexForm`.
-fn mysqlObjects(comptime all: []const Table, comptime all_indexes: []const Index) MysqlObjects {
+fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Index) MysqlObjects {
     comptime {
-        @setEvalBranchQuota(50_000 * (all.len + all_indexes.len));
+        @setEvalBranchQuota(50_000 * (every.len + all_indexes.len));
+        const all = onEngine(every, .mysql);
         var result: []const Object = &.{};
         var later: []const Object = &.{};
         for (all, 0..) |table, position| {
@@ -1076,6 +1240,14 @@ fn mysqlObjects(comptime all: []const Table, comptime all_indexes: []const Index
                     (if (column.default) |value| " DEFAULT " ++ value else "")};
                 if (columnCheck(column)) |check| checks = checks ++ .{check};
             }
+            for (all_indexes) |index| if (std.mem.eql(u8, index.table, table.name) and mysqlIndexForm(index) == .leading) {
+                const lead = indexColumn(index.columns[0]).name;
+                const lead_type = switch (mysqlColumnType(all, all_indexes, table, columnNamed(table, lead))) {
+                    .refused => |message| return .{ .refused = message },
+                    .type => |found| found,
+                };
+                lines = lines ++ .{" " ++ leadingColumn(index) ++ " " ++ lead_type.name ++ " GENERATED ALWAYS AS (" ++ leadingValue(all, index) ++ ") STORED"};
+            };
             var keys_of: []const []const []const u8 = &.{table.primary_key};
             keys_of = keys_of ++ table.uniques;
             for (table.foreign_keys) |key| keys_of = keys_of ++ .{key.columns};
@@ -1100,6 +1272,146 @@ fn mysqlObjects(comptime all: []const Table, comptime all_indexes: []const Index
         for (all_indexes) |index| result = result ++ .{Object{ .kind = .index, .name = index.name, .sql = createMysqlIndex(all, index) }};
         return .{ .objects = result ++ later };
     }
+}
+
+/// The catalog of a MySQL Store as its open reads it (D203): one line per
+/// table, column, index and foreign key, and each table's count of
+/// CHECKs, from information_schema for the database `database` names (an
+/// SQL expression, such as `DATABASE()`). It holds what the schema value
+/// decides and leaves out what MySQL names or spells itself: CHECK and
+/// expression texts, which servers normalise differently, and the names
+/// of CHECKs, foreign keys and unique keys. Each value is cast to binary,
+/// so the lines compare as bytes whatever information_schema's collations.
+pub fn catalogSql(comptime database: []const u8) [:0]const u8 {
+    return comptime blk: {
+        const in = "information_schema.";
+        const text = "SELECT CONCAT('t '," ++ binary("TABLE_NAME") ++ ",' '," ++ binary("ENGINE") ++ ",' '," ++ binary("TABLE_COLLATION") ++ ") FROM " ++ in ++
+            "TABLES WHERE TABLE_SCHEMA=" ++ database ++ " AND TABLE_TYPE='BASE TABLE'" ++
+            " UNION ALL SELECT CONCAT('c '," ++ binary("TABLE_NAME") ++ ",' '," ++ binary("COLUMN_NAME") ++ ",' '," ++ binary("COLUMN_TYPE") ++ ",' '," ++ binary("IS_NULLABLE") ++
+            ",' '," ++ binary("COALESCE(COLLATION_NAME,'-')") ++ ",IF(EXTRA IN ('STORED GENERATED','VIRTUAL GENERATED'),' generated','')) FROM " ++ in ++
+            "COLUMNS WHERE TABLE_SCHEMA=" ++ database ++
+            " UNION ALL SELECT CONCAT('i '," ++ binary("TABLE_NAME") ++ ",IF(MAX(NON_UNIQUE)=0,' u ',' n '),GROUP_CONCAT(" ++ binary("COALESCE(COLUMN_NAME,'*')") ++
+            ",IF(COLLATION='D',' desc','') ORDER BY SEQ_IN_INDEX SEPARATOR ',')) FROM " ++ in ++ "STATISTICS WHERE TABLE_SCHEMA=" ++ database ++ " GROUP BY TABLE_NAME,INDEX_NAME" ++
+            " UNION ALL SELECT CONCAT('f '," ++ binary("TABLE_NAME") ++ ",' ',GROUP_CONCAT(" ++ binary("COLUMN_NAME") ++ " ORDER BY ORDINAL_POSITION SEPARATOR ','),' '," ++
+            binary("MAX(REFERENCED_TABLE_NAME)") ++ ",' ',GROUP_CONCAT(" ++ binary("REFERENCED_COLUMN_NAME") ++ " ORDER BY ORDINAL_POSITION SEPARATOR ',')) FROM " ++ in ++
+            "KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=" ++ database ++ " AND REFERENCED_TABLE_NAME IS NOT NULL GROUP BY TABLE_NAME,CONSTRAINT_NAME" ++
+            " UNION ALL SELECT CONCAT('k '," ++ binary("TABLE_NAME") ++ ",' ',COUNT(*)) FROM " ++ in ++ "TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=" ++ database ++
+            " AND CONSTRAINT_TYPE='CHECK' GROUP BY TABLE_NAME";
+        const terminated = text ++ "\x00";
+        break :blk terminated[0..text.len :0];
+    };
+}
+
+fn binary(comptime column: []const u8) []const u8 {
+    return "CAST(" ++ column ++ " AS BINARY)";
+}
+
+/// One line's share of a catalog digest. A digest is the wrapping sum of
+/// its lines' shares, so it does not depend on the order rows arrive in.
+pub fn catalogLineDigest(line: []const u8) u64 {
+    return std.hash.Fnv1a_64.hash(line);
+}
+
+/// The digest of the catalog `catalogSql` reads from a MySQL Store at
+/// schema_version, derived from the schema value.
+pub fn catalogDigest() u64 {
+    return comptime blk: {
+        @setEvalBranchQuota(objects_quota);
+        var sum: u64 = 0;
+        for (catalogLines(&tables, &indexes)) |line| sum +%= catalogLineDigest(line);
+        break :blk sum;
+    };
+}
+
+/// The lines `catalogSql` returns for a database made by
+/// `mysqlObjects(every, all_indexes)`, in no particular order. An index
+/// part MySQL computes is `*`. InnoDB adds an index for a foreign key
+/// that no index leads with (MySQL 8.4 manual, FOREIGN KEY Constraints),
+/// and drops it when a later index does.
+fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Index) []const []const u8 {
+    comptime {
+        @setEvalBranchQuota(50_000 * (every.len + all_indexes.len));
+        const all = onEngine(every, .mysql);
+        const collation = "utf8mb4_0900_bin";
+        var lines: []const []const u8 = &.{};
+        for (all) |table| {
+            lines = lines ++ .{"t " ++ table.name ++ " InnoDB " ++ collation};
+            var checks: usize = table.checks.len;
+            for (table.columns) |column| {
+                const found = mysqlColumnType(all, all_indexes, table, column).type;
+                lines = lines ++ .{"c " ++ table.name ++ " " ++ column.name ++ " " ++ catalogType(found.name) ++ (if (column.nullable) " YES " else " NO ") ++ catalogCollation(found.name)};
+                if (columnCheck(column) != null) checks += 1;
+            }
+            if (checks != 0) lines = lines ++ .{std.fmt.comptimePrint("k {s} {d}", .{ table.name, checks })};
+            // Each index as its parts: a column, `*`, then ` desc` if descending.
+            var parts: []const []const []const u8 = &.{table.primary_key};
+            for (table.uniques) |unique| parts = parts ++ .{unique};
+            var flags: []const bool = &.{true};
+            for (table.uniques) |_| flags = flags ++ .{true};
+            for (all_indexes) |index| if (std.mem.eql(u8, index.table, table.name)) {
+                var names: []const []const u8 = &.{};
+                for (index.columns, 0..) |column, position| {
+                    const part = indexColumn(column);
+                    const order = if (part.order.len == 0) "" else " desc";
+                    names = names ++ .{switch (mysqlIndexForm(index) orelse MysqlIndexForm.plain_unique) {
+                        .plain_unique => part.name ++ order,
+                        .leading => (if (position == 0) leadingColumn(index) else part.name) ++ order,
+                        .unique_when => "*" ++ order,
+                    }};
+                    if (mysqlIndexForm(index) == .leading and position == 0) {
+                        const found = mysqlColumnType(all, all_indexes, table, columnNamed(table, part.name)).type;
+                        lines = lines ++ .{"c " ++ table.name ++ " " ++ leadingColumn(index) ++ " " ++ catalogType(found.name) ++ " YES " ++ catalogCollation(found.name) ++ " generated"};
+                    }
+                }
+                parts = parts ++ .{names};
+                flags = flags ++ .{index.unique};
+            };
+            var added: usize = 0;
+            for (table.foreign_keys) |key| {
+                lines = lines ++ .{"f " ++ table.name ++ " " ++ list(key.columns) ++ " " ++ key.references ++ " " ++ list(key.referenced)};
+                const led = for (parts) |index_parts| {
+                    if (index_parts.len >= key.columns.len and eqlList(index_parts[0..key.columns.len], key.columns)) break true;
+                } else false;
+                if (!led) {
+                    parts = parts ++ .{key.columns};
+                    flags = flags ++ .{false};
+                    added += 1;
+                }
+            }
+            for (parts, flags, 0..) |index_parts, unique, position| {
+                // InnoDB keeps no index it added for a foreign key when a
+                // longer one it added for another key leads with it.
+                const implicit = parts[parts.len - added ..];
+                const covered = position >= parts.len - added and for (implicit) |other| {
+                    if (other.len > index_parts.len and eqlList(other[0..index_parts.len], index_parts)) break true;
+                } else false;
+                if (!covered) lines = lines ++ .{"i " ++ table.name ++ (if (unique) " u " else " n ") ++ list(index_parts)};
+            }
+        }
+        return lines;
+    }
+}
+
+/// `catalogLines` of the schema, for the live check's report.
+pub fn catalogLinesForTesting() []const []const u8 {
+    return comptime blk: {
+        @setEvalBranchQuota(objects_quota);
+        break :blk catalogLines(&tables, &indexes);
+    };
+}
+
+/// A MySQL type as information_schema's COLUMN_TYPE spells it.
+fn catalogType(comptime name: []const u8) []const u8 {
+    var lower: [name.len]u8 = undefined;
+    for (name, &lower) |byte, *out| out.* = std.ascii.toLower(byte);
+    const result = lower;
+    return &result;
+}
+
+/// The collation information_schema gives a column of MySQL type `name`:
+/// the table's for text, none (`-`) for numbers and bytes.
+fn catalogCollation(comptime name: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, name, "VARCHAR") or std.mem.endsWith(u8, name, "TEXT")) "utf8mb4_0900_bin" else "-";
 }
 
 /// The most bytes InnoDB keys in one index, under the DYNAMIC row format
@@ -1189,8 +1501,11 @@ fn mysqlKeyed(comptime all: []const Table, comptime all_indexes: []const Index, 
 /// How MySQL, which has no partial index, holds a partial one. Each is
 /// derived from the index alone.
 pub const MysqlIndexForm = enum {
-    /// Not unique: the plain index on its columns. Its predicate only
-    /// narrowed what SQLite stores, never what it allows.
+    /// Not unique: an index whose first column is generated
+    /// (`leadingColumn`), its first column's value where the predicate
+    /// holds and NULL elsewhere, so a walk of one value of it skips the
+    /// rows SQLite's index leaves out. Its predicate only narrowed what
+    /// SQLite stores, never what it allows.
     leading,
     /// Unique, and its predicate is exactly the text `c IS NOT NULL` for
     /// one of its columns c: a plain unique index, since MySQL never finds
@@ -1210,9 +1525,25 @@ pub fn mysqlIndexForm(comptime index: Index) ?MysqlIndexForm {
     return .unique_when;
 }
 
+/// A `leading` index's generated column on MySQL, named after the index.
+fn leadingColumn(comptime index: Index) []const u8 {
+    const name = index.name ++ "_lead";
+    checkIdentifier(name);
+    if (name.len > 64) @compileError("schema: MySQL names are at most 64 characters: " ++ name);
+    return name;
+}
+
+/// The value of `leadingColumn(index)`: its first column where its
+/// predicate holds, else NULL.
+fn leadingValue(comptime all: []const Table, comptime index: Index) []const u8 {
+    return "CASE WHEN " ++ expression(.mysql, all[tablePosition(all, index.table)], index.where.?) ++ " THEN " ++ indexColumn(index.columns[0]).name ++ " END";
+}
+
 fn createMysqlIndex(comptime all: []const Table, comptime index: Index) []const u8 {
     checkIdentifier(index.name);
     var parts: []const u8 = list(index.columns);
+    if (mysqlIndexForm(index) == .leading) parts = leadingColumn(index) ++ indexColumn(index.columns[0]).order ++
+        (if (index.columns.len > 1) "," ++ list(index.columns[1..]) else "");
     if (mysqlIndexForm(index) == .unique_when) {
         parts = "";
         for (index.columns, 0..) |column, position| {
@@ -1282,10 +1613,16 @@ const version_sql = std.fmt.comptimePrint("PRAGMA user_version={d}", .{schema_ve
 const format_text = std.fmt.comptimePrint("{d}", .{schema_version});
 /// The wire version is bound, not spliced: it has its own check on open, so
 /// a wire bump is no schema change.
-const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('" ++ meta_keys[0] ++ "',?1),('" ++ meta_keys[1] ++ "',?2),('" ++ meta_keys[2] ++ "','" ++ format_text ++ "')";
+/// The Store id is 16 bytes from SQLite's randomness, which it seeds from
+/// the OS, in lower-case hex, as `migrations` writes it too.
+const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('" ++ meta_keys[0] ++ "',?1),('" ++ meta_keys[1] ++ "',?2),('" ++ meta_keys[2] ++ "','" ++ format_text ++
+    "'),('" ++ meta_keys[3] ++ "',lower(hex(randomblob(" ++ std.fmt.comptimePrint("{d}", .{store_id_bytes}) ++ "))))";
+/// The bytes of a Store id; store_meta holds them as twice as many hex digits.
+pub const store_id_bytes = 16;
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };
 
 fn createTable(comptime table: Table) []const u8 {
+    if (!table.engines.on(.sqlite)) @compileError("schema: " ++ table.name ++ " is not on SQLite");
     var lines: []const []const u8 = &.{};
     for (table.columns) |column| lines = lines ++ .{columnDefinition(table, column)};
     if (table.primary_key.len > 1) lines = lines ++ .{" PRIMARY KEY(" ++ list(table.primary_key) ++ ")"};
@@ -1494,8 +1831,8 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
 /// as run, and only bootstrap and `migrate` write it, so a dropped CHECK, a
 /// changed column, a migration that leaves other text than bootstrap's, or a
 /// missing or extra index or trigger is a WrongStoreSchema. A
-/// network engine keeps no such text: PR 8/9 compare its catalog's tables,
-/// columns and indexes by name and type instead, which cannot see a CHECK.
+/// network engine keeps no such text: MySQL's open compares its catalog's
+/// structure instead (`catalogDigest`), which sees a CHECK only by count.
 /// Its caller has read user_version as schema_version, or set it.
 fn validateCurrent(database: *c.sqlite3, selector: []const u8) !void {
     {
@@ -1546,6 +1883,19 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8) !void {
         try sqlite.readText(statement, 0, &stored_selector);
         if (!stored_selector.eql(selector)) return error.WrongStoreIdentity;
     }
+    {
+        const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
+        defer _ = c.sqlite3_finalize(statement);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
+        if (!isStoreId(try columnText(statement, 0))) return error.WrongStoreIdentity;
+    }
+}
+
+/// Whether `text` is a Store id as store_meta holds it.
+pub fn isStoreId(text: []const u8) bool {
+    if (text.len != 2 * store_id_bytes) return false;
+    for (text) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    return true;
 }
 
 /// Column `column` of the current row, which is not NULL, as text.
@@ -1610,7 +1960,9 @@ test "MySQL types come from foreign keys, bounds and keys, and a key cycle close
 }
 
 test "each partial index takes its MySQL form" {
-    try std.testing.expectEqualStrings("CREATE INDEX open ON turn(session_ref)", comptime createMysqlIndex(&tables, .{ .name = "open", .table = "turn", .columns = &.{"session_ref"}, .where = "outcome_code IS NULL" }));
+    const open: Index = .{ .name = "open", .table = "turn", .columns = &.{ "session_ref", "turn_id DESC" }, .where = "outcome_code IS NULL" };
+    try std.testing.expectEqualStrings("CREATE INDEX open ON turn(open_lead,turn_id DESC)", comptime createMysqlIndex(&tables, open));
+    try std.testing.expectEqualStrings("CASE WHEN outcome_code IS NULL THEN session_ref END", comptime leadingValue(&tables, open));
     try std.testing.expectEqualStrings(
         "CREATE UNIQUE INDEX handle ON action_operation(sender_handle,action_id)",
         comptime createMysqlIndex(&tables, .{ .name = "handle", .table = "action_operation", .columns = &.{ "sender_handle", "action_id" }, .unique = true, .where = "sender_handle IS NOT NULL" }),
@@ -1651,6 +2003,61 @@ test "the schema's MySQL DDL keeps each foreign key once and no SQLite spelling"
         if (std.mem.eql(u8, object.name, "model_output_item")) break object.sql;
     } else unreachable;
     try std.testing.expect(std.mem.indexOf(u8, output_items, " session_ref VARCHAR(6) NOT NULL,") != null);
+}
+
+test "each engine's DDL holds only its own tables and columns" {
+    const sqlite_ddl = comptime ddl(.sqlite);
+    const mysql_ddl = comptime ddl(.mysql);
+    for ([_][]const u8{ "CREATE TABLE store_owner(", "CREATE TABLE content_chunk(" }) |mysql_only| {
+        try std.testing.expect(std.mem.indexOf(u8, sqlite_ddl, mysql_only) == null);
+        try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, mysql_only) != null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, sqlite_ddl, " payload BLOB NOT NULL CHECK(length(payload)=byte_length)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, "payload") == null);
+    try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, " bytes LONGBLOB NOT NULL,") != null);
+    try std.testing.expect(comptime lacks(.mysql, "content", "payload"));
+    try std.testing.expect(!comptime lacks(.sqlite, "content", "payload"));
+    try std.testing.expect(!comptime lacks(.mysql, "content", "digest"));
+}
+
+test "a leading index's MySQL table computes its first column" {
+    const mysql_ddl = comptime ddl(.mysql);
+    try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, " session_stop_unpositioned_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN position IS NULL THEN session_ref END) STORED,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, "CREATE INDEX session_stop_unpositioned ON session_stop(session_stop_unpositioned_lead);") != null);
+    // SQLite keeps its partial index.
+    try std.testing.expect(std.mem.indexOf(u8, comptime ddl(.sqlite), "CREATE INDEX session_stop_unpositioned ON session_stop(session_ref) WHERE position IS NULL;") != null);
+}
+
+test "a catalog line names each table, column, index, foreign key and CHECK count MySQL keeps" {
+    const lines = comptime catalogLines(&[_]Table{ mysql_test_order, mysql_test_label }, &.{
+        .{ .name = "open", .table = "turn", .columns = &.{ "code", "turn_id DESC" }, .where = "live=1" },
+        .{ .name = "one", .table = "turn", .columns = &.{"code"}, .unique = true, .where = "live=1" },
+    });
+    const expected = [_][]const u8{
+        "t turn InnoDB utf8mb4_0900_bin",
+        "c turn turn_id bigint NO -",
+        "c turn code varchar(8) NO utf8mb4_0900_bin",
+        "c turn live tinyint NO -",
+        "k turn 1",
+        "c turn open_lead varchar(8) YES utf8mb4_0900_bin generated",
+        "f turn code content label",
+        "i turn u turn_id",
+        "i turn n open_lead,turn_id desc",
+        "i turn u *",
+        "i turn n code",
+        "t content InnoDB utf8mb4_0900_bin",
+        "c content label varchar(8) NO utf8mb4_0900_bin",
+        "c content note text YES utf8mb4_0900_bin",
+        "c content body longblob NO -",
+        "c content first_turn bigint NO -",
+        "k content 3",
+        "f content first_turn turn turn_id",
+        "i content u label",
+        "i content n first_turn",
+    };
+    try std.testing.expectEqual(expected.len, lines.len);
+    for (expected, lines) |want, line| try std.testing.expectEqualStrings(want, line);
+    try std.testing.expect(catalogLineDigest("t turn") != catalogLineDigest("t content"));
 }
 
 test "a MySQL key wider than InnoDB keeps is refused" {

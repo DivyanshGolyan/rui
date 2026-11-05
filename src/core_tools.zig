@@ -22,11 +22,11 @@ pub const start_agent_max_argument_bytes = 6 * message_agent_max_text_bytes + 16
 
 // Prompt text: written here, and given no tests (D141).
 pub const start_agent_description = "Start another Rui agent on a task. It creates the agent's Session, gives it the task as its first Message and returns the agent's ID at once, before any answer. " ++
-    "An attached agent is your child: it works in your Workspace with your provider and Bash environment. A standalone agent has its own lifetime. " ++
+    "An attached agent is your child: it works in your Workspace with your provider and Bash environment, and stops when you are stopped or run out of context. A standalone agent has its own lifetime. " ++
     "The spec may only narrow your own tools and permission mode.";
 pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     std.fmt.comptimePrint("\"task\":{{\"type\":\"string\",\"description\":\"The agent's first Message: nonempty UTF-8, at most {d} bytes.\"}},", .{message_agent_max_text_bytes}) ++
-    "\"attached\":{\"type\":\"boolean\",\"description\":\"true starts your child; false starts a standalone agent.\"}," ++
+    "\"attached\":{\"type\":\"boolean\",\"description\":\"true starts your child, which stops with you; false starts a standalone agent.\"}," ++
     "\"spec\":{\"type\":\"object\",\"properties\":{" ++
     "\"model\":{\"type\":\"string\"}," ++
     "\"effort\":{\"type\":\"string\",\"enum\":[\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}," ++

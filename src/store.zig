@@ -20,6 +20,9 @@ pub const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 pub const AgentDelivery = command_domain.AgentDelivery;
 pub const AgentStart = command_domain.AgentStart;
 pub const CoreActionInput = action_domain.CoreActionInput;
+pub const CoreWork = action_domain.CoreWork;
+pub const OwedStop = action_domain.OwedStop;
+pub const OwedEnding = action_domain.OwedEnding;
 pub const ActionDispatchPermit = action_domain.ActionDispatchPermit;
 pub const ActionResolutionCode = action_domain.ActionResolutionCode;
 pub const ActiveOperationFilter = action_domain.ActiveOperationFilter;
@@ -70,4 +73,8 @@ test {
     _ = @import("store/tests.zig");
     _ = @import("store/sqlite_tests.zig");
     _ = @import("store/mysql_dialect_check.zig");
+    _ = @import("store/mysql_literal.zig");
+    _ = @import("store/mysql_row.zig");
+    _ = @import("store/mysql_session_tests.zig");
+    _ = @import("store/wire/mysql_connection.zig");
 }

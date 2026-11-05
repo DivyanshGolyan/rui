@@ -340,7 +340,7 @@ def help_case():
 def compiled_model_cases():
     """One release list owns help; any ID with valid syntax is admitted, an unlisted one with default limits."""
     import host_launch_integration as launch
-    models = ("gpt-6-luna", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra",
+    models = ("gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra",
               "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
     listing = "Supported model IDs: " + ", ".join(models) + "\n"
     unlisted_note = "it uses default limits"
@@ -2335,7 +2335,7 @@ def persistent_opening_case():
             rejected = subprocess.run([str(fixture.RUI), "session", "read-conversation", *map(str, flags),
                 "--position", "1", "--ordinal", "0"], capture_output=True, timeout=10)
             assert rejected.returncode == 1 and not rejected.stdout, (flags, rejected)
-            assert any(code in rejected.stderr for code in (b"[hex_malformed]", b"[identity_spelling_repeated]")), rejected.stderr
+            assert any(code in rejected.stderr for code in (b"[option_unknown]", b"[hex_malformed]", b"[identity_spelling_repeated]")), rejected.stderr
             assert b"Accepted: " in rejected.stderr and b" Next: " in rejected.stderr and b"Nothing was captured or sent." in rejected.stderr, rejected.stderr
         assert "late beyond captured end" not in recovered and "saved user 09" not in recovered, "history recaptured or replayed opening"
         assert proxy.exchanges[0][0] == proxy.exchanges[2][0], "history failure advanced its actual cursor"

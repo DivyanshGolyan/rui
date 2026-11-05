@@ -425,8 +425,8 @@ Catalog-only values such as `ultra` do not expand Rui's grammar or trigger a fal
 Catalog support is source metadata, not account entitlement or live backend qualification.
 
 With no override, a new Session uses the catalog default.
-The pinned Codex catalog gives `gpt-6-astra`, `gpt-6.1-sol` and `gpt-5.6-sol` a `low` default; the other five release-supported models default to `medium`.
-All eight advertise `low`, `medium`, `high` and `xhigh`.
+The pinned Codex catalog gives `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-5.6-sol` a `low` default; the other five release-supported models default to `medium`.
+All nine advertise `low`, `medium`, `high` and `xhigh`.
 All except `gpt-5.5` also advertise `max`.
 An unknown exact binding has no inferred default: without an override, Rui omits `reasoning` and leaves the provider's effective effort unknown.
 An explicit effort on that binding rejects because Rui has no support evidence.
@@ -550,6 +550,15 @@ Sending a report requires an explicit Message admission.
 The receiving Session uses the existing input boundaries, pending-prefix selection, stop exclusions and original-result guarantees.
 There is no separate inbox, callback or resident waiter for a future reply.
 A Session an attached `start_agent` call created records its creator as its **parent** (`session.parent_ref`, never itself); a standalone agent and every other Session has none.
+When a parent stops, or a Turn of it ends out of context, each of its attached children owes a stop (`session_stop_owed`, written in the same transaction, keyed `rui.core/stop/<child>/<parent>/<position>` by the parent position that caused it).
+The Host runs each owed stop before any core tool call, as that child's own ordinary Session stop, which settles the owed row and passes the stop on to the child's own children.
+A child that owes a stop runs none of its core tool calls; the stop cancels them.
+Clients cannot use keys under `rui.core/`, which Rui keeps for its own commands, so an owed stop's key is always free.
+An owed stop whose obligation a client's stop already settled, or a newer one replaced, runs nothing.
+Every attached child Turn ending owes its parent an ordinary Message from the child, waking the parent through normal Message admission (D39, D122).
+A done ending's Message is the child's saved answer itself, so nothing is copied; any other ending is a short line naming it, which is prompt text (D161).
+An ending caused by the parent's owed stop under `rui.core/stop/` settles quietly without admitting a Message (D139).
+One Store command delivers it and deletes the owed row, so a retry cannot deliver it twice.
 Dormant peers retain only saved facts.
 
 Peer composition supports one Host, which owns one Store.
@@ -630,8 +639,9 @@ The Responses provider maps uniquely named top-level `input_tokens` and `output_
 A provider total is not a count.
 A missing, invalid or duplicate count, or a cache read above the input, leaves usage absent, and pressure falls back to retained-context estimates; a missing counter is not zero.
 
-Codex's eight exact [release-supported model IDs](#supported-model-ids) default to a 244,800-token trigger and zero extra output reservation.
-Each has a 272,000-token window in the [pinned Codex catalog](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json); its client derives the trigger at 90% of that window.
+Codex's nine exact [release-supported model IDs](#supported-model-ids) default to a trigger at 90% of their window and zero extra output reservation, as Codex's client derives it.
+Eight have a 272,000-token window in the [pinned Codex catalog](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json), so a 244,800-token trigger.
+`gpt-6.1-terra` has a 500,000-token window in a [later Codex catalog](https://github.com/openai/codex/blob/5c0b1ac71f2f04016abdfcf43bee7e0c96867f0e/codex-rs/models-manager/models.json), so a 450,000-token trigger.
 A model Rui does not list is assumed to have a 128,000-token window (`product_defaults.unlisted_context_window`), so it compacts at 115,200 tokens: small on purpose, because an early compaction costs a summary and a late one a refused request.
 An explicit override replaces it without claiming a model capacity or entitlement.
 Pressure uses valid usage from the latest accepted same-binding output plus estimates for appended input and extra reservation; without valid usage it estimates retained context.
@@ -1270,7 +1280,10 @@ The Host opens schema 51 (41 let a failed, overflowed or retry-exhausted Turn ou
 Schema 51 is the migration baseline (Divyansh, D204): every later format change ships one forward step in `schema.migrations`, for SQLite and MySQL, and the build fails when `schema_version` and the steps disagree, and `tests/ci/test_store_schema_version.py` fails when a step whose `from` is below the released schema_version differs from its text at the release.
 A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
 Rui runs no DDL on MySQL (D203): the DB team runs `schema.mysqlMigration(from)`, which PR 8's `rui store schema --engine mysql [--from N]` will print.
-No step exists yet.
+The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
+The step to 53 records a Session's parent (D27).
+The step to 54 records the stops an attached child owes (D38), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
+On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
 Sessions store a Label and creation time.
@@ -3395,8 +3408,9 @@ Matching in-flight retries may receive the same acknowledgement; a replacement r
 
 Pause affects all work in the selected Store; it records no Session stop, so a later Host resumes that work from committed facts.
 Acknowledgement means a fence was requested, not that effects retired, connections drained or the lease released.
+So after acknowledgement pause probes only the lease (never the Host) for up to `product_defaults.host_shutdown_seconds` (10): a free lease reports `"retirement":"confirmed"`; a lease still held then reports `"unconfirmed"` and stderr says a new Host can start once `rui host status` reports unavailable.
+Confirmed retirement means the old Host let go of the Store; it reports nothing about cleanup progress.
 A missing/disconnected listener or timeout leaves completion unconfirmed.
-After listener closure, lease observation reports only unavailable or owned-but-unavailable, not cleanup progress or completed shutdown.
 Host pause adds no PID signal, force escalation, Session stop or separate shutdown authority.
 
 Holding new Turns is a different control, answered from Host memory like `host_info`: `POST /v1/control/host-pause` takes `kind:"host_pause"`, `store` and `paused`, sets whether this Host holds every new Turn, and replies `host_pause_reply` with the state now in force; repeating it changes nothing (D193).

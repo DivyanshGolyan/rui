@@ -25,8 +25,8 @@ const rsql = @import("rsql.zig");
 const schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
 const store_testing = @import("testing.zig");
-const mysql_driver = @import("wire/mysql_driver.zig");
-const mysql = mysql_driver.mysql;
+const mysql_connection = @import("wire/mysql_connection.zig");
+const mysql = mysql_connection.mysql;
 
 const database = "rui_dialect_check";
 const oracle_database = "rui_dialect_check_oracle";
@@ -36,7 +36,7 @@ const State = enum { unopened, absent, open, broken };
 /// Guards everything below: some Store tests call the Store from threads.
 var mutex: std.Io.Mutex = .init;
 var state: State = .unopened;
-var driver: mysql_driver.Driver = undefined;
+var driver: mysql_connection.Connection = undefined;
 /// Each statement the opening's DDL had refused, with MySQL's error, one
 /// per line; the DDL test reports them.
 var ddl_refusals: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
@@ -62,7 +62,7 @@ var done: struct {
     }
 } = .{};
 
-const Config = struct { socket: []const u8, password: []const u8, record: ?[]const u8 };
+pub const Config = struct { socket: []const u8, password: []const u8, record: ?[]const u8 };
 
 /// The server the environment names, copied out of it; null when it names
 /// none. `error.MysqlRequired` when `RUI_TEST_REQUIRE_ENGINES` lists `mysql`
@@ -89,6 +89,15 @@ fn configured() !?Config {
     };
 }
 
+/// `configured`, under `mutex`, for another live test that opens its own
+/// connection to the same server.
+pub fn rootConfig() !?Config {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    return configured();
+}
+
 /// Under `mutex`: rewrites the record file with `done`, when one is named.
 /// A failed write logs at err level, so a run that cannot record fails.
 fn writeRecord() void {
@@ -106,7 +115,7 @@ fn writeRecord() void {
 /// Under `mutex`: the bootstrapped connection, or null when MySQL is not
 /// configured or the opening failed. The first call opens it; a failed
 /// opening logs at err level, which fails the test that made the call.
-fn connection() ?*mysql_driver.Driver {
+fn connection() ?*mysql_connection.Connection {
     switch (state) {
         .open => return &driver,
         .absent, .broken => return null,
@@ -122,7 +131,7 @@ fn connection() ?*mysql_driver.Driver {
     };
     var refusal: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
     defer refusal.deinit();
-    driver.open(std.testing.io, .{ .unix_socket = config.socket }, .{ .user = "root", .password = config.password, .database = "mysql" }, &refusal.writer) catch |err| {
+    driver.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = "mysql" }, &refusal.writer) catch |err| {
         std.log.err("MySQL dialect check: root login over {s} failed: {s} {s}", .{ config.socket, @errorName(err), refusal.written() });
         return null;
     };
@@ -178,7 +187,7 @@ const Refused = struct {
 fn run(text: []const u8) !?Refused {
     try driver.query(text);
     var refused: ?Refused = null;
-    while (!driver.client.isReady()) switch (try driver.next()) {
+    while (!driver.isReady()) switch (try driver.next()) {
         .err => |err| if (refused == null) {
             const len = @min(err.message.len, 480);
             refused = .{ .code = err.code, .message = undefined, .message_len = len };
@@ -347,7 +356,7 @@ fn load(comptime name: []const u8, text: []const u8, unchecked: bool) !void {
 fn writeResult(text: []const u8, out: *std.Io.Writer) !void {
     try driver.query(text);
     var refused = false;
-    while (!driver.client.isReady()) switch (try driver.next()) {
+    while (!driver.isReady()) switch (try driver.next()) {
         .err => |err| {
             std.log.err("MySQL migration check: err {d} {s}\n  {s}", .{ err.code, err.message, text });
             refused = true;
@@ -376,15 +385,50 @@ fn shapeQueries(comptime name: []const u8) [5][]const u8 {
     };
 }
 
-/// Each table's rows in database `name`, in key order.
-fn rowQueries(comptime name: []const u8) [schema.tables.len][]const u8 {
-    var queries: [schema.tables.len][]const u8 = undefined;
-    for (schema.tables, &queries) |table, *query| {
+/// Each MySQL table's rows in database `name`, in key order.
+fn rowQueries(comptime name: []const u8) []const []const u8 {
+    var queries: []const []const u8 = &.{};
+    for (schema.tables) |table| if (table.engines.on(.mysql)) {
         var order: []const u8 = "";
         for (table.primary_key, 0..) |column, position| order = order ++ (if (position == 0) "" else ",") ++ column;
-        query.* = "SELECT * FROM " ++ name ++ "." ++ table.name ++ " ORDER BY " ++ order;
-    }
+        queries = queries ++ .{"SELECT * FROM " ++ name ++ "." ++ table.name ++ " ORDER BY " ++ order};
+    };
     return queries;
+}
+
+/// Fails unless database `name`'s catalog (`schema.catalogSql`) has the
+/// digest the schema derives, and then logs the lines each side lacks.
+fn expectCatalog(comptime name: []const u8) !void {
+    var lines: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer lines.deinit();
+    try writeResult(comptime schema.catalogSql("'" ++ name ++ "'"), &lines.writer);
+    // writeResult writes a row as its end of line, then each value as " length:" and its bytes.
+    var sum: u64 = 0;
+    var rows = std.mem.splitScalar(u8, lines.written(), '\n');
+    while (rows.next()) |row| {
+        if (row.len == 0) continue;
+        const colon = std.mem.indexOfScalar(u8, row, ':') orelse return error.MysqlCatalogRow;
+        sum +%= schema.catalogLineDigest(row[colon + 1 ..]);
+    }
+    if (sum == schema.catalogDigest()) return;
+    // stderr, which the test runner always shows.
+    const expected = comptime schema.catalogLinesForTesting();
+    rows = std.mem.splitScalar(u8, lines.written(), '\n');
+    while (rows.next()) |row| {
+        if (row.len == 0) continue;
+        const line = row[std.mem.indexOfScalar(u8, row, ':').? + 1 ..];
+        for (expected) |want| {
+            if (std.mem.eql(u8, want, line)) break;
+        } else std.debug.print("MySQL catalog check: only {s} has: {s}\n", .{ name, line });
+    }
+    for (expected) |want| {
+        rows = std.mem.splitScalar(u8, lines.written(), '\n');
+        while (rows.next()) |row| {
+            const colon = std.mem.indexOfScalar(u8, row, ':') orelse continue;
+            if (std.mem.eql(u8, row[colon + 1 ..], want)) break;
+        } else std.debug.print("MySQL catalog check: only the schema has, for {s}: {s}\n", .{ name, want });
+    }
+    return error.MysqlCatalogDiffers;
 }
 
 /// Writes each query of `migrated` and its twin of `fresh`, and fails
@@ -416,9 +460,12 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     try load(migrated_database, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| try load(migrated_database, schema.mysqlMigration(step.from), false);
     try load(fresh_database, schema.ddl(.mysql), false);
-    try load(fresh_database, store_testing.expected_rows, true);
+    try load(fresh_database, store_testing.expected_mysql_rows, true);
     try expectSameResults(comptime &shapeQueries(migrated_database), comptime &shapeQueries(fresh_database));
-    try expectSameResults(comptime &rowQueries(migrated_database), comptime &rowQueries(fresh_database));
+    try expectSameResults(comptime rowQueries(migrated_database), comptime rowQueries(fresh_database));
+    // What the engine's open compares, on a fresh and a migrated Store.
+    try expectCatalog(fresh_database);
+    try expectCatalog(migrated_database);
     done.migrations += 1;
     writeRecord();
 }

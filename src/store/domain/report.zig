@@ -229,35 +229,14 @@ pub const SessionReportCapture = struct {
     }
 
     /// A set's names as `tool_set.namesSql` joins them, as a JSON array in
-    /// name order, the order configure gave its members.
+    /// name order (`sortedToolNames`).
     fn appendTools(self: *SessionReportCapture, names: ?[]const u8) !void {
         var sorted: [tool_catalog.max_tools][]const u8 = undefined;
-        var count: usize = 0;
-        if (names) |joined| {
-            var each = std.mem.splitScalar(u8, joined, ',');
-            while (each.next()) |name| : (count += 1) {
-                if (count == sorted.len or !protocol.validToolName(name)) return error.CorruptStore;
-                sorted[count] = name;
-            }
-        }
-        // Not `sort`, whose block merge keeps a cache on the stack.
-        std.mem.sortUnstable([]const u8, sorted[0..count], {}, lessThan);
-        try self.append("[");
-        for (sorted[0..count], 0..) |name, index| {
-            if (index != 0) {
-                // A set names each tool once.
-                if (std.mem.eql(u8, sorted[index - 1], name)) return error.CorruptStore;
-                try self.append(",");
-            }
-            try self.append("\"");
-            try self.append(name);
-            try self.append("\"");
-        }
-        try self.append("]");
-    }
-
-    fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-        return std.mem.lessThan(u8, a, b);
+        const tools = try sortedToolNames(names, &sorted);
+        var buffer: [256]u8 = undefined;
+        var sink: ShapeSink = .{ .capture = self, .writer = .{ .vtable = &.{ .drain = ShapeSink.drain }, .buffer = &buffer } };
+        writeToolNames(&sink.writer, tools) catch return sink.failure.?;
+        sink.writer.flush() catch return sink.failure.?;
     }
 
     fn appendPermissionMode(self: *SessionReportCapture, permission_mode: u8) !void {
@@ -548,7 +527,43 @@ const first_message = rsql.Read(.{
     .cardinality = .optional,
 });
 
-const settings_columns = "s.session_ref,s.workspace,s.provider,s.model," ++ tool_set.maskSql("s.tool_set_id") ++ " AS tools_mask,s.permission_mode,s.label,s.created_at,s.revision,s.next_position," ++
+/// The names `tool_set.namesSql` joined, in name order, the order
+/// configure gave the set's members. A bad or repeated name, or too many,
+/// is `CorruptStore`.
+fn sortedToolNames(names: ?[]const u8, sorted: *[tool_catalog.max_tools][]const u8) ![]const []const u8 {
+    var count: usize = 0;
+    if (names) |joined| {
+        var each = std.mem.splitScalar(u8, joined, ',');
+        while (each.next()) |name| : (count += 1) {
+            if (count == sorted.len or !protocol.validToolName(name)) return error.CorruptStore;
+            sorted[count] = name;
+        }
+    }
+    // Not `sort`, whose block merge keeps a cache on the stack.
+    std.mem.sortUnstable([]const u8, sorted[0..count], {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.less);
+    for (sorted[0..count], 0..) |name, index| {
+        if (index != 0 and std.mem.eql(u8, sorted[index - 1], name)) return error.CorruptStore;
+    }
+    return sorted[0..count];
+}
+
+/// Writes `names` as a JSON array of strings.
+fn writeToolNames(writer: *std.Io.Writer, names: []const []const u8) std.Io.Writer.Error!void {
+    try writer.writeAll("[");
+    for (names, 0..) |name, index| {
+        if (index != 0) try writer.writeAll(",");
+        try writer.writeAll("\"");
+        try writer.writeAll(name);
+        try writer.writeAll("\"");
+    }
+    try writer.writeAll("]");
+}
+
+const settings_columns = "s.session_ref,s.workspace,s.provider,s.model," ++ tool_set.namesSql("s.tool_set_id") ++ " AS tools,s.permission_mode,s.label,s.created_at,s.revision,s.next_position," ++
     "(" ++ person_message_sql ++ ") AS from_person_at,";
 
 /// One list row: the Session's settings, its latest Message from no
@@ -577,7 +592,7 @@ const ListRow = struct {
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
     provider: protocol.Provider,
     model: protocol.Bounded(protocol.max_model_bytes),
-    tools_mask: u8,
+    tools: ?protocol.Bounded(tool_set.max_names_bytes),
     permission_mode: u8,
     label: ?protocol.Bounded(protocol.max_label_bytes),
     created_at: rsql.Positive,
@@ -637,11 +652,10 @@ noinline fn appendSessionRows(a: *ReadAccess, references: []const change_ring.Id
 const ShownRow = struct { reference: *const change_ring.Id, first: u64, work: *const WorkRead };
 
 /// Reads each shown row's `list_row` in one round and renders it as it
-/// steps. Not inlined: its visitor holds a row's text.
+/// steps. The row it decodes is in report scratch (`RowScratch`).
 noinline fn renderRows(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, capture: *SessionReportCapture) !void {
-    // A literal that omits `decoded` leaves its bytes unwritten until a
-    // row decodes into it.
-    var render: RowsRender = .{ .rows = rows, .now_ms = now_ms, .capture = capture };
+    const scratch = a.store.reportScratch(RowScratch);
+    var render: RowsRender = .{ .decoded = &scratch.row, .tools_json = &scratch.tools_json, .rows = rows, .now_ms = now_ms, .capture = capture };
     for (rows) |row| {
         if (row.first == 0)
             a.readEach(list_row_bare, .{ .session = row.reference }, 1, &render)
@@ -656,11 +670,16 @@ noinline fn renderRows(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, capt
     if (render.shown != rows.len) return error.CorruptStore;
 }
 
+/// A list row and its rendered tools, kept in the Store's report scratch
+/// and not on a Host stack frame.
+const RowScratch = struct { row: ListRow, tools_json: [protocol.max_tool_names_json_bytes]u8 };
+
 /// Renders each `list_row` as it steps, in the page's order. A row that
 /// is not the next shown Session's, or a missing one, is `CorruptStore`;
 /// after a failure it renders nothing more.
 const RowsRender = struct {
-    decoded: ListRow = undefined,
+    decoded: *ListRow,
+    tools_json: *[protocol.max_tool_names_json_bytes]u8,
     rows: []const ShownRow,
     now_ms: u64,
     capture: *SessionReportCapture,
@@ -671,7 +690,7 @@ const RowsRender = struct {
 
     pub fn visit(render: *RowsRender, row: *const ListRow) bool {
         if (render.failure != null) return false;
-        renderListRow(render.capture, render.rows, render.shown, render.now_ms, row) catch |err| {
+        renderListRow(render.capture, render.rows, render.shown, render.now_ms, row, render.tools_json) catch |err| {
             render.failure = err;
             return false;
         };
@@ -680,9 +699,12 @@ const RowsRender = struct {
     }
 };
 
-fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow) !void {
+fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow, tools_json: *[protocol.max_tool_names_json_bytes]u8) !void {
     if (index == rows.len or !std.mem.eql(u8, row.session_ref.slice(), rows[index].reference)) return error.CorruptStore;
-    const tools = try configuration_domain.toolSet(row.tools_mask);
+    var sorted: [tool_catalog.max_tools][]const u8 = undefined;
+    const names = try sortedToolNames(if (row.tools) |*tools| tools.slice() else null, &sorted);
+    var writer = std.Io.Writer.fixed(tools_json);
+    try writeToolNames(&writer, names);
     if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
     const work: protocol.SessionWork = .fromCore(try rows[index].work.work(row.created_at.get(), now_ms));
     const peers: protocol.PeerFacts = .{ .from_person_at = optional(row.from_person_at) };
@@ -691,7 +713,7 @@ fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: 
         .workspace = row.workspace.slice(),
         .provider = row.provider,
         .model = row.model.slice(),
-        .tools = tools,
+        .tools = writer.buffered(),
         .permission_mode = try configuration_domain.permissionMode(row.permission_mode),
         .label = if (row.label) |*label| label.slice() else null,
         .created_at = row.created_at.get(),
@@ -1319,13 +1341,18 @@ fn appendPresentation(capture: *SessionReportCapture, presentation: protocol.Too
     try capture.append(writer.buffered());
 }
 
+// `@payload` reads one MySQL chunk.
+comptime {
+    if (Quota.max_bytes > store_schema.content_chunk_bytes) @compileError("a quota diagnostic is more than one content chunk");
+}
+
 /// The Session's latest Turn and its current Operation. The quota
 /// diagnostic is read only for a failed outcome, and only while it is
 /// small enough to be one (`Quota.max_bytes`).
 const work_latest = rsql.Read(.{
     .sql = "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
         "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
-        "(SELECT payload FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
+        "(SELECT @payload(content) FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
         " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
         "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
         "FROM turn t @index(turn_session_latest) JOIN model_operation o ON o.operation_id=t.operation_id " ++

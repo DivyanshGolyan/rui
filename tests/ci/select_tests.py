@@ -85,7 +85,7 @@ RULES = (
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "The wire contract: openapi.json must equal what the wire types emit"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
-    (("src/launch_frame.zig", "tests/integration/launch_frame*"), ("test", "launch-frame-integration", "ts-client"),
+    (("src/launch_frame.zig", "tests/integration/launch_frame*", "tests/integration/mcp_sdk/*"), ("test", "launch-frame-integration", "ts-client"),
      ("test", "launch-frame-integration", "ts-client"), "The launch frame a program uses to start its own Host"),
     (("src/protocol.zig", "src/cli_value.zig", "src/retention_capacity.zig", "src/provider_name.zig", "src/platform.zig",
       "src/execution.zig", "src/attempt.zig", "src/tools.zig", "src/*Scratch*",
@@ -105,9 +105,9 @@ RULES = (
      "Bash execution, direct custody and process-crash recovery"),
     (("src/h2/*",), ("test-h2",), ("test-h2",), "The HTTP/2 client module's own tests"),
     (("src/h2/policy.zig",), ("test-logic",), ("test-logic",), "HTTP/2 client policy core boundary"),
-    (("src/http1/*",), ("test-logic", "test"), ("test-logic", "test"),
+    (("src/http1/*",), ("test-logic", "test", "launch-frame-integration"), ("test-logic", "test", "launch-frame-integration"),
      "The loopback HTTP/1.1 client: its value cores and its socket exchange"),
-    (("src/mcp/*",), ("test-logic", "test"), ("test-logic", "test"),
+    (("src/mcp/*",), ("test-logic", "test", "launch-frame-integration"), ("test-logic", "test", "launch-frame-integration"),
      "The MCP client: its value cores and the request that drives one exchange"),
     (("src/codec_abi.zig", "src/codecs/*"), ("test-logic", "check"), ("test-logic", "check"),
      "The codec contract and the built-in codecs, functional cores; the Host's encode and transport follow"),
@@ -210,7 +210,7 @@ LIVE_RULES = (
       "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
      ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux",
      LIVE_POSTGRES_TARGETS),
-    (("src/store/wire/mysql.zig", "src/store/wire/mysql_driver.zig", "tests/integration/mysql_wire*",
+    (("src/store/wire/mysql.zig", "src/store/wire/mysql_connection.zig", "src/store/wire/tls.zig", "tests/integration/mysql_wire*",
       "tests/integration/mysql_server.py", "build.zig"),
      ("test-logic", "mysql-wire-integration"), ("test-logic",),
      "MySQL wire client: replayed exchanges and a real MySQL 8.4 server (Docker, Linux only)",
@@ -255,7 +255,7 @@ CACHE_POLICY = {
 def setup_requirements(targets):
     # Every runner installs the same fixture packages (tests/integration/requirements.txt)
     # for any target, so no fixture's import depends on a hand-kept target list.
-    return {"go": "measurement-check" in targets, "node": "ts-client" in targets, "python": bool(targets)}
+    return {"go": "measurement-check" in targets, "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets)}
 
 
 def execution_batches(targets, check_part="all"):

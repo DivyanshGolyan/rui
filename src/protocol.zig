@@ -13,6 +13,10 @@ pub const next_wire_version = std.fmt.comptimePrint("{d}", .{wire_number + 1});
 pub const previous_wire_version = std.fmt.comptimePrint("{d}", .{wire_number - 1});
 const wire_number = std.fmt.parseInt(u32, wire_version, 10) catch unreachable;
 pub const max_key_bytes = 128;
+/// Command keys Rui gives its own commands: a core tool call's Message or
+/// agent start, and the stop an attached child owes. A client command
+/// with one is refused.
+pub const reserved_key_prefix = "rui.core/";
 pub const max_session_bytes = 128;
 // SQLite's Unix VFS needs eight bytes beyond the database path for journals.
 // The Store selector plus "/rui.sqlite3" and the journal suffix must stay
@@ -186,36 +190,11 @@ pub const ToolsField = struct {
 /// A `tools` list's names, one space apart.
 pub const max_tool_names_bytes = max_tool_list_name_bytes + max_tools - 1;
 
+/// A JSON list of validated tool names, including brackets, quotes and commas.
+pub const max_tool_names_json_bytes = 2 + max_tool_list_name_bytes + 2 * max_tools + max_tools - 1;
+
 pub const BuiltInTool = built_in_tool.BuiltInTool;
 pub const ToolSelection = built_in_tool.Selection;
-
-/// The longest JSON list of tool names a report or row writes.
-pub const max_tool_selection_json_bytes = blk: {
-    var bytes: usize = "[]".len;
-    for (std.enums.values(BuiltInTool)) |tool| bytes += @tagName(tool).len + "\"\",".len;
-    break :blk bytes - 1;
-};
-
-/// Writes `tools` as a JSON list of names, in the catalog's order, into
-/// `buffer`, which holds `max_tool_selection_json_bytes`.
-pub fn toolSelectionJson(tools: ToolSelection, buffer: *[max_tool_selection_json_bytes]u8) []const u8 {
-    var length: usize = 0;
-    buffer[length] = '[';
-    length += 1;
-    for (std.enums.values(BuiltInTool)) |tool| if (tools.contains(tool)) {
-        if (length != 1) {
-            buffer[length] = ',';
-            length += 1;
-        }
-        buffer[length] = '"';
-        @memcpy(buffer[length + 1 ..][0..@tagName(tool).len], @tagName(tool));
-        length += 1 + @tagName(tool).len;
-        buffer[length] = '"';
-        length += 1;
-    };
-    buffer[length] = ']';
-    return buffer[0 .. length + 1];
-}
 
 /// The built-in tool `name` names, or null.
 pub fn builtInTool(name: []const u8) ?BuiltInTool {
@@ -1018,7 +997,7 @@ pub const SessionRow = struct {
     workspace: Bounded(max_workspace_bytes) = .{},
     provider: Provider = .codex,
     model: Bounded(max_model_bytes) = .{},
-    tools: ToolSelection = .empty,
+    tools: ToolsField = .{ .state = .value },
     permission_mode: PermissionMode = .ask,
     label: ?Bounded(max_label_bytes) = null,
     created_at: u64 = 0,
@@ -1031,18 +1010,18 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"reference\":",       Hole{ .string = max_session_bytes },           ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",      Hole{ .tag = Provider },                       "\",\"model\":",           Hole{ .string = max_model_bytes },
-        ",\"tools\":",           Hole{ .text = max_tool_selection_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
-        "\",\"label\":",         Hole{ .optional_string = max_label_bytes },    ",\"created_at\":\"",      Hole.decimal,
-        "\",\"revision\":\"",    Hole.decimal,                                  "\",\"end\":\"",           Hole.decimal,
-        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },         ",\"work\":",              Hole{ .json = SessionWork },
-        ",\"peers\":",           Hole{ .json = PeerFacts },                     "}",
+        "{\"reference\":",       Hole{ .string = max_session_bytes },        ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",      Hole{ .tag = Provider },                    "\",\"model\":",           Hole{ .string = max_model_bytes },
+        ",\"tools\":",           Hole{ .text = max_tool_names_json_bytes },  ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
+        "\",\"label\":",         Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"",      Hole.decimal,
+        "\",\"revision\":\"",    Hole.decimal,                               "\",\"end\":\"",           Hole.decimal,
+        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },      ",\"work\":",              Hole{ .json = SessionWork },
+        ",\"peers\":",           Hole{ .json = PeerFacts },                  "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     /// A row may never exceed this, whatever its fields hold: a new field that
     /// would grow every page's scratch charge past it fails the build.
-    pub const budget_bytes = 32 * 1024;
+    pub const budget_bytes = 36 * 1024;
     comptime {
         std.debug.assert(max_json_bytes <= budget_bytes);
     }
@@ -1054,7 +1033,8 @@ pub const SessionRow = struct {
         workspace: []const u8,
         provider: Provider,
         model: []const u8,
-        tools: ToolSelection,
+        /// Already-rendered JSON borrowed from the Store read.
+        tools: []const u8,
         permission_mode: PermissionMode,
         label: ?[]const u8,
         created_at: u64,
@@ -1067,23 +1047,33 @@ pub const SessionRow = struct {
         pub const max_json_bytes = SessionRow.max_json_bytes;
 
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
-            var tools_buffer: [max_tool_selection_json_bytes]u8 = undefined;
             try writeShape(out, json_shape, .{
-                f.reference,                               f.workspace,       f.provider,      f.model,
-                toolSelectionJson(f.tools, &tools_buffer), f.permission_mode, f.label,         f.created_at,
-                f.revision,                                f.end,             f.first_message, f.work,
+                f.reference, f.workspace,       f.provider,      f.model,
+                f.tools,     f.permission_mode, f.label,         f.created_at,
+                f.revision,  f.end,             f.first_message, f.work,
                 f.peers,
             });
         }
     };
 
     pub fn writeJson(self: *const SessionRow, out: *std.Io.Writer) !void {
+        var tools_buffer: [max_tool_names_json_bytes]u8 = undefined;
+        var tools_writer = std.Io.Writer.fixed(&tools_buffer);
+        try tools_writer.writeByte('[');
+        var names = self.tools.iterator();
+        var first = true;
+        while (names.next()) |name| {
+            if (!first) try tools_writer.writeByte(',');
+            first = false;
+            try tools_writer.print("\"{s}\"", .{name});
+        }
+        try tools_writer.writeByte(']');
         const fields: Fields = .{
             .reference = self.reference.slice(),
             .workspace = self.workspace.slice(),
             .provider = self.provider,
             .model = self.model.slice(),
-            .tools = self.tools,
+            .tools = tools_writer.buffered(),
             .permission_mode = self.permission_mode,
             .label = if (self.label) |*label| label.slice() else null,
             .created_at = self.created_at,
@@ -1740,7 +1730,7 @@ const Parser = struct {
         const Field = enum { key, session, configuration, require_model };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(&out.key),
+            .key => try self.readCommandKey(&out.key),
             .session => try self.readSmallString(&out.session),
             .configuration => try self.parseConfiguration(true, &out.configuration),
             .require_model => out.require_model = try self.readBoolean(),
@@ -1776,7 +1766,7 @@ const Parser = struct {
         const Field = enum { key, session, sender, sender_handle, configuration, text, require_model };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(&out.key),
+            .key => try self.readCommandKey(&out.key),
             .session => try self.readSmallString(&out.session),
             .sender => if (!try self.readNull()) {
                 out.sender = .{};
@@ -1820,7 +1810,7 @@ const Parser = struct {
         const Field = enum { key, session };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(&out.key),
+            .key => try self.readCommandKey(&out.key),
             .session => try self.readSmallString(&out.session),
         };
         try require(Field, seen, &.{ .key, .session });
@@ -1830,7 +1820,7 @@ const Parser = struct {
         const Field = enum { key, target };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(&out.key),
+            .key => try self.readCommandKey(&out.key),
             .target => {
                 const Target = enum { session, turn, operation };
                 try self.expectByte('{');
@@ -1851,7 +1841,7 @@ const Parser = struct {
         const Field = enum { key, session, action, decision };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
-            .key => try self.readSmallString(&out.key),
+            .key => try self.readCommandKey(&out.key),
             .session => try self.readSmallString(&out.session),
             .action => out.action_id = try self.readCanonicalU64(),
             .decision => {
@@ -2184,6 +2174,13 @@ const Parser = struct {
     fn skipKey(self: *Parser, discard: *DiscardSink) !void {
         try self.readJsonString(discard);
         try self.expectByte(':');
+    }
+
+    /// A command's key. Keys under `reserved_key_prefix` are Rui's own
+    /// commands', so a client command cannot take one first.
+    fn readCommandKey(self: *Parser, key: *Bounded(max_key_bytes)) !void {
+        try self.readSmallString(key);
+        if (std.mem.startsWith(u8, key.slice(), reserved_key_prefix)) return error.ReservedCommandKey;
     }
 
     fn readSmallString(self: *Parser, destination: anytype) !void {
@@ -3677,6 +3674,24 @@ test "Session listing wire distinguishes all, exact workspace, continuation, sin
     }
 }
 
+test "a client command cannot take a key Rui keeps for its own commands" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"session_stop\",\"store\":\"s\",\"key\":";
+    const cases = [_]struct { key: []const u8, failure: ?anyerror }{
+        .{ .key = "\"rui.core/stop/abcdef/ghjkmn/3\"", .failure = error.ReservedCommandKey },
+        .{ .key = "\"rui.core/message_agent/1\"", .failure = error.ReservedCommandKey },
+        .{ .key = "\"rui.core\"", .failure = null },
+        .{ .key = "\"my/rui.core/stop\"", .failure = null },
+    };
+    for (cases) |case| {
+        var buffer: [256]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{s}{s},\"session\":\"peer\"}}", .{ head, case.key });
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        if (case.failure) |failure| try std.testing.expectError(failure, parseForTest(&parser)) else _ = try parseForTest(&parser);
+    }
+}
+
 test "peer wire rejects old sender strings, malformed addresses and missing handles" {
     const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"target\",\"sender\":";
     const text = ",\"text\":{\"state\":\"omitted\"}}";
@@ -4029,4 +4044,27 @@ test "an order-free request still names each member once, carries every required
     }
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expect(retained == null);
+}
+
+test "SessionRow borrowed fields preserve offered tool names" {
+    const fields: SessionRow.Fields = .{
+        .reference = "peer",
+        .workspace = "/w",
+        .provider = .codex,
+        .model = "model",
+        .tools = "[\"bash\",\"offered_tool\"]",
+        .permission_mode = .ask,
+        .label = null,
+        .created_at = 0,
+        .revision = 0,
+        .end = 0,
+        .first_message = null,
+        .work = &.{},
+        .peers = &.{},
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try fields.writeJson(&out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"tools\":[\"bash\",\"offered_tool\"]") != null);
+    try std.testing.expect(out.written().len <= SessionRow.max_json_bytes);
 }
