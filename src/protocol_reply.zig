@@ -677,7 +677,7 @@ pub const Current = struct {
             action: Id,
             parent_operation: Id,
             call_ordinal: Count,
-            tool: JsonEnum(protocol.BuiltInTool),
+            tool: JsonString(protocol.max_tool_name_bytes),
             permission_revision: Id,
             /// `core`: a core tool's call, which settlement authorizes at
             /// once with no permission decision.
@@ -981,6 +981,7 @@ fn AttentionRows(comptime tag: std.meta.Tag(Current.Attention)) type {
                 }
                 if ((tag == .resolved or tag == .rejected) and row.code.slice().len == 0) return error.InvalidObservation;
                 if (tag == .unresolved) {
+                    if (!protocol.validToolName(row.tool.slice())) return error.InvalidObservation;
                     const p = row.presentation.value;
                     if (p.publication_position != null or p.code != (if (row.authorization.value == .pending) protocol.ToolPresentation.Code.pending_permission else .unresolved)) return error.InvalidObservation;
                 }
@@ -3350,6 +3351,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     inline for (.{
         .{ "\"version\":\"" ++ protocol.wire_version ++ "\"", "\"version\":\"" ++ protocol.next_wire_version ++ "\"" },
         .{ "\"tools\":[\"bash\"]", "\"tools\":[\"ba.h\"]" },
+        .{ "\"tool\":\"bash\"", "\"tool\":\"ba.h\"" },
         .{ "\"turn\":\"7\"", "\"turn\":\"0\"" },
         .{ "\"operation\":\"19\"", "\"operation\":\"00\"" },
         .{ "\"selected_message\"", "\"ignored__message\"" },

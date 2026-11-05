@@ -222,6 +222,48 @@ pub const Reader = struct {
         return if (value_due and self.depth > max_depth) error.JsonTooDeep else error.UnexpectedJsonEnd;
     }
 
+    /// Reads one object from a decoded byte source without retaining its text.
+    /// String scalars use the same decoder as the contiguous reader.
+    pub fn readSource(self: *Reader, source: anytype, handler: anytype) !void {
+        self.init();
+        while (try source.peek()) |byte| {
+            _ = try source.take();
+            if (self.state != .string) {
+                try self.step(byte, handler);
+                self.offset += 1;
+                continue;
+            }
+            if (byte == '"') {
+                if (self.in_key) {
+                    handler.key(self, self.depth);
+                    self.state = .colon;
+                } else self.endValue(.string, handler);
+                self.offset += 1;
+                continue;
+            }
+            var scalar: [12]u8 = undefined;
+            scalar[0] = byte;
+            var length: usize = 1;
+            var needed: usize = if (byte == '\\') 2 else if (byte >= 0x80)
+                std.unicode.utf8ByteSequenceLength(byte) catch return error.InvalidJsonUtf8
+            else
+                1;
+            while (length < needed) {
+                scalar[length] = (try source.peek()) orelse return error.UnexpectedJsonEnd;
+                _ = try source.take();
+                length += 1;
+                if (length == 2 and byte == '\\' and scalar[1] == 'u') needed = 6;
+                if (length == 6 and needed == 6) {
+                    const value = try hex(scalar[0..length], 2);
+                    if (value >= 0xd800 and value <= 0xdbff) needed = 12;
+                }
+            }
+            _ = try decodeString(scalar[0..length], 0, self);
+            self.offset += length;
+        }
+        if (self.state != .done) return error.UnexpectedJsonEnd;
+    }
+
     /// The state before a document's first byte. The decoded text is written
     /// before it is read, so it is left.
     fn init(self: *Reader) void {
@@ -650,6 +692,23 @@ fn expectReadAsStd(document: []const u8) !void {
         try std.json.validate(std.testing.allocator, document);
     var recorder: Recorder = .{};
     try std.testing.expectEqual(expected, readForTesting(document, &recorder));
+    const Source = struct {
+        bytes: []const u8,
+        position: usize = 0,
+        pub fn peek(self: *@This()) !?u8 {
+            return if (self.position < self.bytes.len) self.bytes[self.position] else null;
+        }
+        pub fn take(self: *@This()) !u8 {
+            defer self.position += 1;
+            return self.bytes[self.position];
+        }
+    };
+    var source: Source = .{ .bytes = document };
+    var reader: Reader = undefined;
+    var streamed: Recorder = .{};
+    const accepted = if (reader.readSource(&source, &streamed)) |_| true else |_| false;
+    try std.testing.expectEqual(expected, accepted);
+    if (accepted) try std.testing.expectEqualStrings(recorder.events(), streamed.events());
 }
 
 test "the reader reports keys and values with their depths, ranges and decoded starts" {

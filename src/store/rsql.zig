@@ -264,6 +264,7 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 /// portable or on an unknown or malformed marker. SQLite's spelling of
 /// each marker:
 ///
+///   @bytes(x)            exact bytes: CAST to BLOB (SQLite) or BINARY (MySQL)
 ///   @octets(x)           bytes in x: `length(CAST(x AS BLOB))`
 ///   @charset(c,'set')    only these characters: `(c NOT GLOB '*[^set]*' AND
 ///                        length(c)=length(CAST(c AS BLOB)))`. GLOB stops
@@ -1906,6 +1907,7 @@ const arg_b = "\x02";
 const arg_set = "\x03";
 const served_slots = "\x04";
 const expression_markers = [_]ExpressionMarker{
+    .{ .name = "bytes", .arity = 1, .sqlite = "CAST(" ++ arg_a ++ " AS BLOB)", .mysql = "CAST(" ++ arg_a ++ " AS BINARY)" },
     .{ .name = "octets", .arity = 1, .sqlite = "length(CAST(" ++ arg_a ++ " AS BLOB))", .mysql = "OCTET_LENGTH(" ++ arg_a ++ ")" },
     .{
         .name = "charset",
@@ -3659,4 +3661,9 @@ test "SQLite-only spellings MySQL would refuse at PREPARE are refused at build t
     inline for (.{ "printf('%d',1)", "randomblob(8)", "strftime('%s','now')", "julianday('now')", "iif(1,2,3)" }) |call| {
         try std.testing.expect(comptime std.mem.indexOf(u8, portabilityError("SELECT " ++ call, false).?, "is not portable") != null);
     }
+}
+
+test "bytes marker compares text with content payload across dialects" {
+    try std.testing.expectEqualStrings("CAST(tool.name AS BLOB)=name.payload", comptime render(.sqlite, "@bytes(tool.name)=name.payload"));
+    try std.testing.expectEqualStrings("CAST(tool.name AS BINARY)=name.payload", comptime render(.mysql, "@bytes(tool.name)=name.payload"));
 }

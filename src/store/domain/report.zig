@@ -890,10 +890,11 @@ const recent_messages = rsql.Read(.{
 /// The active Turn's current Operation's unresolved Actions, with each
 /// call's line for its presentation.
 const unresolved_actions = rsql.Read(.{
-    .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode," ++
+    .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode,call_name.payload AS tool_name," ++
         "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
-        "call_name.digest AS name_digest,tool_call.description FROM turn active @index(turn_one_active_per_session) " ++
+        "call_name.digest AS name_digest," ++ action_domain.mcpCallSql("a", "operation") ++ " AS mcp,tool_call.description FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN action_operation a ON a.parent_operation_id=active.operation_id " ++
+        "CROSS JOIN model_operation operation ON operation.operation_id=a.parent_operation_id " ++
         "CROSS JOIN session_revision revision ON revision.session_ref=a.session_ref AND revision.revision=a.permission_revision " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
         "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
@@ -908,11 +909,13 @@ const unresolved_actions = rsql.Read(.{
         permission_revision: rsql.Positive,
         authorized: bool,
         permission_mode: u1,
+        tool_name: protocol.Bounded(tool_catalog.max_name_bytes),
         call_id_length: u64,
         call_id_digest: [32]u8,
         arguments_length: u64,
         arguments_digest: [32]u8,
         name_digest: [32]u8,
+        mcp: bool,
         description: ?Description,
     },
     .cardinality = .each,
@@ -1239,15 +1242,19 @@ fn renderRecent(capture: *SessionReportCapture, row: *const recent_messages.Row)
 fn renderUnresolved(capture: *SessionReportCapture, row: *const unresolved_actions.Row) !void {
     // The insert authorizes every Action proposed under `bypass`.
     if (row.permission_mode == 1 and !row.authorized) return error.CorruptStore;
-    const tool = actionTool(&row.name_digest) orelse return error.CorruptStore;
-    const core = tool_catalog.Runner.of(tool_catalog.record(tool)) == .core;
+    const built_in = actionTool(&row.name_digest);
+    // A non-built-in Action must name an MCP member of its frozen offer.
+    // Built-in checks remain strict; provider tools never create Actions.
+    const name = if (row.mcp) row.tool_name.slice() else @tagName(built_in orelse return error.CorruptStore);
+    if (row.mcp and !protocol.validToolName(name)) return error.CorruptStore;
+    const core = !row.mcp and tool_catalog.Runner.of(tool_catalog.record(built_in.?)) == .core;
     // Settlement authorizes a core call at once, with no decision.
     if (core and !row.authorized) return error.CorruptStore;
     try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",\"permission_revision\":\"{d}\",\"authorization\":\"{s}\",\"call_id\":", .{
         row.action_id.get(),
         row.parent_operation_id.get(),
         row.call_ordinal,
-        @tagName(tool),
+        name,
         row.permission_revision.get(),
         if (core) "core" else if (!row.authorized) "pending" else if (row.permission_mode == 1) "bypass" else "allow_once",
     });

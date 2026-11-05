@@ -46,10 +46,9 @@ const insert_member = rsql.Write(.{
 
 /// A Rui SQL expression for the built-in tools the set `set_column` names,
 /// as a tools_mask: each built-in member's bit, and nothing for any other
-/// member. Settlement runs only the built-ins, so it reads a set this way:
-/// a call to another member, an MCP server's tool, is unknown until Rui
-/// runs it. A catalog holds the built-ins unchanged, so no other member
-/// shares a built-in's name.
+/// member. Settlement reads MCP records separately from the same saved set.
+/// A catalog holds the built-ins unchanged, so no other member shares a
+/// built-in's name.
 pub fn maskSql(comptime set_column: []const u8) []const u8 {
     comptime {
         var cases: []const u8 = "";

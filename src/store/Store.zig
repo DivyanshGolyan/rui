@@ -897,6 +897,28 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.failCoreCall(&access, binding, result, faults)));
     }
 
+    pub fn nextMcpAction(self: *Store) !?action_domain.McpAction {
+        return self.queue().run(nextMcpActionHeld, .{self});
+    }
+    fn nextMcpActionHeld(self: *Store) !?action_domain.McpAction {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, action_domain.nextMcpAction(&access));
+    }
+    pub fn resolveMcpAction(self: *Store, action_id: u64, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
+        return self.queue().write(resolveMcpActionHeld, .{ self, action_id, code, text, faults });
+    }
+    fn resolveMcpActionHeld(self: *Store, action_id: u64, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
+        if (text.len == 0) return error.InvalidActionResult;
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.resolveMcpAction(&access, action_id, code, text, faults)));
+    }
+
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
         return self.queue().write(recoverOneUncertainActionHeld, .{ self, active });
     }
@@ -1210,14 +1232,14 @@ const scratch_bytes = @max(@sizeOf(configuration_domain.ConfigurationReads), @si
 const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @alignOf(model_settlement_domain.Batch));
 
 /// The resident bytes the owner accepted for a settlement batch of 64
-/// items, beyond the configure reads' 4888.
-const accepted_settlement_growth = 10240;
+/// items and 64 call-name lookups, beyond the configure reads' 4888.
+const accepted_settlement_growth = 14352;
 
 comptime {
-    // The settlement batch is the larger use: 14480 bytes, 9120 beyond the
-    // configure reads, 4968 with the tool set and parent a configure may save. Exact,
-    // so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 4968 or scratch_bytes != 14480)
+    // The settlement batch is 19240 bytes: the original 14480 plus 4760
+    // for per-batch call names, membership flags and their lookup visitor.
+    // Configure reads remain 4968 bytes. Keep both sizes explicit.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 4968 or scratch_bytes != 19240)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1226,8 +1248,8 @@ comptime {
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: at most 14480 bytes, a settlement
-/// batch's size, of which a configure writes 4960.
+/// resident for the Store's life: at most 19240 bytes, a settlement
+/// batch's size, of which a configure writes 4968.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {

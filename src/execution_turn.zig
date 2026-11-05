@@ -79,6 +79,8 @@ pub fn serviceLifecycle(state: *State, context: anytype) bool {
 /// Noinline: the stack-frame gate names the engine thread by it.
 noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error{Fence}!bool {
     var made_progress = false;
+    // Neither slot-free runner may starve the other while calls are queued.
+    if (try context.runNextMcpAction()) made_progress = true;
     const capacity_released = state.capacity_was_full and context.freeSlots() != 0;
     const retry_poll_due = if (state.last_retry_poll) |last|
         last.durationTo(now).raw.nanoseconds >= retry_poll_interval_ns
@@ -214,6 +216,8 @@ const Recording = struct {
     observed_slots: ?SlotFacts = null,
     transport: bool = false,
     bash: bool = false,
+    mcp_available: bool = false,
+    mcp_runs: usize = 0,
     recover_action: bool = false,
     recover_retry: bool = false,
     recover_action_fence: bool = false,
@@ -338,6 +342,13 @@ const Recording = struct {
 
     fn hasBash(self: *const Recording) bool {
         return self.bash;
+    }
+
+    fn runNextMcpAction(self: *Recording) error{Fence}!bool {
+        if (!self.mcp_available) return false;
+        self.mcp_available = false;
+        self.mcp_runs += 1;
+        return true;
     }
 
     fn recoverUncertainAction(self: *Recording) error{Fence}!bool {
@@ -842,4 +853,20 @@ test "retry admission keeps its own poll while the commit-gated scans wait" {
     try std.testing.expectEqual(@as(usize, 2), context.count(.recover_retry));
     try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+}
+
+test "MCP resolution runs before execution slot admission even at capacity" {
+    var state: State = .{};
+    var context: Recording = .{ .free = 0, .provider = false, .mcp_available = true };
+    const outcome = run(&state, &context);
+    try std.testing.expect(outcome == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+}
+
+test "MCP and core calls both run at capacity in one scheduling pass" {
+    var state: State = .{};
+    var context: Recording = .{ .free = 0, .provider = false, .mcp_available = true, .core_admission = .admitted };
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
 }
