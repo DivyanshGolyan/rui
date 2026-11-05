@@ -1907,7 +1907,11 @@ A later send failure does not undo accepted configuration.
 `session start` captures one Message mutation with fresh-Session configuration and an empty requested Session ID.
 Initial configuration accepts scalar settings but no instruction or schema content values, preserving the existing ingress content and descriptor bounds.
 Inside one Store transaction, it validates the sender and configuration, allocates an ID through the same collision-safe allocator as configure, and admits the first Message to that new ID.
-Its successful stdout is the six-character ID plus newline, an admission receipt rather than execution or completion.
+Its successful stdout is the same JSON mutation receipt as `session send`, with the allocated six-character ID in `.context.session` and the request handle in `.context.key`, followed by newline: admission rather than execution or completion.
+Only the accepted `session start` receipt adds `configuration` immediately after `context`, containing the resolved `provider`, `model`, effective `reasoning_effort` and `effort_source`.
+The effort source is `flag` whenever `--reasoning-effort` was given (including `default`), otherwise `saved` when `model_capability.startEffort` selected the saved override, otherwise `model_default`.
+Without an override, the effective effort is the model catalog default, or null for an unlisted model.
+These values come from the CLI-resolved configuration sent with the Message, never a new Host read; rejection output and `session send` receipts are unchanged.
 Replay returns the original allocated ID, Message admission and result even after cancellation or restart; changed creation settings or Message bytes conflict with the original request key.
 Rejection creates no Session.
 Any canonical failure rolls back allocation, revision and Message together.
@@ -3238,7 +3242,7 @@ An indeterminate reported outcome never implies that an effect did not run or ma
 ### Wire format and command output
 
 HTTP owns closed versioned JSON.
-Non-interactive mutation receipts and metadata reads write one final complete JSON value on stdout, without interleaved events or prose, except successful `session start`, which prints its allocated six-character ID and newline.
+Non-interactive mutation receipts and metadata reads write one final complete JSON value on stdout, without interleaved events or prose.
 Bounded streaming does not promise atomic pipe delivery or a resident result population.
 Every such JSON value, and each JSON diagnostic, spells DEL and every non-ASCII code point as a `\u` escape through one CLI output owner, so names, Action proposals and Host replies cannot reorder or hide terminal output while decoded values stay exact.
 Explicit content reads stream saved bytes only; a content reader that fails before content writes its typed diagnostic to stderr and leaves stdout empty.
