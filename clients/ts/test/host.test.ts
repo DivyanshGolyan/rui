@@ -2,7 +2,7 @@
 // ts-client step passes the one it built.
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -147,4 +147,51 @@ test("a refused frame is a RuiStartError", { skip }, async () => {
 
 test("a missing executable is RuiUnavailableError", async () => {
 	await assert.rejects(Rui.connect(options(newStore(), { binary: "/nonexistent/rui" })), RuiUnavailableError);
+});
+
+test("MySQL readiness discovers an opaque id without sending the URL on requests", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "rui-ts-mysql-"));
+	const executable = join(directory, "host.cjs");
+	writeFileSync(executable, String.raw`#!/usr/bin/env node
+const net = require("node:net");
+let bytes = Buffer.alloc(0), server;
+const id = "0123456789abcdef0123456789abcdef";
+process.stdin.on("data", chunk => {
+  bytes = Buffer.concat([bytes, chunk]);
+  if (server || bytes.length < 4 || bytes.length < 4 + bytes.readUInt32BE()) return;
+  const frame = JSON.parse(bytes.subarray(4, 4 + bytes.readUInt32BE()).toString());
+  bytes.fill(0);
+  if (!frame.store.startsWith("mysql://") || Object.values(process.env).includes(frame.store) || process.argv.includes(frame.store)) process.exit(2);
+  server = net.createServer(socket => {
+    let input = "";
+    socket.on("data", chunk => {
+      input += chunk.toString();
+      const end = input.indexOf("\r\n\r\n");
+      if (end < 0) return;
+      const length = Number(/content-length: (\d+)/i.exec(input.slice(0, end))[1]);
+      if (Buffer.byteLength(input.slice(end + 4)) < length) return;
+      const request = JSON.parse(input.slice(end + 4));
+      if (request.store !== "" && request.store !== id) process.exit(3);
+      const body = JSON.stringify({version:"8",type:"host_info",store:id,instance:"a".repeat(32),active_capacity:"2",intake_capacity:"100",descriptor_limit:"1024",started_at:"1792918800",custody_occupied:"0",paused:false,innodb_doublewrite:"OFF",capabilities:{bash:true,providers:{codex:"unserved",openai:"key_file"}}});
+      socket.end("HTTP/1.1 200 OK\r\nContent-Length: " + Buffer.byteLength(body) + "\r\n\r\n" + body);
+    });
+  }).listen(require("node:path").join(frame.runtimeDir, "rui.sock"));
+});
+process.stdin.on("end", () => server ? server.close(() => process.exit(0)) : process.exit(0));
+`, { mode: 0o700 });
+	let rui: Rui | undefined;
+	try {
+		rui = await Rui.connect(options("mysql://user:private@localhost/db", { binary: executable }));
+		const id = "0123456789abcdef0123456789abcdef";
+		assert.equal(rui.hostInfo?.store, id);
+		assert.ok(rui.hostInfo && "innodb_doublewrite" in rui.hostInfo);
+		assert.equal(rui.hostInfo.innodb_doublewrite, "OFF");
+		await rui.exchange("/v1/host-info", store => {
+			assert.equal(store, id);
+			return JSON.stringify({ version: "8", kind: "host_info", store });
+		});
+	} finally {
+		await rui?.close();
+		rmSync(directory, { recursive: true, force: true });
+	}
 });

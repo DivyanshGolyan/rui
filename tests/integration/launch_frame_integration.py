@@ -47,7 +47,7 @@ def host_stop(path, store, instance):
                 b"X-Rui-Host-Instance: " + instance.encode() + b"\r\n")
 
 
-def post(path, route, request, extra=b""):
+def post(path, route, request, extra=b"", expected_status=200):
     body = json.dumps(request).encode()
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(10)
@@ -58,7 +58,7 @@ def post(path, route, request, extra=b""):
         while chunk := connection.recv(65536):
             reply += chunk
     head, _, payload = reply.partition(b"\r\n\r\n")
-    assert head.startswith(b"HTTP/1.1 200"), reply
+    assert head.startswith(b"HTTP/1.1 " + str(expected_status).encode() + b" "), reply
     return json.loads(payload)
 
 
