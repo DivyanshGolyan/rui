@@ -25,8 +25,8 @@ const rsql = @import("rsql.zig");
 const schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
 const store_testing = @import("testing.zig");
-const mysql_driver = @import("wire/mysql_driver.zig");
-const mysql = mysql_driver.mysql;
+const mysql_connection = @import("wire/mysql_connection.zig");
+const mysql = mysql_connection.mysql;
 
 const database = "rui_dialect_check";
 const oracle_database = "rui_dialect_check_oracle";
@@ -36,7 +36,7 @@ const State = enum { unopened, absent, open, broken };
 /// Guards everything below: some Store tests call the Store from threads.
 var mutex: std.Io.Mutex = .init;
 var state: State = .unopened;
-var driver: mysql_driver.Driver = undefined;
+var driver: mysql_connection.Connection = undefined;
 /// Each statement the opening's DDL had refused, with MySQL's error, one
 /// per line; the DDL test reports them.
 var ddl_refusals: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
@@ -62,7 +62,7 @@ var done: struct {
     }
 } = .{};
 
-const Config = struct { socket: []const u8, password: []const u8, record: ?[]const u8 };
+pub const Config = struct { socket: []const u8, password: []const u8, record: ?[]const u8 };
 
 /// The server the environment names, copied out of it; null when it names
 /// none. `error.MysqlRequired` when `RUI_TEST_REQUIRE_ENGINES` lists `mysql`
@@ -89,6 +89,15 @@ fn configured() !?Config {
     };
 }
 
+/// `configured`, under `mutex`, for another live test that opens its own
+/// connection to the same server.
+pub fn rootConfig() !?Config {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    return configured();
+}
+
 /// Under `mutex`: rewrites the record file with `done`, when one is named.
 /// A failed write logs at err level, so a run that cannot record fails.
 fn writeRecord() void {
@@ -106,7 +115,7 @@ fn writeRecord() void {
 /// Under `mutex`: the bootstrapped connection, or null when MySQL is not
 /// configured or the opening failed. The first call opens it; a failed
 /// opening logs at err level, which fails the test that made the call.
-fn connection() ?*mysql_driver.Driver {
+fn connection() ?*mysql_connection.Connection {
     switch (state) {
         .open => return &driver,
         .absent, .broken => return null,
@@ -122,7 +131,7 @@ fn connection() ?*mysql_driver.Driver {
     };
     var refusal: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
     defer refusal.deinit();
-    driver.open(std.testing.io, .{ .unix_socket = config.socket }, .{ .user = "root", .password = config.password, .database = "mysql" }, &refusal.writer) catch |err| {
+    driver.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = "mysql" }, &refusal.writer) catch |err| {
         std.log.err("MySQL dialect check: root login over {s} failed: {s} {s}", .{ config.socket, @errorName(err), refusal.written() });
         return null;
     };
@@ -178,7 +187,7 @@ const Refused = struct {
 fn run(text: []const u8) !?Refused {
     try driver.query(text);
     var refused: ?Refused = null;
-    while (!driver.client.isReady()) switch (try driver.next()) {
+    while (!driver.isReady()) switch (try driver.next()) {
         .err => |err| if (refused == null) {
             const len = @min(err.message.len, 480);
             refused = .{ .code = err.code, .message = undefined, .message_len = len };
@@ -347,7 +356,7 @@ fn load(comptime name: []const u8, text: []const u8, unchecked: bool) !void {
 fn writeResult(text: []const u8, out: *std.Io.Writer) !void {
     try driver.query(text);
     var refused = false;
-    while (!driver.client.isReady()) switch (try driver.next()) {
+    while (!driver.isReady()) switch (try driver.next()) {
         .err => |err| {
             std.log.err("MySQL migration check: err {d} {s}\n  {s}", .{ err.code, err.message, text });
             refused = true;

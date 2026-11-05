@@ -210,7 +210,7 @@ LIVE_RULES = (
       "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
      ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux",
      LIVE_POSTGRES_TARGETS),
-    (("src/store/wire/mysql.zig", "src/store/wire/mysql_driver.zig", "tests/integration/mysql_wire*",
+    (("src/store/wire/mysql.zig", "src/store/wire/mysql_connection.zig", "src/store/wire/tls.zig", "tests/integration/mysql_wire*",
       "tests/integration/mysql_server.py", "build.zig"),
      ("test-logic", "mysql-wire-integration"), ("test-logic",),
      "MySQL wire client: replayed exchanges and a real MySQL 8.4 server (Docker, Linux only)",
