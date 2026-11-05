@@ -337,8 +337,16 @@ pub const Store = struct {
 
     /// The catalog the last `saveCatalog` saved, read back with every
     /// text, in `allocator`'s memory; null before the first. A Host reads
-    /// it at start to keep the tools of a server it cannot reach.
+    /// it at start to keep the tools of a server it cannot reach. A saved
+    /// catalog that fails its checks fences the Store.
     pub fn readCatalog(self: *Store, allocator: std.mem.Allocator) !?SavedCatalog {
+        return self.readCatalogChecked(allocator) catch |err| switch (err) {
+            error.CorruptStore => fence(self, error.CorruptStore),
+            else => err,
+        };
+    }
+
+    fn readCatalogChecked(self: *Store, allocator: std.mem.Allocator) !?SavedCatalog {
         const head = (try self.readCatalogSet()) orelse return null;
         const count = std.math.cast(usize, head.member_count) orelse return error.CorruptStore;
         if (count > tool_catalog.max_catalog_records) return error.CorruptStore;

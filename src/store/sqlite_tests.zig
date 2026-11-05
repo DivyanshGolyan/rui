@@ -8620,6 +8620,19 @@ test "a Store opened without a catalog reads back the last one saved, an MCP ser
     try storage.close();
 }
 
+test "a saved catalog whose text no longer matches its digest fences the Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
+    defer storage.close() catch unreachable;
+    try storage.saveCatalog(&mcp_catalog);
+    try sqlite.exec(storage.database, "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
+    try std.testing.expectError(error.CorruptStore, storage.readCatalog(std.testing.allocator));
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.readCatalog(std.testing.allocator));
+}
+
 test "a record names a server exactly when an MCP server owns it" {
     try std.testing.expect(tool_catalog.validServer(&mcp_record));
     try std.testing.expect(!tool_catalog.validServer(&.{ .name = "fetch_page", .owner = .mcp }));
