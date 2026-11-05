@@ -17,6 +17,7 @@ pub const Code = enum {
     id_malformed,
     count_malformed,
     choice_unsupported,
+    invocation_invalid,
     instructions_source,
     handle_names_store_and_key,
     handle_names_store_record_and_kind,
@@ -277,8 +278,8 @@ fn mapped(err: anyerror) ?Code {
         error.InteractiveTerminalRequired => .terminal_required,
         error.IncompleteTerminalInput => .terminal_input_incomplete,
         error.EmptyMessageInput => .message_empty,
-        error.InvalidArguments => .invalid_arguments,
-        error.InvalidInvocation => .invalid_arguments,
+        error.InvalidArguments => .invocation_invalid,
+        error.InvalidInvocation => .invocation_invalid,
         error.CallerFailure => .internal_unexpected,
         // Directory owners translate this to a contextual Store/preference
         // cause. An escape without that context retains the internal fallback.
@@ -473,6 +474,7 @@ pub fn facts(code: Code) Facts {
         .operation_resolved => .{ .act = .fix, .input = .operation, .accepted = .{ .grammar = "a currently unresolved Operation in this Session" }, .says = "That Operation has already resolved.", .next = "Inspect this Session; interrupt only an Operation that is still running." },
         .unknown_action => .{ .act = .fix, .input = .action, .accepted = .{ .grammar = "an Action ID belonging to this Session, from rui session inspect" }, .says = "That Action does not exist in this Session.", .next = "Select the Session and pending --action shown by rui session inspect." },
         .action_not_pending => .{ .act = .fix, .input = .action, .accepted = .{ .grammar = "an Action currently awaiting permission in this Session" }, .says = "That Action is not awaiting a permission decision.", .next = "Inspect this Session and decide only an Action currently awaiting permission." },
+        .invocation_invalid => .{ .act = .fix, .input = .arguments, .accepted = .{ .read = .command_help }, .says = "The command arguments are invalid.", .next = "Correct the invocation using this command's help." },
         .invalid_arguments => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "arguments satisfying the selected tool schema" }, .says = "The tool arguments are invalid.", .next = "Correct the arguments to match the selected tool schema." },
         .idempotency_key_conflict => .{ .act = .fix, .input = .key, .accepted = .{ .grammar = "one immutable captured request per key" }, .says = "This key already belongs to a different request.", .next = "Recover the original capture to inspect it; use a new key only for intentionally different work." },
         .host_busy => .{ .act = .wait, .input = null, .accepted = .none, .says = "The Host is busy.", .next = "Retry the same request unchanged later." },
@@ -711,4 +713,17 @@ test "saved ambiguous causes do not invent missing flags or model restrictions" 
     try std.testing.expectEqualStrings("default or a decimal from 0 to 9223372036854775807", facts(.invalid_output_reservation).accepted.grammar);
     try std.testing.expectEqualSlices([]const u8, names(cli_value.PermissionMode), facts(.unsupported_permission_mode).accepted.closed);
     try std.testing.expectEqualSlices([]const u8, names(cli_value.ReasoningChoice), facts(.unsupported_reasoning_effort).accepted.closed);
+}
+
+test "fresh CLI argument errors are distinct from saved tool refusals" {
+    inline for (.{ error.InvalidArguments, error.InvalidInvocation }) |err| {
+        const code = of(err);
+        try std.testing.expectEqualStrings("invocation_invalid", @tagName(code));
+        try std.testing.expectEqual(Read.command_help, facts(code).accepted.read);
+        try std.testing.expectEqual(Act.fix, facts(code).act);
+    }
+    var bytes: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try writeSavedLine(&out, .invalid_arguments, .{ .resource = "session", .operation = "send" });
+    try std.testing.expectEqualStrings("rui session send: arguments: The tool arguments are invalid. Accepted: arguments satisfying the selected tool schema. Next: Correct the arguments to match the selected tool schema. This rejection was saved and replays as saved; a resend needs a new key. [invalid_arguments]\n", out.buffered());
 }

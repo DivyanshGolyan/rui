@@ -3971,6 +3971,36 @@ test "stop-all refusal and uncertain recovery golden aggregates to exit four" {
     try std.testing.expectEqual(caller_exit.Status.unconfirmed, uncertain.merge(refused));
 }
 
+test "CLI inspect selector dependencies give command help rather than tool guidance" {
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = [_][*:0]const u8{"rui"};
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = &environment, .preopens = .empty };
+    const cases = [_][]const []const u8{
+        &.{ "--session", "k7m2qx", "--operation", "1" },
+        &.{ "--session", "k7m2qx", "--attempt", "1" },
+        &.{ "--session", "k7m2qx", "--operation", "1", "--attempt", "1" },
+        &.{ "--session", "k7m2qx", "--failed-response", "body", "--operation", "1" },
+        &.{ "--session", "k7m2qx", "--failed-response", "metadata", "--attempt", "1" },
+    };
+    for (cases) |args| {
+        var refusal: cli_args.Refusal = undefined;
+        const parsed = try cli_args.Command.session_inspect.definition().parse(args, arena.allocator(), &refusal);
+        try std.testing.expectEqual(null, parsed.missing());
+        if (inspect(init, &parsed)) |_| return error.ExpectedRefusal else |err| {
+            try std.testing.expectEqual(error.InvalidArguments, err);
+            const code = caller_error.of(err);
+            var bytes: [1024]u8 = undefined;
+            var out = std.Io.Writer.fixed(&bytes);
+            try caller_error.writeLine(&out, code, .{ .resource = "session", .operation = "inspect" });
+            try std.testing.expectEqualStrings("rui session inspect: The command arguments are invalid. Accepted: options and values listed by rui session inspect --help. Next: Correct the invocation using this command's help. Nothing was captured or sent. [invocation_invalid]\n", out.buffered());
+            try std.testing.expectEqual(caller_exit.Status.invalid, caller_exit.forCode(.not_sent, code));
+        }
+    }
+}
+
 test "CLI boundary classifies local failures with repair lines and exits" {
     const Case = struct { err: anyerror, code: caller_error.Code, exit: u8, phrase: []const u8 };
     const cases = [_]Case{
