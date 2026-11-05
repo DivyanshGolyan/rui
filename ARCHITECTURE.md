@@ -164,7 +164,7 @@ Noncanonical references, including old UUID and NUL-bearing references, reject r
 
 A creation configuration requires an exact nonempty model, explicit effort, a token-count `compactAt`, a tools list and Permission Mode (D104, D111, D113).
 A missing required field is a missing-field request error; an empty tools list means no tools and has no Host default.
-The agent spec also accepts instructions, output schema and label; provider defaults to the Host's single served provider (D133).
+The agent spec also accepts instructions, output schema and label; provider defaults to the Host's single served provider, and a Host serving several has no default, so a creation must name one (D133, D221).
 Workspace is required when tools includes Bash and is unused for execution otherwise.
 A supplied Workspace is checked like any other, and a spec without Bash that omits it saves `/`, because the Store's Workspace column is never empty.
 Enabling Bash later runs it in the saved Workspace, which a later configure cannot change.
@@ -1181,8 +1181,8 @@ Who runs an accepted call is derived from its name, never stored.
 A **core tool** call runs as one core command, with no process: `message_agent(id, text)` admits `text` to Session `id` as a Message from the calling Session, with no client environment, and resolves the call `Delivered to ID.` in the same transaction; an unknown `id` resolves it failed and sends nothing.
 `read_transcript(id?, kinds?, before?, limit?, query?, full?, offset?)` reads any Session's public activity feed, defaulting to the caller, and resolves only its call: newest-first outlines page up to 16 entries, and `full` opens one entry in UTF-8-aligned 16 KiB windows.
 It uses the public activity visibility and provenance rules, never private provider material; invalid arguments, unknown Sessions and missing entries resolve failed when the core runs the call, not at settlement.
-`start_agent(task, attached, spec)` creates a Session configured by the full agent `spec` (model, effort, token-count compaction threshold, tools, Permission Mode, optional provider, Workspace, instructions, output schema and label), admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
-Every refused `start_agent` spec fails the tool call and starts nothing, including a missing required field, unsupported effort or an excessive known-window compaction threshold (D165, D166).
+`start_agent(task, attached, spec)` creates a Session configured by the full agent `spec` (model, effort, token-count compaction threshold, tools, Permission Mode, instructions, output schema and label) in the caller's Workspace with its provider, admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
+Every refused `start_agent` spec fails the tool call and starts nothing, including a missing required field, a named provider or Workspace, unsupported effort or an excessive known-window compaction threshold (D140, D165, D166, D221).
 The spec's provider defaults to the Host's provider and its Workspace is required when its tools include Bash (D133).
 A spec that widens the caller's tools or asks for `bypass` under a caller that asks resolves the call failed with a result naming the field; the Host checks the arguments when it runs the call, not at admission.
 The agent's Bash starts from the caller's client environment, installed as the task commits.

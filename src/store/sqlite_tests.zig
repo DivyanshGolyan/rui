@@ -9198,7 +9198,7 @@ test "a Session with message_agent keeps it through its list row and report, as 
     try std.testing.expectEqual(@as(usize, 1), sink.core_calls);
 }
 
-test "a start_agent call honors its spec with the caller task and may only narrow tools and permissions" {
+test "a start_agent call creates its agent where its caller works, with the task from the caller, and may only narrow" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -9241,9 +9241,9 @@ test "a start_agent call honors its spec with the caller task and may only narro
     try std.testing.expectEqual(command_domain.AgentStart.failed, try storage.startAgent(bypass.binding, caller.slice(), "run freely", true, &spec, null, .{}));
     try std.testing.expect(try storage.nextCoreWork() == null);
 
-    // D133: these specs omit an unused Workspace and use the Host provider;
-    // only the attached agent is the caller's child.
-    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref<>?1 AND workspace='/' AND provider='codex'", .{caller.slice()}));
+    // Two agents, both in the caller's Workspace with its provider (D122,
+    // D221); only the attached one is its child.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref<>?1 AND workspace=?2 AND provider=(SELECT provider FROM session WHERE session_ref=?1)", .{ caller.slice(), workspace }));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{caller.slice()}));
     // Public list and both report profiles expose only the attached agent's
     // parent; the standalone agent and its caller have none.

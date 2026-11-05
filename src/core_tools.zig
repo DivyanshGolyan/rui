@@ -128,14 +128,12 @@ pub const start_agent_max_argument_bytes = 6 * message_agent_max_text_bytes + 16
 
 // Prompt text: written here, and given no tests (D141).
 pub const start_agent_description = "Start another Rui agent on a task. It creates the agent's Session, gives it the task as its first Message and returns the agent's ID at once, before any answer. " ++
-    "An attached agent is your child: it inherits your Bash environment, and stops when you are stopped or run out of context. A standalone agent has its own lifetime. " ++
+    "An attached agent is your child: it works in your Workspace with your provider and Bash environment, and stops when you are stopped or run out of context. A standalone agent has its own lifetime. " ++
     "The spec may only narrow your own tools and permission mode.";
 pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     std.fmt.comptimePrint("\"task\":{{\"type\":\"string\",\"description\":\"The agent's first Message: nonempty UTF-8, at most {d} bytes.\"}},", .{message_agent_max_text_bytes}) ++
     "\"attached\":{\"type\":\"boolean\",\"description\":\"true starts your child, which stops with you; false starts a standalone agent.\"}," ++
     "\"spec\":{\"type\":\"object\",\"properties\":{" ++
-    "\"provider\":{\"type\":\"string\"}," ++
-    "\"workspace\":{\"type\":\"string\",\"description\":\"Required when Bash is enabled.\"}," ++
     "\"model\":{\"type\":\"string\"}," ++
     "\"effort\":{\"type\":[\"string\",\"null\"],\"enum\":[null,\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}," ++
     "\"compactAt\":{\"type\":\"integer\",\"description\":\"Tokens of context at which the agent compacts.\"}," ++
@@ -148,7 +146,8 @@ pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     "},\"required\":[\"task\",\"attached\",\"spec\"],\"additionalProperties\":false}";
 
 /// A `start_agent` call's checked arguments: the task, whether the agent
-/// is attached, and its spec as a creating Configuration.
+/// is attached, and its spec as a creating Configuration without the
+/// Workspace and provider, which come from the calling Session (D122, D221).
 pub const StartAgent = struct {
     task: []const u8,
     instructions: ?[]const u8 = null,
@@ -207,15 +206,13 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartA
         .object => |object| object,
         else => return refused("spec must be an object"),
     };
-    // D113/D133: provider defaults at the Host; workspace is required for Bash.
-    if (unknownField(spec, &.{ "model", "effort", "compactAt", "tools", "permissionMode", "label", "instructions", "outputSchema", "provider", "workspace" })) |name|
+    // An agent works where its parent does, with its provider (D140, D221).
+    if (spec.get("workspace") != null) return refused("spec.workspace: an agent always works in your Workspace");
+    if (spec.get("provider") != null) return refused("spec.provider: an agent always uses your provider");
+    if (unknownField(spec, &.{ "model", "effort", "compactAt", "tools", "permissionMode", "label", "instructions", "outputSchema" })) |name|
         return refusedField(arena, name, "is not a spec field");
     out.configuration = .{};
     const configuration = &out.configuration;
-    if (spec.contains("provider") and !stringField(spec, "provider", &configuration.provider))
-        return refused("spec.provider must be a provider name");
-    if (spec.contains("workspace") and !stringField(spec, "workspace", &configuration.workspace))
-        return refused("spec.workspace must be a Workspace path");
     if (!stringField(spec, "model", &configuration.model)) return refused("spec.model must be a model name");
     switch (spec.get("effort") orelse return refused("spec.effort is required")) {
         .null => configuration.reasoning_effort.state = .explicit_null,
@@ -241,11 +238,6 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartA
         error.Refused => return refused("spec.tools must be a list of distinct tool names"),
         error.UnknownTool => return refusedField(arena, unknown, "is not a Rui tool (spec.tools)"),
     };
-    var selected_tools = configuration.tools.iterator();
-    while (selected_tools.next()) |name| {
-        if (std.mem.eql(u8, name, "bash") and configuration.workspace.state != .value)
-            return refused("spec.workspace is required when spec.tools includes bash");
-    }
     if (!stringField(spec, "permissionMode", &configuration.permission_mode))
         return refused("spec.permissionMode must be ask or bypass");
     if (!configuration.permission_mode.value.eql("ask") and !configuration.permission_mode.value.eql("bypass"))
@@ -270,13 +262,13 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartA
     };
     if (out.instructions) |bytes_value| configuration.instructions = .{
         .state = .value,
-        .borrowed_bytes = bytes_value,
+        .borrowed = bytes_value.ptr,
         .length = bytes_value.len,
         .digest = protocol.contentDigest(bytes_value),
     };
     if (out.output_schema) |bytes_value| configuration.output_schema = .{
         .state = .value,
-        .borrowed_bytes = bytes_value,
+        .borrowed = bytes_value.ptr,
         .length = bytes_value.len,
         .digest = protocol.contentDigest(bytes_value),
     };
@@ -595,8 +587,8 @@ test "a message_agent text over its bound is rejected, across chunk boundaries" 
     }
 }
 
-test "a start_agent call's arguments carry a task and a whole spec with an optional provider and Bash Workspace" {
-    const spec = "\"spec\":{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[\"start_agent\",\"bash\"],\"workspace\":\"/\",\"provider\":\"codex\",\"permissionMode\":\"ask\",\"label\":null}";
+test "a start_agent call's arguments carry a task and a whole spec without a provider or Workspace" {
+    const spec = "\"spec\":{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[\"start_agent\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}";
     const Case = struct { arguments: []const u8, refusal: ?[]const u8 = null };
     for ([_]Case{
         .{ .arguments = "{\"task\":\"read\",\"attached\":true," ++ spec ++ "}" },
@@ -608,7 +600,9 @@ test "a start_agent call's arguments carry a task and a whole spec with an optio
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"bash\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.tools must be a list of distinct tool names" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":0,\"tools\":[],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.compactAt must be a positive number of tokens" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"never\",\"label\":null}}", .refusal = "spec.permissionMode must be ask or bypass" },
-        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"}}", .refusal = "spec.workspace is required when spec.tools includes bash" },
+        // D221: a child inherits both, so a spec naming either is refused.
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"workspace\":\"/\"}}", .refusal = "spec.workspace: an agent always works in your Workspace" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"provider\":\"codex\"}}", .refusal = "spec.provider: an agent always uses your provider" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"note\":1," ++ spec ++ "}", .refusal = "note is not a start_agent field" },
         .{ .arguments = "{\"task\":\"read\",\"task\":\"again\",\"attached\":true," ++ spec ++ "}", .refusal = "a field appears more than once" },
         .{ .arguments = "[]", .refusal = "the arguments are not one JSON object" },
@@ -628,7 +622,7 @@ test "a start_agent call's arguments carry a task and a whole spec with an optio
             try std.testing.expectEqualStrings("100000", start.configuration.compaction_trigger.value.slice());
             // Sorted, as the Store's tool list requires.
             try std.testing.expectEqualStrings("bash start_agent", start.configuration.tools.names.slice());
-            try std.testing.expect(start.configuration.workspace.state == .value and start.configuration.provider.state == .value and start.configuration.label.state != .value);
+            try std.testing.expect(start.configuration.workspace.state != .value and start.configuration.provider.state != .value and start.configuration.label.state != .value);
         }
     }
 }
@@ -707,12 +701,12 @@ test "core_tools start_agent optional instructions and output schema" {
             try std.testing.expect(result == .accepted);
             try std.testing.expect(start.instructions != null);
             try std.testing.expectEqual(.value, start.configuration.instructions.state);
-            try std.testing.expectEqualStrings(start.instructions.?, start.configuration.instructions.borrowed_bytes.?);
+            try std.testing.expectEqualStrings(start.instructions.?, start.configuration.instructions.borrowedBytes().?);
             try std.testing.expectEqual(start.instructions.?.len, start.configuration.instructions.length);
             try std.testing.expectEqual(protocol.contentDigest(start.instructions.?), start.configuration.instructions.digest);
             if (start.output_schema) |schema| {
                 try std.testing.expectEqual(.value, start.configuration.output_schema.state);
-                try std.testing.expectEqualStrings(schema, start.configuration.output_schema.borrowed_bytes.?);
+                try std.testing.expectEqualStrings(schema, start.configuration.output_schema.borrowedBytes().?);
                 try std.testing.expectEqual(protocol.contentDigest(schema), start.configuration.output_schema.digest);
             } else try std.testing.expectEqual(.omitted, start.configuration.output_schema.state);
             if (start.instructions.?.len != 0) {

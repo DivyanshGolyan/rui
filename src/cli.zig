@@ -3758,7 +3758,7 @@ test "a saved rejection code this build does not know keeps the answer and says 
 test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {
     const cases = [_]struct { code: []const u8, session: []const u8, line: []const u8 }{
         .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
-        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --workspace, --provider, --model: A new Session's spec is missing a required setting. Accepted: model, reasoning effort, compaction trigger, tools and permission mode, and a workspace when tools include bash. Next: State every required setting; rui session start fills them for you. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
+        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --workspace, --provider, --model: A new Session's spec is missing a required setting. Accepted: model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several. Next: State every required setting; rui session start fills them for you. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
     };
     for (cases) |case| {
         var wire: [1024]u8 = undefined;

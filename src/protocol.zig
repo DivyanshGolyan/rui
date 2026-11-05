@@ -131,9 +131,11 @@ pub const ContentField = struct {
     // A parsed request owns an unlinked file descriptor. The Store imports
     // through this sealed custody; no pathname can be swapped after capture.
     file: ?std.Io.File = null,
-    /// D113: bounded start_agent content borrows its call arena through commit.
-    /// Wire content still uses sealed file custody; this pointer is never saved.
-    borrowed_bytes: ?[]const u8 = null,
+    /// D113: bounded start_agent content borrows its call arena through commit;
+    /// `length` counts it. Wire content still uses sealed file custody; this
+    /// pointer is never saved. A bare pointer keeps ContentField, which the
+    /// configure path copies, no larger than one word.
+    borrowed: ?[*]const u8 = null,
     scratch_budget: ?ScratchBudget = null,
     charged: u64 = 0,
     length: u64 = 0,
@@ -141,6 +143,11 @@ pub const ContentField = struct {
     /// While a request is parsed, which Ingress capture holds this value,
     /// counted from 1 in arrival order; 0 once it holds its own file.
     capture: u8 = 0,
+
+    pub fn borrowedBytes(self: *const ContentField) ?[]const u8 {
+        const bytes = self.borrowed orelse return null;
+        return bytes[0..@intCast(self.length)];
+    }
 
     pub fn hasFile(self: *const ContentField) bool {
         return self.file != null;
@@ -642,7 +649,9 @@ pub const ActivityPage = struct {
     pub const Kinds = std.EnumSet(ActivityItem.Kind);
     pub const items = @typeInfo(@FieldType(ActivityFacts, "items")).array.len;
 
-    pub fn validate(self: ActivityPage) !void {
+    /// By pointer: a by-value copy sat in the Store read frame on every
+    /// engine chain that reads a page.
+    pub fn validate(self: *const ActivityPage) !void {
         if (self.position > std.math.maxInt(i64) or (self.ordinal != null and
             (self.position == 0 or self.ordinal.? > std.math.maxInt(i64)))) return error.InvalidCursor;
         if (self.end) |end| if (end > std.math.maxInt(i64) or self.position > end) return error.InvalidCursor;
@@ -658,7 +667,7 @@ pub const ActivitySearch = struct {
     before_ordinal: ?u64 = null,
     limit: u8 = ActivityPage.items,
 
-    pub fn validate(self: ActivitySearch) !void {
+    pub fn validate(self: *const ActivitySearch) !void {
         if (self.query.len == 0 or !std.unicode.utf8ValidateSlice(self.query.slice())) return error.InvalidCursor;
         if (self.before_position) |position| {
             if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidCursor;
@@ -1264,7 +1273,7 @@ fn removeContent(content: *ContentField, io: std.Io) !void {
     if (content.scratch_budget) |budget| budget.release(content.charged);
     content.charged = 0;
     content.file = null;
-    content.borrowed_bytes = null;
+    content.borrowed = null;
     content.state = .omitted;
 }
 

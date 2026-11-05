@@ -71,12 +71,13 @@ fn requestsBash(requested: *const protocol.Configuration) bool {
 }
 
 /// D133: an omitted provider selects the Host's single served provider.
-/// A multi-provider or idle Host retains its product binding preference.
-fn defaultProvider(routes: protocol.Routes) protocol.Provider {
+/// A Host serving several has no default (D221), so a creation must name
+/// one. An idle Host keeps the product's, which its unserved check refuses.
+fn defaultProvider(routes: protocol.Routes) ?protocol.Provider {
     var selected: ?protocol.Provider = null;
     inline for (std.enums.values(protocol.Provider)) |provider| {
         if (protocol.routeOf(routes, provider) != .unserved) {
-            if (selected != null) return std.meta.stringToEnum(protocol.Provider, product_defaults.provider).?;
+            if (selected != null) return null;
             selected = provider;
         }
     }
@@ -207,7 +208,7 @@ pub fn configurationBeforeWorkspace(
     catalog: *const tool_catalog.Catalog,
     current: ?*const CurrentConfiguration,
     requested: *const protocol.Configuration,
-    default_provider: protocol.Provider,
+    default_provider: ?protocol.Provider,
 ) ?protocol.ConfigurationRejection {
     if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
     const compact_at = if (requested.compaction_trigger.state == .value)
@@ -224,7 +225,8 @@ pub fn configurationBeforeWorkspace(
     if (current == null and
         (requested.model.state != .value or requested.reasoning_effort.state == .omitted or
             requested.compaction_trigger.state != .value or requested.tools.state != .value or
-            requested.permission_mode.state != .value or (requestsBash(requested) and requested.workspace.state != .value)))
+            requested.permission_mode.state != .value or (requestsBash(requested) and requested.workspace.state != .value) or
+            (provider == null and default_provider == null)))
     {
         return .incomplete_initial_configuration;
     }
@@ -239,7 +241,7 @@ pub fn configurationBeforeWorkspace(
         }
     }
     if (requested.label.state == .value and !protocol.validLabel(requested.label.value.slice())) return .invalid_label;
-    if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider), &requested.tools)) |rejection| return rejection;
+    if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     // D166: an unlisted model has no known window to enforce.
     if (compact_at) |tokens| if (model_capability.find(model)) |known| {
@@ -733,10 +735,15 @@ fn readCreation(a: anytype, reads: *ConfigurationReads) void {
     a.read(creation_facts, .{ .digest = reads.workspace_digest, .workspace = reads.next.workspace.slice(), .session = &reads.reference }, &reads.creation);
 }
 
-/// noinline: the hash state stays off applyConfiguration's frame, which
-/// sits on the engine thread's deepest chain.
-noinline fn rootWorkspaceDigest() [32]u8 {
-    return store_core.workspaceDigest("/");
+/// D133: only a spec with Bash needs a directory, and the parser and
+/// configurationBeforeWorkspace refused one without it. The Workspace column
+/// stays nonempty, so a spec without one saves the root. noinline: the
+/// digest's hash state stays off applyConfiguration's frame, which sits on
+/// the engine thread's deepest chain.
+noinline fn saveUnusedWorkspace(configuration: *const protocol.Configuration, next: *CurrentConfiguration, reads: *ConfigurationReads) void {
+    std.debug.assert(!requestsBash(configuration));
+    next.workspace.set("/") catch unreachable;
+    reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
 }
 
 /// After `prepareConfiguration`'s round: decides the configuration, and
@@ -765,7 +772,7 @@ pub fn applyConfiguration(
         return .{ .rejected = .invalid_model };
     }
     if (configuration.output_schema.state == .value) {
-        const valid = if (configuration.output_schema.borrowed_bytes) |bytes|
+        const valid = if (configuration.output_schema.borrowedBytes()) |bytes|
             try model_settlement_domain.validateJsonBytes(bytes)
         else
             try model_settlement_domain.validateJsonFile(io, configuration.output_schema.file orelse return error.MissingContentCustody);
@@ -779,20 +786,20 @@ pub fn applyConfiguration(
     }
     if (reads.found.get()) try checkSaved(next);
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
-    if (configurationBeforeWorkspace(a.store.catalog().catalog, current_configuration, configuration, defaultProvider(a.store.served))) |rejection| {
+    const default_provider = defaultProvider(a.store.served);
+    if (configurationBeforeWorkspace(a.store.catalog().catalog, current_configuration, configuration, default_provider)) |rejection| {
         return .{ .rejected = rejection };
     }
 
-    if (creating) next.provider = defaultProvider(a.store.served);
+    // A stated provider is saved by the update plan; configurationBeforeWorkspace
+    // refused a creation with neither.
+    if (creating) if (default_provider) |provider| {
+        next.provider = provider;
+    };
     // An existing Session's Workspace is only compared, in sameWorkspace's
     // own frame; a created one's was canonicalized into `next`.
     const workspace_matches: ?bool = if (creating and configuration.workspace.state != .value) unused: {
-        // D133: only a spec with Bash needs a directory, and the parser and
-        // configurationBeforeWorkspace refused one without it. The Workspace
-        // column stays nonempty, so a spec without one saves the root.
-        std.debug.assert(!requestsBash(configuration));
-        next.workspace.set("/") catch unreachable;
-        reads.workspace_digest = rootWorkspaceDigest();
+        saveUnusedWorkspace(configuration, next, reads);
         break :unused null;
     } else if (configuration.workspace.state == .value) matches: {
         if (reads.found.get()) {
@@ -920,7 +927,7 @@ pub fn servesProviderOf(served: anytype, configuration: ?*const protocol.Configu
     const provider = if (configuration != null and configuration.?.provider.state == .value)
         std.meta.stringToEnum(protocol.Provider, configuration.?.provider.value.slice()) orelse return true
     else
-        saved orelse (if (configuration != null) defaultProvider(served) else return true);
+        saved orelse (if (configuration != null) defaultProvider(served) orelse return true else return true);
     return protocol.routeOf(served, provider) != .unserved;
 }
 

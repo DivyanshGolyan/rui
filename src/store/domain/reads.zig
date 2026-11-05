@@ -1042,7 +1042,10 @@ const page_session = rsql.Read(.{
 /// The work footer is a report read (`report.WorkRead`): its latest Turn
 /// shares round 1 and its next stage round 2, and any later stage runs
 /// after the page's rounds.
-pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page: *protocol.ActivityFacts) !void {
+/// noinline: its row buffers (about 2.4 KB) stay out of the read's Queue.run
+/// frame, which also drains queued writes and so sits under the deepest
+/// write on every engine chain that reads a page (read_transcript).
+pub noinline fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page: *protocol.ActivityFacts) !void {
     page.* = .{ .end = 0, .direction = request.direction, .work = .{ .workspace = .{ .len = 0 } } };
     const session_ref = request.session.slice();
     var session: page_session.Row = undefined;

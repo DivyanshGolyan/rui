@@ -178,7 +178,8 @@ def main():
                     "permission_mode": {"state": "value", "value": "bypass"},
                     "output_schema": {"state": "omitted"},
                     "compaction_trigger": {"state": "value", "value": "100000"},
-                    "reasoning_effort": {"state": "value", "value": "low"},
+                    # D111: a model the catalog does not list states no effort.
+                    "reasoning_effort": {"state": "value", "value": "low"} if model == "gpt-6-sol" else {"state": "null"},
                 }
                 if label is not None:
                     config["label"] = {"state": "value", "value": label}

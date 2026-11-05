@@ -3992,7 +3992,7 @@ test "configure refuses a tool name the catalog lacks and a provider tool its pr
     }
 }
 
-test "Store configuration defaults provider and requires model and Bash workspace" {
+test "Store configuration requires model, Bash workspace and, on a Host serving several, a provider" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -4015,7 +4015,8 @@ test "Store configuration defaults provider and requires model and Bash workspac
                 if (mask & 2 == 0) command.configuration.provider.state = .omitted;
                 if (mask & 4 == 0) command.configuration.model.state = .omitted;
                 const reply = storage.configure(&command, .{});
-                if (mask & 5 == 5) {
+                // The test Store serves every provider, so none is the default (D221).
+                if (mask == 7) {
                     try std.testing.expect(reply == .accepted);
                 } else {
                     try std.testing.expect(reply == .rejected);
@@ -4136,7 +4137,6 @@ test "creation requires every agent setting and accepts an unused Workspace" {
                 const index: usize = 0;
                 var command = try completeConfiguration("unused-omitted", "", workspace, "model-a");
                 command.configuration.tools = try .of(&.{});
-                command.configuration.provider.state = .omitted;
                 command.configuration.workspace.state = .omitted;
                 const reply = storage.configure(&command, .{});
                 try std.testing.expect(reply == .accepted);
@@ -4177,6 +4177,33 @@ test "an omitted provider selects the Host's sole served provider" {
             const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
             try std.testing.expectEqual(protocol.Provider.openai, observed.provider.?);
             try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort);
+        }
+    }.run);
+}
+
+test "an omitted provider is refused on a Host serving several" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var routes = protocol.routesAll(.unserved);
+            routes.openai = .endpoint;
+            routes.codex = .endpoint;
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .served = routes });
+            defer storage.close() catch unreachable;
+            // D221: no provider is preferred, so the creation must name one.
+            var command = try completeConfiguration("several-providers", "", "/", "model-a");
+            command.configuration.provider.state = .omitted;
+            command.configuration.workspace.state = .omitted;
+            command.configuration.tools = try .of(&.{});
+            const reply = storage.configure(&command, .{});
+            try std.testing.expect(reply == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, reply.rejected.code);
+            try command.key.set("several-providers-named");
+            command.configuration.provider.state = .value;
+            try command.configuration.provider.value.set("openai");
+            try std.testing.expect(storage.configure(&command, .{}) == .accepted);
         }
     }.run);
 }
@@ -8819,11 +8846,6 @@ pub fn testingAgentSpec(tools: []const []const u8, permission_mode: []const u8) 
     try spec.compaction_trigger.value.set("100000");
     spec.tools.state = .value;
     spec.tools = try .of(tools);
-    for (tools) |tool| if (std.mem.eql(u8, tool, "bash")) {
-        spec.workspace.state = .value;
-        try spec.workspace.value.set("/");
-        break;
-    };
     spec.permission_mode.state = .value;
     try spec.permission_mode.value.set(permission_mode);
     return spec;
@@ -10305,7 +10327,7 @@ test "core_tools start_agent spec refusals fail calls and name the refused setti
     }.run);
 }
 
-test "core_tools start_agent honors its requested Workspace and provider" {
+test "a start_agent child works in its caller's Workspace with its provider" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
             var tmp = std.testing.tmpDir(.{});
@@ -10329,15 +10351,10 @@ test "core_tools start_agent honors its requested Workspace and provider" {
                 .decoded_arguments = "{}",
             }});
             const action = (try storage.nextCoreWork()).?.action;
+            // D122/D221: a Bash spec names no Workspace; the child inherits both.
             var spec = try testingAgentSpec(&.{"bash"}, "ask");
-            var other_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-            const length = try tmp.dir.realPath(std.testing.io, &other_buffer);
-            const other = other_buffer[0..length];
-            try spec.workspace.value.set(other);
-            spec.provider.state = .value;
-            try spec.provider.value.set("openai");
-            try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), "work elsewhere", true, &spec, null, .{}) == .started);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1 AND workspace=?2 AND provider='openai'", .{ parent.slice(), other }));
+            try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), "work here", true, &spec, null, .{}) == .started);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1 AND workspace=?2 AND provider='codex'", .{ parent.slice(), workspace }));
         }
     }.run);
 }
@@ -10367,7 +10384,7 @@ test "a null effort on a listed model refuses a mixed update before any changes"
             patch.configuration.label.state = .value;
             try patch.configuration.label.value.set("must not apply");
             const bytes = "must not import these instructions";
-            patch.configuration.instructions = .{ .state = .value, .borrowed_bytes = bytes, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
+            patch.configuration.instructions = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
             const refused = storage.configure(&patch, .{});
             try std.testing.expect(refused == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, refused.rejected.code);
