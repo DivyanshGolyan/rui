@@ -61,9 +61,8 @@ pub fn maskSql(comptime set_column: []const u8) []const u8 {
 
 /// A Rui SQL expression for the names of the set `set_column`'s members,
 /// joined by commas in no set order, since ordering them would sort; NULL
-/// for an empty set. A name has no
-/// comma (`protocol.validToolName`), and a Session's names, as configure
-/// bounds them, fit `max_names_bytes`.
+/// for an empty set. A name has no comma (`protocol.validToolName`), and
+/// a Session's names, as configure bounds them, fit `max_names_bytes`.
 pub fn namesSql(comptime set_column: []const u8) []const u8 {
     return "(SELECT @list(tool.name) FROM tool_set_member member " ++
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=" ++ set_column ++ ")";

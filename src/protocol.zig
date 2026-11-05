@@ -1,4 +1,5 @@
 const std = @import("std");
+const built_in_tool = @import("built_in_tool.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
@@ -184,9 +185,36 @@ pub const ToolsField = struct {
 /// A `tools` list's names, one space apart.
 pub const max_tool_names_bytes = max_tool_list_name_bytes + max_tools - 1;
 
-/// The tools the Host offers, in their names' byte order: `bash` runs locally as
-/// Actions; `web_search` is hosted, run by the provider inside a response.
-pub const BuiltInTool = enum { bash, web_search };
+pub const BuiltInTool = built_in_tool.BuiltInTool;
+pub const ToolSelection = built_in_tool.Selection;
+
+/// The longest JSON list of tool names a report or row writes.
+pub const max_tool_selection_json_bytes = blk: {
+    var bytes: usize = "[]".len;
+    for (std.enums.values(BuiltInTool)) |tool| bytes += @tagName(tool).len + "\"\",".len;
+    break :blk bytes - 1;
+};
+
+/// Writes `tools` as a JSON list of names, in the catalog's order, into
+/// `buffer`, which holds `max_tool_selection_json_bytes`.
+pub fn toolSelectionJson(tools: ToolSelection, buffer: *[max_tool_selection_json_bytes]u8) []const u8 {
+    var length: usize = 0;
+    buffer[length] = '[';
+    length += 1;
+    for (std.enums.values(BuiltInTool)) |tool| if (tools.contains(tool)) {
+        if (length != 1) {
+            buffer[length] = ',';
+            length += 1;
+        }
+        buffer[length] = '"';
+        @memcpy(buffer[length + 1 ..][0..@tagName(tool).len], @tagName(tool));
+        length += 1 + @tagName(tool).len;
+        buffer[length] = '"';
+        length += 1;
+    };
+    buffer[length] = ']';
+    return buffer[0 .. length + 1];
+}
 
 /// The built-in tool `name` names, or null.
 pub fn builtInTool(name: []const u8) ?BuiltInTool {
@@ -1006,8 +1034,7 @@ pub const SessionRow = struct {
     workspace: Bounded(max_workspace_bytes) = .{},
     provider: Provider = .codex,
     model: Bounded(max_model_bytes) = .{},
-    bash: bool = false,
-    web_search: bool = false,
+    tools: ToolSelection = .empty,
     permission_mode: PermissionMode = .ask,
     label: ?Bounded(max_label_bytes) = null,
     created_at: u64 = 0,
@@ -1020,13 +1047,13 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"reference\":",       Hole{ .string = max_session_bytes },             ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",      Hole{ .tag = Provider },                         "\",\"model\":",           Hole{ .string = max_model_bytes },
-        ",\"tools\":",           Hole{ .text = "[\"bash\",\"web_search\"]".len }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
-        "\",\"label\":",         Hole{ .optional_string = max_label_bytes },      ",\"created_at\":\"",      Hole.decimal,
-        "\",\"revision\":\"",    Hole.decimal,                                    "\",\"end\":\"",           Hole.decimal,
-        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },           ",\"work\":",              Hole{ .json = SessionWork },
-        ",\"peers\":",           Hole{ .json = PeerFacts },                       "}",
+        "{\"reference\":",       Hole{ .string = max_session_bytes },           ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",      Hole{ .tag = Provider },                       "\",\"model\":",           Hole{ .string = max_model_bytes },
+        ",\"tools\":",           Hole{ .text = max_tool_selection_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
+        "\",\"label\":",         Hole{ .optional_string = max_label_bytes },    ",\"created_at\":\"",      Hole.decimal,
+        "\",\"revision\":\"",    Hole.decimal,                                  "\",\"end\":\"",           Hole.decimal,
+        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },         ",\"work\":",              Hole{ .json = SessionWork },
+        ",\"peers\":",           Hole{ .json = PeerFacts },                     "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     /// A row may never exceed this, whatever its fields hold: a new field that
@@ -1043,8 +1070,7 @@ pub const SessionRow = struct {
         workspace: []const u8,
         provider: Provider,
         model: []const u8,
-        bash: bool,
-        web_search: bool,
+        tools: ToolSelection,
         permission_mode: PermissionMode,
         label: ?[]const u8,
         created_at: u64,
@@ -1057,10 +1083,11 @@ pub const SessionRow = struct {
         pub const max_json_bytes = SessionRow.max_json_bytes;
 
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
+            var tools_buffer: [max_tool_selection_json_bytes]u8 = undefined;
             try writeShape(out, json_shape, .{
-                f.reference,                 f.workspace,       f.provider,      f.model,
-                tools(f.bash, f.web_search), f.permission_mode, f.label,         f.created_at,
-                f.revision,                  f.end,             f.first_message, f.work,
+                f.reference,                               f.workspace,       f.provider,      f.model,
+                toolSelectionJson(f.tools, &tools_buffer), f.permission_mode, f.label,         f.created_at,
+                f.revision,                                f.end,             f.first_message, f.work,
                 f.peers,
             });
         }
@@ -1072,8 +1099,7 @@ pub const SessionRow = struct {
             .workspace = self.workspace.slice(),
             .provider = self.provider,
             .model = self.model.slice(),
-            .bash = self.bash,
-            .web_search = self.web_search,
+            .tools = self.tools,
             .permission_mode = self.permission_mode,
             .label = if (self.label) |*label| label.slice() else null,
             .created_at = self.created_at,
@@ -1084,11 +1110,6 @@ pub const SessionRow = struct {
             .peers = &self.peers,
         };
         try fields.writeJson(out);
-    }
-
-    fn tools(bash: bool, web_search: bool) []const u8 {
-        if (bash) return if (web_search) "[\"bash\",\"web_search\"]" else "[\"bash\"]";
-        return if (web_search) "[\"web_search\"]" else "[]";
     }
 };
 

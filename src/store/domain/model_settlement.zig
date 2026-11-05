@@ -752,7 +752,8 @@ const insert_call = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// An accepted call's Action, decided now when the revision bypasses asks.
+/// An accepted call's Action, decided now when the revision bypasses asks
+/// or the core runs it.
 /// Under an `ask` revision it keeps its call's position as the feed's
 /// approval request.
 const insert_action = rsql.Write(.{
@@ -1593,9 +1594,10 @@ fn Settlement(comptime A: type) type {
                 std.mem.writeInt(u64, field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
                 @memcpy(field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
             }
-            // A Bash call has its description whether or not it was offered;
-            // one whose arguments the parser rejected has none.
-            const description: ?tool_catalog.Description = if (call_facts.bashArguments()) |arguments| tool_catalog.describe(.{ .bash = arguments }) else null;
+            // A call has its description whether or not it was offered; one
+            // whose arguments the parser rejected has none.
+            const description = call_facts.description();
+
             s.a.write(insert_call, .{
                 .operation_id = s.binding.operation_id,
                 .call_ordinal = s.imported_calls,
@@ -1612,15 +1614,17 @@ fn Settlement(comptime A: type) type {
                 .session = s.session,
             });
             if (rejection_code != null) return;
+            // A core tool acts only on the Store, so no person decides it.
+            const authorized = tool_catalog.Runner.of(call_facts.tool.?) == .core or s.settling.permission_mode;
             s.a.write(insert_action, .{
                 .action_id = try s.a.identity(.action_id),
                 .operation_id = s.binding.operation_id,
                 .call_ordinal = s.imported_calls,
                 .session = s.session,
                 .revision = s.settling.revision.get(),
-                .authorized = s.settling.permission_mode,
-                .timeout_ms = call_facts.bashArguments().?.timeout_ms,
-                .approval_position = if (s.settling.permission_mode) null else s.first_item_position + record.ordinal,
+                .authorized = authorized,
+                .timeout_ms = if (call_facts.bashArguments()) |arguments| arguments.timeout_ms else null,
+                .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
             });
         }
     };

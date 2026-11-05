@@ -25,6 +25,8 @@ const Engine = @import("engine.zig").Engine;
 const Sqlite = @import("engine/Sqlite.zig");
 const ActionAttemptAdmission = action_domain.ActionAttemptAdmission;
 const ActionAttemptBinding = action_domain.ActionAttemptBinding;
+const AgentDelivery = command_domain.AgentDelivery;
+const CoreActionInput = action_domain.CoreActionInput;
 const ActionResolutionCode = action_domain.ActionResolutionCode;
 const ActionSettlement = action_domain.ActionSettlement;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
@@ -838,6 +840,33 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttempt(&access, binding, code, result, faults)));
     }
 
+    /// The next core tool call to run (D24), or null.
+    pub fn nextCoreAction(self: *Store) !?CoreActionInput {
+        return self.queue().run(nextCoreActionHeld, .{self});
+    }
+
+    fn nextCoreActionHeld(self: *Store) !?CoreActionInput {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, action_domain.nextCoreAction(&access));
+    }
+
+    /// Runs the `message_agent` call `binding` names with its checked
+    /// arguments, in one transaction.
+    pub fn deliverAgentMessage(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, faults: Faults) !AgentDelivery {
+        return self.queue().write(deliverAgentMessageHeld, .{ self, binding, target, text, faults });
+    }
+
+    fn deliverAgentMessageHeld(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, faults: Faults) !AgentDelivery {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.deliverAgentMessage(&access, binding, target, text, faults)));
+    }
+
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
         return self.queue().write(recoverOneUncertainActionHeld, .{ self, active });
     }
@@ -1019,6 +1048,21 @@ pub const Store = struct {
 
     pub fn openContent(self: *Store, reference: ContentReference) !ContentLocation {
         return content_domain.openContentIdentity(self, reference, false);
+    }
+
+    /// Reads a core call's whole arguments into `bytes`, which holds exactly
+    /// their length, one content window at a time.
+    pub fn readCoreArguments(self: *Store, input: *const CoreActionInput, bytes: []u8) !void {
+        var reader: content_domain.ContentReader = undefined;
+        reader.open(try self.openContent(input.arguments));
+        defer reader.close();
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const end = @min(bytes.len, offset + content_domain.ContentReader.content_window_bytes);
+            const count = try reader.read(offset, bytes[offset..end]);
+            if (count == 0) return error.ShortCanonicalRead;
+            offset += count;
+        }
     }
 };
 

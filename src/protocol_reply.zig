@@ -677,9 +677,11 @@ pub const Current = struct {
             action: Id,
             parent_operation: Id,
             call_ordinal: Count,
-            tool: JsonEnum(enum { bash }),
+            tool: JsonEnum(protocol.BuiltInTool),
             permission_revision: Id,
-            authorization: JsonEnum(enum { pending, bypass, allow_once }),
+            /// `core`: a core tool's call, which settlement authorizes at
+            /// once with no permission decision.
+            authorization: JsonEnum(enum { pending, bypass, allow_once, core }),
             call_id: Reference,
             arguments: Reference,
         },
@@ -915,12 +917,8 @@ fn ReportNumber(comptime allow_zero: bool) type {
 /// Host lists them, MCP servers' tools included.
 const ReportTools = struct {
     names: protocol.ToolsField = .{ .state = .value },
-
-    pub fn has(self: *const ReportTools, tool: protocol.BuiltInTool) bool {
-        var names = self.names.iterator();
-        while (names.next()) |name| if (std.mem.eql(u8, name, @tagName(tool))) return true;
-        return false;
-    }
+    /// The built-ins among `names`.
+    set: protocol.ToolSelection = .empty,
 
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !ReportTools {
         if (try source.next() != .array_begin) return error.UnexpectedToken;
@@ -931,6 +929,7 @@ const ReportTools = struct {
                 error.InvalidToolName => error.InvalidCharacter,
                 error.InvalidJsonShape => error.UnexpectedToken,
             };
+            if (protocol.builtInTool(name.slice())) |tool| result.set.insert(tool);
         }
         _ = try source.next();
         return result;
@@ -1108,8 +1107,7 @@ pub const SessionListPage = struct {
                 .workspace = wire.workspace.value,
                 .provider = wire.provider.value,
                 .model = wire.model.value,
-                .bash = wire.tools.has(.bash),
-                .web_search = wire.tools.has(.web_search),
+                .tools = wire.tools.set,
                 .permission_mode = wire.permission_mode.value,
                 .label = if (wire.label) |label| label.value else null,
                 .created_at = try ActivityPage.id(wire.created_at, false),
@@ -2897,7 +2895,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     // Every row escapes every byte of its longest texts.
     const largest = std.math.maxInt(i64);
-    var maximal: protocol.SessionRow = .{ .provider = .codex, .bash = true, .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
+    var maximal: protocol.SessionRow = .{ .provider = .codex, .tools = .initOne(.bash), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
     try maximal.workspace.set(&workspace);
     try maximal.model.set(&model);
     try maximal.label.?.set(&text);
@@ -2930,7 +2928,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
         try std.testing.expectEqual(protocol.session_id_bytes, row.reference.len);
         try std.testing.expectEqualStrings(&workspace, row.workspace.slice());
         try std.testing.expectEqualStrings(&model, row.model.slice());
-        try std.testing.expect(row.bash and row.permission_mode == .bypass);
+        try std.testing.expect(row.tools.contains(.bash) and row.permission_mode == .bypass);
         try std.testing.expectEqualStrings(&text, row.label.?.slice());
         try std.testing.expectEqualStrings(&text, row.work.state.bash.description.?.slice());
     }
@@ -3222,7 +3220,6 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     const facts = &reply.current;
     try std.testing.expectEqualStrings("exact\x01model", facts.settings.model.slice());
     try std.testing.expectEqual(@as(u64, 17), facts.settings.revision.value);
-    try std.testing.expect(!facts.settings.tools.has(.bash));
     try std.testing.expectEqual(@as(u64, 7), facts.settings.instructions.bytes.value);
     try std.testing.expect(facts.settings.reasoning_effort == null and facts.settings.reasoning_effort_override == null and facts.selected_message != null);
     try std.testing.expectEqualStrings("", facts.selected_message.?.slice());
