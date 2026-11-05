@@ -208,8 +208,8 @@ const saved_identity = &[_]PositionalConflict{
 };
 /// Session settings shared by `session configure` and the live /configure.
 const settings = &[_]Option{
-    value("workspace", "PATH"),       value("instructions", "-"), value("tools", "bash,message_agent,read_transcript,start_agent,web_search|none"), value("loaded-tools", "a,b|none"),             choice("permission-mode", cli_value.PermissionMode),
-    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"),                                    value("output-reservation", "TOKENS|default"), choice("reasoning-effort", cli_value.ReasoningChoice),
+    value("workspace", "PATH"),       value("instructions", "-"), value("tools", "bash,find_tools,message_agent,read_transcript,start_agent,web_search|none"), value("loaded-tools", "a,b|none"),             choice("permission-mode", cli_value.PermissionMode),
+    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"),                                               value("output-reservation", "TOKENS|default"), choice("reasoning-effort", cli_value.ReasoningChoice),
     value("label", "TEXT"),
 };
 const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[4], settings[7], settings[8], settings[9], settings[10] };

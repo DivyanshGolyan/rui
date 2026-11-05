@@ -281,6 +281,9 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 ///                        `schema.mysql_session` sets
 ///   @served(x)           the opening serves provider x: `rui_served(x)`,
 ///                        the function each opening registers
+///   @contains_ascii(x,word)  ASCII-folded x contains the already folded word
+///   @content_contains_ascii(id,word)  the saved content contains word, even
+///                        across MySQL chunks, without truncating long words
 ///   @payload(t)          the bytes of content row t, which its text keeps
 ///                        to one MySQL chunk (`schema.content_chunk_bytes`)
 ///                        by bounding byte_length: `payload`
@@ -1916,7 +1919,32 @@ const arg_a = "\x01";
 const arg_b = "\x02";
 const arg_set = "\x03";
 const served_slots = "\x04";
+/// MySQL LOWER leaves binary strings unchanged. Fold only ASCII bytes, so
+/// arbitrary UTF-8 (including a chunk boundary inside a character) is preserved.
+fn mysqlAsciiLower(comptime bytes: []const u8) []const u8 {
+    var result = bytes;
+    for (0..26) |i| result = "REPLACE(" ++ result ++ std.fmt.comptimePrint(",X'{X:0>2}',X'{X:0>2}')", .{ @as(u8, 'A') + i, @as(u8, 'a') + i });
+    return result;
+}
+
+/// Most words fit in one chunk, so searching adjoining chunks avoids making
+/// a copy of the whole description. For longer words, a windowed JSON array
+/// preserves chunk order without GROUP_CONCAT's session truncation limit.
+/// Its elements are hex, so removing JSON punctuation and decoding is lossless
+/// for arbitrary bytes (including NUL and UTF-8 split across chunks).
+fn mysqlContentContainsAscii() []const u8 {
+    @setEvalBranchQuota(100_000);
+    const pair = "EXISTS(SELECT 1 FROM content_chunk search_chunk LEFT JOIN content_chunk search_next ON search_next.content_id=search_chunk.content_id AND search_next.chunk_index=search_chunk.chunk_index+1 WHERE search_chunk.content_id=" ++ arg_a ++ " AND INSTR(" ++ mysqlAsciiLower("CONCAT(search_chunk.bytes,COALESCE(search_next.bytes,X''))") ++ "," ++ arg_b ++ ")>0)";
+    var hex: []const u8 = "JSON_ARRAYAGG(HEX(search_all.bytes)) OVER(ORDER BY search_all.chunk_index ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)";
+    for ("[],\" ") |byte| hex = "REPLACE(" ++ hex ++ std.fmt.comptimePrint(",X'{X:0>2}',X'')", .{byte});
+    const whole = "COALESCE((SELECT INSTR(" ++ mysqlAsciiLower("UNHEX(" ++ hex ++ ")") ++ "," ++ arg_b ++ ")>0 FROM content_chunk search_all WHERE search_all.content_id=" ++ arg_a ++ " LIMIT 1),0)";
+    return "(CASE WHEN OCTET_LENGTH(" ++ arg_b ++ ")<=" ++ std.fmt.comptimePrint("{d}", .{schema.content_chunk_bytes}) ++ " THEN " ++ pair ++ " ELSE " ++ whole ++ " END)";
+}
+
 const expression_markers = [_]ExpressionMarker{
+    // Search needles are already ASCII-folded by the caller.
+    .{ .name = "contains_ascii", .arity = 2, .sqlite = "(instr(lower(" ++ arg_a ++ ")," ++ arg_b ++ ")>0)", .mysql = "(INSTR(" ++ mysqlAsciiLower(arg_a) ++ "," ++ arg_b ++ ")>0)" },
+    .{ .name = "content_contains_ascii", .arity = 2, .sqlite = "(EXISTS(SELECT 1 FROM content search_content WHERE search_content.content_id=" ++ arg_a ++ " AND instr(lower(search_content.payload)," ++ arg_b ++ ")>0))", .mysql = mysqlContentContainsAscii() },
     .{ .name = "octets", .arity = 1, .sqlite = "length(CAST(" ++ arg_a ++ " AS BLOB))", .mysql = "OCTET_LENGTH(" ++ arg_a ++ ")" },
     .{
         .name = "charset",
@@ -2016,6 +2044,9 @@ fn mysqlTemplate(comptime text: []const u8) Template {
 ///   @now                 a slot for the Access's second
 ///   @index(name)         nothing: MySQL plans alone until PR 8 reads EXPLAIN
 ///   @served(x)           `(x IN (?,...))`, a slot per `provider_name.Provider`
+///   @contains_ascii(x,word)  INSTR over bytewise ASCII replacements
+///   @content_contains_ascii(id,word)  EXISTS over adjoining saved chunks,
+///                        or an ordered, lossless JSON hex array for long words
 ///   @payload(t)          t's first `content_chunk`, or X'' when it has none
 ///   @octets(x)           `OCTET_LENGTH(x)`
 ///   @charset(c,'set')    `(NOT REGEXP_LIKE(c,'[^set]','c'))`: no character

@@ -15,6 +15,38 @@ pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     std.fmt.comptimePrint("\"text\":{{\"type\":\"string\",\"description\":\"The Message: nonempty UTF-8, at most {d} bytes.\"}}", .{message_agent_max_text_bytes}) ++
     "},\"required\":[\"id\",\"text\"],\"additionalProperties\":false}";
 
+// Prompt text: written here, and given no tests (D141).
+pub const find_tools_description = "Find and load tools available to this Session but not yet loaded. Give one to eight space-separated search words; a tool matches any word in its name or description, ignoring ASCII case. Loads at most eight matches in name order. Loaded tools become available on your next request.";
+pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
+
+pub const FindTools = struct {
+    words: [8][]const u8 = @splat(""),
+    count: usize = 0,
+};
+
+/// Checked when the core call runs, not when its model output settles.
+pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindTools) error{OutOfMemory}!StartAgentCheck {
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return refused("words must be the only field of one well-formed JSON object"),
+    };
+    if (root != .object or root.object.count() != 1) return refused("words must be the only field of one JSON object");
+    const words = root.object.get("words") orelse return refused("words is required");
+    if (words != .string) return refused("words must be a string");
+    out.* = .{};
+    var pieces = std.mem.splitScalar(u8, words.string, ' ');
+    while (pieces.next()) |piece| {
+        if (piece.len == 0) continue;
+        if (out.count == out.words.len) return refused("words must contain one to eight space-separated words");
+        const folded = try arena.dupe(u8, piece);
+        for (folded) |*byte| byte.* = std.ascii.toLower(byte.*);
+        out.words[out.count] = folded;
+        out.count += 1;
+    }
+    if (out.count == 0) return refused("words must contain one to eight space-separated words");
+    return .accepted;
+}
+
 /// Read arguments are deliberately small; content is read in bounded windows.
 pub const read_transcript_max_argument_bytes = 4096;
 
@@ -675,5 +707,40 @@ test "read_transcript arguments defaults filters addresses and every refusal" {
         const bytes = try std.fmt.allocPrint(arena.allocator(), "{{\"kinds\":[\"{s}\"]}}", .{@tagName(kind)});
         try std.testing.expect(try checkReadTranscript(arena.allocator(), bytes, &read) == .accepted);
         try std.testing.expect(read.kinds.eql(.initOne(kind)));
+    }
+}
+
+test "find_tools checks words at execution time" {
+    const Case = struct { bytes: []const u8, count: ?usize = null };
+    for ([_]Case{
+        .{ .bytes = "{\"words\":\"one\"}", .count = 1 },
+        .{ .bytes = "{\"words\":\"  OnE   TWO  \"}", .count = 2 },
+        .{ .bytes = "{\"words\":\"1 2 3 4 5 6 7 8\"}", .count = 8 },
+        .{ .bytes = "{\"words\":\"one\\ttwo\"}", .count = 1 },
+        .{ .bytes = "{\"words\":\"\"}" },
+        .{ .bytes = "{\"words\":\"   \"}" },
+        .{ .bytes = "{\"words\":\"1 2 3 4 5 6 7 8 9\"}" },
+        .{ .bytes = "{}" },
+        .{ .bytes = "[]" },
+        .{ .bytes = "{" },
+        .{ .bytes = "{\"words\":7}" },
+        .{ .bytes = "{\"words\":null}" },
+        .{ .bytes = "{\"words\":[]}" },
+        .{ .bytes = "{\"words\":\"one\",\"extra\":true}" },
+        .{ .bytes = "{\"words\":\"one\",\"words\":\"two\"}" },
+        .{ .bytes = "{\"words\":\"one\"} {}" },
+    }) |case| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var arguments: FindTools = .{};
+        const check = try checkFindTools(arena.allocator(), case.bytes, &arguments);
+        if (case.count) |count| {
+            try std.testing.expect(check == .accepted);
+            try std.testing.expectEqual(count, arguments.count);
+            for (arguments.words[0..count]) |word| for (word) |byte| try std.testing.expect(!std.ascii.isUpper(byte));
+        } else {
+            try std.testing.expect(check == .rejected);
+            try std.testing.expect(std.mem.indexOf(u8, check.rejected, "words") != null);
+        }
     }
 }
