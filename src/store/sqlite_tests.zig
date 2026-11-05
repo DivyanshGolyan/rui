@@ -8819,6 +8819,42 @@ test "an owed stop whose key a client already used is settled by that command an
     try std.testing.expect(!storage.isFenced());
 }
 
+test "an owed stop a client's stop already settled, or a newer one replaced, runs nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const parent = try configureTestSession(&storage, "stale-parent");
+    const child = try configureTestSession(&storage, "stale-child");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+    var stop = try completeSessionStop("stale-stop", parent.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    const selected = (try storage.nextCoreWork()).?.stop;
+
+    // A client stops the child under its own key, then sends it a Message.
+    var client = try completeSessionStop("stale-client-stop", child.slice());
+    try std.testing.expect(storage.stopSession(&client, .{}) == .accepted);
+    try submitTestMessage(&storage, &tmp, "stale-after", "stale-after", child.slice(), "after the stop");
+    var stale = try completeSessionStop(selected.key.slice(), selected.session.slice());
+    try std.testing.expect(storage.stopOwedSession(&stale, .{}) == .conflict);
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE session_ref=?1", .{child.slice()}));
+    try std.testing.expect(try storage.admitNextModelAttempt(.{}) != null);
+
+    // A newer obligation is not consumed by the stale key, only by its own.
+    var again = try completeSessionStop("stale-stop-again", parent.slice());
+    try std.testing.expect(storage.stopSession(&again, .{}) == .accepted);
+    const newer = (try storage.nextCoreWork()).?.stop;
+    try std.testing.expect(!std.mem.eql(u8, newer.key.slice(), selected.key.slice()));
+    try std.testing.expect(storage.stopOwedSession(&stale, .{}) == .conflict);
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
+    var owed = try completeSessionStop(newer.key.slice(), newer.session.slice());
+    try std.testing.expect(storage.stopOwedSession(&owed, .{}) == .accepted);
+    try std.testing.expect(try storage.nextCoreWork() == null);
+    try std.testing.expect(!storage.isFenced());
+}
+
 test "a stop that selects a message_agent call's Turn cancels it before it runs" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

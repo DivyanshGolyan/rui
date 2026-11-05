@@ -113,6 +113,13 @@ const owed_stop = rsql.Read(.{
     .cardinality = .optional,
 });
 
+/// The key an owed stop runs under: the child, and the stop or context
+/// full ending of its parent that owes it, so a newer obligation of the
+/// same child has another key.
+pub fn owedStopKey(buffer: []u8, child: []const u8, cause: []const u8, position: u64) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "rui.core/stop/{s}/{s}/{d}", .{ child, cause, position });
+}
+
 pub fn nextCoreWork(a: anytype) !?CoreWork {
     var stop: owed_stop.Result = undefined;
     var next: next_core_action.Result = undefined;
@@ -123,7 +130,7 @@ pub fn nextCoreWork(a: anytype) !?CoreWork {
     if (stop) |owed| {
         var work: OwedStop = .{ .session = owed.child_ref, .key = .{} };
         var buffer: [protocol.max_key_bytes]u8 = undefined;
-        try work.key.set(try std.fmt.bufPrint(&buffer, "rui.core/stop/{s}/{s}/{d}", .{ owed.child_ref.slice(), owed.cause_ref.slice(), owed.cause_position }));
+        try work.key.set(try owedStopKey(&buffer, owed.child_ref.slice(), owed.cause_ref.slice(), owed.cause_position));
         return .{ .stop = work };
     }
     const found = next orelse return null;
