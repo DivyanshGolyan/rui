@@ -219,7 +219,9 @@ fn activitySources(comptime range: fn (comptime []const u8, comptime []const u8)
             // Each compaction that succeeded, at its compaction item: a
             // position its settlement took, so no earlier prefix gains it (D217).
             " UNION ALL SELECT session_position,0,14,operation_id FROM model_output_item @index(model_output_compaction_history) " ++
-            "WHERE session_ref=?1 AND item_kind=4 AND " ++ on(14) ++ " AND " ++ range("session_position", "0") ++ order,
+            "WHERE session_ref=?1 AND item_kind=4 AND " ++ on(14) ++ " AND " ++ range("session_position", "0") ++
+            " UNION ALL SELECT position,0,CASE kind WHEN 1 THEN 12 ELSE 6 END,source_id FROM session_forward @index(session_forward_feed) " ++
+            "WHERE target_ref=?1 AND position IS NOT NULL AND (kind=1 AND " ++ on(12) ++ " OR kind=2 AND " ++ on(6) ++ ") AND " ++ range("position", "0") ++ order,
     };
 }
 
@@ -1042,7 +1044,10 @@ const page_session = rsql.Read(.{
 /// The work footer is a report read (`report.WorkRead`): its latest Turn
 /// shares round 1 and its next stage round 2, and any later stage runs
 /// after the page's rounds.
-pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page: *protocol.ActivityFacts) !void {
+/// noinline: its row buffers (about 2.4 KB) stay out of the read's Queue.run
+/// frame, which also drains queued writes and so sits under the deepest
+/// write on every engine chain that reads a page (read_transcript).
+pub noinline fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page: *protocol.ActivityFacts) !void {
     page.* = .{ .end = 0, .direction = request.direction, .work = .{ .workspace = .{ .len = 0 } } };
     const session_ref = request.session.slice();
     var session: page_session.Row = undefined;
@@ -1436,10 +1441,10 @@ const activity_message = rsql.Read(.{
 /// The call Action ?1 of Session ?2 waits on, dated by its Operation's
 /// settlement, which saved the Action with the request for approval.
 const approval_request = rsql.Read(.{
-    .sql = "SELECT action.parent_operation_id AS operation,action.call_ordinal,op.resolved_at FROM action_operation action " ++
-        "JOIN model_operation op ON op.operation_id=action.parent_operation_id AND op.session_ref=action.session_ref WHERE action.action_id=?1 AND action.session_ref=?2",
+    .sql = "SELECT action.session_ref,action.parent_operation_id AS operation,action.call_ordinal,op.resolved_at FROM action_operation action " ++
+        "JOIN model_operation op ON op.operation_id=action.parent_operation_id AND op.session_ref=action.session_ref WHERE action.action_id=?1 AND action.approval_position IS NOT NULL AND (action.session_ref=?2 OR EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=action.action_id AND f.child_ref=action.session_ref AND f.position IS NOT NULL))",
     .Args = struct { action: u64, session: []const u8 },
-    .Row = struct { operation: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive },
+    .Row = struct { session_ref: SessionText, operation: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive },
     .cardinality = .optional,
 });
 
@@ -1497,13 +1502,14 @@ const send_failure = rsql.Read(.{
 /// A Turn's outcome at position ?2, with its causing Operation's, and
 /// whether a Session stop selected the Turn.
 const turn_outcome = rsql.Read(.{
-    .sql = "SELECT t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
+    .sql = "SELECT t.session_ref,t.turn_id,t.operation_id,t.outcome_code,t.outcome_content_id,o.session_ref=t.session_ref AND o.turn_id=t.turn_id " ++
         "AND o.resolution_code IS NOT NULL AS consistent,o.resolution_content_id,t.outcome_at," ++
         "EXISTS(SELECT 1 FROM session_stop stop @index(session_stop_turn) WHERE stop.selected_turn_id=t.turn_id) AS stopped " ++
         "FROM turn t LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
-        "WHERE t.session_ref=?1 AND t.outcome_position=?2",
-    .Args = struct { session: []const u8, position: u64 },
+        "WHERE t.turn_id=?3 AND ((t.session_ref=?1 AND t.outcome_position=?2) OR EXISTS(SELECT 1 FROM session_forward f @index(session_forward_feed) WHERE f.target_ref=?1 AND f.position=?2 AND f.kind=2 AND f.source_id=t.turn_id AND f.child_ref=t.session_ref))",
+    .Args = struct { session: []const u8, position: u64, turn: u64 },
     .Row = struct {
+        session_ref: SessionText,
         turn_id: rsql.Positive,
         operation_id: rsql.Positive,
         outcome_code: protocol.Bounded(protocol.max_code_bytes),
@@ -1639,13 +1645,14 @@ const FailureRead = struct {
 /// `outcome`; its content, if any, is the next round's.
 const OutcomeRead = struct {
     position: u64,
+    turn: u64,
     outcome: *protocol.ActivityItem.TurnEnded,
     content_id: ?u64 = null,
     at: u64 = 0,
     count: RowCount = .{},
 
     fn queue(read: *OutcomeRead, a: *ReadAccess, session: []const u8) void {
-        readFirst(a, turn_outcome, .{ .session = session, .position = read.position }, read);
+        readFirst(a, turn_outcome, .{ .session = session, .position = read.position, .turn = read.turn }, read);
     }
 
     pub fn visit(read: *OutcomeRead, row: *const turn_outcome.Row) bool {
@@ -1661,7 +1668,8 @@ const OutcomeRead = struct {
             .completed => |answer| if (row.resolution_content_id == null or row.resolution_content_id.?.get() != answer) return error.CorruptStore,
             .cancelled, .retry_exhausted, .resource_exceeded, .failed => {},
         }
-        read.outcome.* = .{ .turn = row.turn_id.get(), .operation = row.operation_id.get(), .ending = outcome.ending(row.stopped), .code = row.outcome_code, .content = null };
+        read.outcome.* = .{ .session = .{}, .turn = row.turn_id.get(), .operation = row.operation_id.get(), .ending = outcome.ending(row.stopped), .code = row.outcome_code, .content = null };
+        read.outcome.session.set(row.session_ref.slice()) catch return error.CorruptStore;
         read.at = row.outcome_at.get();
     }
 };
@@ -1893,6 +1901,7 @@ const ItemRead = struct {
             },
             12 => {
                 const row = read.state.approval orelse return error.CorruptStore;
+                item.value.approval_requested.session.set(row.session_ref.slice()) catch return error.CorruptStore;
                 item.value.approval_requested.operation = row.operation.get();
                 item.value.approval_requested.call_ordinal = row.call_ordinal;
                 item.at = row.resolved_at.get();
@@ -1956,14 +1965,14 @@ const ItemRead = struct {
             },
             6 => {
                 item.value = .{ .turn_ended = undefined };
-                read.state = .{ .outcome = .{ .read = .{ .position = read.position, .outcome = &item.value.turn_ended } } };
+                read.state = .{ .outcome = .{ .read = .{ .position = read.position, .turn = (row.id orelse return error.CorruptStore).get(), .outcome = &item.value.turn_ended } } };
             },
             7 => {
                 item.value = .{ .stop = undefined };
                 read.state = .{ .stop = .{ .position = read.position, .end = undefined, .stop = &item.value.stop } };
             },
             12 => {
-                item.value = .{ .approval_requested = .{ .action = (row.id orelse return error.CorruptStore).get(), .operation = undefined, .call_ordinal = undefined } };
+                item.value = .{ .approval_requested = .{ .session = undefined, .action = (row.id orelse return error.CorruptStore).get(), .operation = undefined, .call_ordinal = undefined } };
                 read.state = .{ .approval = null };
             },
             13 => {

@@ -284,7 +284,9 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
                 return "no catalog value; reasoning omitted";
             };
             try out.writeAll(@tagName(effort));
-            return if (session.effort_override) "Session override" else "model default";
+            // D111: clients save the catalog effort as the Session's own, so
+            // the note compares the value rather than whether one was saved.
+            return if (effort == model_capability.defaultReasoningEffort(session.model.slice())) "model default" else "Session override";
         },
         // The bypass default is stated where it is inspected, without alert weight.
         .permissions => try out.writeAll(switch (session.permission) {
@@ -305,7 +307,9 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
                 try out.writeAll(" · now ");
                 try writeGrouped(out, estimate);
             }
-            return if (session.compaction_override) "Session override" else if (model_capability.supportsModel(session.model.slice())) "model default" else "assumed for an unlisted model";
+            // D111: the default a client fills is 90% of the known or assumed window.
+            const client_default = model_capability.contextWindow(session.model.slice()) * product_defaults.compaction_trigger_percent / 100;
+            return if (session.compaction_override and tokens != client_default) "Session override" else if (model_capability.supportsModel(session.model.slice())) "model default" else "assumed for an unlisted model";
         },
         .headroom => {
             try writeTokens(out, session.output_reservation);
@@ -495,7 +499,7 @@ test "the page shows the approved rows, `›` on the selected one, then the work
     try std.testing.expectEqualStrings(
         " Status · fix-safari-export · k7m2qx\n" ++
             " This Session\n" ++
-            " › Effort          high" ++ grey ++ "model default" ++ end ++
+            " › Effort          high" ++ grey ++ "Session override" ++ end ++
             "   Permissions     bypass · Bash and MCP run without asking\n" ++
             "   Tools           bash, web search\n" ++
             "   Name            fix-safari-export\n" ++

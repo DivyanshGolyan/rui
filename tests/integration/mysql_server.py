@@ -10,7 +10,8 @@ for the unit binary's live dialect check:
   mysql_server.py wait NAME STATUS_FILE
       fails when `start` failed, else blocks until the server is ready.
 
-The server runs the image's own settings, durability included. Its Unix
+The server runs the image's own settings, durability included, apart from
+how it keeps optimizer statistics (UNIT_SERVER_COMMAND). Its Unix
 socket is SOCKET_DIR/mysqld.sock, a directory shared with the host.
 """
 import os
@@ -20,6 +21,14 @@ import sys
 import host_process
 import live_engines
 
+# The unit binary's server lives one job. Its data sits in memory, so commits
+# still flush with the durability settings Rui checks, but to no disk. Its
+# optimizer statistics update as each test's tables fill: persistent ones
+# recompute in the background at most every ten seconds, so a table that
+# grows from empty in a second is planned as empty and an indexed lookup
+# becomes a scan (one test took 386 s instead of 26).
+UNIT_SERVER = ("--tmpfs", "/var/lib/mysql")
+UNIT_SERVER_COMMAND = ("--innodb-stats-persistent=OFF",)
 IMAGE = "mysql:8.4.13@sha256:a0225d1ea6631c8bc2385dc4c2faba17bbf1834ecf369e1659a9a382bd8d5dd7"
 READY_SECONDS = 180
 
@@ -58,7 +67,7 @@ def main(argv, root_password):
     if argv[:1] == ["start"] and len(argv) == 4:
         name, socket_dir, status_file = argv[1:]
         try:
-            start(name, socket_dir, root_password)
+            start(name, socket_dir, root_password, *UNIT_SERVER, command=UNIT_SERVER_COMMAND)
             status = "0"
         except subprocess.CalledProcessError as error:
             print(error.stderr, file=sys.stderr)

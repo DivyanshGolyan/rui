@@ -1,8 +1,8 @@
 //! Product defaults: the values Rui supplies when a caller omits a setting.
 //! Every surface that fills an omitted value reads this module: bare `rui`,
-//! `host start`, `host serve`, `session configure`, `/setup` and the Store's
-//! first-configuration defaults. Explicit options, saved preferences and saved
-//! Session or running Host settings take precedence; a default never rewrites
+//! `host start`, `host serve`, `session configure` and `/setup`.
+//! Explicit options, saved preferences and saved Session or running Host
+//! settings take precedence; a default never rewrites
 //! a saved value. Keep this module free of production imports so every owner
 //! can use it.
 
@@ -32,10 +32,10 @@ pub const provider = "codex";
 /// a row in `model_capability.models`, which checks this at compile time.
 pub const recommended_model = "gpt-6.1-sol";
 
-/// Automatic compaction begins at this percentage of a model's context.
+/// D111: CLI/TUI clients choose this share of a known model's context.
 pub const compaction_trigger_percent: u64 = 90;
 
-/// Tokens of context assumed for a model the table does not list. Small on
+/// Client-side context estimate for a model the table does not list. Small on
 /// purpose: compacting early costs a summary, compacting late costs a request
 /// the provider refuses.
 pub const unlisted_context_window: u64 = 128000;

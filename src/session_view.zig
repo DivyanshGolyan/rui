@@ -1444,6 +1444,41 @@ fn workEnded(sink: anytype, provider: ?protocol.Provider, code: []const u8, repo
     try sink.feed("\n");
 }
 
+/// A descendant agent's failed or stopped Turn, as one line in an ancestor.
+fn agentEnded(sink: anytype, agent: []const u8, code: []const u8, report: ?[]const u8) !void {
+    try sink.feed("\n! Agent ");
+    var name: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
+    try name.feed(agent);
+    try name.finish();
+    try sink.feed(" ended: ");
+    try sink.feed(code);
+    if (report) |words| {
+        try sink.feed(" (");
+        var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
+        try escaped.feed(words);
+        try escaped.finish();
+        try sink.feed(")");
+    }
+    try sink.feed(".\n");
+}
+
+test "a descendant's ending names the agent and gives no advice for this Session" {
+    const Sink = struct {
+        bytes: [256]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    var failed: Sink = .{};
+    try agentEnded(&failed, "9f8e7d", "provider_http_401", "expired\x1b[2J");
+    try std.testing.expectEqualStrings("\n! Agent 9f8e7d ended: provider_http_401 (expired\\x1b[2J).\n", failed.bytes[0..failed.length]);
+    var stopped: Sink = .{};
+    try agentEnded(&stopped, "9f8e7d", "cancelled", null);
+    try std.testing.expectEqualStrings("\n! Agent 9f8e7d ended: cancelled.\n", stopped.bytes[0..stopped.length]);
+}
+
 /// A failed outcome's report, read whole before its line is drawn. A
 /// longer one than the Store keeps shows its prefix.
 const ReportBytes = struct {
@@ -1623,7 +1658,13 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 var report: ReportBytes = undefined;
                 report.len = 0;
                 if (ended.content) |reference| try content(requests, store, session, item, reference, &report);
-                try workEnded(sink, provider, ended.code.slice(), if (ended.content != null) report.bytes[0..report.len] else null);
+                const words = if (ended.content != null) report.bytes[0..report.len] else null;
+                // A descendant's ending reaches every ancestor's feed: it is
+                // that agent's outcome, never this Session's, so it names the
+                // agent and gives no advice meant for this Session.
+                if (!std.mem.eql(u8, ended.session.slice(), session)) {
+                    try agentEnded(sink, ended.session.slice(), ended.code.slice(), words);
+                } else try workEnded(sink, provider, ended.code.slice(), words);
             },
             .stop => {
                 compact_tools.* = false;
