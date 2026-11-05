@@ -276,6 +276,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/activity-search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Search public Session activity newest first with bounded snippets. */
+        post: operations["activitySearch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/activity-page": {
         parameters: {
             query?: never;
@@ -427,6 +444,7 @@ export interface components {
             at: components["schemas"]["Decimal"];
             value: {
                 turn_ended: {
+                    session: string;
                     turn: components["schemas"]["Decimal"];
                     operation: components["schemas"]["Decimal"];
                     /** @enum {string} */
@@ -493,6 +511,7 @@ export interface components {
             at: components["schemas"]["Decimal"];
             value: {
                 approval_requested: {
+                    session: string;
                     action: components["schemas"]["Decimal"];
                     operation: components["schemas"]["Decimal"];
                     call_ordinal: components["schemas"]["Decimal"];
@@ -506,7 +525,7 @@ export interface components {
                 session_changed: {
                     revision: components["schemas"]["Decimal"];
                     /** @enum {string} */
-                    field: "provider" | "model" | "instructions" | "tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "label";
+                    field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "label";
                 };
             };
         } | {
@@ -554,10 +573,45 @@ export interface components {
             kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
             limit: components["schemas"]["Decimal"];
         };
+        ActivitySearchFactsCursor: {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+        };
+        ActivitySearchFactsHit: {
+            snippet: string;
+            offset: components["schemas"]["Decimal"];
+            length: components["schemas"]["Decimal"];
+        };
+        ActivitySearchItem: {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            kind: "admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted";
+            hits: components["schemas"]["ActivitySearchFactsHit"][];
+        };
+        ActivitySearchReply: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "activity_search";
+            items: components["schemas"]["ActivitySearchItem"][];
+            next: components["schemas"]["ActivitySearchFactsCursor"] | null;
+        };
+        ActivitySearchRequest: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            kind: "activity_search";
+            store: string;
+            session: string;
+            query: string;
+            /** @description Each at most once, in the order the enum lists them. */
+            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
+            before_position: components["schemas"]["Decimal"] | null;
+            before_ordinal: components["schemas"]["Decimal"] | null;
+            limit: components["schemas"]["Decimal"];
+        };
         AgentSpec: {
-            provider?: string;
-            /** @description Required when Bash is enabled. */
-            workspace?: string;
             model: string;
             /** @enum {string|null} */
             effort: null | "none" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -575,6 +629,9 @@ export interface components {
             } | null;
             /** @description A few words naming the agent's task. */
             label?: string | null;
+            /** @enum {string} */
+            provider?: "codex" | "openai";
+            workspace?: string;
         };
         CallActivity: {
             total: components["schemas"]["Decimal"];
@@ -619,6 +676,15 @@ export interface components {
                 value: string;
             };
             tools: {
+                /** @constant */
+                state: "omitted";
+            } | {
+                /** @constant */
+                state: "value";
+                /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                value: string[];
+            };
+            loaded_tools?: {
                 /** @constant */
                 state: "omitted";
             } | {
@@ -743,7 +809,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
+                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
             };
             execution: {
                 /** @constant */
@@ -1288,6 +1354,15 @@ export interface components {
                 /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
                 value: string[];
             };
+            loaded_tools?: {
+                /** @constant */
+                state: "omitted";
+            } | {
+                /** @constant */
+                state: "value";
+                /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                value: string[];
+            };
             permission_mode: {
                 /** @constant */
                 state: "omitted";
@@ -1405,7 +1480,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
+                code: "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
             };
             input: {
                 /** @constant */
@@ -2336,6 +2411,7 @@ export interface components {
             tools: string[];
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
+            parent: string | null;
             label: string | null;
             created_at: components["schemas"]["Decimal"];
             revision: components["schemas"]["Decimal"];
@@ -2511,6 +2587,7 @@ export interface components {
         };
         domainreportCurrentJsonSettings: {
             reference: string;
+            parent: string | null;
             workspace: string;
             /** @enum {string} */
             provider: "codex" | "openai";
@@ -2527,6 +2604,8 @@ export interface components {
             revision: components["schemas"]["Decimal"];
             /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
             tools: string[];
+            /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+            loaded_tools: string[];
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
             instructions: components["schemas"]["ActivityItemContent"];
@@ -2545,7 +2624,7 @@ export interface components {
             parent_operation: components["schemas"]["Decimal"];
             call_ordinal: components["schemas"]["Decimal"];
             /** @enum {string} */
-            tool: "bash" | "message_agent" | "start_agent" | "web_search";
+            tool: "bash" | "find_tools" | "message_agent" | "read_transcript" | "start_agent" | "web_search";
             permission_revision: components["schemas"]["Decimal"];
             /** @enum {string} */
             authorization: "core" | "pending" | "bypass" | "allow_once";
@@ -2696,6 +2775,8 @@ export interface components {
             label: string | null;
             /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
             tools: string[];
+            /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+            loaded_tools: string[];
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
             instructions: components["schemas"]["domainreport_full_shapeFullRevisionContent"];
@@ -3393,6 +3474,44 @@ export interface operations {
                 };
                 content: {
                     "application/octet-stream": string;
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    activitySearch: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActivitySearchRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivitySearchReply"];
                 };
             };
             /** @description A refusal or failure. */

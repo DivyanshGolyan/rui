@@ -164,7 +164,7 @@ Noncanonical references, including old UUID and NUL-bearing references, reject r
 
 A creation configuration requires an exact nonempty model, explicit effort, a token-count `compactAt`, a tools list and Permission Mode (D104, D111, D113).
 A missing required field is a missing-field request error; an empty tools list means no tools and has no Host default.
-The agent spec also accepts instructions, output schema and label; provider defaults to the Host's single served provider (D133).
+The agent spec also accepts instructions, output schema and label; provider defaults to the Host's single served provider, and a Host serving several has no default, so a creation must name one (D133, D221).
 Workspace is required when tools includes Bash and is unused for execution otherwise.
 A supplied Workspace is checked like any other, and a spec without Bash that omits it saves `/`, because the Store's Workspace column is never empty.
 Enabling Bash later runs it in the saved Workspace, which a later configure cannot change.
@@ -436,12 +436,14 @@ The CLI and TUI choose the catalog default when building a new spec without a us
 The pinned Codex catalog gives `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-5.6-sol` a `low` default; the other five release-supported models default to `medium`.
 All nine advertise `low`, `medium`, `high` and `xhigh`.
 All except `gpt-5.5` also advertise `max`.
-An unknown exact binding has no inferred default: an explicit null effort tells Rui to omit `reasoning` and leave the provider's effective effort unspecified.
+An unknown exact binding has no inferred default: its spec states a null effort, and Rui omits `reasoning` and leaves the provider's effective effort unspecified.
 An explicit effort on that binding rejects because Rui has no support evidence.
 This preserves exact-model syntax without guessing capabilities from model families.
 
-On an existing Session, omission preserves the saved effort and an accepted explicit `null` leaves provider effort unspecified, without a catalog fallback.
-The pinned `openai-responses/2` codec cannot encode a boundary back to unspecified effort, so clearing an assigned value rejects atomically as `unsupported_reasoning_effort`; a client reset sends a concrete supported effort instead (D165).
+An explicit `null` effort is accepted only for a model the catalog does not list; for a listed model it rejects as `unsupported_reasoning_effort` on create and update (D165).
+So an update never moves a Session from an effort back to none, which the `openai-responses/2` codec cannot encode.
+A Session saved before D111 with null effort on a listed model keeps freezing the catalog default its earlier Operations froze.
+On an existing Session, omission preserves the saved effort.
 The CLI resolves `--reasoning-effort default` on the client to the model's catalog effort or explicit null; `--reasoning-effort VALUE` selects a value for `session configure`, initial `session start` and interactive `/configure`.
 Current inspection reports the saved nullable `reasoning_effort` and `reasoning_effort_override`; non-null effort is the Session's explicit value, not a Host-inferred catalog default.
 Each model Operation, including compaction and continuation, freezes the resolved effort at admission.
@@ -531,7 +533,9 @@ No identity tool, peer tool, alternate CLI-path variable or bundled skill is req
 Agents compose ordinary Session configuration and Message admission through the CLI, and the Host records who sent each Message.
 `rui session send --to k7m2qx` takes one exact canonical ID, without JSON.
 Anonymous human and script sends may select `--store PATH` or use their ordinary Store defaults.
-A peer destination is always in the trusted sender's Store, before HOME preferences; an explicit Store override must canonicalize to that same Store or reject before capture.
+A peer destination is in the trusted sender's Store, before HOME preferences; an explicit Store override that canonicalizes to that same Store keeps the peer identity.
+An explicit Store override naming another Store is a plain caller's send there, unsigned, because a peer identity belongs to one Store and never crosses to another (#957); a harness that starts its own Host inside a Session relies on this.
+The invalid-peer-context refusal names the three variables and the plain-caller form, `env -u RUI_ADDRESS -u RUI_STORE -u RUI_SENDER_HANDLE rui ...`.
 Incomplete or malformed peer environment rejects without anonymous or default-Store fallback, including with an explicit Store selector.
 Store selection is canonicalized without changing Session bytes.
 A Session may send to itself.
@@ -567,7 +571,12 @@ An owed stop whose obligation a client's stop already settled, or a newer one re
 Every attached child Turn ending owes its parent an ordinary Message from the child, waking the parent through normal Message admission (D39, D122).
 A done ending's Message is the child's saved answer itself, so nothing is copied; any other ending is a short line naming it, which is prompt text (D161).
 An ending caused by the parent's owed stop under `rui.core/stop/` settles quietly without admitting a Message (D139).
-One Store command delivers it and deletes the owed row, so a retry cannot deliver it twice.
+One Store command delivers it and marks the retained owed row delivered, so a retry cannot deliver it twice.
+An attached child's approval request and Turn ending also appear in every ancestor's Activity feed, naming the Session whose Action or Turn it is (D135, D180).
+An approval request queues an unpositioned `session_forward` row for the direct parent in the transaction that saves it, and a Turn ending queues one in the transaction that delivers its owed ending Message (so a root Session's Turn end writes nothing extra); after owed stops and ending Messages, the Host delivers one hop per Store command before core tool calls.
+Each delivery claims a position only in the receiving ancestor, retains the delivered row and atomically queues the same child fact for that ancestor's parent, if any.
+The unique `(target_ref,kind,source_id)` key and retained rows make retries no-ops, and no transaction walks the tree or grows with its depth.
+A Permission Decision addressed to an ancestor may name the child's Action only after that ancestor received its forwarded request; it updates the child's Action and Turn, while the saved command retains the Session the client named.
 Dormant peers retain only saved facts.
 
 Peer composition supports one Host, which owns one Store.
@@ -1167,14 +1176,25 @@ Call rejection, Action denial, failure, cancellation and uncertainty all produce
 ### Authorizing exact actions
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority.
-It holds `bash`, which Rui runs as Actions; `message_agent` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
+It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_transcript` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
 The CLI and TUI put `bash` and `web_search` in a fresh Session's spec; the Host never supplies a tools list (D104).
-CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `message_agent`, `start_agent`, `web_search`).
+CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_transcript`, `start_agent`, `web_search`).
+A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools`, and is the set sent to the model and used to validate calls.
+Every loaded name must be in its resulting tools or configure refuses `loaded_tools_not_in_tools`; a strict subset must contain `find_tools` or configure refuses `loaded_tools_unreachable`.
+Changing tools without specifying loaded_tools keeps equality when the saved sets were equal; otherwise it intersects the saved loaded set with the new tools and applies the same checks.
+The Session and each revision store a nullable `loaded_tool_set_id`, interned like `tool_set_id`, with NULL denoting equality; Current and Full reports expose both sets, and a newly loaded tool follows the existing `additional_tools` history path without discarding the cache prefix.
 Who runs an accepted call is derived from its name, never stored.
 A **core tool** call runs as one core command, with no process: `message_agent(id, text)` admits `text` to Session `id` as a Message from the calling Session, with no client environment, and resolves the call `Delivered to ID.` in the same transaction; an unknown `id` resolves it failed and sends nothing.
-`start_agent(task, attached, spec)` creates a Session configured by the full agent `spec` (model, effort, token-count compaction threshold, tools, Permission Mode, optional provider, Workspace, instructions, output schema and label), admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
-Every refused `start_agent` spec fails the tool call and starts nothing, including a missing required field, unsupported effort or an excessive known-window compaction threshold (D165, D166).
-The spec's provider defaults to the Host's provider and its Workspace is required when its tools include Bash (D133).
+`find_tools(words)` searches the Session's saved, not-yet-loaded tools by name or description, ignoring ASCII case and matching any of one to eight space-separated words.
+SQL selects only unloaded candidates; the Host streams names and description windows through the shared `word_search.Matcher`, whose ASCII folding and carry give every Store engine the same answers (D216).
+It loads at most eight matches in name order, in one call-keyed command and one revision naming `loaded_tools`, committed with the call result.
+A no-match call writes no revision.
+A strict `loaded_tools` subset must include `find_tools`; NULL in the saved loaded set means all configured tools.
+Newly loaded definitions join the next request as `additional_tools`; a call to an unloaded tool still settles as `unknown_tool`.
+`read_transcript(id?, kinds?, before?, limit?, query?, full?, offset?)` reads any Session's public activity feed, defaulting to the caller, and resolves only its call: newest-first outlines page up to 16 entries, and `full` opens one entry in UTF-8-aligned 16 KiB windows.
+It uses the public activity visibility and provenance rules, never private provider material; invalid arguments, unknown Sessions and missing entries resolve failed when the core runs the call, not at settlement.
+`start_agent(task, attached, spec)` creates a Session configured by the full agent `spec` (model, effort, token-count compaction threshold, tools, Permission Mode, instructions, output schema and label) in the caller's Workspace with its provider, admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
+Every refused `start_agent` spec fails the tool call and starts nothing, including a missing required field, a named provider or Workspace, unsupported effort or an excessive known-window compaction threshold (D140, D165, D166, D221).
 A spec that widens the caller's tools or asks for `bypass` under a caller that asks resolves the call failed with a result naming the field; the Host checks the arguments when it runs the call, not at admission.
 The agent's Bash starts from the caller's client environment, installed as the task commits.
 A core tool acts only on the Store, so admission authorizes its call at once under either Permission Mode, and a stop cancels it like any other unattempted Action.
@@ -1297,7 +1317,7 @@ A SQLite Store at a format from 51 up to the current one takes each pending step
 Rui runs no DDL on MySQL (D203): the DB team runs `schema.mysqlMigration(from)`, which PR 8's `rui store schema --engine mysql [--from N]` will print.
 The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
 The step to 53 records a Session's parent (D27).
-The step to 54 records the stops an attached child owes (D38), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
+The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -1378,7 +1398,8 @@ Once migrations keep old Stores usable across format changes, Rui should switch 
 
 Development test Stores and associated configure captures are recreated for changed formats, not migrated.
 This does not authorize recreating user Stores.
-The unreleased wire label is `8`: it changed after v0.50.0 shipped `7` when the Host dropped the `proposal_page` and `proposal_field` requests, and when the Activity page gained `kinds`, `limit` and the `received` row kind and the Host dropped the `person_message` request, which Divyansh asked for on 2026-11-03.
+Public activity search was added to wire label `8` after v0.53.1 shipped it: an added request needs no new label, and an older Host answers it as unknown.
+Wire label `8` changed after v0.50.0 shipped `7` when the Host dropped the `proposal_page` and `proposal_field` requests, and when the Activity page gained `kinds`, `limit` and the `received` row kind and the Host dropped the `person_message` request, which Divyansh asked for on 2026-11-03.
 The Store records the wire label it was created with in `store_meta` and opens only at the current one.
 It has one canonical configure shape, which includes the omission-aware provider and Label fields, and one canonical Message shape, whose creating form may carry `require_model` (digest domain `rui/core/message/v4`).
 Pre-provider captures are not accepted or defaulted to Codex.
@@ -1888,7 +1909,11 @@ A later send failure does not undo accepted configuration.
 `session start` captures one Message mutation with fresh-Session configuration and an empty requested Session ID.
 Initial configuration accepts scalar settings but no instruction or schema content values, preserving the existing ingress content and descriptor bounds.
 Inside one Store transaction, it validates the sender and configuration, allocates an ID through the same collision-safe allocator as configure, and admits the first Message to that new ID.
-Its successful stdout is the six-character ID plus newline, an admission receipt rather than execution or completion.
+Its successful stdout is the same JSON mutation receipt as `session send`, with the allocated six-character ID in `.context.session` and the request handle in `.context.key`, followed by newline: admission rather than execution or completion.
+Only the accepted `session start` receipt adds `configuration` immediately after `context`, containing the resolved `provider`, `model`, effective `reasoning_effort` and `effort_source`.
+The effort source is `flag` whenever `--reasoning-effort` was given (including `default`), otherwise `saved` when `model_capability.startEffort` selected the saved override, otherwise `model_default`.
+Without an override, the effective effort is the model catalog default, or null for an unlisted model.
+These values come from the CLI-resolved configuration sent with the Message, never a new Host read; rejection output and `session send` receipts are unchanged.
 Replay returns the original allocated ID, Message admission and result even after cancellation or restart; changed creation settings or Message bytes conflict with the original request key.
 Rejection creates no Session.
 Any canonical failure rolls back allocation, revision and Message together.
@@ -1913,7 +1938,33 @@ Failure after upload begins leaves admission unconfirmed; inspection or recovery
 #### Help and prerequisites
 
 Root help (`rui --help` or `rui -h`), resource help and operation help succeed with useful stdout and zero exit without a Host, credentials, preferences, TTY or state changes.
-Invalid invocation is nonzero with a stderr diagnostic and relevant help path.
+Invalid fresh invocation exits 2 with a stderr diagnostic and relevant help path.
+
+The CLI derives exit status from admission certainty and the catalog remedy, not the rejection code alone:
+
+| Exit | Caller action |
+| --- | --- |
+| 0 | Done. |
+| 1 | Failed for a cause not classified above; stderr names it. Treat it as unknown: do not assume the request was or was not sent unless stderr says so. |
+| 2 | Invalid fresh invocation; nothing was sent. Fix the invocation. |
+| 3 | Rui answered with a saved refusal. Correct the request; a resend needs a new key. |
+| 4 | Admission unconfirmed. Run `rui request recover HANDLE` (or the printed explicit-record recovery); never resubmit with a new key. |
+| 5 | Retry the same request unchanged later (Host busy or result not ready). |
+| 6 | Repair the environment, then retry unchanged (known stopped/unreachable Host, sign-in required or locked Store). |
+
+An error enters 2-6 only once its cause is mapped; every other failure stays exit 1 until it is.
+
+Uncertainty takes precedence over remedy: a busy-looking mutation response without a confirmed admission remains exit 4, not 5.
+Multiple outcomes, including `session stop --all`, aggregate in cautious order **4 > 1 > 6 > 5 > 3 > 2 > 0**, never numeric maximum or first failure.
+A nonzero exit may follow acceptance; it does not authorize a new identity.
+
+Saved rejections render one catalog line on stderr with their existing wire code, input flags or fields, accepted values and repair.
+The ending says the rejection was saved, replays as saved and needs a new key for a resend; stdout JSON is unchanged.
+Replay advice uses the saved code, never current argv values, current Session settings or a live accepted subset.
+Today's ambiguous saved codes remain honest about every possible cause; splitting them and saving witnesses belongs to the later wire/Store change.
+The static saved-code facts are replay-affecting and must not be silently reinterpreted in a compatible Store.
+HTTP statuses and wire spellings are independent of this CLI exit policy and remain unchanged.
+
 Command/option definitions own syntax and scoped help; public types and goldens own semantic fields.
 There is no second catalog, generic JSON-command input mode, schema generator or registry.
 Ordinary non-interactive calls never implicitly start a Host, sign in or enter setup.
@@ -1926,7 +1977,7 @@ The public client `listSessions` streams one complete JSON page to caller-owned 
 Request fields are `version`, `kind`, canonical `store`, `workspace` (exact canonical stored path or `null` for all), and string-valued `after`/`ceiling` (both `"0"` initially).
 A first page may also carry `since`, an opaque token from an earlier reply.
 Response `session_list` has up to eight `sessions`, then `delta`, a new `since` token, and `next` as either `null` or a continuation.
-Each row has exact `reference`, `workspace`, `provider`, `model`, `tools` and `permission_mode`; nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
+Each row has exact `reference`, `workspace`, `provider`, `model`, `tools` and `permission_mode`; nullable `parent` (the creator’s six-character Session reference for an attached agent, otherwise `null`); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
 `work` is the same value that activity pages, Current and Message progress carry.
 With `since`, the Host answers one of three `delta` values.
 `not_modified` means no row has changed on this Host since the token; it is answered before any Store entry, lock or scratch, and never while the Store is fenced.
@@ -2483,6 +2534,7 @@ Any other waits in the row, which shows only in the latest view, whenever the Ho
 It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or a browsed page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
+Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.
 Wire version 8 dropped the `proposal_page`, `proposal_field` and `person_message` requests, added the Activity page's `kinds`, `limit` and `received` rows, renamed its `outcome` rows to `turn_ended`, each naming its `ending`, and marked a done Turn's answer `final` on its assistant row, after version 7 dropped the page's `read_through` and `beyond_unseen` fields and the `mark_read` request (the "new since you looked" feature, removed 2026-11-03), version 6 added the `label` on the Session a Message row names as sender or target, version 5 added the pages' `hosted_call` items, version 4 added each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 Normal desktop widths are the design target; narrower terminals wrap the same interface, never omit an approval command or decision label.
 Opening adds no configuration banner or command tutorial.
@@ -2862,7 +2914,7 @@ Host work and captured-request recovery are independent of terminal state; unsen
 A report may lag and has no global cross-Session revision.
 The one in-memory exception is Session listing's `since` token: an opaque Host-opening hint that says which Sessions may have changed, not a revision any read can be asked to be "as of", never stored and void after a Host restart.
 
-Reports have exactly two closed profiles. **Current**, the default, contains effective settings including the Label, `created_at`, `context_estimate`, the Session work, `first_message` and `from_person_at` that Session listing reports, current execution state, the latest relevant outcome, pending-message count, every unresolved Action and actionable permission, accepted call outcomes still participating in the active Turn, the selected work's original Message key (active Turn's first admission or oldest unexcluded queued admission), and up to ten most recent applied Messages from terminal Turns with their keys and outcomes.
+Reports have exactly two closed profiles. **Current**, the default, contains effective settings including the Label, `parent`, `created_at`, `context_estimate`, the Session work, `first_message` and `from_person_at` that Session listing reports, current execution state, the latest relevant outcome, pending-message count, every unresolved Action and actionable permission, accepted call outcomes still participating in the active Turn, the selected work's original Message key (active Turn's first admission or oldest unexcluded queued admission), and up to ten most recent applied Messages from terminal Turns with their keys and outcomes.
 Selection and recent identities are committed Host facts, not local caller records; growing terminal history is excluded.
 Explicit **Full** contains Current plus the following closed inventory:
 
@@ -3006,9 +3058,11 @@ The cursor may name a row of any kind; the page lists only the asked kinds, and 
 A person's Messages alone are one seek in the index of Messages without a Session sender, whatever the history's length; a page that lists received Messages reads all of a Session's Messages by position, as every unfiltered page does.
 Null end captures the current committed end; zero freezes empty history.
 Pages echo end/direction and return at most `limit` owned metadata rows with `more`, ordered by (position, ordinal).
-Only complete Tool Result groups share positions, using one-based call ordinals; an `approval_requested` row shares its call's position at ordinal 1; a revision's `session_changed` rows share its position, numbered from zero; other rows use zero.
-An `approval_requested` row (D115) follows each call whose Action was saved under an `ask` revision, whatever was decided since, and carries `action` (the id `permission_decision` names), `operation` and `call_ordinal`; it is dated by its Operation's settlement, which saved the Action.
+Only complete Tool Result groups share positions, using one-based call ordinals; a Session's own `approval_requested` row shares its call's position at ordinal 1; a revision's `session_changed` rows share its position, numbered from zero; other rows, including forwarded child facts, use zero.
+An `approval_requested` row (D115) follows each call whose Action was saved under an `ask` revision, whatever was decided since, and carries `session` (the Session whose Action it is), `action` (the id `permission_decision` names), `operation` and `call_ordinal`; it is dated by its Operation's settlement, which saved the Action.
 That settlement stores the call's position on the Action as `approval_position` (Store format 51), and the feed seeks that column's partial index, so a page of approval requests costs the same however many calls ran without asking.
+Forwarded `approval_requested` and `turn_ended` rows have their own receiving-Session position and carry the originating child's `session`, while all remaining fields come from the child's own Action or Turn facts.
+A Session's own `turn_ended` row likewise carries its own `session`; forwarding does not alter the child's row or backfill a captured ancestor feed prefix.
 A `session_changed` row (D138, D218) is one setting a later revision changed, carrying `revision` and `field` (a configuration member's name: `provider`, `model`, `instructions`, `tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`).
 The revision's commit writes them to `session_change` at a position taken when it is accepted, never edited; the revision keeps the current values, and a creation and a revision that changes nothing have none.
 A `compacted` row (D217) is a compaction that succeeded, at its compaction item's position (taken at settlement, so no earlier page gains it), carrying `operation` and `dropped`: how many conversation entries its floor left out beyond the one before it, zero for a compaction that made no room.
@@ -3018,6 +3072,17 @@ Null ordinal denotes a sequence boundary, excluding all rows at position; positi
 Forward catch-up captures a fresh end from the preceding end with null ordinal, so group ties are not replayed.
 Later appends and group completion cannot backfill an earlier prefix.
 Query work may grow with history; item bounds do not promise traversal latency.
+
+`POST /v1/activity-search` takes `kind:"activity_search"`, `session`, `query`, `kinds`, nullable decimal-string `before_position` and `before_ordinal`, and decimal-string `limit` with the Activity page's kind and limit rules.
+The query is 1 to 256 UTF-8 bytes; matching folds only ASCII A–Z and keeps every other byte exact, independent of the Store engine.
+The Host streams existing public content through `ContentReader`, with a fixed 8 MiB content-byte scan budget per request, and SQL chooses only candidate identities, never text matches.
+Searched text is Message text (admission, user, received and sent), assistant text, Turn-ending content, Tool Results, and a call's tool name followed by a newline and its stored arguments JSON; instructions, output schemas, usage, call IDs and private provider material are not searched.
+The reply is `type:"activity_search"` with newest-first `items`, each naming `position`, `ordinal`, `kind` and up to three `hits`, and nullable `next` naming the last scanned entry.
+A hit carries a UTF-8-aligned `snippet` of at most 160 bytes and decimal-string byte `offset` and `length` inside that snippet; when the full matched query exceeds the snippet bound, the highlight is its visible prefix, but matching still uses the entire query.
+Malformed stored text bytes appear as `?` in snippets, one byte each, preserving byte offsets.
+A budget-limited reply may contain no matches and still have `next`; the exclusive cursor proceeds to older entries, including when scanning stopped inside a large entry, rather than resuming that entry's remaining bytes.
+`read_transcript` with `query` uses this same search, prints each matching entry's outline followed by quoted snippets, and preserves the query in its continuation hint; `query` with `full` is refused.
+Search adds no Store format, index or SQL text-matching dependency.
 
 `POST /v1/model-list` takes `kind:"model_list"` and returns `providers`: for each provider the Host serves, in Provider order, its `provider`, `source` and `models`, each an `id` with `known`, whether Rui's model table knows its facts.
 A model the table does not list runs with default limits (see compaction).
@@ -3179,7 +3244,7 @@ An indeterminate reported outcome never implies that an effect did not run or ma
 ### Wire format and command output
 
 HTTP owns closed versioned JSON.
-Non-interactive mutation receipts and metadata reads write one final complete JSON value on stdout, without interleaved events or prose, except successful `session start`, which prints its allocated six-character ID and newline.
+Non-interactive mutation receipts and metadata reads write one final complete JSON value on stdout, without interleaved events or prose.
 Bounded streaming does not promise atomic pipe delivery or a resident result population.
 Every such JSON value, and each JSON diagnostic, spells DEL and every non-ASCII code point as a `\u` escape through one CLI output owner, so names, Action proposals and Host replies cannot reorder or hide terminal output while decoded values stay exact.
 Explicit content reads stream saved bytes only; a content reader that fails before content writes its typed diagnostic to stderr and leaves stdout empty.
@@ -3412,7 +3477,8 @@ Orphan tools may retain each bounded unlinked stdin file until exit; replacement
 
 A launched Host (`rui host serve --launch-frame`) is the exception: its shutdown is bounded.
 The program that starts it writes one frame to its stdin, a 4-byte big-endian length and then UTF-8 JSON naming `v` (1), the Store directory, the OpenAI key provider `{kind: "openai_key", baseUrl, key}`, the `runtimeDir` that holds its socket `rui.sock`, and optionally `activeCapacity`.
-The optional `presets` object maps at most 64 names (1–64 bytes of `[a-z0-9_-]`) to complete agent specs, checked by the `start_agent` spec parser and held only in Host memory (D22, D112).
+The optional `presets` object maps at most 64 names (1–64 bytes of `[a-z0-9_-]`) to complete agent specs, checked by the shared agent-spec parser and held only in Host memory (D22, D112).
+A `start_agent` call may name a preset and override its fields, but still refuses provider or Workspace fields, including those supplied by the preset (D221).
 The key stays in memory only, never on disk, in argv or in the environment.
 stdin then stays open and carries nothing; when it closes, the Host stops as `host-stop` does, and an alarm ends the process 10 seconds later if the drain has not finished, which is a forced termination as above.
 A refusal at open is one stdout line `{"rui_start_error":{"code","message"}}` with code `launch_frame_invalid`, `invalid_preset` or `store_locked`, then exit status 1.

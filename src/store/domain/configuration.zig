@@ -80,12 +80,13 @@ fn requestsBash(requested: *const protocol.Configuration) bool {
 }
 
 /// D133: an omitted provider selects the Host's single served provider.
-/// A multi-provider or idle Host retains its product binding preference.
-fn defaultProvider(routes: protocol.Routes) protocol.Provider {
+/// A Host serving several has no default (D221), so a creation must name
+/// one. An idle Host keeps the product's, which its unserved check refuses.
+fn defaultProvider(routes: protocol.Routes) ?protocol.Provider {
     var selected: ?protocol.Provider = null;
     inline for (std.enums.values(protocol.Provider)) |provider| {
         if (protocol.routeOf(routes, provider) != .unserved) {
-            if (selected != null) return std.meta.stringToEnum(protocol.Provider, product_defaults.provider).?;
+            if (selected != null) return null;
             selected = provider;
         }
     }
@@ -129,7 +130,6 @@ pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
 pub const CurrentConfiguration = struct {
     workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
     provider: protocol.Provider = undefined,
-    codec: protocol.Codec = .@"openai-responses/2",
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
     /// Read only: the tools of the set `tool_set_id` names, as a mask,
@@ -137,6 +137,8 @@ pub const CurrentConfiguration = struct {
     tools_mask: u8 = 0,
     /// The saved tool set; 0 until a creation saves its first.
     tool_set_id: u64 = 0,
+    /// Null means every configured tool is loaded.
+    loaded_tool_set_id: ?u64 = null,
     permission_mode: u8 = 0,
     output_schema_id: ?i64 = null,
     revision: u64 = 0,
@@ -149,6 +151,8 @@ pub const CurrentConfiguration = struct {
     created_at: u64 = 0,
     /// Read only: the change ring's key for the Session's Workspace.
     workspace_key: u64 = 0,
+    /// Read only: the creator of an attached agent; absent for other Sessions.
+    parent_ref: ?protocol.Bounded(protocol.session_id_bytes) = null,
 };
 
 /// The Session columns turn work, settlement and page cursors read, without
@@ -213,7 +217,7 @@ pub fn configurationBeforeWorkspace(
     catalog: *const tool_catalog.Catalog,
     current: ?*const CurrentConfiguration,
     requested: *const protocol.Configuration,
-    default_provider: protocol.Provider,
+    default_provider: ?protocol.Provider,
 ) ?protocol.ConfigurationRejection {
     if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
     const compact_at = if (requested.compaction_trigger.state == .value)
@@ -230,7 +234,8 @@ pub fn configurationBeforeWorkspace(
     if (current == null and
         (requested.model.state != .value or requested.reasoning_effort.state == .omitted or
             requested.compaction_trigger.state != .value or requested.tools.state != .value or
-            requested.permission_mode.state != .value or (requestsBash(requested) and requested.workspace.state != .value)))
+            requested.permission_mode.state != .value or (requestsBash(requested) and requested.workspace.state != .value) or
+            (provider == null and default_provider == null)))
     {
         return .incomplete_initial_configuration;
     }
@@ -245,18 +250,19 @@ pub fn configurationBeforeWorkspace(
         }
     }
     if (requested.label.state == .value and !protocol.validLabel(requested.label.value.slice())) return .invalid_label;
-    if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider), &requested.tools)) |rejection| return rejection;
+    if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     // D166: an unlisted model has no known window to enforce.
     if (compact_at) |tokens| if (model_capability.find(model)) |known| {
         if (tokens > known.context_window) return .compact_at_too_large;
     };
     if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
-    // D111/D165: v2 cannot encode a boundary back to unspecified effort.
-    // Refuse before saving an unusable revision rather than inferring effort.
-    if (requested.reasoning_effort.state == .explicit_null) if (current) |existing| {
-        if (existing.codec == .@"openai-responses/2" and existing.reasoning_effort != null) return .unsupported_reasoning_effort;
-    };
+    // D111/D165: a null effort states "send none" and is accepted only for a
+    // model the catalog does not list; a listed model takes one of its values.
+    // So a saved null on a listed model can only predate D111 (see
+    // effectiveReasoningEffort), and no update creates a boundary from an
+    // effort back to none, which the openai-responses/2 codec cannot encode.
+    if (requested.reasoning_effort.state == .explicit_null and model_capability.find(model) != null) return .unsupported_reasoning_effort;
     if (requested.reasoning_effort.state == .value) {
         const effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
             return .unsupported_reasoning_effort;
@@ -265,9 +271,12 @@ pub fn configurationBeforeWorkspace(
     return null;
 }
 
-/// D111: Operations freeze the spec's effort, never a catalog default.
+/// The effort a new Operation freezes: the Session's own (D111). A Session
+/// saved before D111 may hold null on a listed model, and its Operations
+/// froze the catalog default, so it keeps that default; configuration
+/// refuses null for a listed model, so no newer Session reaches it.
 pub fn effectiveReasoningEffort(current: anytype) ?protocol.ReasoningEffort {
-    return current.reasoning_effort;
+    return current.reasoning_effort orelse model_capability.defaultReasoningEffort(current.model.slice());
 }
 
 /// `next` holds the current configuration's values, or the defaults when
@@ -336,7 +345,7 @@ pub fn planConfigurationUpdate(
 /// write round (`importSealed`). The
 /// decision is `applyConfiguration`; the write round saves the Session,
 /// the command and its revision, then commits.
-pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, preset: ?PresetDecision, faults: Faults) !ConfigureReply {
+pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, preset: ?*const PresetDecision, faults: Faults) !ConfigureReply {
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
     const command = request;
@@ -408,6 +417,7 @@ const Settings = struct {
     model: protocol.Bounded(protocol.max_model_bytes),
     instructions_id: ?i64,
     tool_set_id: u64,
+    loaded_tool_set_id: ?u64,
     permission_mode: u8,
     output_schema_id: ?i64,
     compaction_trigger: ?u64,
@@ -421,6 +431,7 @@ const Settings = struct {
             .model = current.model,
             .instructions_id = current.instructions_id,
             .tool_set_id = current.tool_set_id,
+            .loaded_tool_set_id = current.loaded_tool_set_id,
             .permission_mode = current.permission_mode,
             .output_schema_id = current.output_schema_id,
             .compaction_trigger = current.compaction_trigger,
@@ -437,6 +448,8 @@ const Settings = struct {
         fields.setPresent(.model, !before.model.eql(after.model.slice()));
         fields.setPresent(.instructions, before.instructions_id != after.instructions_id);
         fields.setPresent(.tools, before.tool_set_id != after.tool_set_id);
+        // Equality follows tools implicitly: its existing tools event suffices.
+        fields.setPresent(.loaded_tools, before.loaded_tool_set_id != after.loaded_tool_set_id);
         fields.setPresent(.permission_mode, before.permission_mode != after.permission_mode);
         fields.setPresent(.output_schema, before.output_schema_id != after.output_schema_id);
         fields.setPresent(.compaction_trigger, before.compaction_trigger != after.compaction_trigger);
@@ -474,6 +487,11 @@ pub const ConfigurationReads = struct {
     /// The tool set a creation or a `tools` change saves, when it does;
     /// null too when the catalog lacks a name, which the configure refuses.
     tools: ?tool_set.Selection = null,
+    loaded_tools: ?tool_set.Selection = null,
+    /// Saved names used only when a tool update must preserve or narrow a
+    /// previously loaded subset. Keep these in Store scratch, not a frame.
+    saved_tools: protocol.ToolsField = undefined,
+    saved_loaded: protocol.ToolsField = undefined,
     /// The Session a creation starts as the child of, when it has one.
     parent: ?[protocol.session_id_bytes]u8 = null,
 
@@ -487,9 +505,9 @@ pub const ConfigurationReads = struct {
 /// A Session's saved configuration, decoded into a CurrentConfiguration in
 /// place; `checkSaved` holds it to its types.
 const saved_session = rsql.Read(.{
-    .sql = "SELECT workspace,provider,codec,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,permission_mode," ++
+    .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
-        "reasoning_effort,label,created_at,workspace_key FROM session WHERE session_ref=?1",
+        "reasoning_effort,label,created_at,workspace_key,parent_ref FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = CurrentConfiguration,
     .cardinality = .optional,
@@ -509,8 +527,8 @@ const creation_facts = rsql.Read(.{
 /// the `created_seq` of its first Session.
 const insert_session = rsql.Write(.{
     .sql = "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,next_position," ++
-        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref) " ++
-        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17)",
+        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id) " ++
+        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17,?18)",
     .Args = struct {
         session: rsql.SessionHead,
         workspace: []const u8,
@@ -529,6 +547,7 @@ const insert_session = rsql.Write(.{
         created_seq: u64,
         workspace_key: u64,
         parent: ?protocol.Bounded(protocol.session_id_bytes),
+        loaded_tool_set_id: ?u64,
     },
     // Its round read the reference free, under the single writer.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -561,12 +580,13 @@ pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentCon
         .created_seq = created_seq,
         .workspace_key = head.workspace_key.get(),
         .parent = parent_ref,
+        .loaded_tool_set_id = next.loaded_tool_set_id,
     });
 }
 
 const update_session = rsql.Write(.{
     .sql = "UPDATE session SET model=?2,instructions_content_id=?3,tool_set_id=?4,permission_mode=?5,output_schema_content_id=?6,revision=?7,provider=?8," ++
-        "compaction_trigger=?9,output_reservation=?10,reasoning_effort=?11,label=?12 WHERE session_ref=@session(?1)",
+        "compaction_trigger=?9,output_reservation=?10,reasoning_effort=?11,label=?12,loaded_tool_set_id=?13 WHERE session_ref=@session(?1)",
     .Args = struct {
         session: rsql.SessionHead,
         model: []const u8,
@@ -580,6 +600,7 @@ const update_session = rsql.Write(.{
         output_reservation: ?u64,
         reasoning_effort: ?protocol.ReasoningEffort,
         label: ?[]const u8,
+        loaded_tool_set_id: ?u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SessionUpdateFailed } },
 });
@@ -591,9 +612,9 @@ pub const update_session_sql = update_session.sql;
 /// The one writer of session_revision: it copies the Session row as
 /// written under `command_key`, which an earlier write of the round saved.
 const insert_revision = rsql.Write(.{
-    .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id," ++
+    .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id," ++
         "permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) " ++
-        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,permission_mode,output_schema_content_id,provider," ++
+        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,provider," ++
         "compaction_trigger,output_reservation,reasoning_effort,label FROM session WHERE session_ref=@session(?1)",
     .Args = struct { session: rsql.SessionHead, command_key: []const u8, instructions_updated: bool },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -613,7 +634,7 @@ pub fn readSaved(a: anytype, session_ref: []const u8, current: *CurrentConfigura
 pub fn checkSaved(current: *const CurrentConfiguration) error{CorruptStore}!void {
     const instructions = current.instructions_id orelse return error.CorruptStore;
     if (instructions == 0 or current.output_schema_id == @as(?i64, 0) or current.revision == 0 or current.next_position == 0 or
-        current.compaction_trigger == @as(?u64, 0) or current.created_at == 0 or current.workspace_key == 0 or current.tool_set_id == 0) return error.CorruptStore;
+        current.compaction_trigger == @as(?u64, 0) or current.created_at == 0 or current.workspace_key == 0 or current.tool_set_id == 0 or current.loaded_tool_set_id == @as(?u64, 0)) return error.CorruptStore;
     _ = try toolSet(current.tools_mask);
     _ = try permissionMode(current.permission_mode);
     if (current.label) |*label| try checkLabel(label.slice());
@@ -653,8 +674,97 @@ pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *con
     } else if (instructions orelse output_schema) |value| content_domain.lookup(a, value);
 }
 
+/// Sorted saved names, streamed into the configure's Store scratch. The
+/// optional filter implements preserving a loaded subset across a tools change.
+const selected_names = rsql.Read(.{
+    .sql = "SELECT tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "WHERE member.tool_set_id=?1 ORDER BY tool.name",
+    .Args = struct { set: u64 },
+    .Row = struct { name: protocol.Bounded(tool_catalog.max_name_bytes) },
+    .cardinality = .each,
+});
+
+fn containsName(names: *const protocol.ToolsField, wanted: []const u8) bool {
+    var each = names.iterator();
+    while (each.next()) |name| if (std.mem.eql(u8, name, wanted)) return true;
+    return false;
+}
+
+const NameSelection = struct {
+    names: *protocol.ToolsField,
+    filter: ?*const protocol.ToolsField = null,
+    invalid: bool = false,
+
+    pub fn visit(self: *NameSelection, row: *const selected_names.Row) bool {
+        if (self.filter) |filter| if (!containsName(filter, row.name.slice())) return true;
+        self.names.append(row.name.slice()) catch {
+            self.invalid = true;
+            return false;
+        };
+        return true;
+    }
+};
+
+/// A strict loaded set must retain the built-in loader, so every configured
+/// tool remains reachable. Membership always refers to the selected saved set.
+fn loadedToolsRejection(tools: *const protocol.ToolsField, loaded: *const protocol.ToolsField) ?protocol.ConfigurationRejection {
+    var names = loaded.iterator();
+    while (names.next()) |name| if (!containsName(tools, name)) return .loaded_tools_not_in_tools;
+    if (loaded.count < tools.count and !containsName(loaded, "find_tools")) return .loaded_tools_unreachable;
+    return null;
+}
+
+/// Resolves the loaded set before importing content or changing the Session.
+/// Omitted loaded_tools follows the entire tools set unless it was already a
+/// strict subset; that subset is intersected with a newly requested tools set.
+fn prepareLoadedTools(a: anytype, creating: bool, requested: *const protocol.Configuration, reads: *ConfigurationReads) !?protocol.ConfigurationRejection {
+    if (!creating and requested.tools.state != .value and requested.loaded_tools.state != .value) return null;
+    if (requested.loaded_tools.state != .value and (creating or reads.next.loaded_tool_set_id == null)) return null;
+
+    const tools: *const protocol.ToolsField = if (creating or requested.tools.state == .value) requestedNames(requested) else saved: {
+        reads.saved_tools.state = .value;
+        reads.saved_tools.count = 0;
+        reads.saved_tools.names.len = 0;
+        var names: NameSelection = .{ .names = &reads.saved_tools };
+        a.readEach(selected_names, .{ .set = reads.next.tool_set_id }, protocol.max_tools + 1, &names);
+        try a.run();
+        if (names.invalid) return error.CorruptStore;
+        break :saved &reads.saved_tools;
+    };
+    const loaded: *const protocol.ToolsField = if (requested.loaded_tools.state == .value) &requested.loaded_tools else saved: {
+        reads.saved_loaded.state = .value;
+        reads.saved_loaded.count = 0;
+        reads.saved_loaded.names.len = 0;
+        var names: NameSelection = .{ .names = &reads.saved_loaded, .filter = tools };
+        a.readEach(selected_names, .{ .set = reads.next.loaded_tool_set_id.? }, protocol.max_tools + 1, &names);
+        try a.run();
+        if (names.invalid) return error.CorruptStore;
+        break :saved &reads.saved_loaded;
+    };
+    if (loadedToolsRejection(tools, loaded)) |rejection| return rejection;
+    if (loaded.count == tools.count) return null;
+    reads.loaded_tools = if (creating or requested.tools.state == .value)
+        tool_set.Selection.of(a.store.catalog().catalog, loaded) orelse return error.CorruptStore
+    else
+        try tool_set.Selection.ofSaved(a, reads.next.tool_set_id, loaded);
+    tool_set.lookupSelection(a, &reads.loaded_tools.?);
+    try a.run();
+    return null;
+}
+
 fn readCreation(a: anytype, reads: *ConfigurationReads) void {
     a.read(creation_facts, .{ .digest = reads.workspace_digest, .workspace = reads.next.workspace.slice(), .session = &reads.reference }, &reads.creation);
+}
+
+/// D133: only a spec with Bash needs a directory, and the parser and
+/// configurationBeforeWorkspace refused one without it. The Workspace column
+/// stays nonempty, so a spec without one saves the root. noinline: the
+/// digest's hash state stays off applyConfiguration's frame, which sits on
+/// the engine thread's deepest chain.
+noinline fn saveUnusedWorkspace(configuration: *const protocol.Configuration, next: *CurrentConfiguration, reads: *ConfigurationReads) void {
+    std.debug.assert(!requestsBash(configuration));
+    next.workspace.set("/") catch unreachable;
+    reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
 }
 
 /// After `prepareConfiguration`'s round: decides the configuration, and
@@ -675,8 +785,7 @@ pub fn applyConfiguration(
         return .{ .rejected = .invalid_session_reference };
     }
     if (configuration.permission_mode.state == .value and
-        !configuration.permission_mode.value.eql("ask") and
-        !configuration.permission_mode.value.eql("bypass"))
+        std.meta.stringToEnum(protocol.PermissionMode, configuration.permission_mode.value.slice()) == null)
     {
         return .{ .rejected = .unsupported_permission_mode };
     }
@@ -684,7 +793,7 @@ pub fn applyConfiguration(
         return .{ .rejected = .invalid_model };
     }
     if (configuration.output_schema.state == .value) {
-        const valid = if (configuration.output_schema.borrowed_bytes) |bytes|
+        const valid = if (configuration.output_schema.borrowedBytes()) |bytes|
             try model_settlement_domain.validateJsonBytes(bytes)
         else
             try model_settlement_domain.validateJsonFile(io, configuration.output_schema.file orelse return error.MissingContentCustody);
@@ -698,20 +807,20 @@ pub fn applyConfiguration(
     }
     if (reads.found.get()) try checkSaved(next);
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
-    if (configurationBeforeWorkspace(a.store.catalog().catalog, current_configuration, configuration, defaultProvider(a.store.served))) |rejection| {
+    const default_provider = defaultProvider(a.store.served);
+    if (configurationBeforeWorkspace(a.store.catalog().catalog, current_configuration, configuration, default_provider)) |rejection| {
         return .{ .rejected = rejection };
     }
 
-    if (creating) next.provider = defaultProvider(a.store.served);
+    // A stated provider is saved by the update plan; configurationBeforeWorkspace
+    // refused a creation with neither.
+    if (creating) if (default_provider) |provider| {
+        next.provider = provider;
+    };
     // An existing Session's Workspace is only compared, in sameWorkspace's
     // own frame; a created one's was canonicalized into `next`.
     const workspace_matches: ?bool = if (creating and configuration.workspace.state != .value) unused: {
-        // D133: only a spec with Bash needs a directory, and the parser and
-        // configurationBeforeWorkspace refused one without it. The Workspace
-        // column stays nonempty, so a spec without one saves the root.
-        std.debug.assert(!requestsBash(configuration));
-        next.workspace.set("/") catch unreachable;
-        reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
+        saveUnusedWorkspace(configuration, next, reads);
         break :unused null;
     } else if (configuration.workspace.state == .value) matches: {
         if (reads.found.get()) {
@@ -723,6 +832,8 @@ pub fn applyConfiguration(
         reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
         break :matches true;
     } else null;
+
+    if (try prepareLoadedTools(a, creating, configuration, reads)) |rejection| return .{ .rejected = rejection };
 
     const created = !reads.found.get();
     const before: ?Settings = if (created) null else .of(next);
@@ -760,6 +871,11 @@ pub fn applyConfiguration(
         const tools = &(reads.tools orelse return error.CorruptStore);
         next.tool_set_id = try tool_set.finishSelection(a, tools, a.store.catalog().set_id);
     }
+    if (reads.loaded_tools) |*loaded| {
+        next.loaded_tool_set_id = try tool_set.finishSelection(a, loaded, next.tool_set_id);
+    } else if (creating or configuration.loaded_tools.state == .value or configuration.tools.state == .value) {
+        next.loaded_tool_set_id = null;
+    }
     var target: protocol.Bounded(protocol.max_session_bytes) = .{};
     var head: rsql.SessionHead = undefined;
     if (created) {
@@ -787,6 +903,7 @@ pub fn applyConfiguration(
             .model = next.model.slice(),
             .instructions_id = if (next.instructions_id) |id| @intCast(id) else null,
             .tool_set_id = next.tool_set_id,
+            .loaded_tool_set_id = next.loaded_tool_set_id,
             .permission_mode = next.permission_mode,
             .output_schema_id = if (next.output_schema_id) |id| @intCast(id) else null,
             .revision = next.revision,
@@ -831,7 +948,7 @@ pub fn servesProviderOf(served: anytype, configuration: ?*const protocol.Configu
     const provider = if (configuration != null and configuration.?.provider.state == .value)
         std.meta.stringToEnum(protocol.Provider, configuration.?.provider.value.slice()) orelse return true
     else
-        saved orelse (if (configuration != null) defaultProvider(served) else return true);
+        saved orelse (if (configuration != null) defaultProvider(served) orelse return true else return true);
     return protocol.routeOf(served, provider) != .unserved;
 }
 

@@ -73,7 +73,7 @@ def main():
                     references = [row["reference"] for row in listed["sessions"]]
                     assert references == allocated, result
                 elif mode == "failure":
-                    assert result.returncode != 0 and "HostInvocationFailed" in result.stderr and result.stdout == "", result
+                    assert result.returncode == 5 and result.stdout == "", result
                     assert json.loads(result.stderr.splitlines()[0]) == {"status": 503, "type": "busy", "code": "ordinary_capacity_exhausted"}, result
                     assert "discard-me" not in result.stderr, result
                 else:

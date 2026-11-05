@@ -139,7 +139,7 @@ const touchForTesting = tests.touchForTesting;
 
 /// A catalog with one tool beyond the built-ins, between them by name.
 const testing_record: tool_catalog.Record = .{ .name = "test_tool", .owner = .rui, .description = "A tool only tests offer.", .input_schema = "{\"type\":\"object\"}" };
-const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, tool_catalog.message_agent_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
+const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, tool_catalog.find_tools_record, tool_catalog.message_agent_record, tool_catalog.read_transcript_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
 const testing_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [testing_records.len][32]u8 = undefined;
@@ -417,6 +417,7 @@ fn takeEveryIdentityForTesting(storage: *Store) ![std.enums.values(store_core.Id
         "SELECT max(admission_id) FROM message_admission",
         "SELECT max(tool_record_id) FROM tool_record",
         "SELECT max(tool_set_id) FROM tool_set",
+        "SELECT max(forward_id) FROM session_forward",
     };
     var taken: [maxima.len]u64 = undefined;
     const entry = try store_core.enter(storage, .none);
@@ -438,8 +439,11 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
+    // Attached ask Sessions commit forward identities too.
+    const parent = try configureTestSession(&storage, "identity-parent");
     // Entry points commit rows in every column.
     const first_session = try configureTestSessionAsk(&storage, "identity-config");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), first_session.slice() });
     try submitTestMessage(&storage, &tmp, "identity-message", "identity-message", first_session.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-first");
 
@@ -451,6 +455,7 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     try storage.close();
     try testingStoreCatalog(&storage, &tmp, std.testing.io, &testing_catalog);
     const second_session = try configureTestSessionAsk(&storage, "identity-later");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), second_session.slice() });
     // New text, so content commits a new row too.
     try submitTestMessage(&storage, &tmp, "identity-later-message", "identity-later-message", second_session.slice(), "propose again");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-second");
@@ -939,7 +944,8 @@ fn expectDenseSessionPositions(storage: *Store, session: []const u8) !void {
         "WHERE op.session_ref=?1 AND tool_call.acceptance_position IS NOT NULL), " ++
         "settled(position) AS (SELECT acceptance_position FROM action_operation WHERE session_ref=?1 AND acceptance_position IS NOT NULL " ++
         "UNION ALL SELECT outcome_position FROM turn WHERE session_ref=?1 AND outcome_position IS NOT NULL " ++
-        "UNION ALL SELECT position FROM session_stop WHERE session_ref=?1), " ++
+        "UNION ALL SELECT position FROM session_stop WHERE session_ref=?1 " ++
+        "UNION ALL SELECT position FROM session_forward WHERE target_ref=?1 AND position IS NOT NULL), " ++
         "claimed(position) AS (SELECT position FROM messages UNION ALL SELECT position FROM model UNION ALL SELECT position FROM settled) " ++
         "SELECT count(*),count(DISTINCT position),coalesce(min(position),1),coalesce(max(position),0)," ++
         "(SELECT next_position FROM session WHERE session_ref=?1) FROM claimed");
@@ -1121,17 +1127,17 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
+    // At open, the catalog has two texts for each local tool and web
+    // search's shared empty text; configure has imported nothing yet.
+    try std.testing.expectEqual(@as(u64, 11), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var command = try completeConfiguration("fresh-tool-texts", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
     command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
     command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-    // The Store saved the catalog's seven texts when it opened: two each
-    // for Bash, message_agent and start_agent, and web search's empty one.
     // The configure adds its two values.
-    try std.testing.expectEqual(@as(u64, 7), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
     try std.testing.expect(storage.configure(&command, .{}) == .accepted);
-    try std.testing.expectEqual(@as(u64, 9), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+    try std.testing.expectEqual(@as(u64, 13), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
 }
 
 test "a Session's tools are saved once and read back as saved, not as today's built-ins" {
@@ -1156,19 +1162,19 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
             };
         }
     };
-    // The Host's catalog: one set of the four built-ins, saved at open.
-    try std.testing.expectEqual([3]u64{ 1, 4, 4 }, try Tools.counts(&storage));
+    // The Host's catalog: one set of the six built-ins, saved at open.
+    try std.testing.expectEqual([3]u64{ 1, 6, 6 }, try Tools.counts(&storage));
     // Two Sessions offering Bash share one set, of the catalog's record.
     const first = try configureTestSessionAsk(&storage, "saved-tools-first");
     const second = try configureTestSessionAsk(&storage, "saved-tools-second");
-    try std.testing.expectEqual([3]u64{ 2, 4, 5 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 2, 6, 7 }, try Tools.counts(&storage));
     // A set with the catalog's members is the catalog's set.
-    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "message_agent", "start_agent", "web_search" });
-    try std.testing.expectEqual([3]u64{ 2, 4, 5 }, try Tools.counts(&storage));
+    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "find_tools", "message_agent", "read_transcript", "start_agent", "web_search" });
+    try std.testing.expectEqual([3]u64{ 2, 6, 7 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-both", second, &.{ "bash", "web_search" });
-    try std.testing.expectEqual([3]u64{ 3, 4, 7 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 3, 6, 9 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-none", first, &.{});
-    try std.testing.expectEqual([3]u64{ 4, 4, 7 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 4, 6, 9 }, try Tools.counts(&storage));
     // Each revision keeps the set it was saved with.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
         "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')", .{}));
@@ -1218,6 +1224,69 @@ test "a Bash call the Operation did not offer is rejected and keeps its descript
         .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
     };
     try settleCallsForTesting(&storage, &tmp, binding, "unoffered-metadata", &calls);
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=0 AND rejection_code='unknown_tool' AND description='Run'", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+}
+
+test "loaded tools hide configured tools from frozen requests reports and call settlement" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var empty = try completeConfiguration("loaded-empty", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    empty.configuration.tools = try .of(&.{});
+    const empty_reply = storage.configure(&empty, .{});
+    try std.testing.expect(empty_reply == .accepted);
+    const session = try configureTestSessionAsk(&storage, "loaded-hidden");
+    // An empty loaded set is deliberately unreachable through configure. Seed
+    // its durable representation to exercise frozen settlement defensively.
+    try store_testing.setLoadedToolsForTesting(&storage, session.slice(), empty_reply.accepted.session.slice());
+    for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
+        const bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, profile);
+        defer std.testing.allocator.free(bytes);
+        const report = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer report.deinit();
+        const settings = report.value.object.get("session").?.object;
+        try std.testing.expectEqualStrings("bash", settings.get("tools").?.array.items[0].string);
+        try std.testing.expectEqual(@as(usize, 0), settings.get("loaded_tools").?.array.items.len);
+        if (profile == .current) {
+            const file = try tmp.dir.createFile(std.testing.io, "loaded-current-report", .{ .read = true });
+            defer file.close(std.testing.io);
+            try file.writeStreamingAll(std.testing.io, bytes);
+            const decoded = try protocol_reply.CurrentReply.decode(std.testing.io, file, session.slice(), .{ .report = .{ .bytes = bytes.len } });
+            try std.testing.expect(decoded.current.settings.tools.set.contains(.bash));
+            try std.testing.expectEqual(@as(u8, 0), decoded.current.settings.loaded_tools.names.count);
+        }
+        if (profile == .full) {
+            const revision = report.value.object.get("full").?.object.get("session_revisions").?.array.items[0].object;
+            try std.testing.expectEqualStrings("bash", revision.get("tools").?.array.items[0].string);
+            try std.testing.expectEqual(@as(usize, 0), revision.get("loaded_tools").?.array.items.len);
+        }
+    }
+    try submitTestMessage(&storage, &tmp, "loaded-hidden-message", "loaded-hidden-message", session.slice(), "classify");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    {
+        var view: HistoricalView = undefined;
+        try storage.openHistoricalView(binding, &view);
+        defer view.close();
+        var settings: HistoricalSettings = undefined;
+        try view.settings(&settings);
+        try std.testing.expectEqual(@as(u64, 0), settings.tool_count);
+        var tool: historical_domain.HistoricalTool = .{};
+        try std.testing.expect(!try view.nextTool(&tool));
+    }
+    // Loading Bash after admission does not widen that frozen Operation.
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("loaded-hidden-grow");
+    update.session = session;
+    update.configuration.loaded_tools = try .of(&.{"bash"});
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    const calls = [_]TestingCall{
+        .{ .item_id = "item-1", .name = "bash", .encoded_call_id = "call-1", .decoded_call_id = "call-1", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"one\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"one\"}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, binding, "loaded-hidden-metadata", &calls);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=0 AND rejection_code='unknown_tool' AND description='Run'", .{}));
     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
 }
@@ -1463,14 +1532,14 @@ test "a stale Action settlement leaves the Store byte-identical" {
     const Snapshot = struct {
         database: []u8,
         log: []u8,
-        ids: @TypeOf(storage.ids.next),
+        ids: @TypeOf(storage.identities().next),
         generation: u64,
 
         fn take(store: *Store, dir: std.Io.Dir) !@This() {
             return .{
                 .database = try dir.readFileAlloc(std.testing.io, "store.sqlite3", std.testing.allocator, .unlimited),
                 .log = try dir.readFileAlloc(std.testing.io, "store.sqlite3-wal", std.testing.allocator, .unlimited),
-                .ids = store.ids.next,
+                .ids = store.identities().next,
                 .generation = store.commitGeneration(),
             };
         }
@@ -1556,7 +1625,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
 
     // The open Action still settles at the position and content id the stale ones left.
     const position = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{});
-    const content_id = storage.ids.next.get(.content_id);
+    const content_id = storage.identities().next.get(.content_id);
     try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(open, .failed, "A later result is stored.", .{}));
     try std.testing.expectEqual(position, try store_testing.sqlite_only.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE resolution_code='failed'", .{}));
     try std.testing.expectEqual(content_id, try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code='failed'", .{}));
@@ -8345,6 +8414,62 @@ test "a Store at the migration baseline with its rows takes every migration at o
     try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }
 
+test "schema 53 moves forward to 54 with loaded tools defaulting to NULL" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        for (store_schema.migrations) |step| {
+            if (step.from >= 53) break;
+            for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+        }
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=53", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','53')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, protocol.wire_version);
+        try sqlite.bindText(meta, 2, root);
+        try sqlite.expectDone(meta);
+        // Saved pre-T4a identities survive migration and must replay, not
+        // conflict. These golden digests use the old algorithm's bytes.
+        try sqlite.exec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES" ++
+            "('legacy-configure',1,'',X'e983bd4a7dce4a1ec777d065815928f654ac824dc57a57b397b8f78e7a4ede3a',0,'incomplete_initial_configuration',0,0,1000)," ++
+            "('legacy-create-message',2,'',X'29da99db4ed9dcdf55128d1f956d9551106135b126ec23d2e97cc768618b8127',0,'incomplete_initial_configuration',0,0,1001)");
+    }
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(u64, 54), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+    inline for (.{ "session", "session_revision" }) |table| {
+        try std.testing.expect((try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table, .{})) > 0);
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table ++ " WHERE loaded_tool_set_id IS NOT NULL", .{}));
+    }
+    var configure: protocol.ConfigureCommand = .{};
+    try configure.key.set("legacy-configure");
+    const configure_replay = storage.configure(&configure, .{});
+    try std.testing.expect(configure_replay == .rejected);
+    try std.testing.expect(configure_replay.rejected.replayed);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.incomplete_initial_configuration, configure_replay.rejected.code);
+    var message: protocol.MessageCommand = .{ .configuration = .{} };
+    try message.key.set("legacy-create-message");
+    message.text = try testingBytesContent(&tmp, "legacy-message", "go");
+    defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+    const message_replay = storage.submitMessageWithModel(&message, null, .{});
+    try std.testing.expect(message_replay == .rejected);
+    try std.testing.expect(message_replay.rejected.replayed);
+    try std.testing.expectEqual(protocol.MessageRejection.incomplete_initial_configuration, message_replay.rejected.code);
+    const violations = try sqlite.prepare(storage.sqliteDatabase(), "PRAGMA foreign_key_check");
+    defer _ = c.sqlite3_finalize(violations);
+    try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(violations));
+}
+
 test "a migration whose step fails leaves its backup and the original Store readable, and replaces an earlier backup" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8802,7 +8927,7 @@ test "a stop or a context full ending stops every attached child below it, each 
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&key_buffer, "rui.core/stop/{s}/{s}/{d}", .{ child.slice(), parent.slice(), stop_position }), owed.key.slice());
     // A replayed parent stop owes nothing again.
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE settled=0", .{}));
 
     // The child's stop is an ordinary stop: it excludes the child's queued
     // task, settles what it owed and passes the stop down.
@@ -8860,14 +8985,49 @@ test "child endings deliver once with their answer and sender; standalone ending
         try store_testing.sqlite_only.queryU64(&storage, "SELECT outcome_content_id FROM turn WHERE turn_id=?1", .{ending.turn_id}),
         try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{parent.slice()}),
     );
-    try std.testing.expect(try storage.nextCoreWork() == null);
+    try expectOnlyForwardsThenIdle(&storage);
     // A standalone Turn has no parent to notify.
     const solo = try configureTestSession(&storage, "ending-solo");
     try submitTestMessage(&storage, &tmp, "solo-task", "solo-task", solo.slice(), "answer");
     while (try storage.admitNextModelAttempt(.{})) |attempt| {
         try settleItemsForTesting(&storage, &tmp, attempt.permit.binding, &.{item}, "hello");
     }
-    try std.testing.expect(try storage.nextCoreWork() == null);
+    try expectOnlyForwardsThenIdle(&storage);
+}
+
+test "a child settles two parent stop obligations in place" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const parent = try configureTestSession(&storage, "repeat-stop-parent");
+    const child = try configureTestSession(&storage, "repeat-stop-child");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+
+    for ([_][]const u8{ "repeat-stop-first", "repeat-stop-second" }, 0..) |key, index| {
+        if (index != 0) {
+            try submitTestMessage(&storage, &tmp, "repeat-stop-message", "repeat-stop-message", parent.slice(), "work again");
+        }
+        var stop = try completeSessionStop(key, parent.slice());
+        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        // Replaying the cause must not add another open obligation.
+        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=0", .{child.slice()}));
+        try std.testing.expectEqual(@as(u64, index), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=1", .{child.slice()}));
+
+        const owed = (try storage.nextCoreWork()).?.stop;
+        try std.testing.expectEqualStrings(child.slice(), owed.session.slice());
+        var owed_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
+        try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=0", .{child.slice()}));
+        try std.testing.expectEqual(@as(u64, index + 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=1", .{child.slice()}));
+        try std.testing.expect(try storage.nextCoreWork() == null);
+    }
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1", .{child.slice()}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE session_ref=?1", .{child.slice()}));
+    try std.testing.expect(!storage.isFenced());
 }
 
 test "a client stopped child delivers a nonquiet stopped ending" {
@@ -8921,7 +9081,7 @@ test "a child's core call selected before its parent stopped runs only after the
     try std.testing.expect(ending.quiet);
     try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
-    try std.testing.expect(try storage.nextCoreWork() == null);
+    try expectOnlyForwardsThenIdle(&storage);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
 }
 
@@ -8954,13 +9114,13 @@ test "an owed stop a client's stop already settled, or a newer one replaced, run
     const newer = (try storage.nextCoreWork()).?.stop;
     try std.testing.expect(!std.mem.eql(u8, newer.key.slice(), selected.key.slice()));
     try std.testing.expect(storage.stopOwedSession(&stale, .{}) == .conflict);
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE settled=0", .{}));
     var owed = try completeSessionStop(newer.key.slice(), newer.session.slice());
     try std.testing.expect(storage.stopOwedSession(&owed, .{}) == .accepted);
     const ending = (try storage.nextCoreWork()).?.ending;
     try std.testing.expect(ending.quiet);
     try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
-    try std.testing.expect(try storage.nextCoreWork() == null);
+    try expectOnlyForwardsThenIdle(&storage);
     try std.testing.expect(!storage.isFenced());
 }
 
@@ -9044,7 +9204,7 @@ test "a Session with message_agent keeps it through its list row and report, as 
     try std.testing.expectEqual(@as(usize, 1), sink.core_calls);
 }
 
-test "a start_agent call honors its spec with the caller task and may only narrow tools and permissions" {
+test "a start_agent call creates its agent where its caller works, with the task from the caller, and may only narrow" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -9087,10 +9247,46 @@ test "a start_agent call honors its spec with the caller task and may only narro
     try std.testing.expectEqual(command_domain.AgentStart.failed, try storage.startAgent(bypass.binding, caller.slice(), "run freely", true, &spec, null, .{}));
     try std.testing.expect(try storage.nextCoreWork() == null);
 
-    // D133: these specs omit an unused Workspace and use the Host provider;
-    // only the attached agent is the caller's child.
-    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref<>?1 AND workspace='/' AND provider='codex'", .{caller.slice()}));
+    // Two agents, both in the caller's Workspace with its provider (D122,
+    // D221); only the attached one is its child.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref<>?1 AND workspace=?2 AND provider=(SELECT provider FROM session WHERE session_ref=?1)", .{ caller.slice(), workspace }));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{caller.slice()}));
+    // Public list and both report profiles expose only the attached agent's
+    // parent; the standalone agent and its caller have none.
+    {
+        var used = std.atomic.Value(u64).init(0);
+        const bytes = try tests.testingSessionList(&storage, &tmp, .{}, &used, 77);
+        defer std.testing.allocator.free(bytes);
+        const listed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer listed.deinit();
+        const rows = listed.value.object.get("sessions").?.array.items;
+        try std.testing.expectEqual(@as(usize, 3), rows.len);
+        var children: usize = 0;
+        for (rows) |row| {
+            const reference = row.object.get("reference").?.string;
+            const first = row.object.get("first_message").?;
+            const attached_child = !std.mem.eql(u8, reference, caller.slice()) and
+                std.mem.eql(u8, first.object.get("content").?.object.get("bytes").?.string, "14");
+            const parent = row.object.get("parent").?;
+            if (attached_child) {
+                try std.testing.expect(parent == .string);
+                try std.testing.expectEqualStrings(caller.slice(), parent.string);
+                children += 1;
+            } else try std.testing.expect(parent == .null);
+            for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
+                const report = try testingSessionReportWithProfile(&storage, &tmp, reference, 1024 * 1024, profile);
+                defer std.testing.allocator.free(report);
+                const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+                defer parsed.deinit();
+                const reported_parent = parsed.value.object.get("session").?.object.get("parent").?;
+                if (attached_child) {
+                    try std.testing.expect(reported_parent == .string);
+                    try std.testing.expectEqualStrings(caller.slice(), reported_parent.string);
+                } else try std.testing.expect(reported_parent == .null);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), children);
+    }
     // Each task is its agent's first Message, from the caller, under the
     // call's own command key.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1 AND admission_position=1 AND command_key LIKE 'rui.core/start_agent/%'", .{caller.slice()}));
@@ -9103,21 +9299,244 @@ test "a start_agent call honors its spec with the caller task and may only narro
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'spec.permissionMode:%'", .{}));
 }
 
+test "read_transcript core runner reads other Session outlines before full windows unknown id and self" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("transcript-caller", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{"read_transcript"});
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const caller = storage.configure(&command, .{}).accepted.session;
+    try submitTestMessage(&storage, &tmp, "transcript-task", "transcript-task", caller.slice(), "read the public feed");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+
+    const other = try configureTestSession(&storage, "transcript-other");
+    const long = try arena.alloc(u8, 16 * 1024 + 64);
+    @memset(long, 'x');
+    @memcpy(long[16383..][0..4], "😀");
+    try submitTestMessage(&storage, &tmp, "transcript-old", "transcript-old", other.slice(), "old message");
+    try submitTestMessage(&storage, &tmp, "transcript-long", "transcript-long", other.slice(), long);
+    try submitTestMessage(&storage, &tmp, "transcript-new", "transcript-new", other.slice(), "new message");
+    const page = try arena.create(protocol.ActivityFacts);
+    try storage.activityPage(&.{ .session = other, .direction = .backward }, page);
+    try std.testing.expectEqual(@as(usize, 3), page.count);
+    const newest = page.items[0].position;
+    const middle = page.items[1].position;
+    const oldest = page.items[2].position;
+    const args = [_][]const u8{
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1}}", .{other.slice()}),
+        // Exactly the continuation call 0 emits, so the test follows it.
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"limit\":1,\"before\":\"{d}.0\"}}", .{ other.slice(), newest }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ other.slice(), middle }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":16383}}", .{ other.slice(), middle }),
+        "{\"id\":\"zzzzzz\"}",
+        "{}",
+        "{\"limit\":0}",
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"999999.0\"}}", .{other.slice()}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":16384}}", .{ other.slice(), middle }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"query\":\"MESSAGE\",\"kinds\":[\"admission\"],\"limit\":1}}", .{other.slice()}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"query\":\"MESSAGE\",\"before\":\"{d}.0\"}}", .{ other.slice(), newest }),
+    };
+    var calls: [args.len]TestingCall = undefined;
+    for (&calls, args, 0..) |*call, arguments, index| {
+        const quoted = try std.json.Stringify.valueAlloc(arena, arguments, .{});
+        const id = try std.fmt.allocPrint(arena, "read-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "read_transcript", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = arguments };
+    }
+    try settleCallsForTesting(&storage, &tmp, model, "transcript-metadata", &calls);
+    // Even malformed runtime arguments settle as core calls under ask.
+    try std.testing.expectEqual(@as(u64, args.len), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND approval_position IS NULL", .{}));
+    try std.testing.expect(try storage.admitNextActionAttempt(300_000, .{}) == null);
+    const note = try std.fmt.allocPrint(arena, "Read {s}'s transcript", .{other.slice()});
+    try std.testing.expectEqual(@as(u64, 8), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{note}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description='Read own transcript'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description='Read zzzzzz''s transcript'", .{}));
+
+    for (args, 0..) |_, index| {
+        const work = (try storage.nextCoreWork()).?.action;
+        try std.testing.expect(work.tool == .read_transcript);
+        try @import("../read_transcript.zig").run(&storage, arena, &work, .{});
+        const result_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{work.binding.action_id});
+        const reference = try testingContentReference(&storage, result_id);
+        const bytes = try arena.alloc(u8, @intCast(reference.length));
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(reference));
+        defer reader.close();
+        try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
+        const succeeded = index < 4 or index == 5 or index >= 9;
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ work.binding.action_id, if (succeeded) "succeeded" else "failed" }));
+        switch (index) {
+            0 => {
+                const expected = try std.fmt.allocPrint(arena, "{d}.0 admission person", .{newest});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "new message") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "old message") == null);
+                const more = try std.fmt.allocPrint(arena, "More: call read_transcript with {s}.\n", .{args[1]});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, more) != null);
+            },
+            1 => {
+                const expected = try std.fmt.allocPrint(arena, "{d}.0 admission person", .{middle});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+                const excluded = try std.fmt.allocPrint(arena, "{d}.0 admission", .{newest});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, excluded) == null);
+                const older = try std.fmt.allocPrint(arena, "{d}.0 admission", .{oldest});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, older) == null);
+            },
+            2 => {
+                const expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 0 to 16383 of {d}:\n{s}\nMore: call read_transcript with {s}.\n", .{ middle, long.len, long[0..16383], args[3] });
+                try std.testing.expectEqualStrings(expected, bytes);
+            },
+            3 => {
+                const expected = try std.fmt.allocPrint(arena, "Entry {d}.0 admission, bytes 16383 to {d} of {d}:\n{s}", .{ middle, long.len, long.len, long[16383..] });
+                try std.testing.expectEqualStrings(expected, bytes);
+            },
+            4 => try std.testing.expectEqualStrings("Rui could not read the transcript: id names an unknown Session.", bytes),
+            5 => {
+                const heading = try std.fmt.allocPrint(arena, "Session {s}, newest first", .{caller.slice()});
+                try std.testing.expect(std.mem.startsWith(u8, bytes, heading));
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "read_transcript") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "Read own transcript") != null);
+            },
+            6 => try std.testing.expectEqualStrings("Rui could not read the transcript: limit must be 1 to 16.", bytes),
+            7 => try std.testing.expectEqualStrings("Rui could not read the transcript: full names no public entry.", bytes),
+            8 => try std.testing.expect(std.mem.indexOf(u8, bytes, "offset must be within the entry and on a UTF-8 character boundary") != null),
+            9 => {
+                const expected = try std.fmt.allocPrint(arena, "{d}.0 admission person", .{newest});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "\"new message\"\n\"new message\"\n") != null);
+                const more = try std.fmt.allocPrint(arena, "More: call read_transcript with {{\"id\":\"{s}\",\"query\":\"MESSAGE\",\"kinds\":[\"admission\"],\"limit\":1,\"before\":\"{d}.0\"}}.", .{ other.slice(), newest });
+                try std.testing.expect(std.mem.indexOf(u8, bytes, more) != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "old message") == null);
+            },
+            10 => {
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "\"old message\"\n\"old message\"\n") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "new message") == null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "Start of the Session.") != null);
+            },
+            else => unreachable,
+        }
+    }
+    try std.testing.expect(try storage.nextCoreWork() == null);
+}
+
+test "read_transcript opens public calls and no-content rows and identifies nonzero result ordinals" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    const source = try configureMessagingSession(&storage, "transcript-source");
+    try submitTestMessage(&storage, &tmp, "transcript-source-message", "transcript-source-message", source.slice(), "make calls");
+    const source_model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const source_arguments = "{\"id\":\"zzzzzz\",\"text\":\"hello\"}";
+    const quoted = try std.json.Stringify.valueAlloc(arena, source_arguments, .{});
+    const source_calls = [_]TestingCall{
+        .{ .item_id = "unknown", .name = "not_offered", .encoded_call_id = "unknown", .decoded_call_id = "unknown", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "message", .name = "message_agent", .encoded_call_id = "message", .decoded_call_id = "message", .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = source_arguments },
+    };
+    try settleCallsForTesting(&storage, &tmp, source_model, "transcript-source-calls", &source_calls);
+    const work = (try storage.nextCoreWork()).?.action;
+    try std.testing.expect(try storage.deliverAgentMessage(work.binding, "zzzzzz", "hello", .{}) == .failed);
+    var stop = try completeSessionStop("transcript-source-stop", source.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    const page = try arena.create(protocol.ActivityFacts);
+    try storage.activityPage(&.{ .session = source, .direction = .backward }, page);
+    var call_address: u64 = 0;
+    var stop_address: u64 = 0;
+    for (page.items[0..page.count]) |*item| switch (item.value) {
+        .call => |call| if (call.call_ordinal == 1) {
+            call_address = item.position;
+        },
+        .stop => stop_address = item.position,
+        else => {},
+    };
+    try std.testing.expect(call_address != 0 and stop_address != 0);
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("transcript-reader", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{"read_transcript"});
+    const reader_session = storage.configure(&command, .{}).accepted.session;
+    try submitTestMessage(&storage, &tmp, "transcript-reader-message", "transcript-reader-message", reader_session.slice(), "read calls");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const full_text = "message_agent\n" ++ source_arguments;
+    const arguments = [_][]const u8{
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"kinds\":[\"tool_result\"]}}", .{source.slice()}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ source.slice(), call_address }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":13}}", .{ source.slice(), call_address }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ source.slice(), stop_address }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"kinds\":[\"assistant\"]}}", .{source.slice()}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":{d}}}", .{ source.slice(), call_address, full_text.len + 1 }),
+        "{" ++ @as([4096]u8, @splat(' ')),
+        "{",
+    };
+    var calls: [arguments.len]TestingCall = undefined;
+    for (&calls, arguments, 0..) |*call, args, index| {
+        const encoded = try std.json.Stringify.valueAlloc(arena, args, .{});
+        const id = try std.fmt.allocPrint(arena, "tool-read-{d}", .{index});
+        call.* = .{ .item_id = id, .name = "read_transcript", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = args };
+    }
+    try settleCallsForTesting(&storage, &tmp, model, "transcript-reader-calls", &calls);
+    for (arguments, 0..) |_, index| {
+        const input = (try storage.nextCoreWork()).?.action;
+        try @import("../read_transcript.zig").run(&storage, arena, &input, .{});
+        const result_id = try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{input.binding.action_id});
+        const reference = try testingContentReference(&storage, result_id);
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(reference));
+        defer reader.close();
+        const bytes = try arena.alloc(u8, @intCast(reference.length));
+        try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ input.binding.action_id, if (index < 5) "succeeded" else "failed" }));
+        switch (index) {
+            0 => {
+                try std.testing.expect(std.mem.indexOf(u8, bytes, ".2 tool_result message_agent failed") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, ".1 tool_result not_offered unknown_tool") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "Message zzzzzz") != null);
+            },
+            1, 2 => {
+                const offset: usize = if (index == 1) 0 else 13;
+                const expected = try std.fmt.allocPrint(arena, "Entry {d}.0 call, bytes {d} to {d} of {d}:\n{s}", .{ call_address, offset, full_text.len, full_text.len, full_text[offset..] });
+                try std.testing.expectEqualStrings(expected, bytes);
+            },
+            3 => try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena, "{d}.0 stop\n", .{stop_address}), bytes),
+            4 => try std.testing.expect(std.mem.indexOf(u8, bytes, "empty selection") != null),
+            5 => try std.testing.expect(std.mem.indexOf(u8, bytes, "offset must be within") != null),
+            6 => try std.testing.expect(std.mem.indexOf(u8, bytes, "more than 4096 bytes") != null),
+            7 => try std.testing.expect(std.mem.indexOf(u8, bytes, "not one well-formed JSON object") != null),
+            else => unreachable,
+        }
+    }
+}
+
 test "a catalog at its bound saves and opens again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const count = tool_catalog.max_catalog_records - 4;
+    const count = tool_catalog.max_catalog_records - 6;
     var names: [count][9]u8 = undefined;
-    var records: [count + 4]tool_catalog.Record = undefined;
-    var digests: [count + 4][32]u8 = undefined;
+    var records: [count + 6]tool_catalog.Record = undefined;
+    var digests: [count + 6][32]u8 = undefined;
     records[0] = tool_catalog.bash_record;
-    records[1] = tool_catalog.message_agent_record;
-    records[2] = tool_catalog.start_agent_record;
-    for (&names, records[3 .. count + 3], 0..) |*name, *record, index| {
+    records[1] = tool_catalog.find_tools_record;
+    records[2] = tool_catalog.message_agent_record;
+    records[3] = tool_catalog.read_transcript_record;
+    records[4] = tool_catalog.start_agent_record;
+    for (&names, records[5 .. count + 5], 0..) |*name, *record, index| {
         _ = try std.fmt.bufPrint(name, "tool_{d:0>4}", .{index});
         record.* = .{ .name = name, .owner = .rui, .description = "A tool among many.", .input_schema = "{\"type\":\"object\"}" };
     }
-    records[count + 3] = tool_catalog.web_search_record;
+    records[count + 5] = tool_catalog.web_search_record;
     for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
     const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
     var storage: Store = undefined;
@@ -9125,12 +9544,12 @@ test "a catalog at its bound saves and opens again" {
     try storage.close();
     try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, count + 4), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
+    try std.testing.expectEqual(@as(u64, count + 6), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
 }
 
 /// The testing catalog with an MCP server's tool beside it.
 const mcp_record: tool_catalog.Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page from the docs server.", .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}" };
-const mcp_records = [_]tool_catalog.Record{ tool_catalog.bash_record, mcp_record, tool_catalog.message_agent_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
+const mcp_records = [_]tool_catalog.Record{ tool_catalog.bash_record, mcp_record, tool_catalog.find_tools_record, tool_catalog.message_agent_record, tool_catalog.read_transcript_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
 const mcp_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [mcp_records.len][32]u8 = undefined;
@@ -9270,4 +9689,534 @@ test "a record names a server exactly when an MCP server owns it" {
     var moved = mcp_record;
     moved.server = "wiki";
     try std.testing.expect(!std.mem.eql(u8, &tool_catalog.recordDigest(&mcp_record), &tool_catalog.recordDigest(&moved)));
+}
+
+test "searchActivity streams window edges filters kinds and pages newest first" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try configureTestSession(&storage, "search-config");
+    try submitTestMessage(&storage, &tmp, "search-old", "search-old", session.slice(), "needle old");
+    const text = try arena.alloc(u8, 64 * 1024 + 300);
+    @memset(text, 'x');
+    @memcpy(text[65534..][0..6], "NeEdLe");
+    try submitTestMessage(&storage, &tmp, "search-edge", "search-edge", session.slice(), text);
+    try submitTestMessage(&storage, &tmp, "search-new", "search-new", session.slice(), "needle new");
+    // More than one candidate batch of nonmatching entries must not end
+    // the search before its first match.
+    for (0..18) |i| {
+        const key = try std.fmt.allocPrint(arena, "search-miss-{d}", .{i});
+        try submitTestMessage(&storage, &tmp, key, key, session.slice(), "unrelated");
+    }
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.admission), .limit = 1 };
+    try request.query.set("NEEDLE");
+    var previous: u64 = std.math.maxInt(u64);
+    for (0..3) |i| {
+        try storage.searchActivity(&request, result);
+        try std.testing.expectEqual(@as(usize, 1), result.count);
+        const item = &result.items[0];
+        try std.testing.expect(item.position < previous);
+        previous = item.position;
+        try std.testing.expectEqual(protocol.ActivityItem.Kind.admission, item.kind);
+        try std.testing.expectEqual(@as(usize, 1), item.count);
+        const hit = &item.hits[0];
+        try std.testing.expect(hit.snippet.len <= 160);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(hit.snippet.slice()));
+        try std.testing.expectEqualStrings(if (i == 1) "NeEdLe" else "needle", hit.snippet.slice()[hit.offset..][0..hit.length]);
+        if (i != 2) {
+            const next = result.next.?;
+            try std.testing.expectEqual(item.position, next.position);
+            request.before_position = next.position;
+            request.before_ordinal = next.ordinal;
+        } else try std.testing.expect(result.next == null);
+    }
+    request.before_position = null;
+    request.before_ordinal = null;
+    request.kinds = .initOne(.assistant);
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try std.testing.expect(result.next == null);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "searchActivity budget returns an empty page with a usable next cursor" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try configureTestSession(&storage, "search-budget");
+    try submitTestMessage(&storage, &tmp, "budget-old", "budget-old", session.slice(), "needle");
+    const text = try arena.alloc(u8, reads_domain.activity_search_budget + 32);
+    @memset(text, 'x');
+    @memcpy(text[text.len - 6 ..], "needle");
+    try submitTestMessage(&storage, &tmp, "budget-large", "budget-large", session.slice(), text);
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.admission), .limit = 1 };
+    try request.query.set("needle");
+    const before = storage.testing_content_work.read.load(.monotonic);
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try std.testing.expectEqual(@as(u64, reads_domain.activity_search_budget), storage.testing_content_work.read.load(.monotonic) - before);
+    request.before_position = result.next.?.position;
+    request.before_ordinal = result.next.?.ordinal;
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expect(result.items[0].position < request.before_position.?);
+    try std.testing.expect(result.next == null);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "searchActivity never searches private provider extras" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try configureTestSession(&storage, "search-private");
+    try submitTestMessage(&storage, &tmp, "search-task", "search-task", session.slice(), "public task");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleItemsForTesting(&storage, &tmp, binding, &.{"{\"type\":\"message\",\"id\":\"private-marker\",\"role\":\"assistant\",\"secret\":\"private-marker\",\"content\":[{\"type\":\"output_text\",\"text\":\"public answer\"}]}"}, "public answer");
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT bag.private FROM model_output_item item JOIN content bag ON bag.content_id=item.extras_content_id WHERE item.item_kind=2", .{}));
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session };
+    try request.query.set("private-marker");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try std.testing.expect(result.next == null);
+    try request.query.set("public answer");
+    try storage.searchActivity(&request, result);
+    try std.testing.expect(result.count >= 1);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "searchActivity fences private content substituted into a public message" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const session = try configureTestSession(&storage, "search-corruption");
+    try submitTestMessage(&storage, &tmp, "search-corrupt-message", "search-corrupt-message", session.slice(), "secret");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-corrupt-message')", .{});
+    const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session };
+    try request.query.set("secret");
+    try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "searchActivity verifies canonical content even when its text does not match" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const session = try configureTestSession(&storage, "search-digest");
+    try submitTestMessage(&storage, &tmp, "search-digest-message", "search-digest-message", session.slice(), "correct");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET payload=CAST('damaged' AS BLOB) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-digest-message')", .{});
+    const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session };
+    try request.query.set("absent");
+    try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "searchActivity exhausted exact-budget entry has no continuation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try configureTestSession(&storage, "search-exact-budget");
+    const text = try arena.alloc(u8, reads_domain.activity_search_budget);
+    @memset(text, 'x');
+    try submitTestMessage(&storage, &tmp, "budget-exact", "budget-exact", session.slice(), text);
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.admission) };
+    try request.query.set("absent");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try std.testing.expect(result.next == null);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "searchActivity fences missing assistant entries only in its scanned range" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const missing = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = "lost answer", .decoded = "lost answer" }});
+    try submitTestMessage(&storage, &tmp, "after-missing", "after-missing", missing.session.slice(), "later match");
+    try store_testing.sqlite_only.exec(&storage, "DELETE FROM conversation_entry WHERE entry_kind=3", .{});
+    const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = missing.session, .limit = 1 };
+    try request.query.set("later match");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expect(!storage.isFenced());
+    const next = result.next.?;
+    request.before_position = next.position;
+    request.before_ordinal = next.ordinal;
+    try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "searchActivity finds start_agent call names and stored JSON arguments not call IDs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("search-calls", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{ "read_transcript", "start_agent" });
+    const session = storage.configure(&command, .{}).accepted.session;
+    try submitTestMessage(&storage, &tmp, "search-call-task", "search-call-task", session.slice(), "make calls");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const arguments = "{\"text\":\"find\\nthis\"}";
+    const quoted = try std.json.Stringify.valueAlloc(arena, arguments, .{});
+    const query_args = "{\"kinds\":[\"call\"],\"query\":\"START_AGENT\"}";
+    const query_quoted = try std.json.Stringify.valueAlloc(arena, query_args, .{});
+    try settleCallsForTesting(&storage, &tmp, model, "search-call-metadata", &.{
+        .{ .item_id = "start", .name = "start_agent", .encoded_call_id = "hidden-call-identity", .decoded_call_id = "hidden-call-identity", .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = arguments },
+        .{ .item_id = "read", .name = "read_transcript", .encoded_call_id = "read", .decoded_call_id = "read", .encoded_arguments = query_quoted[1 .. query_quoted.len - 1], .decoded_arguments = query_args },
+    });
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.call) };
+    try request.query.set("start_agent");
+    try storage.searchActivity(&request, result);
+    // The reader's own query also names start_agent in its arguments JSON.
+    try std.testing.expectEqual(@as(usize, 2), result.count);
+    try std.testing.expectEqualStrings("start_agent\n{\"text\":\"find\\nthis\"}", result.items[1].hits[0].snippet.slice());
+    try request.query.set("find\\nthis");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try request.query.set("find\nthis");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try request.query.set("hidden-call-identity");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    // Settle the earlier invalid start call at its owner boundary, then run
+    // read_transcript against the same public call inventory (D163).
+    const start = (try storage.nextCoreWork()).?.action;
+    try std.testing.expect(start.tool == .start_agent);
+    _ = try storage.failCoreCall(start.binding, "invalid start arguments", .{});
+    const read = (try storage.nextCoreWork()).?.action;
+    try @import("../read_transcript.zig").run(&storage, arena, &read, .{});
+    const id = try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{read.binding.action_id});
+    const reference = try testingContentReference(&storage, id);
+    const bytes = try arena.alloc(u8, @intCast(reference.length));
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(reference));
+    defer reader.close();
+    try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "call start_agent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"start_agent\\n") != null);
+    try std.testing.expect(!storage.isFenced());
+}
+
+fn expectOnlyForwardsThenIdle(storage: *Store) !void {
+    while (try storage.nextCoreWork()) |work| {
+        try std.testing.expect(work == .forward);
+        try std.testing.expect(try storage.deliverSessionForward(work.forward, .{}));
+    }
+}
+
+test "K4 ancestor approvals preserve origin and require delivered authority" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const root = try configureTestSession(&storage, "k4-root");
+    const parent = try configureTestSession(&storage, "k4-parent");
+    const child = try configureTestSessionAsk(&storage, "k4-child");
+    const stranger = try configureTestSession(&storage, "k4-stranger");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), parent.slice() });
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+    try submitTestMessage(&storage, &tmp, "k4-input", "k4-input", child.slice(), "propose");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try tests.settleTwoActionsForTesting(&storage, &tmp, model, "k4-calls");
+    const own = try store_core.activityPageForTesting(&storage, .{ .session = child, .kinds = .initOne(.approval_requested) });
+    try std.testing.expectEqual(@as(usize, 2), own.count);
+    const action = own.items[0].value.approval_requested.action;
+    for ([_][]const u8{ root.slice(), stranger.slice() }, 0..) |target, i| {
+        var denied: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };
+        try denied.key.set(if (i == 0) "k4-undelivered" else "k4-unrelated");
+        try denied.session.set(target);
+        const reply = storage.decidePermission(&denied, .{});
+        try std.testing.expect(reply == .rejected);
+        try std.testing.expectEqual(protocol.PermissionDecisionRejection.target_mismatch, reply.rejected.code);
+    }
+    try expectOnlyForwardsThenIdle(&storage);
+    for ([_]@TypeOf(root){ child, parent, root }) |session| {
+        const page = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.approval_requested) });
+        try std.testing.expectEqual(own.count, page.count);
+        for (page.items[0..page.count], own.items[0..own.count]) |actual, expected| {
+            try std.testing.expectEqualDeep(expected.value.approval_requested, actual.value.approval_requested);
+            try std.testing.expectEqualStrings(child.slice(), actual.value.approval_requested.session.slice());
+        }
+    }
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };
+    try allow.key.set("k4-allow");
+    try allow.session.set(root.slice());
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    const replay = storage.decidePermission(&allow, .{});
+    try std.testing.expect(replay == .accepted);
+    try std.testing.expect(replay.accepted.replayed);
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT authorized FROM action_operation WHERE action_id=?1 AND session_ref=?2", .{ action, child.slice() }));
+}
+
+test "K4 ancestor denial positions results in child and continues child turn" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const root = try configureTestSession(&storage, "k4-root");
+    const parent = try configureTestSession(&storage, "k4-parent");
+    const child = try configureTestSessionAsk(&storage, "k4-child");
+    const stranger = try configureTestSession(&storage, "k4-stranger");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), parent.slice() });
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+    try submitTestMessage(&storage, &tmp, "k4-input", "k4-input", child.slice(), "propose");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try tests.settleTwoActionsForTesting(&storage, &tmp, model, "k4-calls");
+    const own = try store_core.activityPageForTesting(&storage, .{ .session = child, .kinds = .initOne(.approval_requested) });
+    try std.testing.expectEqual(@as(usize, 2), own.count);
+    const action = own.items[0].value.approval_requested.action;
+    for ([_][]const u8{ root.slice(), stranger.slice() }, 0..) |target, i| {
+        var denied: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .deny };
+        try denied.key.set(if (i == 0) "k4-undelivered" else "k4-unrelated");
+        try denied.session.set(target);
+        const reply = storage.decidePermission(&denied, .{});
+        try std.testing.expect(reply == .rejected);
+        try std.testing.expectEqual(protocol.PermissionDecisionRejection.target_mismatch, reply.rejected.code);
+    }
+    try expectOnlyForwardsThenIdle(&storage);
+    for ([_]@TypeOf(root){ child, parent, root }) |session| {
+        const page = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.approval_requested) });
+        try std.testing.expectEqual(own.count, page.count);
+        for (page.items[0..page.count], own.items[0..own.count]) |actual, expected| {
+            try std.testing.expectEqualDeep(expected.value.approval_requested, actual.value.approval_requested);
+            try std.testing.expectEqualStrings(child.slice(), actual.value.approval_requested.session.slice());
+        }
+    }
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .deny };
+    try allow.key.set("k4-allow");
+    try allow.session.set(root.slice());
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    const replay = storage.decidePermission(&allow, .{});
+    try std.testing.expect(replay == .accepted);
+    try std.testing.expect(replay.accepted.replayed);
+    const target_statement = try sqlite.prepare(storage.sqliteDatabase(), "SELECT target FROM core_command WHERE command_key='k4-allow'");
+    defer _ = c.sqlite3_finalize(target_statement);
+    try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(target_statement));
+    var target: protocol.Bounded(protocol.max_session_bytes) = .{};
+    try sqlite.readText(target_statement, 0, &target);
+    try std.testing.expectEqualStrings(root.slice(), target.slice());
+    const second = own.items[1].value.approval_requested.action;
+    var deny: protocol.PermissionDecisionCommand = .{ .action_id = second, .decision = .deny };
+    try deny.key.set("k4-deny-second");
+    try deny.session.set(parent.slice());
+    try std.testing.expect(storage.decidePermission(&deny, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE session_ref=?1 AND resolution_code='denied' AND acceptance_position IS NOT NULL", .{child.slice()}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE session_ref=?1", .{root.slice()}));
+    try expectDenseSessionPositions(&storage, child.slice());
+    try expectDenseSessionPositions(&storage, parent.slice());
+    try expectDenseSessionPositions(&storage, root.slice());
+    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expectEqual(model.turn_id, continuation.turn_id);
+    try std.testing.expectEqual(model.operation_id + 1, continuation.operation_id);
+}
+
+test "K4 ending hops rollback reopen once and never backfill frozen feeds" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const root = try configureTestSession(&storage, "k4-ending-root");
+    const parent = try configureTestSession(&storage, "k4-ending-parent");
+    const child = try configureTestSession(&storage, "k4-ending-child");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), parent.slice() });
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+    try submitTestMessage(&storage, &tmp, "k4-ending-input", "k4-ending-input", child.slice(), "answer");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const item = "{\"type\":\"message\",\"id\":\"k4-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"preserved answer\"}]}";
+    try settleItemsForTesting(&storage, &tmp, model, &.{item}, "preserved answer");
+    const own = try store_core.activityPageForTesting(&storage, .{ .session = child, .kinds = .initOne(.turn_ended) });
+    try std.testing.expectEqual(@as(usize, 1), own.count);
+    const frozen = try store_core.activityPageForTesting(&storage, .{ .session = root, .kinds = .initOne(.turn_ended) });
+    try std.testing.expectEqual(@as(usize, 0), frozen.count);
+    const ending = (try storage.nextCoreWork()).?.ending;
+    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
+    const first = (try storage.nextCoreWork()).?.forward;
+    try std.testing.expect(try storage.deliverSessionForward(first, .{}));
+    const second = (try storage.nextCoreWork()).?.forward;
+    try std.testing.expectError(error.InjectedCommitFailure, storage.deliverSessionForward(second, .{ .before_commit = true }));
+    try storage.close();
+    try testingStore(&storage, &tmp, std.testing.io);
+    try std.testing.expectEqual(second, (try storage.nextCoreWork()).?.forward);
+    try std.testing.expect(!try storage.deliverSessionForward(first, .{}));
+    try std.testing.expect(try storage.deliverSessionForward(second, .{}));
+    try std.testing.expect(!try storage.deliverSessionForward(second, .{}));
+    try std.testing.expect(try storage.nextCoreWork() == null);
+    const prefix = try store_core.activityPageForTesting(&storage, .{ .session = root, .end = frozen.end, .kinds = .initOne(.turn_ended) });
+    try std.testing.expectEqual(@as(usize, 0), prefix.count);
+    for ([_]@TypeOf(root){ parent, root }) |session| {
+        const page = try store_core.activityPageForTesting(&storage, .{ .session = session, .kinds = .initOne(.turn_ended) });
+        try std.testing.expectEqual(@as(usize, 1), page.count);
+        try std.testing.expectEqualDeep(own.items[0].value.turn_ended, page.items[0].value.turn_ended);
+        try std.testing.expectEqualStrings(child.slice(), page.items[0].value.turn_ended.session.slice());
+        const location = try storage.openActivityContent(&.{ .session = session, .position = page.items[0].position });
+        var reader: ContentReader = undefined;
+        reader.open(location);
+        defer reader.close();
+        var bytes: [64]u8 = undefined;
+        const count = try reader.read(0, &bytes);
+        try std.testing.expectEqualStrings("preserved answer", bytes[0..count]);
+        var search: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.turn_ended) };
+        try search.query.set("preserved answer");
+        const found = try std.testing.allocator.create(protocol.ActivitySearchFacts);
+        defer std.testing.allocator.destroy(found);
+        try storage.searchActivity(&search, found);
+        try std.testing.expectEqual(@as(usize, 1), found.count);
+        try std.testing.expectEqual(page.items[0].position, found.items[0].position);
+        try std.testing.expectEqual(page.items[0].ordinal, found.items[0].ordinal);
+        try expectDenseSessionPositions(&storage, session.slice());
+    }
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_forward WHERE kind=2 AND position IS NOT NULL", .{}));
+}
+
+test "K4 forwarded approval hydration steps exclude prior forward history" {
+    const Measure = struct {
+        fn run(history: u64) !u64 {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStore(&storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const parent = try configureTestSession(&storage, "k4-cost-parent");
+            const child = try configureTestSessionAsk(&storage, "k4-cost-child");
+            try submitTestMessage(&storage, &tmp, "k4-cost-input", "k4-cost-input", child.slice(), "propose");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try tests.settleTwoActionsForTesting(&storage, &tmp, model, "k4-cost-calls");
+            const start = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{parent.slice()});
+            const child_start = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{child.slice()});
+            const sequence = "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<?1) ";
+            // Copy a complete canonical call group, retaining its content and
+            // permission revision but assigning distinct operation identities
+            // and child positions. Every forward has a genuine ask Action.
+            try store_testing.sqlite_only.exec(&storage, sequence ++
+                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,output_item_count) " ++
+                "SELECT value+1000000,turn_id,session_ref,settings_revision,input_cutoff,?3+3*(value-1),output_reservation,attempt_ordinal,resolution_code,resolved_at,1 FROM model_operation CROSS JOIN sequence WHERE operation_id=?2", .{ history, model.operation_id, child_start });
+            try store_testing.sqlite_only.exec(&storage, sequence ++
+                "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
+                "SELECT value+1000000,0,session_ref,?3+3*(value-1)+1,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count FROM model_output_item CROSS JOIN sequence WHERE operation_id=?2 AND item_ordinal=0", .{ history, model.operation_id, child_start });
+            try store_testing.sqlite_only.exec(&storage, sequence ++
+                "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,action_kind) " ++
+                "SELECT value+1000000,session_ref,0,0,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,action_kind FROM model_tool_call CROSS JOIN sequence WHERE operation_id=?2 AND call_ordinal=0", .{ history, model.operation_id });
+            try store_testing.sqlite_only.exec(&storage, sequence ++
+                "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,approval_position) " ++
+                "SELECT value+1000000,value+1000000,0,session_ref,tool_kind,permission_revision,0,?3+3*(value-1)+2 FROM action_operation CROSS JOIN sequence WHERE parent_operation_id=?2 AND call_ordinal=0", .{ history, model.operation_id, child_start });
+            try store_testing.sqlite_only.exec(&storage, sequence ++
+                "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at) SELECT value,?2,?3,1,value+1000000,?4+value-1,0,1 FROM sequence", .{ history, parent.slice(), child.slice(), start });
+            try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at) SELECT ?1+call_ordinal+1,?2,session_ref,1,action_id,?3+?1+call_ordinal,0,1 FROM action_operation WHERE parent_operation_id=?4", .{ history, parent.slice(), start, model.operation_id });
+            try store_testing.sqlite_only.exec(&storage, "UPDATE session SET next_position=next_position+?1+2 WHERE session_ref=?2", .{ history, parent.slice() });
+            try store_testing.sqlite_only.exec(&storage, "UPDATE session SET next_position=next_position+3*?1 WHERE session_ref=?2", .{ history, child.slice() });
+            // Observe all synthesized forwards through the production feed
+            // before measuring a bounded one-row tail page.
+            var verify: protocol.ActivityPage = .{ .session = parent, .kinds = .initOne(.approval_requested) };
+            var seen: usize = 0;
+            while (true) {
+                const page = try store_core.activityPageForTesting(&storage, verify);
+                for (page.items[0..page.count]) |row| try std.testing.expectEqualStrings(child.slice(), row.value.approval_requested.session.slice());
+                seen += page.count;
+                if (!page.more) break;
+                const last = page.items[page.count - 1];
+                verify.end = page.end;
+                verify.position = last.position;
+                verify.ordinal = last.ordinal;
+            }
+            try std.testing.expectEqual(history + 2, seen);
+            const request: protocol.ActivityPage = .{ .session = parent, .direction = .backward, .kinds = .initOne(.approval_requested), .limit = 1 };
+            _ = try store_core.activityPageForTesting(&storage, request);
+            var counter: TestingSteps = .{};
+            counter.begin(storage.sqliteDatabase());
+            defer counter.end(storage.sqliteDatabase());
+            const page = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, 1), page.count);
+            try std.testing.expectEqualStrings(child.slice(), page.items[0].value.approval_requested.session.slice());
+            return counter.steps;
+        }
+    };
+    // Both populations fill the source query's fixed 17-candidate window.
+    const small = try Measure.run(32);
+    const large = try Measure.run(10_000);
+    try std.testing.expect(large <= small + 100);
+}
+
+test "K4 malformed delivered approval forwards fence page cursor and direct hydration" {
+    // Every route starts with a fresh Store: fencing is sticky by design.
+    for (0..3) |route| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const parent = try configureTestSession(&storage, "k4-corrupt-parent");
+        const child = try configureTestSessionAsk(&storage, "k4-corrupt-child");
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+        var bypass = try store_testing.completeConfiguration("k4-corrupt-bypass", child.slice(), workspace, "model-a");
+        bypass.configuration.permission_mode.state = .value;
+        try bypass.configuration.permission_mode.value.set("bypass");
+        try std.testing.expect(storage.configure(&bypass, .{}) == .accepted);
+        try submitTestMessage(&storage, &tmp, "k4-corrupt-input", "k4-corrupt-input", child.slice(), "propose");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        try tests.settleTwoActionsForTesting(&storage, &tmp, model, "k4-corrupt-calls");
+        const action = try store_testing.sqlite_only.queryU64(&storage, "SELECT min(action_id) FROM action_operation WHERE session_ref=?1", .{child.slice()});
+        // An auto-authorized call never requested approval. A forged delivered
+        // forward cannot turn it into an approval fact on any read route.
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND authorized=1 AND approval_position IS NULL", .{action}));
+        const position = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{parent.slice()});
+        try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at) VALUES(1,?1,?2,1,?3,?4,0,1)", .{ parent.slice(), child.slice(), action, position });
+        try store_testing.sqlite_only.exec(&storage, "UPDATE session SET next_position=next_position+1 WHERE session_ref=?1", .{parent.slice()});
+        const result: anyerror!void = switch (route) {
+            0 => if (store_core.activityPageForTesting(&storage, .{ .session = parent, .kinds = .initOne(.approval_requested) })) |_| {} else |err| err,
+            1 => if (store_core.activityPageForTesting(&storage, .{ .session = parent, .position = position, .ordinal = 0 })) |_| {} else |err| err,
+            else => if (storage.openActivityContent(&.{ .session = parent, .position = position, .ordinal = 0 })) |_| {} else |err| err,
+        };
+        try std.testing.expectError(error.CorruptStore, result);
+        try std.testing.expect(storage.isFenced());
+    }
 }

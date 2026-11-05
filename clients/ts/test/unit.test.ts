@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { encodeFrame, startError } from "../src/client.ts";
+import { encodeFrame, launchFor, startError } from "../src/client.ts";
 import { RuiStartError } from "../src/errors.ts";
 import { FEED_KINDS, listActivity } from "../src/feed.ts";
-import { environmentBytes, type Link } from "../src/sessions.ts";
+import { environmentBytes, Sessions, type Link } from "../src/sessions.ts";
 import { ConnectionError, post, WIRE_VERSION } from "../src/transport.ts";
 
 test("the wire version is the one openapi.json describes", () => {
@@ -22,6 +22,25 @@ test("a launch frame is a big-endian length and the JSON", () => {
 	const json = JSON.stringify(launch);
 	assert.equal(frame.readUInt32BE(0), json.length);
 	assert.equal(frame.subarray(4).toString("utf8"), json);
+});
+
+test("launch frame carries the MCP servers, an empty list when none are given", () => {
+	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" } };
+	const tools = [
+		{ name: "drift", url: "http://127.0.0.1:3000/mcp", bearerToken: "secret", callTimeoutMs: 42 },
+		{ name: "other", url: "http://127.0.0.1:3001/mcp", bearerToken: "secret2", callTimeoutMs: 99 },
+	];
+	const frame = (extra: object) => launchFor({ ...options, ...extra }, "/r").frame as { mcpServers: unknown };
+	assert.deepEqual(frame({}).mcpServers, []);
+	assert.deepEqual(frame({ tools: [{ ...tools[0], extra: true }, tools[1]] }).mcpServers, tools);
+});
+
+test("launch presets preserve creation fields and decode output schema JSON", () => {
+	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["bash"] as const, permissionMode: "ask" as const, provider: "openai" as const, workspace: "/w", outputSchema: '{"type":"object"}' };
+	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" }, presets: { review: spec } };
+	const frame = launchFor(options, "/r").frame;
+	assert.deepEqual(frame.presets, { review: { ...spec, outputSchema: { type: "object" } } });
+	assert.throws(() => launchFor({ ...options, presets: { review: { ...spec, outputSchema: "[]" } } }, "/r"), TypeError);
 });
 
 test("the refusal line becomes a RuiStartError", () => {
@@ -69,7 +88,7 @@ test("an aborted feed drops the page its pending read returns", async () => {
 
 test("the feed asks for every kind by default and keeps approval requests when asked for them alone", async () => {
 	const bodies: string[] = [];
-	const row = { position: "1", ordinal: "1", at: "t", value: { approval_requested: { action: "7", operation: "2", call_ordinal: "0" } } };
+	const row = { position: "1", ordinal: "1", at: "t", value: { approval_requested: { session: "ch1ld1", action: "7", operation: "2", call_ordinal: "0" } } };
 	const link: Link = {
 		exchange: async (_path, body) => {
 			bodies.push(body("store"));
@@ -78,7 +97,8 @@ test("the feed asks for every kind by default and keeps approval requests when a
 	};
 	assert.equal((await listActivity(link, "s").next()).value?.kind, "approval_requested");
 	const only = await listActivity(link, "s", { kinds: ["approval_requested"] }).next();
-	assert.equal(only.value?.kind, "approval_requested");
+	assert.ok(only.value && only.value.kind === "approval_requested");
+	assert.equal(only.value.sessionId, "ch1ld1");
 	assert.deepEqual(JSON.parse(bodies[0] ?? "{}").kinds, [...FEED_KINDS]);
 	assert.deepEqual(JSON.parse(bodies[1] ?? "{}").kinds, ["approval_requested"]);
 });
@@ -123,7 +143,7 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 		exchange: async (_path, build) => {
 			bodies.push(build("/s"));
 			if (bodies.length === 2) controller.abort();
-			return Buffer.from(JSON.stringify({ items: [], more: false, end: "9" }));
+			return Buffer.from(JSON.stringify({ items: [], more: false, end: "9", queued: { count: "0" }, work: { state: { kind: "working" } } }));
 		},
 	};
 	for await (const entry of listActivity(link, "s", { follow: true, kinds: ["received"], signal: controller.signal })) assert.fail(String(entry));
@@ -138,3 +158,70 @@ function launchTypeChecks() {
 	// @ts-expect-error store_fenced is not a launch refusal in the Host enum.
 	new RuiStartError("store_fenced", "refused");
 }
+
+test("activity search follows an empty budget page's next and preserves snippets", async () => {
+	const { searchActivity, encodeCursor } = await import("../src/feed.ts");
+	const requests: Record<string, unknown>[] = [];
+	const hit = { snippet: "Start_Agent", offset: "0", length: "11" };
+	const link: Link = { exchange: async (path, body) => {
+		assert.equal(path, "/v1/activity-search");
+		requests.push(JSON.parse(body("store")));
+		return Buffer.from(JSON.stringify(requests.length === 1
+			? { items: [], next: { position: "9", ordinal: "2" } }
+			: { items: [{ position: "8", ordinal: "1", kind: "call", hits: [hit] }], next: null }));
+	} };
+	const entries = [];
+	for await (const entry of searchActivity(link, "session", "start_agent", { kinds: ["call"], limit: 1 })) entries.push(entry);
+	assert.deepEqual(entries, [{ position: "8", ordinal: "1", kind: "call", hits: [hit], cursor: encodeCursor("8", "1") }]);
+	assert.equal(requests.length, 2);
+	assert.deepEqual(requests[0], { version: WIRE_VERSION, kind: "activity_search", store: "store", session: "session", query: "start_agent", kinds: ["call"], before_position: null, before_ordinal: null, limit: "1" });
+	assert.equal(requests[1]?.before_position, "9");
+	assert.equal(requests[1]?.before_ordinal, "2");
+});
+
+test("activity search validates UTF-8 byte bounds and cancels between hits", async () => {
+	const { searchActivity } = await import("../src/feed.ts");
+	let calls = 0;
+	const link: Link = { exchange: async () => {
+		calls++;
+		return Buffer.from(JSON.stringify({ items: [{ position: "1", ordinal: "0", kind: "user", hits: [] }, { position: "1", ordinal: "1", kind: "user", hits: [] }], next: null }));
+	} };
+	for (const query of ["", "é".repeat(129), "\ud800"]) await assert.rejects(searchActivity(link, "s", query).next(), RangeError);
+	assert.equal(calls, 0);
+	const controller = new AbortController();
+	const iterator = searchActivity(link, "s", "é".repeat(128), { signal: controller.signal });
+	assert.equal((await iterator.next()).done, false);
+	controller.abort();
+	assert.equal((await iterator.next()).done, true);
+});
+
+test("session summaries preserve both parent references and top-level nulls", async () => {
+	const link: Link = {
+		exchange: async () => Buffer.from(JSON.stringify({
+			sessions: [
+				{ reference: "p33rs1", label: "caller", work: { state: { kind: "idle" } }, parent: null },
+				{ reference: "k7m2qx", label: "child", work: { state: { kind: "pending" } }, parent: "p33rs1" },
+			],
+			next: null,
+		})),
+	};
+	assert.deepEqual(await new Sessions(link).list(), [
+		{ id: "k7m2qx", label: "child", state: "pending", parent: "p33rs1" },
+		{ id: "p33rs1", label: "caller", state: "idle", parent: null },
+	]);
+});
+
+
+test("approval and ending feed entries expose the child sessionId", async () => {
+	for (const value of [
+		{ approval_requested: { session: "ch1ld1", action: "7", operation: "2", call_ordinal: "0" } },
+		{ turn_ended: { session: "ch1ld1", turn: "3", operation: "2", ending: "stopped", code: "cancelled", content: null } },
+	]) {
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ items: [{ position: "1", ordinal: "0", at: "1", value }], more: false, end: "1" })) };
+		const entry = (await listActivity(link, "p4rent").next()).value;
+		assert.ok(entry && (entry.kind === "approval_requested" || entry.kind === "turn_ended"));
+		const sessionId: string = entry.sessionId;
+		assert.equal(sessionId, "ch1ld1");
+		assert.equal("session" in entry, false);
+	}
+});

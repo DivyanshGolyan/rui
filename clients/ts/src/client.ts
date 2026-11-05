@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import { SessionNotifications } from "./notifications.ts";
 import { resolveBinary } from "./binary.ts";
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
 import { models, Session, Sessions, setPaused, type AgentSpec, type ModelSummary } from "./sessions.ts";
@@ -20,7 +21,16 @@ import type { components } from "./wire.ts";
 
 type Schemas = components["schemas"];
 
+export interface McpServer {
+	name: string;
+	url: string;
+	bearerToken: string;
+	callTimeoutMs: number;
+}
+
 export interface ConnectOptions {
+	/** The MCP servers whose tools Sessions may name. */
+	tools?: McpServer[];
 	/** The Store: a SQLite Store directory today. The MySQL URL arrives with the Store's MySQL support. */
 	database: string;
 	/** The OpenAI-compatible provider. Only the key Adapter is offered to a launched Host (D149). */
@@ -109,6 +119,8 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	#restart: NodeJS.Timeout | undefined;
 	#closing: Promise<void> | undefined;
 	#dead: Error | undefined;
+	/** Local Session write notifications, shared by every handle. Internal. */
+	readonly activity = new SessionNotifications();
 	/** Create and list Sessions. */
 	readonly sessions: Sessions = new Sessions(this);
 
@@ -254,6 +266,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	#fail(error: Error): void {
+		this.activity.fail(error);
 		for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
 	}
 
@@ -291,7 +304,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 }
 
-function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
+export function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 	// A URL is passed through; anything else is a SQLite Store directory.
 	const store = /^[a-z][a-z0-9+.-]*:\/\//i.test(options.database) ? options.database : resolve(options.database);
 	const frame = {
@@ -304,6 +317,8 @@ function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 			presets: Object.fromEntries(Object.entries(options.presets).map(([name, spec]) => [name, presetFor(spec)])),
 		}),
 		provider: { kind: "openai_key", baseUrl: options.provider.baseUrl, key: options.provider.key },
+		// Only the Host's fields are copied: it refuses unknown ones.
+		mcpServers: (options.tools ?? []).map(({ name, url, bearerToken, callTimeoutMs }) => ({ name, url, bearerToken, callTimeoutMs })),
 	} satisfies Schemas["LaunchFrame"];
 	// The child gets only what it needs to find programs and its home (D185).
 	const env: NodeJS.ProcessEnv = {};

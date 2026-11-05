@@ -54,6 +54,12 @@ pub noinline fn print(comptime format: []const u8, args: anytype) void {
     _ = write(bytes);
 }
 
+/// Already rendered guidance keeps its owner's bound and line framing,
+/// rather than making another copy through print's smaller format buffer.
+pub fn diagnosticBytes(bytes: []const u8) void {
+    _ = write(bytes);
+}
+
 /// Optional fatal guidance cannot retain a restored caller on stderr credit.
 /// One bounded write is best-effort; its failure never replaces the real error.
 pub fn diagnostic(comptime format: []const u8, args: anytype) void {

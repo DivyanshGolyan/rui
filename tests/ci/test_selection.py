@@ -66,6 +66,14 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_catalog_sources_select_the_portable_catalog_tests(self):
+        for path in ("src/models_dev.zig", "src/model_catalog.zig",
+                     "src/model_catalog_main.zig", "src/model_catalog_snapshot.zig"):
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    expected = ["test-logic"] if phase == "development" else ["stack-frames", "test-logic"]
+                    self.assertEqual(select([path], phase, AVAILABLE)["targets"], expected)
+
     def test_development_does_not_claim_native_acceptance(self):
         # The Store keeps `test` for the live MySQL check (LIVE_RULES); nothing else widens.
         result = select(["src/bash_platform.c", "src/store.zig"], "development", AVAILABLE)
@@ -151,6 +159,14 @@ class SelectionTest(unittest.TestCase):
         for core in cores:
             with self.subTest(core=core):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
+
+    def test_cli_value_cores_keep_their_native_consumers(self):
+        for core in ("caller_error", "caller_exit", "cli_value", "retention_capacity"):
+            with self.subTest(core=core):
+                result = select([f"src/{core}.zig"], "review", AVAILABLE)
+                self.assertIn("test-logic", result["targets"])
+                self.assertIn("check", result["targets"])
+                self.assertIn("check", result["native_targets"])
 
     def test_http2_client_selects_its_own_tests(self):
         result = select(["src/h2/Engine.zig"], "review", AVAILABLE)

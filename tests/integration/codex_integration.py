@@ -206,15 +206,19 @@ def run():
         assert len(endpoint.requests) == 2 and proof.read_text() == "once\n"
         settings = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
         assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == "high", settings
-        for effort in ("none", "ultra"):
+        for effort in ("none",):
             rejected = fixture.command(
                 "session", "configure", "--store", store, "--session", session,
                 "--record", state / f"effort-{effort}.json", "--key", f"effort-{effort}",
-                "--reasoning-effort", effort, "--permission-mode", "bypass", expect=1,
+                "--reasoning-effort", effort, "--permission-mode", "bypass", expect=3,
             )
             assert rejected["answer"]["status"] == "rejected", rejected
             unchanged = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             assert unchanged == settings and len(endpoint.requests) == 2, unchanged
+        invalid_effort = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(store),
+            "--session", session, "--reasoning-effort", "ultra"], capture_output=True, text=True, timeout=10)
+        assert invalid_effort.returncode == 2 and not invalid_effort.stdout, invalid_effort
+        assert "[choice_unsupported]" in invalid_effort.stderr, invalid_effort
         configured = fixture.command(
             "session", "configure", "--store", store, "--session", session,
             "--record", state / "effort-default.json", "--key", "effort-default",
@@ -362,7 +366,7 @@ def run():
                 rejected = fixture.command(
                     "session", "configure", "--store", stop_store, "--session", selected,
                     "--record", state / "effort-unsupported-max.json", "--key", "effort-unsupported-max",
-                    "--reasoning-effort", "max", expect=1,
+                    "--reasoning-effort", "max", expect=3,
                 )
                 assert rejected["answer"]["status"] == "rejected", rejected
                 assert fixture.command("session", "inspect", "--store", stop_store, "--session", selected)["session"] == settings
@@ -373,7 +377,7 @@ def run():
             assert request["model"] == model, request
             if settings["compaction_trigger"] != trigger or settings["output_reservation"] != "0":
                 mismatches.append((model, "compaction defaults", settings["compaction_trigger"], settings["output_reservation"]))
-            if settings["reasoning_effort"] != effort or settings["reasoning_effort_override"] is not None:
+            if settings["reasoning_effort"] != effort or settings["reasoning_effort_override"] != effort:
                 mismatches.append((model, "effort settings", settings["reasoning_effort"], settings["reasoning_effort_override"]))
             if request.get("reasoning") != {"effort": effort}:
                 mismatches.append((model, "reasoning", request.get("reasoning")))

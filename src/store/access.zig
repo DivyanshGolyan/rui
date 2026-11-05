@@ -324,15 +324,37 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// contains it reports it.
         fn pass(a: *Self) void {
             bump(&a.passes);
+            if (a.store.engine == .mysql and a.failure == null)
+                for (a.queue[0..a.queued]) |*entry| entry.borrowed.check();
+            if (a.queued != 0 and a.failure == null) {
+                if (@import("builtin").is_test) {
+                    if (a.store.engine == .mysql) a.store.engine.mysql.state.testing_shape.access_passes += 1;
+                }
+                a.store.engine.startPass() catch |err| {
+                    a.failure = err;
+                };
+            }
             for (a.queue[0..a.queued]) |*entry| {
                 if (a.failure != null) break;
-                entry.borrowed.check();
+                if (a.store.engine == .sqlite) entry.borrowed.check();
                 entry.run(a, entry) catch |err| {
                     a.failure = err;
                 };
                 a.store.engine.endStatement(entry.statement);
             }
-            a.resetQueued();
+            if (a.queued != 0) a.store.engine.finishPass() catch |err| {
+                // Later statements already ran on MySQL. Their ordinary
+                // errors cannot replace the first guard/decoder failure;
+                // a lost connection or ownership always fences instead.
+                if (a.failure == null or err == error.StoreConnectionLost or
+                    err == error.CommitOutcomeUnknown or err == error.OwnershipLost)
+                    a.failure = err;
+            };
+            a.resetQueued() catch |err| {
+                if (a.failure == null or err == error.StoreConnectionLost or
+                    err == error.CommitOutcomeUnknown or err == error.OwnershipLost)
+                    a.failure = err;
+            };
         }
 
         /// Whether `S`'s step recorded this Access's failure: how a caller
@@ -411,6 +433,20 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// outlive the round.
         pub fn writeContent(a: *Self, content_id: u64, bytes: []const u8) void {
             comptime std.debug.assert(mode != .read and mode != .single);
+            if (a.store.engine == .mysql) {
+                const Chunk = engine.Mysql.insert_chunk;
+                var offset: usize = 0;
+                while (offset < bytes.len) {
+                    const n = @min(bytes.len - offset, 128 * 1024);
+                    if (!a.queueStatement(Chunk, &.{
+                        .content_id = content_id,
+                        .chunk_index = @intCast(offset / (128 * 1024)),
+                        .bytes = .{ .bytes = bytes[offset..][0..n] },
+                    }, runWrite(Chunk), .{ .none = {} })) break;
+                    offset += n;
+                }
+                return;
+            }
             if (a.reserve()) |slot| {
                 slot.* = .{ .statement = null, .run = runPayload, .target = .{ .payload = .{ .content_id = content_id, .bytes = bytes } } };
                 slot.borrowed = .ofBytes(bytes);
@@ -485,10 +521,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         pub fn abandon(a: *Self, faults: store_core.Faults) Error!void {
             comptime std.debug.assert(mode == .write or mode == .single);
             if (a.ended) return;
-            a.resetQueued();
+            const discarded = a.resetQueued();
             a.claimed = 0;
             a.ended = true;
             if (mode == .write and a.opened) try store_core.rollbackAfterError(a.store, faults);
+            try discarded;
         }
 
         /// The transition's `result`, after abandoning the Access when it
@@ -507,7 +544,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Clears statements queued but never run. A write Access that
         /// opened its transaction must have ended by now, in every build.
         pub fn deinit(a: *Self) void {
-            a.resetQueued();
+            a.resetQueued() catch |err| {
+                // deinit cannot return errors; MySQL also keeps this failure
+                // latched so the Store cannot reuse the unresolved connection.
+                a.failure = err;
+            };
             if (mode == .write and a.opened and !a.ended) @panic("a write Access neither committed nor abandoned its transaction");
         }
 
@@ -516,7 +557,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// bound only once the writes stepped without a failure.
         fn finishWrites(a: *Self) Error!void {
             a.ensureOpen();
-            a.pass();
+            if (a.store.engine == .sqlite) a.pass();
             if (a.failure) |err| return err;
             for (a.claims[0..a.claimed]) |*claim| if (claim.taken != 0) {
                 const expected = claim.head.next_position.get();
@@ -565,6 +606,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 a.failure = err;
                 return false;
             } else 0;
+            const fits = a.store.engine.fits(S, args, now) catch |err| {
+                a.failure = err;
+                return false;
+            };
+            if (!fits) a.pass();
             const slot = a.reserve() orelse return false;
             slot.* = .{ .statement = statement, .run = runner, .target = target };
             a.store.engine.bind(statement, S, args, now) catch |err| {
@@ -597,9 +643,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Empties the queue. A pass ended each statement it stepped
         /// (`Engine.endStatement`), as it stepped; what is left was never
         /// stepped since its bind (`Engine.discard`).
-        fn resetQueued(a: *Self) void {
+        fn resetQueued(a: *Self) Failure!void {
             for (a.queue[0..a.queued]) |entry| a.store.engine.discard(entry.statement);
             a.queued = 0;
+            try a.store.engine.discardBatch();
         }
 
         const Runner = *const fn (*Self, *const Queued) Error!void;

@@ -242,7 +242,7 @@ def help_case():
             [str(fixture.RUI), "--not-an-option"], env={**os.environ, "HOME": str(home)},
             capture_output=True, text=True, timeout=10,
         )
-        assert result.returncode != 0 and "InvalidArguments" in result.stderr, result
+        assert result.returncode != 0 and "--not-an-option: That option is not supported" in result.stderr, result
         assert list(home.iterdir()) == [], "invalid arguments created runtime state"
         send_help = run(home, "session", "send", "--help")
         assert "\nRequires: --to ID.\n" in send_help and "stdin" in send_help, send_help
@@ -250,41 +250,67 @@ def help_case():
         # Each syntactically valid call lacks one declared requirement and
         # fails before capture with scoped help, never the root usage.
         record = home / "explicit.json"
-        for args, missing in (
-                (("session", "send"), "missing --to ID"),
-                (("session", "send", "--to", "k7m2qx", "--key", "half-key"), "missing --record FILE"),
-                (("session", "send", "--to", "k7m2qx", "--record", record), "missing --key KEY or --key-hex HEX"),
-                (("request", "recover", "--record", record, "--kind", "message"), "missing --store PATH or --store-hex HEX"),
-                (("auth", "login"), "missing PROVIDER")):
+        for args, accepted in (
+                (("session", "send"), "--to ID"),
+                (("session", "send", "--to", "k7m2qx", "--key", "half-key"), "--record FILE"),
+                (("session", "send", "--to", "k7m2qx", "--record", record), "--key KEY or --key-hex HEX"),
+                (("request", "recover", "--record", record, "--kind", "message"), "--store PATH or --store-hex HEX"),
+                (("auth", "login"), "PROVIDER")):
             result = subprocess.run([str(fixture.RUI), *map(str, args)], env={**os.environ, "HOME": str(home)},
                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
             operation = " ".join(args[:2])
-            assert result.returncode == 1 and result.stdout == "", (args, result)
-            assert (f"rui: {operation}: {missing}. Nothing was captured or sent. "
-                f"Usage: rui {operation} --help\n") in result.stderr, (args, result.stderr)
+            assert result.returncode == 2 and result.stdout == "", (args, result)
+            assert result.stderr == (f"rui {operation}: {accepted}: A required option or selector is missing. "
+                f"Accepted: {accepted}. Next: Supply one of the accepted alternatives. "
+                "Nothing was captured or sent. [option_required]\n"), (args, result.stderr)
             assert "usage:" not in result.stderr and "rui [PROMPT]" not in result.stderr, (args, result.stderr)
             assert "request:" not in result.stderr, ("missing requirement printed a capture notice", result.stderr)
             assert list(home.iterdir()) == [], ("missing requirement created capture or record state", args)
         # Rejected input forms must name a usable correction, without reading
         # even available stdin or creating a recovery record.
         for args, correction in (
-                (("session", "send", "--to", "k7m2qx", "literal"), "Message text must come from stdin"),
-                (("session", "send", "--to", "k7m2qx", "--", "literal"), "Message text must come from stdin"),
-                (("session", "start", "literal"), "Message text must come from stdin"),
-                (("session", "start", "--", "literal"), "Message text must come from stdin"),
-                (("session", "configure", "--instructions", "instructions.txt"), "use --instructions - to read instructions from stdin"),
-                (("session", "list", "literal"), "unexpected argument")):
+                (("session", "send", "--to", "k7m2qx", "literal"),
+                 "literal: Message text must come from stdin, not positional arguments. Accepted: Message text on stdin, not in argv. Next: Pipe or redirect the Message into this command. Nothing was captured or sent. [message_not_stdin]"),
+                (("session", "send", "--to", "k7m2qx", "--", "literal"),
+                 "literal: Message text must come from stdin, not positional arguments. Accepted: Message text on stdin, not in argv. Next: Pipe or redirect the Message into this command. Nothing was captured or sent. [message_not_stdin]"),
+                (("session", "start", "literal"),
+                 "literal: Message text must come from stdin, not positional arguments. Accepted: Message text on stdin, not in argv. Next: Pipe or redirect the Message into this command. Nothing was captured or sent. [message_not_stdin]"),
+                (("session", "start", "--", "literal"),
+                 "literal: Message text must come from stdin, not positional arguments. Accepted: Message text on stdin, not in argv. Next: Pipe or redirect the Message into this command. Nothing was captured or sent. [message_not_stdin]"),
+                (("session", "configure", "--instructions", "instructions.txt"),
+                 "--instructions instructions.txt: Instructions must be read from stdin. Accepted: -. Next: Use --instructions - and pipe or redirect the instructions into this command. Nothing was captured or sent. [instructions_source]"),
+                (("session", "list", "literal"),
+                 "literal: That positional argument is not supported here. Accepted: options and values listed by rui session list --help. Next: Remove it and use this command's declared options and selectors. Nothing was captured or sent. [positional_unexpected]")):
             input_read, input_write = os.pipe()
             try:
                 untouched = b"held stdin must not be consumed\n"
                 os.write(input_write, untouched)
                 result = subprocess.run([str(fixture.RUI), *args], env={**os.environ, "HOME": str(home)},
                     stdin=input_read, capture_output=True, text=True, timeout=5)
-                assert result.returncode == 1 and result.stdout == "", (args, result)
-                assert correction in result.stderr and "use -- before literal text" not in result.stderr, (args, result.stderr)
-                assert "Nothing was captured or sent." in result.stderr, result.stderr
+                assert result.returncode == 2 and result.stdout == "", (args, result)
+                assert result.stderr == f"rui {args[0]} {args[1]}: {correction}\n", (args, result.stderr)
                 assert select.select([input_read], [], [], 0)[0] and os.read(input_read, len(untouched)) == untouched
                 assert list(home.iterdir()) == [], ("invalid input created runtime state", args)
+            finally:
+                dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
+        # Fresh typed choices, saved-HANDLE conflicts and malformed IDs must
+        # refuse before reading stdin or publishing a capture.
+        for args, expected in (
+                (("session", "start", "--permission-mode", "auto"),
+                 "rui session start: --permission-mode auto: That value is not supported. Accepted: ask, bypass. Next: Use one of the accepted values. Nothing was captured or sent. [choice_unsupported]\n"),
+                (("request", "inspect", "HANDLE", "--store", "P"),
+                 "rui request inspect: --store with HANDLE: A saved HANDLE already names its Store and key. Accepted: HANDLE alone, or (--store PATH or --store-hex HEX) with (--key KEY or --key-hex HEX). Next: Keep one of the two. Nothing was captured or sent. [handle_names_store_and_key]\n"),
+                (("session", "interrupt-model", "--session", "k7m2qx", "--turn", "12x", "--operation", "3"),
+                 "rui session interrupt-model: --turn 12x: That is not an ID. Accepted: a decimal from 1 to 9223372036854775807. Next: Copy the ID from rui session inspect. Nothing was captured or sent. [id_malformed]\n")):
+            input_read, input_write = os.pipe()
+            try:
+                untouched = b"unread grammar input\n"
+                os.write(input_write, untouched)
+                result = subprocess.run([str(fixture.RUI), *args], env={**os.environ, "HOME": str(home)},
+                    stdin=input_read, capture_output=True, text=True, timeout=5)
+                assert result.returncode == 2 and result.stdout == "" and result.stderr == expected, (args, result)
+                assert select.select([input_read], [], [], 0)[0] and os.read(input_read, len(untouched)) == untouched
+                assert list(home.iterdir()) == [], (args, "rejected invocation created runtime state")
             finally:
                 dispose_all(lambda: os.close(input_read), lambda: os.close(input_write))
         # Retired names are refused before any entry path, even with a
@@ -297,7 +323,7 @@ def help_case():
             output, errors = terminal_exit(caller, master)
         finally:
             dispose_all(lambda: os.close(master), lambda: os.close(slave))
-        assert caller.returncode == 1, (output, errors)
+        assert caller.returncode == 2, (output, errors)
         assert ("rui: `setup` is now `rui defaults inspect|configure`; see rui defaults --help. "
             "Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n").encode() in errors, errors
         assert b"Provider:" not in output + errors and b"Codex login" not in output + errors, (output, errors)
@@ -306,7 +332,7 @@ def help_case():
         # Bare entry has no inline Message operand, even after --.
         literal = subprocess.run([str(fixture.RUI), "--", "setup"], env={**os.environ, "HOME": str(home)},
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
-        assert literal.returncode == 1 and "InvalidArguments" in literal.stderr, literal
+        assert literal.returncode == 2 and '[positional_unexpected]' in literal.stderr, literal
         assert "is now" not in literal.stderr, literal.stderr
         assert list(home.iterdir()) == [], "literal prompt without a terminal created runtime state"
 
@@ -342,14 +368,23 @@ def compiled_model_cases():
                 assert result.returncode != 0 and not result.stdout, result
                 assert listing in result.stderr and "invalid model" in result.stderr, result.stderr
                 assert "syntax and recovery:" not in result.stderr, result.stderr
-                assert result.stderr.endswith("error: InvalidModel (exit status 1)\n"), result.stderr
+                assert "error: InvalidModel" not in result.stderr, result.stderr
                 assert "\x1b" not in result.stderr, result.stderr
                 assert not record.exists() and not (root / "absent-store").exists()
                 assert list(home.iterdir()) == [], "invalid model created capture or preference state"
+        # Unclassified failures keep exit 1; closed parser choices exit 2.
+        for arguments, cause in ((("session", "list", "--store", ""), "InvalidStore"),
+                (("session", "inspect", "--store", str(root / "absent-store"), "--session", "k7m2qx", "--profile", "invalid"), "UnknownReportProfile")):
+            result = subprocess.run([str(fixture.RUI), *arguments], env=env, capture_output=True, text=True, timeout=10)
+            assert result.returncode == (2 if cause == "UnknownReportProfile" else 1) and not result.stdout, result
+            if cause == "UnknownReportProfile":
+                assert "[choice_unsupported]" in result.stderr, result.stderr
+            else:
+                assert f"failed: {cause}. Syntax and recovery:" in result.stderr, result.stderr
         rejected_default = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", "two words"],
             env=env, capture_output=True, text=True, timeout=10)
         assert rejected_default.returncode != 0 and listing in rejected_default.stderr and not list(home.iterdir())
-        assert rejected_default.stderr.endswith("error: InvalidModel (exit status 1)\n"), rejected_default.stderr
+        assert "error: InvalidModel" not in rejected_default.stderr, rejected_default.stderr
         # An unlisted ID with valid syntax is saved, with one line on its limits.
         for model in ("retired-model", "GPT-6-SOL"):
             accepted = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", model],
@@ -457,7 +492,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         assert status_row(status_frame(master, session), "Name", "Folder") == "lane four"
         terminal_step(master, '/effort "high', "Usage: /effort LEVEL", composer=True)
         told = lambda command, marker: [line for line in terminal_step(master, command, marker, composer=True).split("\n") if marker in line]
-        for short, spelled, marker in (("/effort ultra", "/configure --reasoning-effort ultra", "unsupported_reasoning_effort"),
+        for short, spelled, marker in (("/effort ultra", "/configure --reasoning-effort ultra", "choice_unsupported"),
                                        ("/rename " + "x" * 101, "/configure --label " + "x" * 101, "--label must be")):
             assert told(short, marker) == told(spelled, marker), short
         terminal_step(master, "/rename ", "! Usage: /rename NAME", composer=True)
@@ -489,9 +524,11 @@ def compaction_settings_case(home, store, workspace, socket_path):
     body = {"version": host_process.WIRE_VERSION, "kind": "configure", "store": str(store),
             "key": "unknown-compaction-policy", "session": "", "configuration": {
                 **{name: {"state": "value", "value": value} for name, value in
-                   (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"))},
+                   (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"),
+                    ("tools", ["bash"]), ("permission_mode", "bypass"), ("compaction_trigger", "115200"))},
+                "reasoning_effort": {"state": "null"},
                 **{name: {"state": "omitted"} for name in
-                   ("instructions", "tools", "permission_mode", "output_schema", "compaction_trigger", "output_reservation")}}}
+                   ("instructions", "output_schema", "output_reservation")}}}
     head, answer = raw_request(socket_path, "/v1/configure", json.dumps(body).encode())
     reply = json.loads(answer)
     assert b" 200 " in head and reply["answer"]["status"] == "accepted" and reply["answer"]["created"], (head, reply)
@@ -1653,7 +1690,7 @@ def command_entry_cases():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         defaults(home, "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
-        initial_session = run(home, "session", "start", "--workspace", workspace, input=prompt).strip()
+        initial_session = json.loads(run(home, "session", "start", "--workspace", workspace, input=prompt))["context"]["session"]
         assert re.fullmatch(r"[0123456789abcdefghjkmnpqrstvwxyz]{6}", initial_session), initial_session
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
@@ -1695,7 +1732,7 @@ def command_entry_cases():
                 # Without cursor addressing Rui refuses before any Host or
                 # terminal change, naming the recovery.
                 _, errors = caller.communicate(timeout=10)
-                assert caller.returncode == 1, (caller.returncode, errors)
+                assert caller.returncode == 2, (caller.returncode, errors)
                 assert b"TERM=dumb does not" in errors and b"No Host or Session changed." in errors, errors
                 assert not select.select([master], [], [], 0.2)[0], "dumb terminal was drawn"
                 assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
@@ -1740,7 +1777,7 @@ def command_entry_cases():
         before_peer_refusal = set(records.glob("*.json"))
         for address in (chosen, "000000", "not an ID"):
             for flags in ((), ("--model", "gpt-6-astra")):
-                refused_peer = invoke(home, "session", "configure", *flags, expect=1,
+                refused_peer = invoke(home, "session", "configure", *flags, expect=2,
                     environment={"RUI_ADDRESS": address})
                 assert not refused_peer.stdout and "InvalidRuiAddress" in refused_peer.stderr, refused_peer
                 assert set(records.glob("*.json")) == before_peer_refusal
@@ -1843,7 +1880,7 @@ def command_entry_cases():
                 os.write(input_write, unrelated)
                 sent = subprocess.run([str(fixture.RUI), "session", "send", "--to", literal, "--", prompt],
                     cwd=workspace, env=env, stdin=input_read, capture_output=True, timeout=5)
-                assert sent.returncode == 1 and b"InvalidArguments" in sent.stderr, sent
+                assert sent.returncode == 2 and b"[message_not_stdin]" in sent.stderr, sent
                 assert sent.stdout == b"" and select.select([input_read], [], [], 0)[0], sent
                 assert os.read(input_read, len(unrelated)) == unrelated
                 sent = subprocess.run([str(fixture.RUI), "session", "send", "--to", literal],
@@ -2300,8 +2337,9 @@ def persistent_opening_case():
                 ("--store", store, "--store-hex", "61")):
             rejected = subprocess.run([str(fixture.RUI), "session", "read-conversation", *map(str, flags),
                 "--position", "1", "--ordinal", "0"], capture_output=True, timeout=10)
-            assert rejected.returncode == 1 and not rejected.stdout, (flags, rejected)
-            assert any(code in rejected.stderr for code in (b"UnknownArgument", b"InvalidHexIdentity", b"DuplicateArgument", b"ConflictingArguments")), rejected.stderr
+            assert rejected.returncode == 2 and not rejected.stdout, (flags, rejected)
+            assert any(code in rejected.stderr for code in (b"[option_unknown]", b"[hex_malformed]", b"[identity_spelling_repeated]")), rejected.stderr
+            assert b"Accepted: " in rejected.stderr and b" Next: " in rejected.stderr and b"Nothing was captured or sent." in rejected.stderr, rejected.stderr
         assert "late beyond captured end" not in recovered and "saved user 09" not in recovered, "history recaptured or replayed opening"
         assert proxy.exchanges[0][0] == proxy.exchanges[2][0], "history failure advanced its actual cursor"
         # At the start there is nothing older: /history reads nothing more.
@@ -3665,7 +3703,7 @@ def saved_capture_cases(state, store, workspace):
     for operation, kind in (("configure", "configure"), ("start", "message")):
         rejected = admit(home, "session", operation, "--store", store,
             "--workspace", state / "missing-workspace", "--provider", "codex", "--model", "gpt-6-sol",
-            input="rejected first Message" if operation == "start" else None, expect=1)
+            input="rejected first Message" if operation == "start" else None, expect=3)
         rejected_handle = rejected["request"]
         rejected_handles.append(rejected_handle)
         rejected_answer = rejected["admission"]["answer"]
@@ -3907,11 +3945,14 @@ def opaque_session_commands_case():
             "rui/" + reference, "01234567-89ab-4cde-8012-3456789abcde", "human/name", "'" + reference + "'")
         for invalid in (*invalid_ids, json.dumps({"session": reference}),
                 json.dumps({"store": str(store), "session": reference})):
-            rejected = invoke(home, "session", "send", "--store", store, "--to", invalid, input="not sent", expect=1)
+            rejected = invoke(home, "session", "send", "--store", store, "--to", invalid, input="not sent", expect=2)
             assert not rejected.stdout and "InvalidSession" in rejected.stderr and "request:" not in rejected.stderr, rejected
         for invalid in invalid_ids:
-            rejected = invoke(home, "session", "configure", "--store", store, "--session", invalid, expect=1)
+            rejected = invoke(home, "session", "configure", "--store", store, "--session", invalid, expect=2)
             assert not rejected.stdout and "InvalidSession" in rejected.stderr and "request:" not in rejected.stderr, rejected
+        for label in (" ", "two\nlines", "x" * 101):
+            rejected = invoke(home, "session", "configure", "--store", store, "--session", reference, "--label", label, expect=2)
+            assert not rejected.stdout and "--label must be one line" in rejected.stderr and "request:" not in rejected.stderr, rejected
         for route in (("session", "resume"), ("action", "allow"), ("action", "deny")):
             extra = [] if route[1] == "resume" else ["--action", "1"]
             negatives = [["--session-hex", value] for value in invalid_hex]
@@ -3929,17 +3970,17 @@ def opaque_session_commands_case():
                     env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=10)
                 assert rejected.returncode != 0 and b"InteractiveTerminalRequired" not in rejected.stderr, (route, flags, rejected)
                 if "--last" in flags:
-                    assert b"rui: session resume: unknown option." in rejected.stderr, (flags, rejected)
+                    assert b"rui session resume: --last: That option is not supported by this command. Accepted: options and values listed by rui session resume --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]" in rejected.stderr, (flags, rejected)
         # Retired --last rejects before selecting a Store, starting a Host
         # or capturing a request; the HOME Store stays absent below.
         retired = subprocess.run([str(fixture.RUI), "session", "resume", "--last"], cwd=state,
             env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=10)
-        assert retired.returncode != 0 and b"rui: session resume: unknown option." in retired.stderr, retired
+        assert retired.returncode != 0 and b"rui session resume: --last: That option is not supported by this command. Accepted: options and values listed by rui session resume --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]" in retired.stderr, retired
         assert {path: path.read_bytes() for path in before} == before
         assert set((home / ".config/rui/requests").glob("*.json")) == set(before)
         absent = "000000" if reference != "000000" else "111111"
         unknown = admit(home, "session", "configure", "--store", store, "--session", absent,
-            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol", expect=1)
+            "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol", expect=3)
         assert unknown["admission"]["answer"] == {"status": "rejected", "replayed": False,
             "session": absent, "code": "unknown_session"}, unknown
         assert [row["reference"] for row in json.loads(run(home, "session", "list", "--store", store, "--all"))["sessions"]] == [reference]
@@ -4313,8 +4354,8 @@ def renderer_cases():
             if ready_write is not None:
                 env["RUI_TEST_ACTION_READY_FD"] = str(ready_write)
             if initial_text is not None:
-                session = run(home, "session", "start", "--store", store, "--workspace", workspace,
-                    "--provider", "codex", "--model", "gpt-6-sol", input=initial_text).strip()
+                session = json.loads(run(home, "session", "start", "--store", store, "--workspace", workspace,
+                    "--provider", "codex", "--model", "gpt-6-sol", input=initial_text))["context"]["session"]
                 assert re.fullmatch(r"[0123456789abcdefghjkmnpqrstvwxyz]{6}", session), session
             arguments = ["session", "resume", "--store", str(store), "--", session]
             caller = subprocess.Popen([str(fixture.RUI), *arguments],
@@ -4412,7 +4453,7 @@ def renderer_cases():
         env = {**os.environ, "HOME": str(home)}
         rejected = subprocess.run([str(fixture.RUI), "session", "resume", "--store", str(store), geometry],
             env=env, input=b"", capture_output=True, timeout=5)
-        assert rejected.returncode != 0 and b"InteractiveTerminalRequired" in rejected.stderr, rejected
+        assert rejected.returncode != 0 and b"rui needs terminal input and output" in rejected.stderr, rejected
         assert b"\x1b" not in rejected.stdout + rejected.stderr, rejected
         pipe_text = "/literal\nstdin café\n"
         pipe_answer = answer("pipe")
@@ -6424,7 +6465,7 @@ def main(selected="all"):
         no_tty_home.mkdir()
         no_terminal = subprocess.run([str(fixture.RUI)], cwd=workspace,
             env={**os.environ, "HOME": str(no_tty_home)}, capture_output=True, text=True, timeout=5)
-        assert no_terminal.returncode != 0 and "InteractiveTerminalRequired" in no_terminal.stderr
+        assert no_terminal.returncode != 0 and "rui needs terminal input and output" in no_terminal.stderr
         assert not (no_tty_home / ".config").exists(), "non-TTY invocation created preferences or a request"
         assert not (no_tty_home / ".local/share/rui/store").exists(), "non-TTY invocation changed the Store"
         before_missing = set(json.loads(run(preferences_home, "request", "list")))
@@ -6670,7 +6711,7 @@ def main(selected="all"):
         credential.unlink()
         initial = fixture.command("session", "inspect", "--store", store, "--session", session)
         assert initial["selected_message"] is None and initial["recent_messages"] == [], initial
-        assert "InteractiveTerminalRequired" in subprocess.run(
+        assert "rui needs terminal input and output" in subprocess.run(
             [str(fixture.RUI), "session", "resume", "--store", str(store), "--", session],
             env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=5).stderr
         assert config["request"] in json.loads(run(home, "request", "list"))
@@ -6682,7 +6723,7 @@ def main(selected="all"):
         text = state / "input"
         text.write_text("first input")
         dropped = invoke(home, "session", "send", "--store", store, "--to", session,
-            "--test-drop-reply", "after-commit", input=text.read_text(), expect=1)
+            "--test-drop-reply", "after-commit", input=text.read_text(), expect=4)
         assert dropped.stdout == "", dropped
         first = CAPTURE_NOTICE.match(dropped.stderr).group(1)
         record = home / ".config/rui/requests" / f"{first}.json"
@@ -6746,7 +6787,7 @@ def main(selected="all"):
         assert not counter.exists()
 
         lost_decision = invoke(home, "action", "allow", "--store", store, "--session", session,
-            "--action", action, "--test-drop-reply", "after-commit", expect=1)
+            "--action", action, "--test-drop-reply", "after-commit", expect=4)
         assert lost_decision.stdout == "", lost_decision
         decision_key = CAPTURE_NOTICE.match(lost_decision.stderr).group(1)
         assert decision_key in json.loads(run(home, "request", "list"))
@@ -6755,7 +6796,7 @@ def main(selected="all"):
         fixture.wait_for(lambda: fixture.completed_observation(store, first), "first saved answer")
         fixture.wait_for(lambda: fixture.completed_observation(store, queued), "queued answer after permission")
         stale = admit(home, "action", "deny", "--store", store, "--session", session,
-            "--action", action, expect=1)
+            "--action", action, expect=3)
         assert stale["admission"]["answer"]["status"] == "rejected", stale
         assert fixture.read_result(store, queued) == b"first answer"
         current = fixture.command("session", "inspect", "--store", store, "--session", session)
@@ -6806,8 +6847,8 @@ def main(selected="all"):
             terminal_step(master, "/setup --clear-model", "Saved defaults for future Sessions", composer=True)
             assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
             cleared_preferences = interactive_saved.read_bytes()
-            for command, error in (("/setup --clear-model --model gpt-6-luna", "ConflictingArguments"),
-                                   ("/setup --model gpt-6-luna --clear-model", "ConflictingArguments"),
+            for command, error in (("/setup --clear-model --model gpt-6-luna", "model_excludes_clear_model"),
+                                   ("/setup --model gpt-6-luna --clear-model", "model_excludes_clear_model"),
                                    ('/setup --model ""', 'invalid model ""')):
                 rejected = terminal_step(master, command, error, composer=True)
                 if 'invalid model' in error:
@@ -6853,10 +6894,10 @@ def main(selected="all"):
                 "request_target": {"action": action, "decision": "deny"},
                 "answer": {"status": "rejected", "replayed": replayed, "session": session, "action": action,
                     "decision": "deny", "code": "action_not_pending"}}
-        recovered_stale = json.loads(invoke(home, "request", "recover", stale["request"], expect=1).stdout)
+        recovered_stale = json.loads(invoke(home, "request", "recover", stale["request"], expect=3).stdout)
         assert recovered_stale == rejected_decision(stale["request"], True), recovered_stale
         stale_default = admit(home, "action", "deny", "--store", store, "--session", session,
-            "--action", action, expect=1)
+            "--action", action, expect=3)
         assert stale_default["admission"] == rejected_decision(stale_default["request"], False), stale_default
         assert run(home, "request", "read-result", first, environment=render_environment) == "first answer"
         assert fixture.observe(store, first)["result"]["status"] == "completed"
@@ -7041,33 +7082,32 @@ def main(selected="all"):
         known_sessions = {row["reference"] for row in json.loads(run(home, "session", "list", "--store", store, "--all"))["sessions"]}
         absent = next(candidate for candidate in ("000000", "111111", "222222") if candidate not in known_sessions)
         rejected = admit(home, "session", "send", "--to", absent,
-            input="unknown session", expect=1)
+            input="unknown session", expect=3)
         assert rejected["admission"]["answer"] == {"status": "rejected", "replayed": False,
             "session": absent, "code": "unknown_session"}, rejected
         refused = fixture.observe(store, rejected["request"])
         assert refused["status"] == "rejected" and refused["code"] == "unknown_session", refused
-        not_accepted = ("\nrui: the Host did not accept this request; stdout carries its saved answer and code. "
-            "Replay returns that same answer and never resubmits: rui request recover ")
-        assert f"{not_accepted}{rejected['request']}\n" in rejected["stderr"], rejected["stderr"]
-        recovered_rejection = invoke(home, "request", "recover", rejected["request"], expect=1)
-        assert f"{not_accepted}{rejected['request']}\n" in recovered_rejection.stderr, recovered_rejection.stderr
+        assert "[unknown_session]" in rejected["stderr"], rejected["stderr"]
+        assert "MutationNotAccepted" not in rejected["stderr"] and "Syntax and recovery" not in rejected["stderr"], rejected["stderr"]
+        recovered_rejection = invoke(home, "request", "recover", rejected["request"], expect=3)
+        assert "[unknown_session]" in recovered_rejection.stderr, recovered_rejection.stderr
         replayed_rejection = json.loads(recovered_rejection.stdout)
         assert replayed_rejection == {"context": {"store": str(store), "session": absent,
             "key": rejected["request"], "kind": "message"}, "answer": {"status": "rejected", "replayed": True,
             "session": absent, "code": "unknown_session"}, "input": rejected["admission"]["input"]}, replayed_rejection
         stop_record = state / "absent-stop.json"
         refused_stop = invoke(home, "session", "stop", "--store", store, "--session", absent,
-            "--record", stop_record, "--key", "absent-stop", expect=1)
+            "--record", stop_record, "--key", "absent-stop", expect=3)
         assert json.loads(refused_stop.stdout)["answer"] == {"status": "rejected", "replayed": False,
             "session": absent, "code": "unknown_session"}, refused_stop
         repeated_stop = invoke(home, "session", "stop", "--store", store, "--session", absent,
             "--record", stop_record, "--key", "absent-stop", expect=1)
         assert not repeated_stop.stdout and "RecordAlreadyExists" in repeated_stop.stderr, repeated_stop
         explicit_route = f"rui request recover --store $'{store}' --record $'{stop_record}' --kind session-stop"
-        assert f"{not_accepted[:-len('rui request recover ')]}{explicit_route}\n" in refused_stop.stderr, refused_stop.stderr
+        assert "[unknown_session]" in refused_stop.stderr, refused_stop.stderr
         replayed_stop = subprocess.run(["bash", "-c", shlex.quote(str(fixture.RUI)) + explicit_route[len("rui"):]],
             env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=20)
-        assert replayed_stop.returncode == 1 and replayed_stop.stderr == refused_stop.stderr, replayed_stop
+        assert replayed_stop.returncode == 3 and replayed_stop.stderr == refused_stop.stderr, replayed_stop
         assert json.loads(replayed_stop.stdout)["answer"] == {"status": "rejected", "replayed": True,
             "session": absent, "code": "unknown_session"}, replayed_stop
         assert rejected["admission"]["input"]["bytes"] == str(len(b"unknown session")), rejected
@@ -7206,7 +7246,7 @@ def main(selected="all"):
                 "--action", action_id))
             assert exact == {"action": action_id, "call_id": control_call, "arguments": padded_arguments}, exact
             mismatch = admit(home, "action", "allow", "--store", store, "--session", session,
-                "--action", action_id, expect=1)
+                "--action", action_id, expect=3)
             assert mismatch["admission"]["answer"]["status"] == "rejected", mismatch
             assert mismatch["admission"]["answer"]["code"] == "target_mismatch", mismatch
             records = home / ".config/rui/requests"
@@ -7241,7 +7281,7 @@ def main(selected="all"):
             dispose_all(lambda: stop_process(entered, timeout=5),
                         lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
         invalid_name = "human/name\n\x1b[2J\u202e"
-        rejected_name = invoke(home, "session", "configure", "--store", store, "--session", invalid_name, expect=1)
+        rejected_name = invoke(home, "session", "configure", "--store", store, "--session", invalid_name, expect=2)
         assert not rejected_name.stdout and "InvalidSession" in rejected_name.stderr, rejected_name
         control_workspace = workspace / "name\n\x1b[2J\u202e"
         control_workspace.mkdir()
@@ -7493,7 +7533,7 @@ def main(selected="all"):
                 output, errors = terminal_exit(entered, master)
                 assert entered.returncode == (1 if columns == 7 else 0), errors
                 # Below eight columns the Session refuses to draw, with resume guidance.
-                assert (b"error: TerminalTooSmall" in errors and b"Resume: rui session resume --store " in errors) == (columns == 7), errors
+                assert (b"Enlarge the terminal" in errors and b"Resume: rui session resume --store " in errors) == (columns == 7), errors
                 assert (b"Detached." in output) == (columns == 8), output
                 actual = termios.tcgetattr(slave)
                 assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal)
