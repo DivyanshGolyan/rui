@@ -1728,7 +1728,7 @@ def command_interruption_cases(state, library, only=None):
                     else:
                         assert b"rui: Interrupted command output:" not in errors, (case, errors)
                 elif case == "configure-canonical":
-                    assert caller.returncode == 1 and b"Configuration not confirmed; do not replace uncertain work (CanonicalStoreFailure)" in errors and b"Resume: " in errors, (case, output, errors)
+                    assert caller.returncode == 4 and b"Configuration not confirmed; do not replace uncertain work (CanonicalStoreFailure)" in errors and b"Resume: " in errors, (case, output, errors)
                     assert b"error: CanonicalStoreFailure" not in errors, errors
                 else:
                     assert caller.returncode == 0, (case, caller.returncode, output, errors)
@@ -1819,7 +1819,7 @@ def fatal_reporting_cases(state):
         missing_session = "000000" if session != "000000" else "000001"
         diagnostics = [
             (["session", "resume", "--store", str(store), missing_session], b"SessionNotConfigured"),
-            (["defaults", "configure", "--provider", "unsupported"], b"--provider unsupported: That value is not supported."),
+            (["defaults", "configure", "--provider", "unsupported"], b"[choice_unsupported]"),
             (["--store", str(store), "--provider", "unsupported", "--model", "gpt-6-sol"], b"[choice_unsupported]"),
         ]
         for args, error, stopped in ((args, error, stopped) for args, error in diagnostics for stopped in (False, True)):
@@ -1832,7 +1832,7 @@ def fatal_reporting_cases(state):
                     termios.tcflow(error_slave, termios.TCOOFF)
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
-                assert caller.wait(timeout=3) == 1, "fatal diagnostic did not exit"
+                assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "fatal diagnostic did not exit"
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(error_slave, fcntl.F_GETFL), error_flags)
                 if not stopped:
@@ -1856,7 +1856,7 @@ def fatal_reporting_cases(state):
             try:
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
-                assert caller.wait(timeout=3) == 1, "disconnected stderr replaced the real exit"
+                assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "disconnected stderr replaced the real exit"
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
                 print(f"fatal reporting: {error.decode()} disconnected stderr passed", flush=True)

@@ -218,6 +218,13 @@ pub const routes = [_]Route{
         .reply = .bytes,
     },
     .{
+        .path = "/v1/activity-search",
+        .kind = .activity_search,
+        .summary = "Search public Session activity newest first with bounded snippets.",
+        .variants = &.{variant(protocol.activity_search_request, .{})},
+        .reply = jsonReply(.{protocol.ActivitySearchFacts.head ++ .{ListOf(ActivitySearchItem)} ++ protocol.ActivitySearchFacts.tail}),
+    },
+    .{
         .path = "/v1/activity-page",
         .kind = .activity_page,
         .summary = "One page of a Session's activity feed, with its work and queue at the page's boundary.",
@@ -1135,3 +1142,7 @@ test "statuses, media types and required headers match what the Host sends" {
     }
     try std.testing.expect(required);
 }
+
+const ActivitySearchItem = struct {
+    pub const openapi_shape = protocol.ActivitySearchFacts.Item.head ++ .{ ListOf(protocol.ActivitySearchFacts.Hit), "]}" };
+};

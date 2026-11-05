@@ -161,7 +161,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
 
     def test_cli_value_cores_keep_their_native_consumers(self):
-        for core in ("caller_error", "cli_value", "retention_capacity"):
+        for core in ("caller_error", "caller_exit", "cli_value", "retention_capacity"):
             with self.subTest(core=core):
                 result = select([f"src/{core}.zig"], "review", AVAILABLE)
                 self.assertIn("test-logic", result["targets"])
