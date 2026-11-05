@@ -16,7 +16,7 @@ test("configuration preserves omitted, null and value states and normalizes tool
 	};
 	const session = new Session(link, "session");
 	await session.update({ tools: ["write", "bash", "write"], compactAt: 0, effort: null, label: 'a"\nlabel' });
-	await session.update({ compactAt: 2000, effort: "", label: null });
+	await session.update({ compactAt: 2000, effort: "none", label: null });
 	await session.update({});
 	const [first, second, third] = requests;
 	assert.ok(first && second && third);
@@ -35,7 +35,7 @@ test("configuration preserves omitted, null and value states and normalizes tool
 		label: { state: "value", value: 'a"\nlabel' },
 	});
 	assert.deepEqual(second.configuration.compaction_trigger, { state: "value", value: "2000" });
-	assert.deepEqual(second.configuration.reasoning_effort, { state: "value", value: "" });
+	assert.deepEqual(second.configuration.reasoning_effort, { state: "value", value: "none" });
 	assert.deepEqual(second.configuration.label, { state: "null" });
 	for (const field of Object.values(third.configuration)) assert.deepEqual(field, { state: "omitted" });
 });

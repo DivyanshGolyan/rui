@@ -2064,6 +2064,81 @@
         ],
         "additionalProperties": false
       },
+      "AgentSpec": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "workspace": {
+            "type": "string",
+            "description": "Required when Bash is enabled."
+          },
+          "model": {
+            "type": "string"
+          },
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              null,
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
+          "compactAt": {
+            "type": "integer",
+            "description": "Tokens of context at which the agent compacts."
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tool names, each one of yours."
+          },
+          "permissionMode": {
+            "type": "string",
+            "enum": [
+              "ask",
+              "bypass"
+            ]
+          },
+          "instructions": {
+            "type": "string",
+            "description": "Optional agent instructions."
+          },
+          "outputSchema": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Optional JSON output schema.",
+            "additionalProperties": true
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A few words naming the agent's task."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "model",
+          "effort",
+          "compactAt",
+          "tools",
+          "permissionMode"
+        ]
+      },
       "CallActivity": {
         "type": "object",
         "properties": {
@@ -4314,6 +4389,94 @@
             "additionalProperties": false
           }
         ]
+      },
+      "LaunchFrame": {
+        "type": "object",
+        "properties": {
+          "v": {
+            "const": 1
+          },
+          "store": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "openai_key"
+              },
+              "baseUrl": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "baseUrl",
+              "key"
+            ],
+            "additionalProperties": false
+          },
+          "runtimeDir": {
+            "type": "string"
+          },
+          "activeCapacity": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "presets": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AgentSpec"
+            },
+            "maxProperties": 64
+          },
+          "mcpServers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "bearerToken": {
+                  "type": "string"
+                },
+                "callTimeoutMs": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "name",
+                "url",
+                "bearerToken",
+                "callTimeoutMs"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "v",
+          "store",
+          "provider",
+          "runtimeDir"
+        ],
+        "additionalProperties": false
       },
       "ListSessionsReply": {
         "anyOf": [
@@ -9409,6 +9572,38 @@
           "turn",
           "operation",
           "first_action"
+        ],
+        "additionalProperties": false
+      },
+      "StartError": {
+        "type": "object",
+        "properties": {
+          "rui_start_error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "launch_frame_invalid",
+                  "invalid_preset",
+                  "store_locked",
+                  "runtime_dir_unusable",
+                  "tool_name_collision"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "rui_start_error"
         ],
         "additionalProperties": false
       },

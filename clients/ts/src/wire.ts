@@ -554,6 +554,28 @@ export interface components {
             kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
             limit: components["schemas"]["Decimal"];
         };
+        AgentSpec: {
+            provider?: string;
+            /** @description Required when Bash is enabled. */
+            workspace?: string;
+            model: string;
+            /** @enum {string|null} */
+            effort: null | "none" | "low" | "medium" | "high" | "xhigh" | "max";
+            /** @description Tokens of context at which the agent compacts. */
+            compactAt: number;
+            /** @description Tool names, each one of yours. */
+            tools: string[];
+            /** @enum {string} */
+            permissionMode: "ask" | "bypass";
+            /** @description Optional agent instructions. */
+            instructions?: string;
+            /** @description Optional JSON output schema. */
+            outputSchema?: {
+                [key: string]: unknown;
+            } | null;
+            /** @description A few words naming the agent's task. */
+            label?: string | null;
+        };
         CallActivity: {
             total: components["schemas"]["Decimal"];
             entries: {
@@ -1135,6 +1157,29 @@ export interface components {
             failed_response: "body" | "metadata";
             operation: components["schemas"]["Decimal"];
             attempt: components["schemas"]["Decimal"];
+        };
+        LaunchFrame: {
+            /** @constant */
+            v: 1;
+            store: string;
+            provider: {
+                /** @constant */
+                kind: "openai_key";
+                baseUrl: string;
+                key: string;
+            };
+            runtimeDir: string;
+            activeCapacity?: number | null;
+            paused?: boolean;
+            presets?: {
+                [key: string]: components["schemas"]["AgentSpec"];
+            };
+            mcpServers?: {
+                name: string;
+                url: string;
+                bearerToken: string;
+                callTimeoutMs: number;
+            }[];
         };
         ListSessionsReply: {
             /** @constant */
@@ -2369,6 +2414,13 @@ export interface components {
             turn: components["schemas"]["Decimal"] | null;
             operation: components["schemas"]["Decimal"] | null;
             first_action: components["schemas"]["Decimal"] | null;
+        };
+        StartError: {
+            rui_start_error: {
+                /** @enum {string} */
+                code: "launch_frame_invalid" | "invalid_preset" | "store_locked" | "runtime_dir_unusable" | "tool_name_collision";
+                message: string;
+            };
         };
         ToolPresentation: {
             description: string | null;

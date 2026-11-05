@@ -17,8 +17,9 @@ test("the wire version is the one openapi.json describes", () => {
 });
 
 test("a launch frame is a big-endian length and the JSON", () => {
-	const frame = encodeFrame({ v: 1, store: "/s" });
-	const json = '{"v":1,"store":"/s"}';
+	const launch = { v: 1, store: "/s", runtimeDir: "/r", provider: { kind: "openai_key", baseUrl: "https://example.com/v1", key: "test" } } satisfies import("../src/wire.ts").components["schemas"]["LaunchFrame"];
+	const frame = encodeFrame(launch);
+	const json = JSON.stringify(launch);
 	assert.equal(frame.readUInt32BE(0), json.length);
 	assert.equal(frame.subarray(4).toString("utf8"), json);
 });
@@ -30,6 +31,10 @@ test("the refusal line becomes a RuiStartError", () => {
 	assert.equal(refusal.message, "another Host holds this Store");
 	assert.equal(startError(""), undefined);
 	assert.equal(startError("not json\n"), undefined);
+	assert.equal(startError("null\n{}\n"), undefined);
+	for (const code of ["runtime_dir_unusable", "tool_name_collision", "invalid_preset"] satisfies RuiStartError["code"][]) {
+		assert.equal(startError(JSON.stringify({ rui_start_error: { code, message: "refused" } }))?.code, code);
+	}
 });
 
 test("environment entries the Host would refuse are left out, never split", () => {
@@ -125,3 +130,11 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 	assert.equal(bodies.length, 2);
 	assert.match(bodies[1] as string, /"position":"9","ordinal":null/);
 });
+
+// These checks are compiled by `npm run check`, but never execute invalid input.
+function launchTypeChecks() {
+	// @ts-expect-error The Host requires every non-defaulted launch field.
+	encodeFrame({ v: 1, store: "/s" });
+	// @ts-expect-error store_fenced is not a launch refusal in the Host enum.
+	new RuiStartError("store_fenced", "refused");
+}

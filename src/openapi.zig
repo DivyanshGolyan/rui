@@ -15,6 +15,8 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const model_list = @import("model_list.zig");
 const store = @import("store.zig");
+const launch_frame = @import("launch_frame.zig");
+const core_tools = @import("core_tools.zig");
 const Hole = protocol.Hole;
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
@@ -539,6 +541,69 @@ pub const Document = struct {
         @compileError("no wire schema for " ++ @typeName(T));
     }
 
+    /// JSON decoded directly into a Zig wire type. Defaults permit omission,
+    /// whereas optional types permit null; these are independent on the wire.
+    fn wireSchema(d: *Document, comptime T: type) anyerror!Value {
+        return switch (@typeInfo(T)) {
+            .bool => d.object(.{ .type = Value{ .string = "boolean" } }),
+            .int => d.object(.{ .type = Value{ .string = "integer" } }),
+            .@"enum" => d.enumeration(T, false),
+            .optional => |optional| d.nullable(try d.wireSchema(optional.child)),
+            .pointer => |pointer| if (pointer.size == .slice and pointer.child == u8)
+                d.object(.{ .type = Value{ .string = "string" } })
+            else if (pointer.size == .slice)
+                d.object(.{ .type = Value{ .string = "array" }, .items = try d.wireSchema(pointer.child) })
+            else
+                @compileError("not a JSON wire slice: " ++ @typeName(T)),
+            .@"struct" => |fields| blk: {
+                var properties: ObjectMap = .empty;
+                var required: std.json.Array = .init(d.arena);
+                inline for (fields.field_names, fields.field_types, fields.field_attrs) |name, Field, attrs| {
+                    const schema = if (comptime T == launch_frame.Wire and std.mem.eql(u8, name, "presets"))
+                        try d.object(.{
+                            .type = Value{ .string = "object" },
+                            .additionalProperties = try d.ref("AgentSpec"),
+                            .maxProperties = Value{ .integer = core_tools.max_presets },
+                        })
+                    else
+                        try d.wireSchema(Field);
+                    try properties.put(d.arena, name, schema);
+                    if (attrs.default_value_ptr == null) try required.append(.{ .string = name });
+                }
+                break :blk d.object(.{
+                    .type = Value{ .string = "object" },
+                    .properties = Value{ .object = properties },
+                    .required = Value{ .array = required },
+                    .additionalProperties = Value{ .bool = false },
+                });
+            },
+            else => @compileError("not a JSON wire type: " ++ @typeName(T)),
+        };
+    }
+
+    fn launchSchemas(d: *Document) !void {
+        // Reuse the same spec vocabulary and completeness requirement that
+        // start_agent advertises, rather than describing presets separately.
+        const start_agent = try std.json.parseFromSliceLeaky(Value, d.arena, core_tools.start_agent_schema, .{});
+        var spec = start_agent.object.get("properties").?.object.get("spec").?;
+        const complete = start_agent.object.get("anyOf").?.array.items[1].object.get("properties").?.object.get("spec").?;
+        try spec.object.put(d.arena, "required", complete.object.get("required").?);
+        // JSON Schema defaults object properties to unconstrained values.
+        // Spell that out so generated clients do not turn them into `never`.
+        const output_schema = spec.object.getPtr("properties").?.object.getPtr("outputSchema").?;
+        try output_schema.object.put(d.arena, "additionalProperties", .{ .bool = true });
+        try d.schemas.put(d.arena, "AgentSpec", spec);
+        var frame = try d.wireSchema(launch_frame.Wire);
+        const properties = frame.object.getPtr("properties").?;
+        try properties.object.put(d.arena, "v", try d.object(.{ .@"const" = Value{ .integer = launch_frame.version } }));
+        const provider = properties.object.getPtr("provider").?.object.getPtr("properties").?;
+        try provider.object.put(d.arena, "kind", try d.object(.{ .@"const" = Value{ .string = "openai_key" } }));
+        try d.schemas.put(d.arena, "LaunchFrame", frame);
+        try d.schemas.put(d.arena, "StartError", try d.wireSchema(struct {
+            rui_start_error: struct { code: launch_frame.StartError, message: []const u8 },
+        }));
+    }
+
     /// The schema of a JSON shape.
     pub fn shapeSchema(d: *Document, comptime shape: anytype) !Value {
         return d.shapeSchemaWith(shape, null);
@@ -737,6 +802,7 @@ pub const Document = struct {
             try paths.put(d.arena, route.path, try d.object(.{ .post = operation }));
         }
         try d.schemas.put(d.arena, "ErrorReply", try d.shapeSchema(protocol.error_reply));
+        try d.launchSchemas();
         d.schemas.sort(SortKeys{ .keys = d.schemas.keys() });
         return d.object(.{
             .openapi = Value{ .string = "3.1.0" },
@@ -981,6 +1047,67 @@ test "the Host parses a generated example of every request variant" {
     }
 }
 
+test "every launch Wire field parses and conforms to its component schema" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var document: Document = .init(allocator);
+    _ = try document.build();
+    const preset = try std.json.parseFromSliceLeaky(Value, allocator,
+        \\{"review":{"model":"custom","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask","instructions":"Review","outputSchema":{"type":"object"},"label":null}}
+    , .{});
+    const wire: launch_frame.Wire = .{
+        .v = launch_frame.version,
+        .store = "/tmp/store",
+        .provider = .{ .kind = "openai_key", .baseUrl = "https://api.openai.com/v1", .key = "test-key" },
+        .runtimeDir = "/tmp/rui",
+        .activeCapacity = 2,
+        .paused = true,
+        .presets = preset,
+        .mcpServers = &.{.{ .name = "tools", .url = "http://127.0.0.1:1234/mcp", .bearerToken = "test-token", .callTimeoutMs = 1000 }},
+    };
+    const bytes = try std.json.Stringify.valueAlloc(allocator, wire, .{});
+    var frame: launch_frame.Frame = .{};
+    defer frame.deinit();
+    var refusal: launch_frame.Refusal = undefined;
+    try launch_frame.parse(std.testing.allocator, bytes, &frame, &refusal);
+    const json = try std.json.parseFromSliceLeaky(Value, allocator, bytes, .{});
+    try std.testing.expectEqual(@typeInfo(launch_frame.Wire).@"struct".field_names.len, json.object.count());
+    const schema = document.schemas.get("LaunchFrame").?;
+    try std.testing.expect(conforms(document.schemas, schema, json));
+    try std.testing.expectEqual(@as(usize, 1), frame.presets.len);
+    try std.testing.expectEqual(@as(usize, 1), frame.mcp_server_count);
+    // Defaults are omittable; nullable capacity is distinct from omission.
+    const minimal = try std.json.parseFromSliceLeaky(Value, allocator,
+        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDir":"/tmp/rui","activeCapacity":null}
+    , .{});
+    try std.testing.expect(conforms(document.schemas, schema, minimal));
+    const minimal_bytes = try std.json.Stringify.valueAlloc(allocator, minimal, .{});
+    var minimal_frame: launch_frame.Frame = .{};
+    defer minimal_frame.deinit();
+    try launch_frame.parse(std.testing.allocator, minimal_bytes, &minimal_frame, &refusal);
+    // Closed wire objects must reject renamed or missing fields, including
+    // fields inside MCP entries and the reused agent-spec schema.
+    const invalid = [_][]const u8{
+        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDirectory":"/tmp/rui"}
+        ,
+        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDir":"/tmp/rui","mcpServers":[{"name":"tools","url":"http://127.0.0.1:1234/mcp","bearerToken":"test-token","timeoutMs":1000}]}
+        ,
+        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDir":"/tmp/rui","presets":{"review":{"model":"custom","tools":[],"effort":"low","permissionMode":"ask"}}}
+        ,
+    };
+    for (invalid) |text| {
+        const invalid_json = try std.json.parseFromSliceLeaky(Value, allocator, text, .{});
+        try std.testing.expect(!conforms(document.schemas, schema, invalid_json));
+        try std.testing.expectError(error.LaunchFrameInvalid, launch_frame.parse(std.testing.allocator, text, &minimal_frame, &refusal));
+    }
+    inline for (std.meta.tags(launch_frame.StartError)) |code| {
+        const line = try std.json.Stringify.valueAlloc(allocator, .{ .rui_start_error = .{ .code = code, .message = "refused" } }, .{});
+        const error_json = try std.json.parseFromSliceLeaky(Value, allocator, line, .{});
+        try std.testing.expect(conforms(document.schemas, document.schemas.get("StartError").?, error_json));
+    }
+}
+
 fn report(route: *const Route, index: usize, bytes: []const u8, err: anyerror) anyerror {
     std.debug.print("{s} variant {d} refused with {s}: {s}\n", .{ route.path, index, @errorName(err), bytes });
     return err;
@@ -989,6 +1116,7 @@ fn report(route: *const Route, index: usize, bytes: []const u8, err: anyerror) a
 /// Checks `json` against `schema`, resolving references in `schemas`: the
 /// subset of JSON Schema this document uses.
 fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
+    if (schema == .bool) return schema.bool;
     const rules = schema.object;
     if (rules.get("$ref")) |target| {
         const name = target.string["#/components/schemas/".len..];
@@ -1003,7 +1131,16 @@ fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
         for (names.array.items) |name| if (equal(name, json)) return true;
         return false;
     }
-    const kind = rules.get("type").?.string;
+    const type_rule = rules.get("type") orelse return true;
+    if (type_rule == .array) {
+        for (type_rule.array.items) |kind| if (conformsKind(schemas, rules, kind.string, json)) return true;
+        return false;
+    }
+    return conformsKind(schemas, rules, type_rule.string, json);
+}
+
+fn conformsKind(schemas: ObjectMap, rules: ObjectMap, kind: []const u8, json: Value) bool {
+    if (std.mem.eql(u8, kind, "integer")) return json == .integer;
     if (std.mem.eql(u8, kind, "null")) return json == .null;
     if (std.mem.eql(u8, kind, "boolean")) return json == .bool;
     if (std.mem.eql(u8, kind, "string")) {
@@ -1025,12 +1162,13 @@ fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
     }
     if (std.mem.eql(u8, kind, "object")) {
         if (json != .object) return false;
-        const properties = rules.get("properties").?.object;
+        if (rules.get("maxProperties")) |limit| if (json.object.count() > limit.integer) return false;
+        const properties = if (rules.get("properties")) |props| props.object else ObjectMap.empty;
         for (json.object.keys(), json.object.values()) |name, value| {
-            const property = properties.get(name) orelse return false;
+            const property = properties.get(name) orelse rules.get("additionalProperties") orelse continue;
             if (!conforms(schemas, property, value)) return false;
         }
-        for (rules.get("required").?.array.items) |name| if (!json.object.contains(name.string)) return false;
+        if (rules.get("required")) |required| for (required.array.items) |name| if (!json.object.contains(name.string)) return false;
         return true;
     }
     return false;

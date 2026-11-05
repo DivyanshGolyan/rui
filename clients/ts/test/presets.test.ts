@@ -86,6 +86,7 @@ test("an invalid connect preset is a RuiStartError naming the preset and field",
 	await assert.rejects(Rui.connect({
 		database: join(root, "store"), binary: binary ?? "rui",
 		provider: { baseUrl: "https://api.openai.com/v1", key: "sk-ts-presets" },
-		presets: { review: { model: "m" } as AgentSpec },
+		// @ts-expect-error Deliberately bypass the complete spec type to exercise Host refusal.
+		presets: { review: { model: "m", tools: [], compactAt: 1000, permissionMode: "ask" } },
 	}), (error: unknown) => error instanceof RuiStartError && error.code === "invalid_preset" && /review.*effort/.test(error.message));
 });

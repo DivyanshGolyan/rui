@@ -127,7 +127,7 @@ fn refuse(refusal: *Refusal, message: []const u8) error{LaunchFrameInvalid} {
 }
 
 /// The frame as JSON. Unknown fields are refused.
-const Wire = struct {
+pub const Wire = struct {
     v: i64,
     store: []const u8,
     provider: struct { kind: []const u8, baseUrl: []const u8, key: []const u8 },

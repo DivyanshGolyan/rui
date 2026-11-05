@@ -58,7 +58,7 @@ const READY_POLL_MS = 25;
 /** How long a refused connection waits for the child's exit before it counts as unanswered. */
 const EXIT_NOTICE_MS = 2_000;
 /** Refusals a restart cannot fix: the same frame would be refused again. */
-const RETRYABLE_START_CODES = new Set(["store_locked", "store_fenced"]);
+const RETRYABLE_START_CODES = new Set<RuiStartError["code"]>(["store_locked"]);
 
 interface Exit {
 	code: number | null;
@@ -80,7 +80,7 @@ interface Waiter {
 
 interface Launch {
 	binary: string;
-	frame: object;
+	frame: Schemas["LaunchFrame"];
 	socketPath: string;
 	store: string;
 	env: NodeJS.ProcessEnv;
@@ -301,13 +301,10 @@ function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 		...(options.activeCapacity === undefined ? {} : { activeCapacity: options.activeCapacity }),
 		...(options.paused ? { paused: true } : {}),
 		...(options.presets === undefined ? {} : {
-			presets: Object.fromEntries(Object.entries(options.presets).map(([name, spec]) => [name, {
-				...spec,
-				...(typeof spec.outputSchema === "string" ? { outputSchema: JSON.parse(spec.outputSchema) as unknown } : {}),
-			}])),
+			presets: Object.fromEntries(Object.entries(options.presets).map(([name, spec]) => [name, presetFor(spec)])),
 		}),
 		provider: { kind: "openai_key", baseUrl: options.provider.baseUrl, key: options.provider.key },
-	};
+	} satisfies Schemas["LaunchFrame"];
 	// The child gets only what it needs to find programs and its home (D185).
 	const env: NodeJS.ProcessEnv = {};
 	for (const name of ["PATH", "HOME", "TMPDIR"]) {
@@ -315,6 +312,24 @@ function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 		if (value !== undefined) env[name] = value;
 	}
 	return { binary: resolveBinary(options.binary), frame, socketPath: join(runtimeDir, SOCKET_NAME), store, env };
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Convert the public JSON-text convenience and readonly tools to the wire spec. */
+function presetFor(spec: AgentSpec): Schemas["AgentSpec"] {
+	const { outputSchema, ...settings } = spec;
+	let schema = outputSchema;
+	if (typeof schema === "string") {
+		const parsed: unknown = JSON.parse(schema);
+		if (parsed !== null && !isJsonObject(parsed)) {
+			throw new TypeError("preset outputSchema must be a JSON object or null");
+		}
+		schema = parsed;
+	}
+	return { ...settings, tools: [...settings.tools], ...(schema === undefined ? {} : { outputSchema: schema }) };
 }
 
 /** Starts one child and resolves once it answers host-info, or throws AttemptFailed. */
@@ -390,7 +405,7 @@ async function probe(launch: Launch): Promise<HostInfo | undefined> {
 }
 
 /** One length-prefixed JSON frame: a 4-byte big-endian length, then UTF-8 JSON (D130). */
-export function encodeFrame(frame: object): Buffer {
+export function encodeFrame(frame: Schemas["LaunchFrame"]): Buffer {
 	const json = Buffer.from(JSON.stringify(frame));
 	const out = Buffer.alloc(4 + json.length);
 	out.writeUInt32BE(json.length, 0);
@@ -404,8 +419,8 @@ export function startError(output: string): RuiStartError | undefined {
 	for (const line of output.split("\n").reverse()) {
 		if (!line.trim()) continue;
 		try {
-			const parsed = JSON.parse(line) as { rui_start_error?: { code?: unknown; message?: unknown } };
-			const refusal = parsed.rui_start_error;
+			const parsed: Partial<Schemas["StartError"]> | null = JSON.parse(line);
+			const refusal = parsed?.rui_start_error;
 			if (refusal && typeof refusal.code === "string") {
 				return new RuiStartError(refusal.code, typeof refusal.message === "string" ? refusal.message : refusal.code);
 			}
