@@ -6,9 +6,9 @@ Help needs no Host or credentials.
 
 Output follows three rules:
 
-- `session start` prints the new Session's six-character ID on stdout.
-- Other metadata is JSON on stdout.
-- Recovery handles and diagnostics go to stderr.
+- Mutation receipts and metadata are JSON on stdout.
+- `.context.session` is the Session ID and `.context.key` is the request handle in mutation receipts.
+- Recovery notices and diagnostics go to stderr.
 
 ## Start a Session
 
@@ -18,12 +18,17 @@ Start the Host first:
 ```sh
 STORE="$HOME/.local/share/rui/store"
 rui host start --store "$STORE"
-SESSION=$(printf '%s' 'Investigate the failing test' | rui session start --store "$STORE" \
+RECEIPT=$(printf '%s' 'Investigate the failing test' | rui session start --store "$STORE" \
 	--workspace "$PWD" --provider codex --model gpt-6-luna --permission-mode ask)
+SESSION=$(printf '%s' "$RECEIPT" | jq -r .context.session)
+HANDLE=$(printf '%s' "$RECEIPT" | jq -r .context.key)
 ```
 
 `session start` creates the Session and admits its first Message in one transaction.
-The ID it returns is an admission receipt, not a finished answer.
+The JSON receipt confirms admission, not a finished answer.
+Its start-only `configuration` member reports the resolved provider, model and effective reasoning effort.
+`configuration.effort_source` is `flag` when `--reasoning-effort` was given, `saved` when a compatible saved override was selected, or `model_default` otherwise.
+The effective effort falls back to the catalog default, or null for an unlisted model.
 An ID is exactly six random lowercase Crockford base32 characters (`0123456789abcdefghjkmnpqrstvwxyz`), such as `k7m2qx`.
 Creation settings you omit come from the current directory and your saved defaults.
 
@@ -35,7 +40,7 @@ rui request inspect SAVED_HANDLE
 rui request read-result SAVED_HANDLE
 ```
 
-`session start` and `session send` print a handle on stderr.
+`session start` and `session send` return the handle in `.context.key` and announce it on stderr.
 Use it in place of `SAVED_HANDLE`.
 Both commands return once Rui admits the Message, not when the work finishes.
 
