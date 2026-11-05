@@ -350,7 +350,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                     err == error.CommitOutcomeUnknown or err == error.OwnershipLost)
                     a.failure = err;
             };
-            a.resetQueued();
+            a.resetQueued() catch |err| {
+                if (a.failure == null or err == error.StoreConnectionLost or
+                    err == error.CommitOutcomeUnknown or err == error.OwnershipLost)
+                    a.failure = err;
+            };
         }
 
         /// Whether `S`'s step recorded this Access's failure: how a caller
@@ -517,10 +521,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         pub fn abandon(a: *Self, faults: store_core.Faults) Error!void {
             comptime std.debug.assert(mode == .write or mode == .single);
             if (a.ended) return;
-            a.resetQueued();
+            const discarded = a.resetQueued();
             a.claimed = 0;
             a.ended = true;
             if (mode == .write and a.opened) try store_core.rollbackAfterError(a.store, faults);
+            try discarded;
         }
 
         /// The transition's `result`, after abandoning the Access when it
@@ -539,7 +544,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Clears statements queued but never run. A write Access that
         /// opened its transaction must have ended by now, in every build.
         pub fn deinit(a: *Self) void {
-            a.resetQueued();
+            a.resetQueued() catch |err| {
+                // deinit cannot return errors; MySQL also keeps this failure
+                // latched so the Store cannot reuse the unresolved connection.
+                a.failure = err;
+            };
             if (mode == .write and a.opened and !a.ended) @panic("a write Access neither committed nor abandoned its transaction");
         }
 
@@ -634,10 +643,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// Empties the queue. A pass ended each statement it stepped
         /// (`Engine.endStatement`), as it stepped; what is left was never
         /// stepped since its bind (`Engine.discard`).
-        fn resetQueued(a: *Self) void {
+        fn resetQueued(a: *Self) Failure!void {
             for (a.queue[0..a.queued]) |entry| a.store.engine.discard(entry.statement);
             a.queued = 0;
-            a.store.engine.discardBatch();
+            try a.store.engine.discardBatch();
         }
 
         const Runner = *const fn (*Self, *const Queued) Error!void;

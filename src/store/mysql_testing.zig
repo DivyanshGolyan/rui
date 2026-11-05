@@ -390,32 +390,40 @@ test "store.mysql live first Access guard survives a later duplicate and keeps f
 }
 
 test "store.mysql live abandoning an Access drains an already-sent large content chunk" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var storage: Store = undefined;
-    try openLive(&storage, &tmp);
-    defer storage.close() catch unreachable;
-    const entry = try store_core.enter(&storage, .none);
-    defer entry.release();
-    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
-    defer access.deinit();
-    const bytes = try std.testing.allocator.alloc(u8, 32 * 1024);
-    defer std.testing.allocator.free(bytes);
-    @memset(bytes, 'x');
-    access.write(live_insert, .{ .id = 9000030, .digest = protocol.contentDigest(bytes), .length = bytes.len });
-    try access.run();
-    access.writeContent(9000030, bytes);
-    // No pass after writeContent: bind has already sent the oversized query,
-    // but Access has not read its response when the caller abandons the work.
-    try std.testing.expect(storage.engine.mysql.state.long_query);
-    try std.testing.expect(!storage.engine.mysql.state.connection.isReady());
-    try access.abandon(.{});
-    try std.testing.expect(!storage.engine.inTransaction());
-    try std.testing.expect(storage.engine.mysql.state.connection.isReady());
-    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000030", .{}));
-    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=9000030", .{}));
-    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
-    try std.testing.expect(!storage.isFenced());
+    for ([_]bool{ false, true }) |duplicate| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try openLive(&storage, &tmp);
+        defer storage.close() catch unreachable;
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+        defer access.deinit();
+        const bytes = try std.testing.allocator.alloc(u8, 32 * 1024);
+        defer std.testing.allocator.free(bytes);
+        @memset(bytes, 'x');
+        access.write(live_insert, .{ .id = 9000030, .digest = protocol.contentDigest(bytes), .length = bytes.len });
+        try access.run();
+        access.writeContent(9000030, bytes);
+        if (duplicate) {
+            // Resolve the first insert, then leave a duplicate-key ERR unread.
+            // Discarding that ordinary statement error must still allow rollback.
+            try access.run();
+            access.writeContent(9000030, bytes);
+        }
+        // No pass after writeContent: bind has already sent the oversized query,
+        // but Access has not read its response when the caller abandons the work.
+        try std.testing.expect(storage.engine.mysql.state.long_query);
+        try std.testing.expect(!storage.engine.mysql.state.connection.isReady());
+        try access.abandon(.{});
+        try std.testing.expect(!storage.engine.inTransaction());
+        try std.testing.expect(storage.engine.mysql.state.connection.isReady());
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000030", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=9000030", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
+        try std.testing.expect(!storage.isFenced());
+    }
 }
 
 test "store.mysql live midchunk stop pads its frame and rollback leaves connection usable" {

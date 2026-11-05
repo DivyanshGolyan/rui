@@ -73,10 +73,10 @@ pub const Engine = union(Kind) {
         }
     }
 
-    pub inline fn discardBatch(e: *Engine) void {
+    pub inline fn discardBatch(e: *Engine) Failure!void {
         switch (e.*) {
             .sqlite => {},
-            .mysql => |*s| s.discardBatch(),
+            .mysql => |*s| try s.discardBatch(),
         }
     }
 
