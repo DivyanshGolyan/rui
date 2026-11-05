@@ -63,7 +63,7 @@ test "detached launcher reports exec failure before claiming Host readiness" {
 pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
         if (err != error.Reported and err != error.CallerFailure) recordExit(caller_exit.knownError(err));
-        if (exit_status == .done) recordExit(.bug);
+        if (exit_status == .done) recordExit(.unclassified);
         if (err == error.EmptyMessageInput) {
             stderr.print("Standard input was empty; provide Message text. Nothing was sent.\n", .{});
         } else if (err != error.Reported and err != error.CallerFailure and err != error.InvalidInvocation) {
@@ -2912,7 +2912,7 @@ fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentat
         recordExit(caller_exit.forCode(.unconfirmed, .reply_unconfirmed));
         reportUnconfirmed(reply.context, replay, err);
         presentMutationOutput(io, reply, presentation) catch |presentation_error| {
-            if (presentation_error != err) recordExit(.bug);
+            if (presentation_error != err) recordExit(.unclassified);
         };
         // Canonical failure still reaches the terminal owner's fatal cleanup.
         return if (err == error.CanonicalStoreFailure) err else error.CallerFailure;
@@ -3572,7 +3572,7 @@ const usage_text =
     \\Non-interactive calls never implicitly start a Host or sign in. Administration is explicit.
     \\After uncertainty, inspect or recover the original handle or record, never a new key.
     \\A nonzero exit can follow acceptance. Inspection never admits work; recovery can.
-    \\Exit statuses: 0 done; 1 Rui bug or unexpected internal error;
+    \\Exit statuses: 0 done; 1 unclassified failure, read stderr;
     \\  2 invalid fresh invocation, nothing sent; 3 saved refusal;
     \\  4 admission unconfirmed: rui request recover HANDLE, never resubmit;
     \\  5 retry unchanged later; 6 repair environment, retry unchanged.

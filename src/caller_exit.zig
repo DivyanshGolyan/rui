@@ -4,7 +4,7 @@ const caller_error = @import("caller_error.zig");
 
 pub const Status = enum(u8) {
     done = 0,
-    bug = 1,
+    unclassified = 1,
     invalid = 2,
     refused = 3,
     unconfirmed = 4,
@@ -22,7 +22,7 @@ pub const Status = enum(u8) {
             .refused => 2,
             .later => 3,
             .environment => 4,
-            .bug => 5,
+            .unclassified => 5,
             .unconfirmed => 6,
         };
     }
@@ -40,7 +40,7 @@ pub fn status(certainty: Certainty, act: caller_error.Act) Status {
             .wait => .later,
             .operate => .environment,
             .recover => .unconfirmed,
-            .report => .bug,
+            .report => .unclassified,
         },
     };
 }
@@ -58,7 +58,7 @@ pub fn knownError(err: anyerror) Status {
         error.ApiKeyMissing => forCode(.not_sent, .sign_in_required),
         error.HostBusy => forCode(.confirmed, .host_busy),
         error.ResultNotReady => forCode(.confirmed, .result_not_ready),
-        else => .bug,
+        else => .unclassified,
     };
 }
 
@@ -68,7 +68,7 @@ test "an invalid label refused before capture is a fresh invocation error" {
 
 test "CLI exits derive from certainty before remedy" {
     const acts = std.meta.tags(caller_error.Act);
-    const remedies = [_]Status{ .invalid, .later, .environment, .unconfirmed, .bug };
+    const remedies = [_]Status{ .invalid, .later, .environment, .unconfirmed, .unclassified };
     for (acts, remedies) |act, expected| {
         try std.testing.expectEqual(Status.invalid, status(.fresh_invalid, act));
         try std.testing.expectEqual(Status.refused, status(.saved_refusal, act));
@@ -77,7 +77,7 @@ test "CLI exits derive from certainty before remedy" {
         try std.testing.expectEqual(expected, status(.confirmed, act));
     }
     try std.testing.expectEqual(Status.invalid, forCode(.fresh_invalid, .choice_unsupported));
-    try std.testing.expectEqual(Status.bug, knownError(error.Unexpected));
+    try std.testing.expectEqual(Status.unclassified, knownError(error.Unexpected));
     try std.testing.expectEqual(Status.environment, knownError(error.HostStopped));
     try std.testing.expectEqual(Status.environment, knownError(error.ApiKeyMissing));
     try std.testing.expectEqual(Status.environment, knownError(error.StoreAlreadyOwned));
@@ -85,7 +85,7 @@ test "CLI exits derive from certainty before remedy" {
 }
 
 test "CLI aggregate exits are cautious in every order" {
-    const cautious = [_]Status{ .done, .invalid, .refused, .later, .environment, .bug, .unconfirmed };
+    const cautious = [_]Status{ .done, .invalid, .refused, .later, .environment, .unclassified, .unconfirmed };
     for (cautious, 0..) |a, i| for (cautious, 0..) |b, j| {
         const expected = cautious[@max(i, j)];
         try std.testing.expectEqual(expected, a.merge(b));

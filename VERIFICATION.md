@@ -659,12 +659,14 @@ The CLI derives exit status from admission certainty and the catalog remedy, not
 | Exit | Caller action |
 | --- | --- |
 | 0 | Done. |
-| 1 | Rui bug or unexpected internal error. |
+| 1 | Failed for a cause not classified above; stderr names it. Treat it as unknown: do not assume the request was or was not sent unless stderr says so. |
 | 2 | Invalid fresh invocation; nothing was sent. Fix the invocation. |
 | 3 | Rui answered with a saved refusal. Correct the request; a resend needs a new key. |
 | 4 | Admission unconfirmed. Run `rui request recover HANDLE` (or the printed explicit-record recovery); never resubmit with a new key. |
 | 5 | Retry the same request unchanged later (Host busy or result not ready). |
 | 6 | Repair the environment, then retry unchanged (known stopped/unreachable Host, sign-in required or locked Store). |
+
+An error enters 2-6 only once its cause is mapped; every other failure stays exit 1 until it is.
 
 Uncertainty takes precedence over remedy: a busy-looking mutation response without a confirmed admission remains exit 4, not 5.
 Multiple outcomes, including `session stop --all`, aggregate in cautious order **4 > 1 > 6 > 5 > 3 > 2 > 0**, never numeric maximum or first failure.
