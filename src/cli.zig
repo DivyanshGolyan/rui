@@ -589,15 +589,29 @@ fn storeFailure(err: anyerror) anyerror {
 // from a missing listener at this transport boundary, not by OS name in main.
 fn readTransportFailure(io: std.Io, store: []const u8, err: anyerror) anyerror {
     holdStore(store);
-    // Only a refused connection means no Host serves; a reset or truncated
-    // reply came from a Host that was serving.
-    switch (err) {
-        error.FileNotFound, error.ConnectionRefused, error.UnixConnectFailed => {},
-        else => return err,
-    }
+    if (!client.hostUnreachable(err)) return err;
     const paths = platform.resolveClientPaths(io, store) catch |store_err| return storeFailure(store_err);
     holdStore(paths.store.slice());
-    return error.HostNotServing;
+    return hostTransportFailure(io, paths.store.slice(), err);
+}
+
+fn hostTransportFailure(io: std.Io, store: []const u8, err: anyerror) anyerror {
+    if (!client.hostUnreachable(err)) return err;
+    return classifyHostTransportFailure(err, client.hostLockState(io, store));
+}
+
+fn classifyHostTransportFailure(err: anyerror, lock: client.HostLockState) anyerror {
+    if (!client.hostUnreachable(err)) return err;
+    return switch (lock) {
+        .free => error.HostNotServing,
+        // A missing/refused socket with an owned Store denotes shutdown.
+        // A reset, cut-off reply or local socket() failure proves no such state.
+        .held => switch (err) {
+            error.FileNotFound, error.ConnectionRefused => error.HostStopping,
+            else => err,
+        },
+        .failure => err,
+    };
 }
 
 fn preferenceFailure(err: anyerror) anyerror {
@@ -2025,8 +2039,8 @@ fn takeReply(step: *?client.Step, stepped: anytype, context: protocol_reply.Muta
                 if (err == error.Cancelled or err == error.Canceled) return err;
                 return error.CallerFailure;
             }
-            if ((failed == .connect or failed == .endpoint) and client.hostUnreachable(err)) {
-                return error.HostNotServing;
+            if (failed == .connect or failed == .endpoint) {
+                return hostTransportFailure(std.Io.Threaded.global_single_threaded.io(), context.store.slice(), err);
             }
             if (failed == .store) return storeFailure(err);
         }
@@ -3839,6 +3853,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
     const Case = struct { err: anyerror, code: caller_error.Code, exit: u8, phrase: []const u8 };
     const cases = [_]Case{
         .{ .err = error.HostNotServing, .code = .host_not_serving, .exit = 6, .phrase = "No Host serves this Store." },
+        .{ .err = error.HostStopping, .code = .host_stopping, .exit = 5, .phrase = "The Host for this Store is shutting down and no longer accepts requests." },
         .{ .err = error.InvalidStorePath, .code = .store_path_malformed, .exit = 2, .phrase = "Supply --store PATH" },
         .{ .err = error.InvalidStore, .code = .store_path_malformed, .exit = 2, .phrase = "canonical form is at most 492 bytes" },
         .{ .err = error.StoreUnavailable, .code = .store_unavailable, .exit = 6, .phrase = "permissions to 0700" },
@@ -3883,6 +3898,36 @@ test "CLI boundary classifies local failures with repair lines and exits" {
     // Compile-time gate is exercised on a closed error set as well as the
     // legacy anyerror values above.
     try std.testing.expectEqual(caller_error.Code.store_unavailable, caller_error.of(error.StoreUnavailable));
+}
+
+test "Host transport classification requires Store lock evidence" {
+    const Case = struct { err: anyerror, free: anyerror, held: anyerror };
+    const cases = [_]Case{
+        .{ .err = error.FileNotFound, .free = error.HostNotServing, .held = error.HostStopping },
+        .{ .err = error.ConnectionRefused, .free = error.HostNotServing, .held = error.HostStopping },
+        .{ .err = error.UnixConnectFailed, .free = error.HostNotServing, .held = error.UnixConnectFailed },
+        .{ .err = error.ConnectionResetByPeer, .free = error.HostNotServing, .held = error.ConnectionResetByPeer },
+        .{ .err = error.BrokenPipe, .free = error.HostNotServing, .held = error.BrokenPipe },
+        .{ .err = error.TruncatedResponse, .free = error.HostNotServing, .held = error.TruncatedResponse },
+        .{ .err = error.WriteFailed, .free = error.WriteFailed, .held = error.WriteFailed },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.free, classifyHostTransportFailure(case.err, .free));
+        try std.testing.expectEqual(case.held, classifyHostTransportFailure(case.err, .held));
+        try std.testing.expectEqual(case.err, classifyHostTransportFailure(case.err, .failure));
+        try std.testing.expectEqual(@as(u8, if (case.free == error.HostNotServing) 6 else 1), @backingInt(caller_exit.knownError(case.free)));
+        try std.testing.expectEqual(@as(u8, if (case.held == error.HostStopping) 5 else 1), @backingInt(caller_exit.knownError(case.held)));
+        try std.testing.expectEqual(caller_exit.Status.unclassified, caller_exit.knownError(classifyHostTransportFailure(case.err, .failure)));
+    }
+
+    const code = caller_error.of(error.HostStopping);
+    try std.testing.expectEqual(caller_error.Code.host_stopping, code);
+    try std.testing.expectEqual(caller_error.Act.wait, caller_error.facts(code).act);
+    try std.testing.expectEqual(null, caller_error.facts(code).input);
+    var bytes: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try caller_error.writeLine(&writer, code, .{ .resource = "session", .operation = "inspect", .store = "/private/store", .not_sent = false });
+    try std.testing.expectEqualStrings("rui session inspect: The Host for this Store is shutting down and no longer accepts requests. Store: \"/private/store\". Next: Wait for it to exit, then start it again with rui host start --store PATH and retry. [host_stopping]\n", writer.buffered());
 }
 
 test "CLI boundary keeps Store and transport failures distinct" {

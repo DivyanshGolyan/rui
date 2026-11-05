@@ -108,7 +108,7 @@ def control_closed_while_host_alive(host, store, session):
     try:
         fixture.command("session", "inspect", "--store", store, "--session", session)
     except AssertionError as error:
-        return "command returned 6, wanted 0:" in str(error) and "[host_not_serving]" in str(error)
+        return "command returned 5, wanted 0:" in str(error) and "[host_stopping]" in str(error)
     return False
 
 

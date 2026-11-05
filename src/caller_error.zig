@@ -50,6 +50,7 @@ pub const Code = enum {
     environment_too_large,
     internal_unexpected,
     host_not_serving,
+    host_stopping,
     store_path_malformed,
     store_unavailable,
     peer_context_invalid,
@@ -236,6 +237,7 @@ fn mapped(err: anyerror) ?Code {
     return switch (err) {
         error.OutOfMemory => .memory_exhausted,
         error.HostNotServing => .host_not_serving,
+        error.HostStopping => .host_stopping,
         error.InvalidStore => .store_path_malformed,
         error.InvalidStorePath => .store_path_malformed,
         error.StorePathTooLong => .store_path_malformed,
@@ -391,6 +393,7 @@ pub fn facts(code: Code) Facts {
         .environment_too_large => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "an inherited environment within the Message byte limit" }, .says = "The inherited environment is too large for a Message.", .next = "Unset or shorten the largest variables, then recover the saved request with rui request recover HANDLE." },
         .internal_unexpected => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui could not complete this operation because of an internal fault.", .next = "Keep the saved request, if any, and report this code with the command to the Rui maintainer." },
         .host_not_serving => .{ .act = .operate, .input = null, .accepted = .none, .says = "No Host serves this Store.", .next = "Start its Host with the command below, then retry the same saved request unchanged." },
+        .host_stopping => .{ .act = .wait, .input = null, .accepted = .none, .says = "The Host for this Store is shutting down and no longer accepts requests.", .next = "Wait for it to exit, then start it again with rui host start --store PATH and retry." },
         .store_path_malformed => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "a nonempty UTF-8 filesystem path without controls, whose canonical form is at most 492 bytes" }, .says = "The Store path is malformed.", .next = "Supply --store PATH naming a private Store directory." },
         .store_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Store directory is missing, inaccessible or not private.", .next = "Create the directory if missing, give your user access, and restrict its permissions to 0700; then retry unchanged." },
         .peer_context_invalid => .{ .act = .fix, .input = .sender_handle, .accepted = .{ .grammar = "RUI_STORE, RUI_ADDRESS (six lowercase Crockford characters) and nonempty RUI_SENDER_HANDLE together, or none" }, .says = "The inherited peer context is incomplete or malformed.", .next = "Restore all three variables from the Session Bash, or unset RUI_STORE RUI_ADDRESS RUI_SENDER_HANDLE to make an operator call." },
