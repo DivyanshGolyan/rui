@@ -65,7 +65,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
         .doublewrite = facts.doublewrite.slice(),
     })) |failure| return failure;
 
-    try conn.query("SELECT meta_key,meta_value FROM store_meta;" ++ schema.catalogSql("DATABASE()"));
+    try conn.query("SELECT meta_key,meta_value FROM store_meta;" ++ comptime schema.catalogSql("DATABASE()"));
     const Meta = struct { key: protocol.Bounded(32), value: protocol.Bounded(protocol.max_store_bytes) };
     var meta_columns = try columns(Meta, conn);
     var seen: packed struct { format: bool = false, wire_version: bool = false, selector: bool = false, store_id: bool = false } = .{};

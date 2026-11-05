@@ -1199,14 +1199,14 @@ test "an Access commits its writes, positions and identities together, or none o
             const next_sql = "SELECT next_position FROM session";
             const position = try store_testing.queryU64(&storage, next_sql, .{});
             const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
-            const content_id = storage.ids.next.get(.content_id);
+            const content_id = storage.identities().next.get(.content_id);
 
             // A failed guard stops the round before COMMIT: no row, position or id stays.
             try std.testing.expectError(error.TestingGuard, TestingRound.change(&storage, session.slice(), "round rolled back", 99));
             try std.testing.expect(!storage.isFenced());
             try std.testing.expectEqual(position, try store_testing.queryU64(&storage, next_sql, .{}));
             try std.testing.expectEqual(contents, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
-            try std.testing.expectEqual(content_id, storage.ids.next.get(.content_id));
+            try std.testing.expectEqual(content_id, storage.identities().next.get(.content_id));
 
             const before = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
             try std.testing.expectEqual(position, try TestingRound.change(&storage, session.slice(), "round committed", 1));

@@ -324,14 +324,32 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// contains it reports it.
         fn pass(a: *Self) void {
             bump(&a.passes);
+            if (a.store.engine == .mysql and a.failure == null)
+                for (a.queue[0..a.queued]) |*entry| entry.borrowed.check();
+            if (a.queued != 0 and a.failure == null) {
+                if (@import("builtin").is_test) {
+                    if (a.store.engine == .mysql) a.store.engine.mysql.state.testing_shape.access_passes += 1;
+                }
+                a.store.engine.startPass() catch |err| {
+                    a.failure = err;
+                };
+            }
             for (a.queue[0..a.queued]) |*entry| {
                 if (a.failure != null) break;
-                entry.borrowed.check();
+                if (a.store.engine == .sqlite) entry.borrowed.check();
                 entry.run(a, entry) catch |err| {
                     a.failure = err;
                 };
                 a.store.engine.endStatement(entry.statement);
             }
+            if (a.queued != 0) a.store.engine.finishPass() catch |err| {
+                // Later statements already ran on MySQL. Their ordinary
+                // errors cannot replace the first guard/decoder failure;
+                // a lost connection or ownership always fences instead.
+                if (a.failure == null or err == error.StoreConnectionLost or
+                    err == error.CommitOutcomeUnknown or err == error.OwnershipLost)
+                    a.failure = err;
+            };
             a.resetQueued();
         }
 
@@ -516,7 +534,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// bound only once the writes stepped without a failure.
         fn finishWrites(a: *Self) Error!void {
             a.ensureOpen();
-            a.pass();
+            if (a.store.engine == .sqlite) a.pass();
             if (a.failure) |err| return err;
             for (a.claims[0..a.claimed]) |*claim| if (claim.taken != 0) {
                 const expected = claim.head.next_position.get();
@@ -565,6 +583,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 a.failure = err;
                 return false;
             } else 0;
+            const fits = a.store.engine.fits(S, args, now) catch |err| {
+                a.failure = err;
+                return false;
+            };
+            if (!fits) a.pass();
             const slot = a.reserve() orelse return false;
             slot.* = .{ .statement = statement, .run = runner, .target = target };
             a.store.engine.bind(statement, S, args, now) catch |err| {
@@ -600,6 +623,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         fn resetQueued(a: *Self) void {
             for (a.queue[0..a.queued]) |entry| a.store.engine.discard(entry.statement);
             a.queued = 0;
+            a.store.engine.discardBatch();
         }
 
         const Runner = *const fn (*Self, *const Queued) Error!void;

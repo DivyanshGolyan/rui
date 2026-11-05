@@ -84,7 +84,6 @@ pub const Store = struct {
     /// The Host hands out every id and sequence value, and each
     /// transaction's second; see `HostValues`. Out of line beside the
     /// change ring, so a new identity does not grow the Store.
-    ids: *HostValues,
     /// The labels of the providers whose Sessions get model Attempts, each
     /// between commas, fixed at open.
     served: protocol.Routes = protocol.routesAll(.unserved),
@@ -101,6 +100,13 @@ pub const Store = struct {
     savepoint: bool = false,
     // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) TestingContentWork else void = if (@import("builtin").is_test) .{} else {},
+
+    /// The identity allocator already lives beside the change ring. Derive
+    /// its address instead of retaining a redundant pointer in the Store;
+    /// these eight bytes pay for the engine union's tag on both engines.
+    pub inline fn identities(self: *const Store) *HostValues {
+        return &@as(*OutOfLine, @fieldParentPtr("ring", self.changes)).ids;
+    }
 
     /// Whether nothing changed since `since` on this opening: atomics only,
     /// no lock. Never while fenced, so a read reports the failure.
@@ -178,7 +184,7 @@ pub const Store = struct {
         errdefer destroyRing(changes);
         const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
         ids.* = .{ .next = undefined };
-        self.* = .{ .io = io, .engine = .{ .sqlite = opened }, .selector = stored_selector, .changes = changes, .ids = ids };
+        self.* = .{ .io = io, .engine = .{ .sqlite = opened }, .selector = stored_selector, .changes = changes };
         self.served = options.served;
         self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch });
         // The Store is in final storage, so the function may keep its address.
@@ -1426,12 +1432,12 @@ pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
 pub fn begin(self: *Store) !void {
     switch (self.batch) {
         .none => {
-            std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
+            std.debug.assert(self.identities().taken.count() == 0 and self.identities().second == 0);
             try self.engine.control(.begin);
             return;
         },
         .ready => {
-            std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
+            std.debug.assert(self.identities().taken.count() == 0 and self.identities().second == 0);
             try self.engine.control(.begin);
             self.batch = .first;
             return;
@@ -1462,8 +1468,8 @@ pub fn commit(self: *Store) !void {
         .ready, .lost => unreachable,
     }
     try self.engine.control(.commit);
-    self.ids.taken = .empty;
-    self.ids.second = 0;
+    self.identities().taken = .empty;
+    self.identities().second = 0;
 }
 
 fn startBatch(context: *anyopaque) void {
@@ -1482,8 +1488,8 @@ fn finishBatch(context: *anyopaque) bool {
     std.debug.assert(!self.savepoint);
     defer {
         self.batch = .none;
-        self.ids.taken = .empty;
-        self.ids.second = 0;
+        self.identities().taken = .empty;
+        self.identities().second = 0;
     }
     commitBatch(self) catch return false;
     return true;
@@ -1503,10 +1509,10 @@ fn commitBatch(self: *Store) !void {
 /// round of a write Access dates its rows with one second. Outside a
 /// transaction (a read Access), each use reads the clock.
 pub fn transactionSecond(self: *Store) error{ClockReadFailed}!i64 {
-    if (self.ids.second != 0) return self.ids.second;
+    if (self.identities().second != 0) return self.identities().second;
     const second = std.math.cast(u32, @divFloor(try readUnixMilliseconds(self.io), 1000)) orelse return error.ClockReadFailed;
     if (second == 0) return error.ClockReadFailed;
-    if (self.engine.inTransaction()) self.ids.second = second;
+    if (self.engine.inTransaction()) self.identities().second = second;
     return second;
 }
 
@@ -1647,10 +1653,10 @@ const HostValues = struct {
 pub fn takeIdentity(self: *Store, comptime column: Identity) error{ IdentityExhausted, IdentityOutsideTransaction }!u64 {
     // Rollback is what gives an id back; outside a transaction nothing would.
     if (!self.engine.inTransaction()) return error.IdentityOutsideTransaction;
-    const value = self.ids.next.get(column);
+    const value = self.identities().next.get(column);
     if (value > std.math.maxInt(i64)) return error.IdentityExhausted;
-    self.ids.next.set(column, value + 1);
-    self.ids.taken.insert(column);
+    self.identities().next.set(column, value + 1);
+    self.identities().taken.insert(column);
     return value;
 }
 
@@ -1690,9 +1696,9 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
         if (!(self.engine.nextRow(statement) catch false)) return error.IdentityReadFailed;
         var row: Ceiling.Row = undefined;
         try self.engine.decodeRow(Ceiling.Row, statement, &row);
-        self.ids.next.set(column, row.ceiling + 1);
+        self.identities().next.set(column, row.ceiling + 1);
     };
-    self.ids.taken = .empty;
+    self.identities().taken = .empty;
 }
 
 pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
@@ -1712,7 +1718,7 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
                 self.engine.control(.rollback_to) catch return error.CanonicalRollbackFailed;
                 self.engine.control(.release) catch return error.CanonicalRollbackFailed;
             }
-            loadIdentities(self, self.ids.taken) catch return error.CanonicalRollbackFailed;
+            loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
             return;
         },
         // The batch's first write rolls back as a lone write does, and the
@@ -1735,8 +1741,8 @@ fn rollbackTransaction(self: *Store, faults: Faults) error{CanonicalRollbackFail
         self.engine.control(.rollback) catch return error.CanonicalRollbackFailed;
         if (self.engine.inTransaction()) return error.CanonicalRollbackFailed;
     }
-    self.ids.second = 0;
-    loadIdentities(self, self.ids.taken) catch return error.CanonicalRollbackFailed;
+    self.identities().second = 0;
+    loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
 }
 
 pub fn readUnixMilliseconds(io: std.Io) !i64 {
