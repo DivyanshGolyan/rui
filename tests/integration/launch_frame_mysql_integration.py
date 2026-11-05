@@ -145,10 +145,12 @@ def main():
         # Drive a canonical read so the Store observes the killed connection.
         with contextlib.suppress(OSError, AssertionError):
             frame_host.post(sock, "inspect-session", request)
-        assert host.wait(timeout=20) == 1, "a fenced MySQL Store did not exit 1"
-        out, _ = frame_host.output(host)
+        code = host.wait(timeout=20)
+        assert code == 1, f"a fenced MySQL Store exited {code}, not 1: {frame_host.output(host)!r}"
+        out, err = frame_host.output(host)
         lines = out.decode().splitlines()
-        assert len(lines) == 1 and json.loads(lines[0])["rui_start_error"]["code"] == "store_fenced", "missing named store_fenced exit"
+        assert len(lines) == 1 and json.loads(lines[0])["rui_start_error"]["code"] == "store_fenced", \
+            f"missing named store_fenced exit: stdout={out!r} stderr={err[-4000:]!r}"
         print("MySQL launch frame: readiness, Session round trip, stable id, private credentials, store_locked, stdin close, store_fenced")
     finally:
         primary = sys.exception()
