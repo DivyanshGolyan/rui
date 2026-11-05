@@ -240,7 +240,8 @@ pub const SessionReportCapture = struct {
                 sorted[count] = name;
             }
         }
-        std.mem.sort([]const u8, sorted[0..count], {}, lessThan);
+        // Not `sort`, whose block merge keeps a cache on the stack.
+        std.mem.sortUnstable([]const u8, sorted[0..count], {}, lessThan);
         try self.append("[");
         for (sorted[0..count], 0..) |name, index| {
             if (index != 0) {
@@ -1047,7 +1048,8 @@ const CurrentFacts = struct {
     active: reads_domain.First(SelectedRow) = .{},
     queued: reads_domain.First(SelectedRow) = .{},
     outcome: content_domain.content_metadata.Row = undefined,
-    tools: set_names.Row = undefined,
+    /// In the Store's scratch (`Store.reportScratch`): over 4 KiB.
+    tools: *set_names.Row,
     tools_found: store_access.Found = undefined,
 };
 
@@ -1077,6 +1079,7 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
         .counts = .{ .session = session_ref },
         .compaction = .init(session_ref, current.next_position, current.provider, current.model.slice(), policy),
         .work = .{ .session = session_ref },
+        .tools = a.store.reportScratch(set_names.Row),
     };
     // `checkSaved` refused a missing or zero instructions id and a zero
     // output schema id. A negative id is `CorruptStore` without a read,
@@ -1090,7 +1093,7 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
     _ = facts.compaction.queue(a);
     _ = facts.work.queue(a);
     a.read(person_message, .{ .session = session_ref }, &facts.person);
-    a.readInto(set_names, .{ .set = current.tool_set_id }, &facts.tools, &facts.tools_found);
+    a.readInto(set_names, .{ .set = current.tool_set_id }, facts.tools, &facts.tools_found);
     facts.first.queue(a, session_ref);
     a.readEach(selected_active, .{ .session = session_ref }, 1, &facts.active);
     try runCurrent(a);
@@ -2242,9 +2245,11 @@ const RevisionChunk = struct {
 noinline fn renderRevisions(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
     var first = true;
     var after: full_revisions.Args = .{ .session = session_ref };
+    // Its row holds a set's names, over 4 KiB: in the Store's scratch.
+    const chunk = a.store.reportScratch(RevisionChunk);
     while (true) {
-        var chunk: RevisionChunk = .{ .a = a, .capture = capture, .first = first, .after = after };
-        a.readEach(full_revisions, after, full_revisions.limit, &chunk);
+        chunk.* = .{ .a = a, .capture = capture, .first = first, .after = after };
+        a.readEach(full_revisions, after, full_revisions.limit, chunk);
         const ran = store_access.runAs(a, error.SessionReadFailed);
         if (chunk.failure) |err| return err;
         try ran;

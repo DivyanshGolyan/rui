@@ -378,6 +378,14 @@ pub const Store = struct {
         return @ptrCast(self.scratch(.configuration));
     }
 
+    /// A report's large state, a `T` such as its tool names, in the
+    /// Store's scratch so no Host stack frame holds it. A report takes it
+    /// for one value at a time: the next take overwrites the last.
+    pub fn reportScratch(self: *Store, comptime T: type) *T {
+        comptime std.debug.assert(@sizeOf(T) <= scratch_bytes and @alignOf(T) <= scratch_align);
+        return @ptrCast(@alignCast(self.scratch(.report)));
+    }
+
     /// The one thread that touches `engine`, the scratch and `ids`,
     /// beside the change ring (`OutOfLine`).
     pub fn queue(self: *Store) *Queue {
@@ -1117,10 +1125,10 @@ const OutOfLine = struct {
     scratch: Scratch align(scratch_align),
 };
 
-const ScratchUse = enum(u8) { none, configuration, settlement };
+const ScratchUse = enum(u8) { none, configuration, settlement, report };
 
-/// One entry point's large state: a configure's reads or a settlement's
-/// batch, which no entry point holds at once (`Store.scratch` checks that
+/// One entry point's large state: a configure's reads, a settlement's
+/// batch or a report's rows, which no entry point holds at once (`Store.scratch` checks that
 /// in safe builds). Bytes, not a union, so it is no bigger than the larger
 /// use and needs no tag of its own: `Store.scratch_use` is its tag.
 const Scratch = [scratch_bytes]u8;
