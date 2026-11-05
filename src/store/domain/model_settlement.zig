@@ -878,7 +878,7 @@ const DuplicateVisitor = struct {
 
 const historical_mcp = rsql.Read(.{
     .sql = "SELECT tool.name,max(CASE WHEN r.revision=o.settings_revision THEN 1 ELSE 0 END) AS offered FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision<=o.settings_revision " ++
-        "JOIN tool_set_member member ON member.tool_set_id=r.tool_set_id JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "JOIN tool_set_member member ON member.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE o.operation_id=?1 AND tool.owner='mcp' AND tool.name IN (" ++ parameters(2, batch_items) ++ ") GROUP BY tool.name",
     .Args = NameArgs(),
     .Row = struct { name: protocol.Bounded(tool_catalog.max_name_bytes), offered: bool },

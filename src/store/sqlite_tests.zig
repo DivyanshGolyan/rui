@@ -9744,6 +9744,35 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
     }
 }
 
+test "an MCP tool outside the loaded tools gets the unknown-tool result instead of an Action" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var empty = try completeConfiguration("mcp-loaded-empty", "", workspace, "model-a");
+    empty.configuration.tools = try .of(&.{});
+    const empty_reply = storage.configure(&empty, .{});
+    try std.testing.expect(empty_reply == .accepted);
+    var command = try completeConfiguration("mcp-loaded-hidden", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{"fetch_page"});
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("bypass");
+    const reply = storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    const session = reply.accepted.session;
+    try store_testing.setLoadedToolsForTesting(&storage, session.slice(), empty_reply.accepted.session.slice());
+    try submitTestMessage(&storage, &tmp, "mcp-loaded-message", "mcp-loaded-message", session.slice(), "fetch");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleCallsForTesting(&storage, &tmp, binding, "mcp-loaded-calls", &.{
+        .{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    });
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE rejection_code='unknown_tool'", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+}
+
 test "a removed MCP tool gets the removed-tool result instead of an Action" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
