@@ -64,7 +64,7 @@ fn mcpCallSelectSql(comptime action_alias: []const u8, comptime operation_alias:
         "JOIN tool_set_member member ON member.tool_set_id=revision.tool_set_id " ++
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE tool_call.operation_id=" ++ action_alias ++ ".parent_operation_id AND tool_call.call_ordinal=" ++ action_alias ++ ".call_ordinal " ++
-        "AND @bytes(tool.name)=name.payload AND tool.owner='mcp'";
+        "AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp'";
 }
 
 /// Calls that must never enter Bash's Attempt path.
@@ -662,7 +662,7 @@ const next_mcp_action = rsql.Read(.{
         "CROSS JOIN tool_set_member member ON member.tool_set_id=revision.tool_set_id " ++
         "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
-        "CROSS JOIN content name ON name.content_id=tool_call.name_content_id AND name.payload=@bytes(tool.name) " ++
+        "CROSS JOIN content name ON name.content_id=tool_call.name_content_id AND @payload(name)=@bytes(tool.name) " ++
         "CROSS JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE active.outcome_code IS NULL AND action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++

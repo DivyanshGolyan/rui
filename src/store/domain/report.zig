@@ -914,7 +914,7 @@ const recent_messages = rsql.Read(.{
 /// The active Turn's current Operation's unresolved Actions, with each
 /// call's line for its presentation.
 const unresolved_actions = rsql.Read(.{
-    .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode,call_name.payload AS tool_name," ++
+    .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode,@payload(call_name) AS tool_name," ++
         "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
         "call_name.digest AS name_digest," ++ action_domain.mcpServerSql("a", "operation") ++ " AS server,tool_call.description FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN action_operation a ON a.parent_operation_id=active.operation_id " ++
