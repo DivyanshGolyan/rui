@@ -8403,7 +8403,7 @@ test "a Store at the migration baseline with its rows takes every migration at o
     try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }
 
-test "schema 53 moves forward to 54 with loaded tools defaulting to NULL" {
+test "schema 53 moves forward with loaded tools defaulting to NULL" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -8435,7 +8435,7 @@ test "schema 53 moves forward to 54 with loaded tools defaulting to NULL" {
     var storage: Store = undefined;
     try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, 54), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+    try std.testing.expectEqual(@as(u64, schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
     inline for (.{ "session", "session_revision" }) |table| {
         try std.testing.expect((try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table, .{})) > 0);
         try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table ++ " WHERE loaded_tool_set_id IS NOT NULL", .{}));
@@ -9690,12 +9690,12 @@ test "a failed model fact batch rolls back overwritten rows and source together"
     try storage.open(std.testing.io, path, root);
     {
         defer storage.close() catch unreachable;
-        try storage.saveModelFacts(&.{.{ .id = "kept", .context_window = 100, .efforts = .{}, .openai = true }}, "\"old\"");
+        try storage.saveModelFacts(&.{.{ .id = "kept", .context_window = 100, .efforts = .{}, .openai_listed = true }}, "\"old\"");
         // The first row is overwritten and stepped before the second row's
         // constraint fails. Neither that overwrite nor publication may stick.
         try std.testing.expectError(error.StatementFailed, storage.saveModelFacts(&.{
-            .{ .id = "kept", .context_window = 200, .efforts = .{}, .openai = false },
-            .{ .id = "", .context_window = null, .efforts = .{}, .openai = false },
+            .{ .id = "kept", .context_window = 200, .efforts = .{}, .openai_listed = false },
+            .{ .id = "", .context_window = null, .efforts = .{}, .openai_listed = false },
         }, "\"new\""));
         try std.testing.expect(storage.isFenced());
     }
@@ -9957,4 +9957,38 @@ test "searchActivity finds start_agent call names and stored JSON arguments not 
     try std.testing.expect(std.mem.indexOf(u8, bytes, "call start_agent") != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "\"start_agent\\n") != null);
     try std.testing.expect(!storage.isFenced());
+}
+
+test "schema 54 gains empty model catalog tables at 55 without changing its rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        for (store_schema.migrations) |step| {
+            if (step.from >= 54) break;
+            for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+        }
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM sqlite_schema WHERE name IN ('model_fact','model_catalog_source')", .{}));
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=54", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','54')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, protocol.wire_version);
+        try sqlite.bindText(meta, 2, root);
+        try sqlite.expectDone(meta);
+    }
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(u64, schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+    try std.testing.expect((try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{})) > 0);
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_fact", .{}));
+    try std.testing.expect(try storage.readModelCatalogSource() == null);
 }

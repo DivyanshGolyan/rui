@@ -1293,6 +1293,8 @@ The step to 52 lets tool records name an MCP server and keeps the Host's catalog
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops an attached child owes (D38), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
+The step to 55 adds the saved model facts and their catalog source.
+Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
 Sessions store a Label and creation time.
@@ -3070,7 +3072,9 @@ A 304 leaves the saved generation untouched.
 Its page-allocated body is capped at 16 MiB and released immediately after the token-walk parser slims it in a scratch arena off the Host stack.
 Transport, status, parse and size failures print one stderr line and keep the saved catalog.
 The Host retains no in-memory fact catalog.
-The Store saves `model_fact(model_id,context_window,efforts,openai,generation)` and one `model_catalog_source(slot=1,etag,generation,fetched_at)` row.
+The Store saves `model_fact(model_id,context_window,efforts,openai_listed,generation)` and one `model_catalog_source(slot=1,etag,generation,fetched_at)` row.
+`openai_listed` only records models.dev's OpenAI-list membership for the D151 merge and D154 list, not provider availability or a core capability.
+The effort mask is format-defined: none=1, low=2, medium=4, high=8, xhigh=16 and max=32; its CHECK permits 0..63.
 Bounded SQL batches share one queued write transaction, with source publication last: because `model_id` is the primary key, separately committed upsert batches would erase old facts before publication.
 Readers therefore see the old or new catalog whole.
 Removed IDs retain their older rows but current-generation reads ignore them; runtime SQL never deletes them.

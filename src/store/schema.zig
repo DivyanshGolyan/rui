@@ -16,12 +16,11 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 54;
-/// `digest()` of each schema_version, oldest first. A change to what
-/// `bootstrap` executes changes the last row's digest: in place while that
-/// version is unreleased, so concurrent PRs share it, and as a new row and
-/// schema_version once it has shipped. tests/ci/test_store_schema_version.py
-/// refuses an edited released row and a second unreleased number.
+pub const schema_version: u32 = 55;
+/// `digest()` of each schema_version, oldest first. Each format PR appends
+/// its own version and forward step (D226); main's digests and steps are
+/// immutable even before release. tests/ci/test_store_schema_version.py
+/// checks both main's prefix and every released format.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
     .{ .schema_version = 46, .digest = 0xf3129842e4a7d447 },
@@ -32,7 +31,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
-    .{ .schema_version = 54, .digest = 0x8ebb4c27ad46e8a2 },
+    .{ .schema_version = 54, .digest = 0x1f3b85a479932ea5 },
+    .{ .schema_version = 55, .digest = 0x2d6efd2d2fda44be },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -44,7 +44,7 @@ comptime {
         .{ schema_version, digest() },
     ));
     if (current.digest != digest()) @compileError(std.fmt.comptimePrint(
-        "the Store's bootstrap changed: set the last row's digest to 0x{x:0>16} if schema_version is unreleased, else bump it and append a row",
+        "the Store's bootstrap changed: the new format's digest is 0x{x:0>16}; append a version and step instead of changing main's rows (D226)",
         .{digest()},
     ));
 }
@@ -133,8 +133,7 @@ pub const migrations = [_]Migration{
     // leading partial index gets its generated first column; store_meta's
     // one CHECK and content's fourth are the ones replaced. session_parent
     // gets its plain twin first, since parent_ref's foreign key needs an
-    // index that leads with it. Finally (C2a), model_fact and
-    // model_catalog_source start empty until the first catalog refresh.
+    // index that leads with it.
     .{
         .from = 53,
         .sqlite = &.{
@@ -163,8 +162,6 @@ pub const migrations = [_]Migration{
             "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
             "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1)\n) STRICT, WITHOUT ROWID",
             "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
-            "CREATE TABLE model_fact(\n model_id TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(model_id AS BLOB)) BETWEEN 1 AND 256),\n context_window INTEGER,\n efforts INTEGER NOT NULL,\n openai INTEGER NOT NULL CHECK(openai IN (0,1)),\n generation INTEGER NOT NULL\n) STRICT",
-            "CREATE TABLE model_catalog_source(\n slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1),\n etag TEXT CHECK(etag IS NULL OR length(CAST(etag AS BLOB))<=512),\n generation INTEGER NOT NULL,\n fetched_at INTEGER NOT NULL\n) STRICT",
         },
         .mysql = &.{
             "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n settled BIGINT NOT NULL,\n PRIMARY KEY(child_ref,cause_ref,cause_position),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0),\n CHECK(settled BETWEEN 0 AND 1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -189,7 +186,18 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session DROP INDEX session_parent, ADD INDEX session_parent(session_parent_lead)",
             "CREATE TABLE session_ending_owed(\n turn_id BIGINT NOT NULL,\n delivered BIGINT NOT NULL,\n PRIMARY KEY(turn_id),\n FOREIGN KEY(turn_id) REFERENCES turn(turn_id),\n CHECK(turn_id>0),\n CHECK(delivered BETWEEN 0 AND 1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
-            "CREATE TABLE model_fact(\n model_id VARCHAR(256) NOT NULL,\n context_window BIGINT,\n efforts BIGINT NOT NULL,\n openai TINYINT NOT NULL,\n generation BIGINT NOT NULL,\n PRIMARY KEY(model_id),\n CHECK(OCTET_LENGTH(model_id) BETWEEN 1 AND 256),\n CHECK(openai IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
+    // Schema 55 (C2a, D226): saved model facts and their publication source.
+    // Both tables start empty until the first successful catalog refresh.
+    .{
+        .from = 54,
+        .sqlite = &.{
+            "CREATE TABLE model_fact(\n model_id TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(model_id AS BLOB)) BETWEEN 1 AND 256),\n context_window INTEGER,\n efforts INTEGER NOT NULL CHECK(efforts BETWEEN 0 AND 63),\n openai_listed INTEGER NOT NULL CHECK(openai_listed IN (0,1)),\n generation INTEGER NOT NULL\n) STRICT",
+            "CREATE TABLE model_catalog_source(\n slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1),\n etag TEXT CHECK(etag IS NULL OR length(CAST(etag AS BLOB))<=512),\n generation INTEGER NOT NULL,\n fetched_at INTEGER NOT NULL\n) STRICT",
+        },
+        .mysql = &.{
+            "CREATE TABLE model_fact(\n model_id VARCHAR(256) NOT NULL,\n context_window BIGINT,\n efforts BIGINT NOT NULL,\n openai_listed TINYINT NOT NULL,\n generation BIGINT NOT NULL,\n PRIMARY KEY(model_id),\n CHECK(OCTET_LENGTH(model_id) BETWEEN 1 AND 256),\n CHECK(efforts BETWEEN 0 AND 63),\n CHECK(openai_listed IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE TABLE model_catalog_source(\n slot BIGINT NOT NULL,\n etag TEXT,\n generation BIGINT NOT NULL,\n fetched_at BIGINT NOT NULL,\n PRIMARY KEY(slot),\n CHECK(slot=1),\n CHECK(etag IS NULL OR OCTET_LENGTH(etag)<=512)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
@@ -497,8 +505,8 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "model_id", .type = .{ .text = .{ .min = 1, .max = 256 } } },
             .{ .name = "context_window", .type = .int, .nullable = true },
-            .{ .name = "efforts", .type = .int },
-            .{ .name = "openai", .type = .flag },
+            .{ .name = "efforts", .type = .int, .check = "efforts BETWEEN 0 AND 63" },
+            .{ .name = "openai_listed", .type = .flag },
             .{ .name = "generation", .type = .int },
         },
         .primary_key = &.{"model_id"},

@@ -14,7 +14,7 @@ pub const Source = struct {
 pub const Fact = struct {
     context_window: ?u32,
     efforts: u8,
-    openai: bool,
+    openai_listed: bool,
     generation: u64,
 };
 
@@ -26,14 +26,14 @@ pub const source = rsql.Read(.{
 });
 
 pub const fact = rsql.Read(.{
-    .sql = "SELECT fact.context_window,fact.efforts,fact.openai,fact.generation FROM model_fact fact JOIN model_catalog_source source ON source.generation=fact.generation WHERE source.slot=1 AND fact.model_id=?1",
+    .sql = "SELECT fact.context_window,fact.efforts,fact.openai_listed,fact.generation FROM model_fact fact JOIN model_catalog_source source ON source.generation=fact.generation WHERE source.slot=1 AND fact.model_id=?1",
     .Args = struct { id: []const u8 },
     .Row = Fact,
     .cardinality = .optional,
 });
 
 pub const openai_ids = rsql.Read(.{
-    .sql = "SELECT fact.model_id FROM model_fact fact JOIN model_catalog_source source ON source.generation=fact.generation WHERE source.slot=1 AND fact.openai=1 ORDER BY fact.model_id",
+    .sql = "SELECT fact.model_id FROM model_fact fact JOIN model_catalog_source source ON source.generation=fact.generation WHERE source.slot=1 AND fact.openai_listed=1 ORDER BY fact.model_id",
     .Args = struct {},
     .Row = struct { model_id: protocol.Bounded(256) },
     .cardinality = .each,
@@ -45,14 +45,14 @@ const existing = rsql.Read(.{
     .Row = struct { generation: u64 },
     .cardinality = .optional,
 });
-const FactArgs = struct { id: []const u8, context_window: ?u32, efforts: u8, openai: bool, generation: u64 };
+const FactArgs = struct { id: []const u8, context_window: ?u32, efforts: u8, openai_listed: bool, generation: u64 };
 const insert_fact = rsql.Write(.{
-    .sql = "INSERT INTO model_fact(model_id,context_window,efforts,openai,generation) VALUES(?1,?2,?3,?4,?5)",
+    .sql = "INSERT INTO model_fact(model_id,context_window,efforts,openai_listed,generation) VALUES(?1,?2,?3,?4,?5)",
     .Args = FactArgs,
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 const update_fact = rsql.Write(.{
-    .sql = "UPDATE model_fact SET context_window=?2,efforts=?3,openai=?4,generation=?5 WHERE model_id=?1",
+    .sql = "UPDATE model_fact SET context_window=?2,efforts=?3,openai_listed=?4,generation=?5 WHERE model_id=?1",
     .Args = FactArgs,
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -83,7 +83,7 @@ pub fn save(a: anytype, entries: []const catalog.Entry, etag: ?[]const u8) !void
             .id = entry.id,
             .context_window = entry.context_window,
             .efforts = @intCast(entry.efforts.bits.mask),
-            .openai = entry.openai,
+            .openai_listed = entry.openai_listed,
             .generation = generation,
         };
         if (old != null) a.write(update_fact, args) else a.write(insert_fact, args);

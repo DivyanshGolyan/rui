@@ -8880,7 +8880,7 @@ test "each Store entry point takes its round budget on its common path" {
             defer storage.close() catch unreachable;
             var meter: RoundMeter = .{ .storage = &storage };
             meter.start();
-            try storage.saveModelFacts(&.{.{ .id = "catalog-budget", .context_window = null, .efforts = .{}, .openai = true }}, null);
+            try storage.saveModelFacts(&.{.{ .id = "catalog-budget", .context_window = null, .efforts = .{}, .openai_listed = true }}, null);
             meter.stop(.saveModelFacts);
             meter.start();
             _ = try storage.readModelCatalogSource();
@@ -10277,7 +10277,7 @@ test "saved model facts replace generations and hide removed ids" {
             const a = (try storage.modelFact("a")).?;
             try std.testing.expectEqual(@as(?u32, 100), a.context_window);
             try std.testing.expectEqual(@as(u8, @intCast(first[0].efforts.bits.mask)), a.efforts);
-            try std.testing.expect(a.openai);
+            try std.testing.expect(a.openai_listed);
             const ids = try storage.readOpenAiModelIds(allocator);
             defer {
                 for (ids) |id| allocator.free(id);
@@ -10311,4 +10311,29 @@ test {
     _ = @import("engine/Mysql.zig");
     _ = @import("engine/mysql_content.zig");
     _ = @import("mysql_testing.zig");
+}
+
+test "model fact effort masks are format-defined on every engine" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // These fixed bits, not a loop index or inferred enum value, are
+            // part of the Store format. Reordering tags must fail this test.
+            const cases = .{ .{ .none, 1 }, .{ .low, 2 }, .{ .medium, 4 }, .{ .high, 8 }, .{ .xhigh, 16 }, .{ .max, 32 } };
+            inline for (cases) |effort| {
+                try storage.saveModelFacts(&.{.{ .id = "effort", .context_window = null, .efforts = .initOne(effort[0]), .openai_listed = false }}, null);
+                try std.testing.expectEqual(@as(u8, effort[1]), (try storage.modelFact("effort")).?.efforts);
+            }
+            const insert = "INSERT INTO model_fact(model_id,context_window,efforts,openai_listed,generation) VALUES(?1,NULL,?2,0,1)";
+            const constraint_error = if (case.engine == .mysql) error.MysqlFixtureFailed else error.StatementFailed;
+            try std.testing.expectError(constraint_error, store_testing.exec(&storage, insert, .{ "below", @as(i64, -1) }));
+            try std.testing.expectError(constraint_error, store_testing.exec(&storage, insert, .{ "above", @as(i64, 64) }));
+            try store_testing.exec(&storage, insert, .{ "empty", @as(i64, 0) });
+            try store_testing.exec(&storage, insert, .{ "full", @as(i64, 63) });
+        }
+    }.run);
 }
