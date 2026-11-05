@@ -457,7 +457,7 @@ pub const ConfigurationReads = struct {
 /// A Session's saved configuration, decoded into a CurrentConfiguration in
 /// place; `checkSaved` holds it to its types.
 const saved_session = rsql.Read(.{
-    .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("coalesce(session.loaded_tool_set_id,session.tool_set_id)") ++ " AS tools_mask,tool_set_id,loaded_tool_set_id,permission_mode," ++
+    .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
         "reasoning_effort,label,created_at,workspace_key FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
