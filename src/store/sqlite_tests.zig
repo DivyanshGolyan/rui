@@ -8669,7 +8669,7 @@ test "a saved catalog whose text no longer matches its digest fences the Store" 
     try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
     defer storage.close() catch unreachable;
     try storage.saveCatalog(&mcp_catalog);
-    try sqlite.exec(storage.database, "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')", .{});
     try std.testing.expectError(error.CorruptStore, storage.readCatalog(std.testing.allocator));
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.readCatalog(std.testing.allocator));
