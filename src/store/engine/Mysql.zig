@@ -46,7 +46,7 @@ pub const State = struct {
     committing: bool = false,
     sink: content.SinkState = .{},
     doublewrite: protocol.Bounded(32) = .{},
-    testing_database: [40]u8 = @splat(0),
+    testing_database: if (is_test) [40]u8 else void = if (is_test) @splat(0) else {},
     begin_sent: bool = false,
     savepoint_queued: bool = false,
     fence_result: u8 = 0,
@@ -430,4 +430,94 @@ test "MySQL error mapping clears only lost transactions" {
     state.transaction = true;
     try std.testing.expectEqual(error.StatementFailed, mysql.serverError(1305));
     try std.testing.expect(!mysql.inTransaction());
+}
+
+test "MySQL unsent transaction and savepoint rollbacks do not contact server" {
+    const state = try std.testing.allocator.create(State);
+    defer std.testing.allocator.destroy(state);
+    state.* = .{ .connection = undefined };
+    state.connection.writer.end = 0;
+    var mysql: Mysql = .{ .state = state };
+    try mysql.control(.begin);
+    try std.testing.expect(mysql.inTransaction());
+    try std.testing.expect(state.pending_begin);
+    try mysql.control(.rollback);
+    try std.testing.expect(!mysql.inTransaction());
+    state.transaction = true;
+    state.begin_sent = true;
+    try mysql.control(.savepoint);
+    try mysql.control(.rollback_to);
+    try std.testing.expect(mysql.inTransaction());
+    try std.testing.expect(!state.pending_savepoint);
+    try mysql.control(.release);
+}
+
+test "MySQL connection loss distinguishes ambiguous commit and latches first fault" {
+    const state = try std.testing.allocator.create(State);
+    defer std.testing.allocator.destroy(state);
+    state.* = .{ .connection = undefined };
+    var mysql: Mysql = .{ .state = state };
+    try std.testing.expectEqual(error.StoreConnectionLost, mysql.lost());
+    try std.testing.expectError(error.StoreConnectionLost, mysql.check());
+    state.failure = null;
+    state.committing = true;
+    try std.testing.expectEqual(error.CommitOutcomeUnknown, mysql.lost());
+    try std.testing.expectError(error.CommitOutcomeUnknown, mysql.check());
+}
+
+test "MySQL ordinary deferred failures report once and never block rollback" {
+    const state = try std.testing.allocator.create(State);
+    defer std.testing.allocator.destroy(state);
+    state.* = .{ .connection = undefined, .failure = error.StatementFailed };
+    state.connection.writer.end = 0;
+    var mysql: Mysql = .{ .state = state };
+    try std.testing.expectError(error.StatementFailed, mysql.check());
+    try mysql.check();
+    state.failure = error.ContentWriteFailed;
+    try mysql.control(.rollback);
+    try std.testing.expectEqual(null, state.failure);
+    state.failure = error.OwnershipLost;
+    try std.testing.expectError(error.OwnershipLost, mysql.control(.rollback));
+    try std.testing.expectError(error.OwnershipLost, mysql.check());
+}
+
+test "MySQL discarding an unsent replacement savepoint does not rollback an older one" {
+    const state = try std.testing.allocator.create(State);
+    defer std.testing.allocator.destroy(state);
+    state.* = .{ .connection = undefined, .transaction = true, .begin_sent = true, .savepoint_sent = true, .savepoint_queued = true };
+    state.connection.writer.end = 20;
+    var mysql: Mysql = .{ .state = state };
+    mysql.discardBatch();
+    try std.testing.expect(state.pending_savepoint);
+    try mysql.control(.rollback_to);
+    try std.testing.expect(mysql.inTransaction());
+    try std.testing.expectEqual(@as(usize, 0), state.connection.writer.end);
+}
+
+test "MySQL content observer shares transaction error transitions" {
+    const state = try std.testing.allocator.create(State);
+    defer std.testing.allocator.destroy(state);
+    state.* = .{ .connection = undefined, .transaction = true, .write_transaction = true };
+    var mysql: Mysql = .{ .state = state };
+    const observer = mysql.contentObserver();
+    observer.server_error(observer.context, 1062);
+    try std.testing.expect(mysql.inTransaction());
+    observer.server_error(observer.context, 1213);
+    try std.testing.expect(!mysql.inTransaction());
+    try std.testing.expect(!mysql.inWriteTransaction());
+}
+
+test "MySQL content query shape counts causes independently of wire sends" {
+    const state = try std.testing.allocator.create(State);
+    defer std.testing.allocator.destroy(state);
+    state.* = .{ .connection = undefined };
+    var mysql: Mysql = .{ .state = state };
+    const observer = mysql.contentObserver();
+    observer.content_query(observer.context);
+    observer.content_query(observer.context);
+    try std.testing.expectEqual(@as(u64, 2), state.testing_shape.content_queries);
+    try std.testing.expectEqual(@as(u64, 0), state.testing_shape.controls);
+    try std.testing.expectEqual(@as(u64, 0), state.testing_shape.prefix_only);
+    try std.testing.expectEqual(@as(u64, 0), state.testing_shape.access_passes);
+    try std.testing.expectEqual(@as(u64, 0), state.testing_shape.identity_passes);
 }

@@ -23,6 +23,8 @@ const Access = @import("access.zig").Access;
 const ReadAccess = reads_domain.ReadAccess;
 const Engine = @import("engine.zig").Engine;
 const Sqlite = @import("engine/Sqlite.zig");
+const Mysql = @import("engine/Mysql.zig");
+const mysql_connection = @import("wire/mysql_connection.zig");
 const ActionAttemptAdmission = action_domain.ActionAttemptAdmission;
 const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 const AgentDelivery = command_domain.AgentDelivery;
@@ -203,6 +205,41 @@ pub const Store = struct {
         }
     }
 
+    /// Opens the network engine in place. Its buffers live out of line;
+    /// SQLite never allocates them. The existing holder remains the sole owner.
+    pub noinline fn openMysql(
+        self: *Store,
+        io: std.Io,
+        connection: mysql_connection.Options,
+        selector: []const u8,
+        options: OpenOptions,
+    ) !void {
+        errdefer self.* = undefined;
+        var opened = try Mysql.open(io, connection, selector, options);
+        errdefer opened.close() catch {};
+        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        try stored_selector.set(selector);
+        const changes = try createRing();
+        errdefer destroyRing(changes);
+        const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
+        ids.* = .{ .next = undefined };
+        self.* = .{ .io = io, .engine = .{ .mysql = opened }, .selector = stored_selector, .changes = changes };
+        self.served = options.served;
+        self.engine.mysql.state.served = &self.served;
+        if (@import("builtin").is_test) {
+            if (connection.database.len >= self.engine.mysql.state.testing_database.len) return error.MysqlConfigTooLong;
+            @memcpy(self.engine.mysql.state.testing_database[0..connection.database.len], connection.database);
+        }
+        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch });
+        io.random(&self.instance);
+        try loadIdentities(self, .full);
+        self.queue().opened();
+        if (options.catalog) |offered| try self.saveCatalog(offered) else {
+            const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+            owned.tools = .{ .catalog = &tool_catalog.built_in, .set_id = 0 };
+        }
+    }
+
     /// The tools the Host offers, and the id of their saved set.
     pub fn catalog(self: *Store) *const HostTools {
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
@@ -356,6 +393,14 @@ pub const Store = struct {
 
     fn sqliteDiagnosticHeld(self: *Store) SqliteDiagnostic {
         return self.engine.sqlite.diagnostic();
+    }
+
+    pub fn mysqlDiagnostic(self: *Store) Mysql.Diagnostic {
+        return self.queue().run(mysqlDiagnosticHeld, .{self});
+    }
+
+    fn mysqlDiagnosticHeld(self: *Store) Mysql.Diagnostic {
+        return self.engine.mysql.diagnostic();
     }
 
     /// The SQLite connection, for SQLite-only tests and fixtures.
@@ -782,6 +827,13 @@ pub const Store = struct {
     fn revokeActionSenderHeld(self: *Store, binding: ActionAttemptBinding) !void {
         const entry = try enter(self, .none);
         defer entry.release();
+        // SQLite's one-statement autocommit is already atomic. Network
+        // writes must include the ownership fence in the same transaction.
+        if (self.engine == .mysql) {
+            var access: Access(.write, error{}) = .open(&entry);
+            defer access.deinit();
+            return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
+        }
         var access: Access(.single, error{}) = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.none, action_domain.revokeActionSender(&access, binding));
@@ -1189,7 +1241,8 @@ const TestingContentWork = struct {
 
 // The frame that holds a Store keeps every byte of it resident, so a fixed
 // buffer belongs in memory of its own, like the change ring's. The production
-// Store is 688 bytes; test builds add 24 bytes of counters and sit exactly at
+// Store remains 688 bytes: its engine tag replaces the redundant ids pointer.
+// Test builds add 24 bytes of counters and sit exactly at
 // 712, so a new field must come out of existing padding, or out of the Store.
 comptime {
     if (@sizeOf(TestingContentWork) != 24) @compileError("TestingContentWork grew past 24 bytes; the test-build Store has no room");
@@ -1531,12 +1584,18 @@ pub fn workspaceDigest(workspace: []const u8) [32]u8 {
 pub fn untouchedForTesting(self: *Store) ?change_ring.Id {
     if (!@import("builtin").is_test) @compileError("test-only check");
     if (self.touched.everything) return null;
-    return self.engine.sqlite.untouchedForTesting(&self.touched);
+    return switch (self.engine) {
+        .sqlite => |*s| s.untouchedForTesting(&self.touched),
+        .mysql => @import("mysql_testing.zig").untouchedForTesting(self, &self.touched),
+    };
 }
 
 fn clearTouchOracleForTesting(self: *Store) void {
     if (!@import("builtin").is_test) @compileError("test-only oracle");
-    self.engine.sqlite.clearTouchOracleForTesting();
+    switch (self.engine) {
+        .sqlite => |*s| s.clearTouchOracleForTesting(),
+        .mysql => @import("mysql_testing.zig").clearTouchOracleForTesting(self),
+    }
 }
 
 /// The only fence setter. Returns `err` so callers can propagate it.
@@ -1672,25 +1731,38 @@ pub fn reloadIdentitiesForTesting(self: *Store) !void {
 /// a COMMIT's outcome is unknown, because only committed rows count: a
 /// value whose row committed is never handed out twice, and one whose row
 /// did not is handed out again.
+fn IdentityCeiling(comptime column: Identity) type {
+    const table = switch (column) {
+        .turn_id => "turn",
+        .operation_id => "model_operation",
+        .action_id => "action_operation",
+        .content_id => "content",
+        .created_seq => "session",
+        .command_seq => "core_command",
+        .admission_id => "message_admission",
+        .tool_record_id => "tool_record",
+        .tool_set_id => "tool_set",
+    };
+    return rsql.Read(.{
+        .sql = "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) AS ceiling FROM " ++ table,
+        .Args = struct {},
+        .Row = struct { ceiling: u64 },
+        .cardinality = .one,
+    });
+}
+
 fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
-    inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
-        const table = switch (column) {
-            .turn_id => "turn",
-            .operation_id => "model_operation",
-            .action_id => "action_operation",
-            .content_id => "content",
-            .created_seq => "session",
-            .command_seq => "core_command",
-            .admission_id => "message_admission",
-            .tool_record_id => "tool_record",
-            .tool_set_id => "tool_set",
+    if (self.engine == .mysql) {
+        inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
+            const Ceiling = IdentityCeiling(column);
+            try self.engine.bind(null, Ceiling, &.{}, 0);
         };
-        const Ceiling = rsql.Read(.{
-            .sql = "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) AS ceiling FROM " ++ table,
-            .Args = struct {},
-            .Row = struct { ceiling: u64 },
-            .cardinality = .one,
-        });
+        if (@import("builtin").is_test) self.engine.mysql.state.testing_shape.identity_passes += 1;
+        try self.engine.startPass();
+    }
+    errdefer self.engine.finishPass() catch {};
+    inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
+        const Ceiling = IdentityCeiling(column);
         const statement = try self.engine.statementFor(Ceiling);
         defer self.engine.endStatement(statement);
         if (!(self.engine.nextRow(statement) catch false)) return error.IdentityReadFailed;
@@ -1698,6 +1770,7 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
         try self.engine.decodeRow(Ceiling.Row, statement, &row);
         self.identities().next.set(column, row.ceiling + 1);
     };
+    try self.engine.finishPass();
     self.identities().taken = .empty;
 }
 
