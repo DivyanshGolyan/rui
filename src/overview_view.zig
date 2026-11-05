@@ -2254,7 +2254,7 @@ fn configure(state: *State, arguments: []const u8) bool {
         state.say(.attention, configure_usage, .{});
         return false;
     }
-    for (cli_args.live_configure.options) |option| {
+    inline for (cli_args.live_configure.options) |option| {
         if (parsed.has(option.name) and startOption(option.name) == null) {
             state.say(.attention, "! Set --{s} after the start", .{option.name});
             return false;
