@@ -3400,8 +3400,9 @@ Matching in-flight retries may receive the same acknowledgement; a replacement r
 
 Pause affects all work in the selected Store; it records no Session stop, so a later Host resumes that work from committed facts.
 Acknowledgement means a fence was requested, not that effects retired, connections drained or the lease released.
+So after acknowledgement pause probes only the lease (never the Host) for up to `product_defaults.host_shutdown_seconds` (10): a free lease reports `"retirement":"confirmed"`; a lease still held then reports `"unconfirmed"` and stderr says a new Host can start once `rui host status` reports unavailable.
+Confirmed retirement means the old Host let go of the Store; it reports nothing about cleanup progress.
 A missing/disconnected listener or timeout leaves completion unconfirmed.
-After listener closure, lease observation reports only unavailable or owned-but-unavailable, not cleanup progress or completed shutdown.
 Host pause adds no PID signal, force escalation, Session stop or separate shutdown authority.
 
 Holding new Turns is a different control, answered from Host memory like `host_info`: `POST /v1/control/host-pause` takes `kind:"host_pause"`, `store` and `paused`, sets whether this Host holds every new Turn, and replies `host_pause_reply` with the state now in force; repeating it changes nothing (D193).

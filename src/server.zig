@@ -618,7 +618,7 @@ const Intake = struct {
         self.deadline_armed = true;
         const default: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.DFL }, .mask = std.posix.sigemptyset(), .flags = 0 };
         std.posix.sigaction(.ALRM, &default, null);
-        _ = std.c.alarm(launch_shutdown_seconds);
+        _ = std.c.alarm(product_defaults.host_shutdown_seconds);
     }
 
     fn run(self: *Intake, listener: *std.Io.net.Server, listener_open: *bool, socket_owned: *bool) !void {
@@ -857,9 +857,6 @@ pub const Launch = struct {
     /// The MCP servers whose tools the Host offers (M3a).
     mcp_servers: []const launch_frame.Frame.McpServer = &.{},
 };
-
-/// How long a launched Host's shutdown may take after stdin closes.
-pub const launch_shutdown_seconds = 10;
 
 /// Lists each MCP server and saves the Host's catalog: the built-ins and
 /// the servers' tools, with an unreachable server's last saved tools kept

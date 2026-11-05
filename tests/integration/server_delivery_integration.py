@@ -20,6 +20,7 @@ import control_integration as control
 import model_fixture as model
 import host_process
 from host_process import HostDiagnostics, PeerCensus, canonical_fixture_root, dispose_all, stop_process
+from product_defaults import DEFAULTS
 
 
 def exchange(sock, store, route, kind, **fields):
@@ -222,17 +223,20 @@ def main():
             # No reader rescue: ten unread peers remain open for the real
             # production inactivity interval. Shutdown must drain them itself.
             started = time.monotonic()
-            stop_deadline = started + 5
+            # The held readers keep the lease past pause's retirement wait,
+            # so pause returns after that whole bound, unconfirmed.
+            stop_deadline = started + DEFAULTS.host_shutdown_seconds + 5
             stop_requests = [peers.expect("host_info"), peers.expect("host_stop")]
             stopped = subprocess.run([control.RUI, "host", "pause", "--store", store],
-                                     capture_output=True, text=True, timeout=5)
+                                     capture_output=True, text=True, timeout=DEFAULTS.host_shutdown_seconds + 5)
             assert stopped.returncode == 0, stopped
             identity = json.loads(discovery_body)["instance"]
             reported = json.loads(stopped.stdout)
             assert {name: reported[name] for name in ("type", "status", "instance", "retirement")} == {
                 "type": "host_pause", "status": "acknowledged", "instance": identity, "retirement": "unconfirmed",
             }, stopped
-            assert stopped.stderr.endswith(f" --instance {identity}\n"), stopped
+            assert f" --instance {identity}\n" in stopped.stderr, stopped
+            assert stopped.stderr.splitlines()[-1].startswith(f"rui: the Host acknowledged the pause but still holds this Store after {DEFAULTS.host_shutdown_seconds} seconds"), stopped
             for request in stop_requests:
                 peers.release(request, stop_deadline)
             control.wait_for(lambda: not pathlib.Path(sock).exists(), "listener closure with ten readers held")
