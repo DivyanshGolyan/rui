@@ -28,6 +28,7 @@ const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 const AgentDelivery = command_domain.AgentDelivery;
 const AgentStart = command_domain.AgentStart;
 const CoreActionInput = action_domain.CoreActionInput;
+const forward_domain = @import("domain/forward.zig");
 const CoreWork = action_domain.CoreWork;
 const ActionResolutionCode = action_domain.ActionResolutionCode;
 const ActionSettlement = action_domain.ActionSettlement;
@@ -881,8 +882,6 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttempt(&access, binding, code, result, faults)));
     }
 
-    /// The core's next work, or null: a stop an attached child owes
-    /// (D38), else the next core tool call to run (D24).
     /// Delivers the owed child ending (D39) `nextCoreWork` names, or only
     /// settles one its parent's stop caused (D139).
     pub fn deliverChildEnding(self: *Store, turn_id: u64, faults: Faults) !bool {
@@ -897,6 +896,20 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, faults)));
     }
 
+    /// Positions one ancestor feed row and durably queues its next hop.
+    pub fn deliverSessionForward(self: *Store, forward_id: u64, faults: Faults) !bool {
+        return self.queue().write(deliverSessionForwardHeld, .{ self, forward_id, faults });
+    }
+
+    fn deliverSessionForwardHeld(self: *Store, forward_id: u64, faults: Faults) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, forward_domain.deliver(&access, forward_id, faults)));
+    }
+
+    /// Owed stops, ending Messages and ancestor feed hops precede calls.
     pub fn nextCoreWork(self: *Store) !?CoreWork {
         return self.queue().run(nextCoreWorkHeld, .{self});
     }
@@ -1630,7 +1643,7 @@ pub fn publicConversationPageForTesting(self: *Store, request: protocol.Conversa
 
 /// A column whose values the Host hands out: a row's id, or its place in
 /// a Store-wide order.
-pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id };
+pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id, forward_id };
 
 /// What the Host hands to transactions. The next value of each `Identity`
 /// is the Store's maximum plus one, read at open and again for each column
@@ -1739,6 +1752,7 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
             .admission_id => "message_admission",
             .tool_record_id => "tool_record",
             .tool_set_id => "tool_set",
+            .forward_id => "session_forward",
         };
         const Ceiling = rsql.Read(.{
             .sql = "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) AS ceiling FROM " ++ table,

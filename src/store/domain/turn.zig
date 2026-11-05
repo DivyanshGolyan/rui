@@ -9,6 +9,7 @@ const store_access = @import("../access.zig");
 const rsql = @import("../rsql.zig");
 const model_admission_domain = @import("model_admission.zig");
 const continues_without_input_sql = model_admission_domain.continues_without_input_sql;
+const forward_domain = @import("forward.zig");
 const failure_class = @import("../../failure_class.zig");
 
 /// How a Turn ended. `turn.outcome_code` saves `code()` and
@@ -143,6 +144,7 @@ pub fn queueCloseOr(a: anytype, positions: *store_access.Positions, turn_id: u64
         .session = positions.head,
     });
     a.write(owe_ending, .{ .turn_id = turn_id, .session = positions.head.ref[0..] });
+    try forward_domain.queue(a, &positions.head.ref, &positions.head.ref, .ending, turn_id);
 }
 
 /// An attached child's Turn ending is owed to its parent as a Message

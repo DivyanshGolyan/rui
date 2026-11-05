@@ -20,6 +20,7 @@ const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_admission_domain = @import("model_admission.zig");
 const store_access = @import("../access.zig");
+const forward_domain = @import("forward.zig");
 const turn_domain = @import("turn.zig");
 const failure_class = @import("../../failure_class.zig");
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
@@ -1624,8 +1625,9 @@ fn Settlement(comptime A: type) type {
             if (rejection_code != null) return;
             // A core tool acts only on the Store, so no person decides it.
             const authorized = tool_catalog.Runner.of(call_facts.tool.?) == .core or s.settling.permission_mode;
+            const action_id = try s.a.identity(.action_id);
             s.a.write(insert_action, .{
-                .action_id = try s.a.identity(.action_id),
+                .action_id = action_id,
                 .operation_id = s.binding.operation_id,
                 .call_ordinal = s.imported_calls,
                 .session = s.session,
@@ -1634,6 +1636,7 @@ fn Settlement(comptime A: type) type {
                 .timeout_ms = if (call_facts.bashArguments()) |arguments| arguments.timeout_ms else null,
                 .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
             });
+            if (!authorized) try forward_domain.queue(s.a, &s.session.ref, &s.session.ref, .approval, action_id);
         }
     };
 }
