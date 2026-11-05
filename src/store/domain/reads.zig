@@ -5,6 +5,8 @@
 //! only what an earlier round's rows name.
 
 const std = @import("std");
+const word_search = @import("../../word_search.zig");
+const pages = @import("../../os/pages.zig");
 const protocol = @import("../../protocol.zig");
 const codec_abi = @import("../../codec_abi.zig");
 const output_format = @import("../../output_format.zig");
@@ -1115,6 +1117,130 @@ pub fn activityPage(a: *ReadAccess, request: *const protocol.ActivityPage, page:
     try report_domain.readWorks(a, (&work)[0..1]);
     page.work.work = .fromCore(try work.work(session.created_at.get(), std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange));
     page.work.revision = session.revision.get();
+}
+
+/// The Host bounds content work independently of page size. This is not a
+/// request option, so every transport and core tool has the same cost bound.
+pub const activity_search_budget = 8 * 1024 * 1024;
+
+const SearchScratch = struct {
+    window: [content_domain.ContentReader.content_window_bytes]u8 = undefined,
+    matcher: word_search.Matcher = undefined,
+    item: protocol.ActivityItem = undefined,
+    workspace: protocol.Bounded(protocol.max_workspace_bytes) = undefined,
+};
+
+/// Searches the page's public sources in one read access. SQL chooses only
+/// candidate identities; the functional matcher alone decides text matches.
+pub fn searchActivity(a: *ReadAccess, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+    out.count = 0;
+    out.next = null;
+    const mapped = try pages.Mapped(SearchScratch).map();
+    defer mapped.unmap();
+    const scratch = mapped.value;
+    const session_ref = request.session.slice();
+    var session: page_session.Row = undefined;
+    session.workspace = &scratch.workspace;
+    var found: store_access.Found = undefined;
+    var guard: activity_sequence_guard.Result = undefined;
+    a.readInto(page_session, .{ .session = session_ref }, &session, &found);
+    a.read(activity_sequence_guard, .{ .session = session_ref }, &guard);
+    try store_access.runNamed(a, .{.{ page_session, error.SessionReadFailed }}, error.CorruptStore);
+    if (!found.get()) return error.SessionNotFound;
+    if (guard != null or session.compaction_trigger == @as(?u64, 0)) return error.CorruptStore;
+    const end = session.next_position.get() - 1;
+    if ((request.before_position orelse 0) > end) return error.InvalidCursor;
+    if (request.before_ordinal) |ordinal| {
+        readItems(1, a, session_ref, end, &.{.{ .position = request.before_position.?, .ordinal = ordinal }}, (&scratch.item)[0..1], null, null) catch |err| switch (err) {
+            error.ContentNotFound => return error.InvalidCursor,
+            else => return err,
+        };
+    }
+    var position = request.before_position orelse end;
+    var ordinal = request.before_ordinal orelse if (request.before_position == null) @as(u64, std.math.maxInt(i64)) else 0;
+    // Non-text kinds have no candidates. Reuse the activity source masks,
+    // not a second SQL definition of kinds or positions.
+    const text_kinds = activityKinds(.initMany(&.{ .admission, .user, .assistant, .call, .tool_result, .turn_ended, .sent, .received }));
+    const kinds = activityKinds(request.kinds) & text_kinds;
+    var budget: usize = activity_search_budget;
+    var lower: u64 = 0;
+    scan: while (true) {
+        var rows: Collected(ActivityPageRow, 17) = .{};
+        a.readEach(activity_backward, .{ .session = session_ref, .position = position, .ordinal = ordinal, .kinds = kinds }, 17, &rows);
+        try runRows(a);
+        // Keep the seventeenth identity as lookahead, just as activityPage.
+        const count = @min(rows.len, 16);
+        for (rows.slice()[0..count], 0..) |row, index| {
+            const at: ItemAt = .{ .position = row.position.get(), .ordinal = row.ordinal };
+            var located: ?Located = null;
+            try readItems(1, a, session_ref, end, &.{at}, (&scratch.item)[0..1], null, &located);
+            scratch.matcher.init(request.query.slice());
+            if (located) |content| {
+                try searchContent(a, scratch, .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } }, &budget);
+            } else if (scratch.item.value == .call) {
+                const fields = scratch.item.value.call.fields;
+                // Same virtual text as read_transcript's full window: tool
+                // name, newline, then arguments in their stored JSON form.
+                try searchField(a, scratch, fields[@backingInt(protocol.ProposalField.name)], &budget);
+                if (budget != 0) {
+                    scratch.matcher.feed("\n");
+                    try searchField(a, scratch, fields[@backingInt(protocol.ProposalField.arguments)], &budget);
+                }
+            }
+            scratch.matcher.finish();
+            if (scratch.matcher.count != 0) {
+                const item = &out.items[out.count];
+                item.position = at.position;
+                item.ordinal = at.ordinal;
+                item.kind = std.meta.stringToEnum(protocol.ActivityItem.Kind, @tagName(scratch.item.value)).?;
+                item.count = scratch.matcher.count;
+                for (scratch.matcher.hits[0..scratch.matcher.count], item.hits[0..item.count]) |*hit, *dest| {
+                    dest.snippet = hit.snippet;
+                    dest.offset = hit.offset;
+                    dest.length = hit.length;
+                }
+                out.count += 1;
+            }
+            position = at.position;
+            ordinal = at.ordinal;
+            if (budget == 0 or out.count == request.limit) {
+                lower = position;
+                if (index + 1 < rows.len) out.next = .{ .position = position, .ordinal = ordinal };
+                break :scan;
+            }
+        }
+        if (rows.len <= 16) break;
+    }
+    // Preserve the activity page's missing-assistant guard over precisely
+    // the range searched, including an exhausted page with no source rows.
+    if (request.kinds.contains(.assistant)) {
+        var missing: missing_assistant_entry.Result = null;
+        const upper = if (request.before_position) |before| before - @intFromBool((request.before_ordinal orelse 0) == 0) else end;
+        if (lower <= upper) {
+            a.read(missing_assistant_entry, .{ .session = session_ref, .lower = lower, .upper = upper }, &missing);
+            try runRows(a);
+            if (missing != null) return error.CorruptStore;
+        }
+    }
+}
+
+fn searchField(a: *ReadAccess, scratch: *SearchScratch, field: protocol.ProposalFieldReference, budget: *usize) !void {
+    const reference: ContentReference = .{ .length = field.length, .digest = field.digest };
+    const id = try content_domain.contentIdOf(a, reference, false);
+    try searchContent(a, scratch, .{ .store = a.store, .content_id = id, .reference = reference }, budget);
+}
+
+fn searchContent(a: *ReadAccess, scratch: *SearchScratch, location: ContentLocation, budget: *usize) !void {
+    var reader: content_domain.ContentReader = undefined;
+    reader.open(location);
+    defer reader.close();
+    var offset: u64 = 0;
+    while (offset < location.reference.length and budget.* != 0) {
+        const count = try reader.readWithAccess(a, offset, scratch.window[0..@min(scratch.window.len, budget.*)]);
+        scratch.matcher.feed(scratch.window[0..count]);
+        offset += count;
+        budget.* -= count;
+    }
 }
 
 const ActivityPageRow = struct { position: rsql.Positive, ordinal: u64 };

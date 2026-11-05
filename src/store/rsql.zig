@@ -281,9 +281,6 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 ///                        `schema.mysql_session` sets
 ///   @served(x)           the opening serves provider x: `rui_served(x)`,
 ///                        the function each opening registers
-///   @contains_ascii(x,word)  ASCII-folded x contains the already folded word
-///   @content_contains_ascii(id,word)  the saved content contains word, even
-///                        across MySQL chunks; word fits in one chunk
 ///   @payload(t)          the bytes of content row t, which its text keeps
 ///                        to one MySQL chunk (`schema.content_chunk_bytes`)
 ///                        by bounding byte_length: `payload`
@@ -1919,25 +1916,7 @@ const arg_a = "\x01";
 const arg_b = "\x02";
 const arg_set = "\x03";
 const served_slots = "\x04";
-/// MySQL LOWER leaves binary strings unchanged. Fold only ASCII bytes, so
-/// arbitrary UTF-8 (including a chunk boundary inside a character) is preserved.
-fn mysqlAsciiLower(comptime bytes: []const u8) []const u8 {
-    var result = bytes;
-    for (0..26) |i| result = "REPLACE(" ++ result ++ std.fmt.comptimePrint(",X'{X:0>2}',X'{X:0>2}')", .{ @as(u8, 'A') + i, @as(u8, 'a') + i });
-    return result;
-}
-
-/// A word fits well within one chunk. Searching each chunk adjoined with
-/// its successor also finds boundary-spanning matches without reconstructing
-/// the whole description or transcoding arbitrary bytes.
-fn mysqlContentContainsAscii() []const u8 {
-    return "(EXISTS(SELECT 1 FROM content_chunk search_chunk LEFT JOIN content_chunk search_next ON search_next.content_id=search_chunk.content_id AND search_next.chunk_index=search_chunk.chunk_index+1 WHERE search_chunk.content_id=" ++ arg_a ++ " AND INSTR(" ++ mysqlAsciiLower("CONCAT(search_chunk.bytes,COALESCE(search_next.bytes,X''))") ++ "," ++ arg_b ++ ")>0))";
-}
-
 const expression_markers = [_]ExpressionMarker{
-    // Search needles are already ASCII-folded by the caller.
-    .{ .name = "contains_ascii", .arity = 2, .sqlite = "(instr(lower(" ++ arg_a ++ ")," ++ arg_b ++ ")>0)", .mysql = "(INSTR(" ++ mysqlAsciiLower(arg_a) ++ "," ++ arg_b ++ ")>0)" },
-    .{ .name = "content_contains_ascii", .arity = 2, .sqlite = "(EXISTS(SELECT 1 FROM content search_content WHERE search_content.content_id=" ++ arg_a ++ " AND instr(lower(search_content.payload)," ++ arg_b ++ ")>0))", .mysql = mysqlContentContainsAscii() },
     .{ .name = "octets", .arity = 1, .sqlite = "length(CAST(" ++ arg_a ++ " AS BLOB))", .mysql = "OCTET_LENGTH(" ++ arg_a ++ ")" },
     .{
         .name = "charset",
@@ -2037,8 +2016,6 @@ fn mysqlTemplate(comptime text: []const u8) Template {
 ///   @now                 a slot for the Access's second
 ///   @index(name)         nothing: MySQL plans alone until PR 8 reads EXPLAIN
 ///   @served(x)           `(x IN (?,...))`, a slot per `provider_name.Provider`
-///   @contains_ascii(x,word)  INSTR over bytewise ASCII replacements
-///   @content_contains_ascii(id,word)  EXISTS over adjoining saved chunks
 ///   @payload(t)          t's first `content_chunk`, or X'' when it has none
 ///   @octets(x)           `OCTET_LENGTH(x)`
 ///   @charset(c,'set')    `(NOT REGEXP_LIKE(c,'[^set]','c'))`: no character

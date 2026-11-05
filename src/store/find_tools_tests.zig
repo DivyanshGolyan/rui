@@ -239,6 +239,11 @@ test "find_tools searches saved descriptions across MySQL chunk boundaries with 
             @memcpy(description[0..8], "Preview\n");
             @memcpy(description[chunk_bytes - 4 ..][0..8], "BoUnDaRy");
             @memcpy(description[3 * chunk_bytes + 5 ..][0..7], "Late%_Z");
+            // Exercise carry at the actual Host read edge as well as the
+            // durable MySQL chunk edge, including a maximum-length word.
+            const read_bytes = content.ContentReader.content_window_bytes;
+            @memset(description[read_bytes - 32 ..][0..64], 'Q');
+            @memcpy(description[2 * chunk_bytes - 3 ..][0..7], "LiT%_Er");
             // A NUL and non-ASCII letters do not stop or broaden ASCII folding.
             description[chunk_bytes + 10] = 0;
             @memcpy(description[chunk_bytes + 11 ..][0..5], "CAFÉ");
@@ -258,10 +263,13 @@ test "find_tools searches saved descriptions across MySQL chunk boundaries with 
                 .{ .words = "boundary", .match = true },
                 .{ .words = &@as([64]u8, @splat('x')), .match = true },
                 .{ .words = "late%_z", .match = true },
+                .{ .words = "lit%_er", .match = true },
+                .{ .words = &@as([64]u8, @splat('q')), .match = true },
+                .{ .words = "bePreview", .match = false },
                 .{ .words = "cafÉ", .match = true },
                 .{ .words = "café", .match = false },
                 .{ .words = "%_no", .match = false },
-                // All eight words participate in the same query.
+                // Every checked word participates in the shared matcher search.
                 .{ .words = "absent1 absent2 absent3 absent4 absent5 absent6 absent7 BOUNDARY", .match = true },
             };
             for (cases, 0..) |item, index| {

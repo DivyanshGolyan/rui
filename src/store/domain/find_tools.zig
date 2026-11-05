@@ -3,6 +3,7 @@ const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const core = @import("../../core_tools.zig");
 const tools = @import("../../tools.zig");
+const word_search = @import("../../word_search.zig");
 const rsql = @import("../rsql.zig");
 const action = @import("action.zig");
 const command = @import("command.zig");
@@ -18,56 +19,114 @@ const settings = rsql.Read(.{
     .cardinality = .one,
 });
 
-const matching_sql = blk: {
-    var sql: []const u8 = "";
-    for (0..8) |i| {
-        const word = std.fmt.comptimePrint("?{d}", .{i + 3});
-        sql = sql ++ (if (i == 0) "" else " OR ") ++ "(" ++ word ++ "<>'' AND (@contains_ascii(tool.name," ++ word ++ ") OR @content_contains_ascii(description.content_id," ++ word ++ ")))";
-    }
-    break :blk sql;
-};
-
-const Word = protocol.Bounded(core.find_tools_max_word_bytes);
-
-/// Walk saved records, never the Host's potentially newer catalog. SQL does
-/// the matching; the ordered visitor keeps the first eight unloaded matches.
+/// SQL narrows identities only; the shared Host matcher decides every hit.
+/// Saved records, not the Host's potentially newer catalog, define the search.
 const candidates = rsql.Read(.{
-    .sql = "SELECT tool.name,description.content_id,description.byte_length,description.digest," ++
-        "EXISTS(SELECT 1 FROM tool_set_member loaded WHERE loaded.tool_set_id=?2 AND loaded.tool_record_id=tool.tool_record_id) AS loaded," ++
-        "(" ++ matching_sql ++ ") AS matched FROM tool_set_member member " ++
-        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "JOIN content description ON description.content_id=tool.description_content_id WHERE member.tool_set_id=?1 ORDER BY tool.name",
-    .Args = struct { set: u64, loaded: u64, word0: Word = .{}, word1: Word = .{}, word2: Word = .{}, word3: Word = .{}, word4: Word = .{}, word5: Word = .{}, word6: Word = .{}, word7: Word = .{} },
-    .Row = struct { name: protocol.Bounded(tools.max_name_bytes), content_id: rsql.Positive, byte_length: u64, digest: [32]u8, loaded: bool, matched: bool },
+    .sql = "SELECT tool.name,description.content_id,description.byte_length,description.digest " ++
+        "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "JOIN content description ON description.content_id=tool.description_content_id WHERE member.tool_set_id=?1 " ++
+        "AND NOT EXISTS(SELECT 1 FROM tool_set_member loaded WHERE loaded.tool_set_id=?2 AND loaded.tool_record_id=member.tool_record_id) ORDER BY tool.name",
+    .Args = struct { set: u64, loaded: u64 },
+    .Row = struct { name: protocol.Bounded(tools.max_name_bytes), content_id: rsql.Positive, byte_length: u64, digest: [32]u8 },
     .cardinality = .each,
 });
 
-const Matches = struct {
-    names: protocol.ToolsField = .{ .state = .value },
-    rows: [8]candidates.Row = undefined,
+const Candidates = struct {
+    rows: [protocol.max_tools]candidates.Row = undefined,
     count: usize = 0,
-    tool_count: usize = 0,
-    remaining: usize = 0,
     invalid: bool = false,
 
-    pub fn visit(self: *Matches, row: *const candidates.Row) bool {
-        if (self.tool_count == protocol.max_tools) {
+    pub fn visit(self: *Candidates, row: *const candidates.Row) bool {
+        if (self.count == self.rows.len) {
             self.invalid = true;
             return false;
         }
-        self.tool_count += 1;
-        const load = !row.loaded and row.matched and self.count < self.rows.len;
-        if (load) {
-            self.rows[self.count] = row.*;
-            self.count += 1;
-        } else if (!row.loaded) self.remaining += 1;
-        if (load or row.loaded) self.names.append(row.name.slice()) catch {
+        self.rows[self.count] = row.*;
+        self.count += 1;
+        return true;
+    }
+};
+
+const loaded_names = rsql.Read(.{
+    .sql = "SELECT tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?1 ORDER BY tool.name",
+    .Args = struct { set: u64 },
+    .Row = struct { name: protocol.Bounded(tools.max_name_bytes) },
+    .cardinality = .each,
+});
+
+const LoadedNames = struct {
+    names: protocol.ToolsField = .{ .state = .value },
+    invalid: bool = false,
+
+    pub fn visit(self: *LoadedNames, row: *const loaded_names.Row) bool {
+        self.names.append(row.name.slice()) catch {
             self.invalid = true;
             return false;
         };
         return true;
     }
 };
+
+const Matches = struct {
+    names: protocol.ToolsField = .{ .state = .value },
+    rows: [8]candidates.Row = undefined,
+    count: usize = 0,
+    remaining: usize = 0,
+};
+
+/// Per-call, fixed-size heap scratch, never a description-sized allocation or
+/// a Host stack window. Matcher's n-1 byte carry spans successive reads.
+const SearchScratch = struct {
+    window: [content.ContentReader.content_window_bytes]u8 = undefined,
+    matchers: [8]word_search.Matcher = undefined,
+};
+
+fn matchesCandidate(a: anytype, scratch: *SearchScratch, words: *const core.FindTools, row: *const candidates.Row) !bool {
+    for (words.words[0..words.count], 0..) |word, index| {
+        const matcher = &scratch.matchers[index];
+        matcher.init(word);
+        matcher.feed(row.name.slice());
+        if (matcher.count != 0) return true;
+    }
+    // A word must match one field, never the end of a name plus the start of
+    // its description. init also owns query folding, just as in feed search.
+    for (words.words[0..words.count], 0..) |word, index| scratch.matchers[index].init(word);
+    var reader: content.ContentReader = undefined;
+    reader.open(.{ .store = a.store, .content_id = @intCast(row.content_id.get()), .reference = .{ .length = row.byte_length, .digest = row.digest } });
+    defer reader.close();
+    var offset: u64 = 0;
+    while (offset < row.byte_length) {
+        const count = try reader.readWithAccess(a, offset, &scratch.window);
+        for (scratch.matchers[0..words.count]) |*matcher| {
+            matcher.feed(scratch.window[0..count]);
+            if (matcher.count != 0) return true;
+        }
+        offset += count;
+    }
+    return false;
+}
+
+/// Merge the two disjoint, ordered sets for the same interning path configure
+/// uses. Equality needs no explicit set; no-match calls need no loaded-name read.
+fn includeLoadedNames(a: anytype, arena: std.mem.Allocator, loaded_set: u64, matches: *Matches) !void {
+    const loaded = try arena.create(LoadedNames);
+    loaded.* = .{};
+    a.readEach(loaded_names, .{ .set = loaded_set }, protocol.max_tools + 1, loaded);
+    try a.run();
+    if (loaded.invalid) return error.CorruptStore;
+    var names = loaded.names.iterator();
+    var saved = names.next();
+    var index: usize = 0;
+    while (saved != null or index < matches.count) {
+        if (index < matches.count and (saved == null or std.mem.lessThan(u8, matches.rows[index].name.slice(), saved.?))) {
+            matches.names.append(matches.rows[index].name.slice()) catch return error.CorruptStore;
+            index += 1;
+        } else {
+            matches.names.append(saved.?) catch return error.CorruptStore;
+            saved = names.next();
+        }
+    }
+}
 
 const update_loaded = rsql.Write(.{
     .sql = "UPDATE session SET loaded_tool_set_id=?2,revision=?3 WHERE session_ref=@session(?1)",
@@ -112,14 +171,24 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     const matches = try arena.create(Matches);
     matches.* = .{};
     if (refusal == null) {
-        // Bounded words are copied at binding, so all eight fit one query
-        // without consuming Access's four borrowed-string slots.
-        const args = try arena.create(candidates.Args);
-        args.* = .{ .set = current.tool_set_id.get(), .loaded = current.loaded_set.get() };
-        inline for (0..8) |index| try @field(args, std.fmt.comptimePrint("word{d}", .{index})).set(words.words[index]);
-        a.readEachFrom(candidates, args, protocol.max_tools + 1, matches);
+        const pending = try arena.create(Candidates);
+        pending.* = .{};
+        a.readEach(candidates, .{ .set = current.tool_set_id.get(), .loaded = current.loaded_set.get() }, protocol.max_tools + 1, pending);
         try a.run();
-        if (matches.invalid) return error.CorruptStore;
+        if (pending.invalid) return error.CorruptStore;
+        matches.remaining = pending.count;
+        if (pending.count > 0) {
+            const scratch = try arena.create(SearchScratch);
+            for (pending.rows[0..pending.count]) |*row| {
+                if (!try matchesCandidate(a, scratch, words, row)) continue;
+                matches.rows[matches.count] = row.*;
+                matches.count += 1;
+                matches.remaining -= 1;
+                if (matches.count == matches.rows.len) break;
+            }
+        }
+        if (matches.count > 0 and matches.remaining > 0)
+            try includeLoadedNames(a, arena, current.loaded_set.get(), matches);
     }
 
     var output: std.Io.Writer.Allocating = .init(arena);
@@ -150,7 +219,7 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     const digest = protocol.contentDigest(key);
     if (matches.count > 0) {
         var loaded: ?u64 = null;
-        if (matches.names.count != matches.tool_count) {
+        if (matches.remaining > 0) {
             var selected = try tool_set.Selection.ofSaved(a, current.tool_set_id.get(), &matches.names);
             tool_set.lookupSelection(a, &selected);
             try a.run();

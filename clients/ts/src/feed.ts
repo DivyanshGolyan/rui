@@ -223,3 +223,35 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 		if (page.items.length === 0) wait = Math.min(wait * 2, MAX_POLL_MS);
 	}
 }
+
+export interface SearchActivityOptions {
+	/** Resume before this search entry's cursor. */
+	before?: string;
+	kinds?: readonly FeedKind[];
+	limit?: number;
+	signal?: AbortSignal;
+}
+
+export type ActivitySearchEntry = Schemas["ActivitySearchReply"]["items"][number] & { cursor: string };
+
+/** Search public feed text newest first. Empty budget-limited pages still advance. */
+export async function* searchActivity(link: Link, session: string, query: string, options: SearchActivityOptions = {}): AsyncGenerator<ActivitySearchEntry, void, undefined> {
+	const bytes = Buffer.byteLength(query, "utf8");
+	if (bytes === 0 || bytes > 256 || Buffer.from(query, "utf8").toString("utf8") !== query) throw new RangeError("query must be 1–256 UTF-8 bytes");
+	const limit = options.limit ?? PAGE_ROWS;
+	if (!Number.isInteger(limit) || limit < 1 || limit > PAGE_ROWS) throw new RangeError("limit must be 1–16");
+	const kinds = options.kinds === undefined ? FEED_KINDS : FEED_KINDS.filter((kind) => options.kinds?.includes(kind));
+	let before = options.before === undefined ? null : decodeCursor(options.before);
+	while (!options.signal?.aborted) {
+		const page = JSON.parse((await link.exchange("/v1/activity-search", (store) => JSON.stringify({
+			version: WIRE_VERSION, kind: "activity_search", store, session, query, kinds: [...kinds],
+			before_position: before?.position ?? null, before_ordinal: before?.ordinal ?? null, limit: String(limit),
+		} satisfies Schemas["ActivitySearchRequest"]))).toString("utf8")) as Schemas["ActivitySearchReply"];
+		for (const item of page.items) {
+			if (options.signal?.aborted) return;
+			yield { ...item, cursor: encodeCursor(item.position, item.ordinal) };
+		}
+		if (page.next === null) return;
+		before = page.next;
+	}
+}
