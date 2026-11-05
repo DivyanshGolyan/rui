@@ -662,7 +662,7 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
     try std.Io.File.stderr().writeStreamingAll(io, notice.buffered());
     var reply: client.ReplyBuffer = .{};
     const outcome = client.stopHost(io, .{ .store = paths.store.slice(), .instance = target }, &reply) catch |err| {
-        stderr.diagnostic("rui: pause reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@tagName(caller_error.of(err))});
+        stderr.diagnostic("rui: pause reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
         return err;
     };
     switch (outcome) {
@@ -1296,7 +1296,7 @@ fn guideProviderLogin(init: std.process.Init, readiness: *const provider_selecti
     }
     if (provider == .openai) {
         saveApiKey(init, .choose) catch |err| {
-            if (err != error.InvalidApiKey and err != error.LoginInterrupted) stderr.diagnostic("rui: the OpenAI key was not saved ({s}).\n", .{@tagName(caller_error.of(err))});
+            if (err != error.InvalidApiKey and err != error.LoginInterrupted) stderr.diagnostic("rui: the OpenAI key was not saved ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
         };
         return;
     }

@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Keep caller failures classified without exposing Zig error names.
+"""Keep CLI-owned failures classified without exposing Zig error names.
 
-The catalog owns mapped causes and its transitional pending tuple. Pending may
-only shrink from the trusted origin/main merge base. Before that tuple existed,
-bootstrap its ceiling from trusted production sources and the pinned Zig
-standard library, not from the candidate's inventory. After rollout the trusted
-pending tuple alone is the ceiling, even across compiler updates. New contextual
-errors are fine when mapped.
+Inventory only src/cli.zig, src/cli_args.zig, src/client.zig,
+src/preferences.zig and root-level src/caller_*.zig. The same predicate selects
+candidate coverage and trusted bootstrap sources. Pending can only shrink from
+the trusted origin/main merge base; before that tuple existed, bootstrap from
+those trusted CLI sources and the pinned Zig standard library, never from the
+candidate's pending names. After rollout only the trusted tuple's names that
+occur in the trusted CLI inventory remain eligible.
 
-Closed error sets are also checked by caller_error.of at compile time. This
-source gate conservatively inventories every src/**/*.zig file: an error from
-a transitive owner can reach the CLI after its set has widened to anyerror.
-This is not call-graph inference. Test blocks are excluded, but test-only files
-and helpers outside test blocks remain in scope. Comments and strings are
+Closed error sets are also checked by caller_error.of at compile time. Errors
+from other owners that widen to anyerror remain internal_unexpected, exit 1
+(unclassified); adding a Host-internal error must not require a CLI catalog edit.
+This is a source inventory, not transitive call-graph inference. Test blocks are
+excluded; helpers outside test blocks remain in scope. Comments and strings are
 never code.
 """
 import argparse
@@ -26,6 +27,7 @@ from typing import NamedTuple
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = "src/caller_error.zig"
 CALLER = {"src/cli.zig", "src/cli_args.zig"}
+INVENTORY = CALLER | {"src/client.zig", "src/preferences.zig"}
 TOKEN = re.compile(
     r'//[^\n]*|\\\\[^\n]*|@"(?:\\.|[^"\\])*"|"(?:\\.|[^"\\])*"|'
     r"'(?:\\.|[^'\\])*'|@?[A-Za-z_][A-Za-z_0-9]*|=>|[^\s]"
@@ -88,13 +90,12 @@ def caller_path(name):
 
 
 def inventory_path(name):
-    path = Path(name)
-    return bool(path.parts) and path.parts[0] == "src" and path.suffix == ".zig"
+    return name in INVENTORY or caller_path(name)
 
 
 def read_sources(root=ROOT):
     return {path.relative_to(root).as_posix(): path.read_text()
-            for path in sorted((root / "src").rglob("*.zig"))
+            for path in sorted((root / "src").glob("*.zig"))
             if inventory_path(path.relative_to(root).as_posix())}
 
 
@@ -272,15 +273,20 @@ def allowance_growth(root=ROOT, bootstrap_names=None):
     once main owns pending, not even a std name can enlarge that exact tuple.
     """
     base = git(root, "merge-base", "HEAD", "origin/main")
+    paths = git(root, "ls-tree", "-r", "--name-only", base, "--", "src").splitlines()
+    trusted = (git(root, "show", f"{base}:{path}") for path in paths if inventory_path(path))
+    inventory = {name for source in trusted for name, _ in error_sites(production(lex(source)))}
     before = trusted_pending(root, base)
     if before is None:
-        paths = git(root, "ls-tree", "-r", "--name-only", base, "--", "src").splitlines()
-        trusted = (git(root, "show", f"{base}:{path}") for path in paths if inventory_path(path))
-        before = {name for source in trusted for name, _ in error_sites(production(lex(source)))}
+        before = inventory
         if bootstrap_names is None:
             version = toolchain_version(git(root, "show", f"{base}:.github/actions/setup/action.yml"))
             bootstrap_names = standard_names(version)
         before |= set(bootstrap_names)
+    else:
+        # A formerly broader pending tuple cannot bless new CLI references to
+        # errors that only appeared in Host-internal owners on trusted main.
+        before &= inventory
     current = pending_names((root / CATALOG).read_text())
     if current is None:
         raise ValueError("caller_error.zig: missing pending tuple")

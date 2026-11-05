@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from caller_errors import (
-    CATALOG, ROOT, allowance_growth, check, error_sites, lex, mapped_names,
+    CATALOG, ROOT, allowance_growth, check, error_sites, inventory_path, lex, mapped_names,
     needs_bootstrap, pending_names, production, read_sources, standard_names, toolchain_version,
 )
 
@@ -20,6 +20,20 @@ def catalog(pending=(), mapped=("Classified",)):
 
 
 class CallerErrors(unittest.TestCase):
+    def test_inventory_is_exactly_the_cli_owners_and_root_caller_modules(self):
+        for path in ("src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/preferences.zig",
+                     "src/caller_error.zig", "src/caller_exit.zig", "src/caller_new.zig"):
+            with self.subTest(path=path):
+                self.assertTrue(inventory_path(path))
+                if path != CATALOG:
+                    failures = check({CATALOG: catalog(), path: "return error.NewCallerError;"})
+                    self.assertEqual(len(failures), 1)
+        for path in ("src/store/access.zig", "src/read_transcript.zig", "src/platform.zig",
+                     "src/provider_selection.zig", "src/nested/caller_new.zig", "tests/cli.zig"):
+            with self.subTest(path=path):
+                self.assertFalse(inventory_path(path))
+                self.assertEqual(check({CATALOG: catalog(), path: "return error.NewInternalError;"}), [])
+
     def test_catalog_is_the_single_inventory(self):
         source = catalog(("OldFailure",), ("Classified", "Contextual"))
         self.assertEqual(pending_names(source), {"OldFailure"})
@@ -44,24 +58,15 @@ class CallerErrors(unittest.TestCase):
         # Internal legacy owners may still log names; their errors are inventoried.
         self.assertEqual(check({CATALOG: catalog(), "src/client.zig": "@errorName(err);"}), [])
 
-    def test_all_transitive_owners_are_covered_without_a_hand_picked_allowlist(self):
-        for path in ("src/client.zig", "src/platform.zig", "src/preferences.zig", "src/caller_new.zig",
-                     "src/provider_selection.zig", "src/new_session_selection.zig",
-                     "src/store/nested/owner.zig", "src/testing/helper_test.zig"):
-            with self.subTest(path=path):
-                failures = check({CATALOG: catalog(), path: "return error.NewCallerError;"})
-                self.assertEqual(len(failures), 1)
-                self.assertIn("error.NewCallerError needs a mapped code", failures[0])
-
-    def test_declared_error_set_names_cannot_bypass_transitive_coverage(self):
+    def test_declared_error_set_names_cannot_bypass_cli_coverage(self):
         source = 'const E = error{NewCallerError, @"Another failure"};'
-        failures = check({CATALOG: catalog(), "src/provider_selection.zig": source})
+        failures = check({CATALOG: catalog(), "src/client.zig": source})
         self.assertEqual(failures, [
-            "src/provider_selection.zig:1: error.NewCallerError needs a mapped code or an existing pending entry",
-            "src/provider_selection.zig:1: error.Another failure needs a mapped code or an existing pending entry",
+            "src/client.zig:1: error.NewCallerError needs a mapped code or an existing pending entry",
+            "src/client.zig:1: error.Another failure needs a mapped code or an existing pending entry",
         ])
         self.assertEqual(check({CATALOG: catalog(("NewCallerError", "Another failure")),
-                                "src/provider_selection.zig": source}), [])
+                                "src/client.zig": source}), [])
         self.assertEqual(list(error_sites(production(lex('test { const E = error{TestOnly}; }')))), [])
 
     def test_comments_strings_chars_and_multiline_strings_are_not_code(self):
@@ -158,6 +163,11 @@ fn live() anyerror!void { return error.NewCallerError; }
     def test_repository_caller_sources_are_classified(self):
         self.assertEqual(check(read_sources()), [])
 
+    def test_repository_pending_names_occur_in_the_cli_inventory(self):
+        sources = read_sources()
+        names = {name for source in sources.values() for name, _ in error_sites(production(lex(source)))}
+        self.assertEqual(pending_names(sources[CATALOG]) - names, set())
+
     def test_repository_pending_does_not_grow_from_trusted_base(self):
         self.assertEqual(allowance_growth(), [])
 
@@ -203,15 +213,16 @@ class TrustedPending(unittest.TestCase):
         self.write("src/client.zig", "return error.LegacyClientFailure;")
         self.write("src/store/nested/owner.zig", "return error.NestedOwnerFailure;")
         self.commit("trusted legacy owners", trusted=True)
-        self.write(CATALOG, catalog(("OldFailure", "LegacyClientFailure", "NestedOwnerFailure"), ("Classified", "NewContextual")))
-        self.write("src/new_session_selection.zig", "return error.NewContextual;")
+        self.write(CATALOG, catalog(("OldFailure", "LegacyClientFailure"), ("Classified", "NewContextual")))
+        self.write("src/preferences.zig", "return error.NewContextual;")
         self.assertEqual(allowance_growth(self.root, bootstrap_names=set()), [])
         self.assertEqual(check(read_sources(self.root)), [])
-        self.write(CATALOG, catalog(("OldFailure", "NewCallerError", "TestOnly")))
+        self.write(CATALOG, catalog(("OldFailure", "NestedOwnerFailure", "NewCallerError", "TestOnly")))
         self.write("src/cli.zig", "return error.NewCallerError;")
         # Even a committed candidate cannot bootstrap arbitrary new names.
         self.commit("candidate grows bootstrap")
         self.assertEqual(allowance_growth(self.root, bootstrap_names=set()), [
+            f"{CATALOG}: pending error NestedOwnerFailure exceeds the trusted allowance",
             f"{CATALOG}: pending error NewCallerError exceeds the trusted allowance",
             f"{CATALOG}: pending error TestOnly exceeds the trusted allowance",
         ])
@@ -221,6 +232,7 @@ class TrustedPending(unittest.TestCase):
         self.commit("before the catalog ratchet", trusted=True)
         self.assertTrue(needs_bootstrap(self.root))
         self.write(CATALOG, catalog(("NotOpenForReading",)))
+        self.write("src/client.zig", "const E = error{NotOpenForReading};")
         external = {"NotOpenForReading", "AnotherStdError"}
         self.assertEqual(allowance_growth(self.root, bootstrap_names=external), [])
         self.commit("seed inherited std failure", trusted=True)
@@ -246,23 +258,39 @@ class TrustedPending(unittest.TestCase):
 
     def test_mapping_a_new_error_needs_no_pending_allowance(self):
         self.write(CATALOG, catalog(("A",)))
+        self.write("src/client.zig", "return error.A;")
         self.commit("trusted pending", trusted=True)
         self.write(CATALOG, catalog(("A",), ("NewCallerError",)))
-        self.write("src/provider_selection.zig", "return error.NewCallerError;")
+        self.write("src/client.zig", "return error.NewCallerError;")
         self.assertEqual(check(read_sources(self.root)), [])
         self.assertEqual(allowance_growth(self.root), [])
 
-    def test_nested_source_discovery_rejects_a_new_error_after_anyerror_widening(self):
+    def test_host_internal_errors_do_not_expand_the_cli_inventory(self):
         self.write(CATALOG, catalog())
         self.write("src/cli.zig", "fn run() anyerror!void { try imported.run(); }")
         self.write("src/provider_selection.zig", "return error.NewCallerError;")
         self.write("src/new_session_selection.zig", "return error.NewCallerError;")
+        self.write("src/read_transcript.zig", "return error.EntryNotFound;")
         self.write("src/store/nested/owner.zig", "return error.NestedCallerError;")
-        failures = check(read_sources(self.root))
-        self.assertEqual(failures, [
-            "src/new_session_selection.zig:1: error.NewCallerError needs a mapped code or an existing pending entry",
-            "src/provider_selection.zig:1: error.NewCallerError needs a mapped code or an existing pending entry",
-            "src/store/nested/owner.zig:1: error.NestedCallerError needs a mapped code or an existing pending entry",
+        self.write("src/store/access.zig", "return error.StoreConnectionLost;")
+        self.assertEqual(set(read_sources(self.root)), {CATALOG, "src/cli.zig"})
+        self.assertEqual(check(read_sources(self.root)), [])
+        self.write("src/client.zig", "fn run() anyerror!void { return error.NewClientError; }")
+        self.assertEqual(check(read_sources(self.root)), [
+            "src/client.zig:1: error.NewClientError needs a mapped code or an existing pending entry",
+        ])
+
+    def test_trusted_broad_pending_cannot_move_host_internal_errors_into_cli(self):
+        self.write(CATALOG, catalog(("CallerFailure", "HostInternal")))
+        self.write("src/client.zig", "return error.CallerFailure;")
+        self.write("src/store/access.zig", "return error.HostInternal;")
+        self.commit("trusted broad inventory", trusted=True)
+        self.write(CATALOG, catalog(("CallerFailure",)))
+        self.assertEqual(allowance_growth(self.root), [])
+        self.write(CATALOG, catalog(("CallerFailure", "HostInternal")))
+        self.write("src/client.zig", "return error.CallerFailure; return error.HostInternal;")
+        self.assertEqual(allowance_growth(self.root), [
+            f"{CATALOG}: pending error HostInternal exceeds the trusted allowance",
         ])
 
     def test_missing_trusted_ref_fails_closed(self):
