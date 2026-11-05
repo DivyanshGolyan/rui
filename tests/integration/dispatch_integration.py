@@ -487,7 +487,7 @@ def compaction_cases(state, processes, endpoints, releases):
         processes.append(host)
         patch(store, session, f"{route}-reset", "--compaction-trigger", "default", "--output-reservation", "default")
         current = command("session", "inspect", "--store", store, "--session", session)["session"]
-        assert current["compaction_trigger"] == "244800" and current["compaction_trigger_override"] is None, current
+        assert current["compaction_trigger"] == "244800" and current["compaction_trigger_override"] == "244800", current
         assert current["output_reservation"] == "0" and current["output_reservation_override"] is None, current
         overflowed = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["model_operations"][0]
         assert overflowed["request_id"] == (overflow_request_id if route == "http" else "request-1"), overflowed

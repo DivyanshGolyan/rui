@@ -289,9 +289,11 @@ body = json.dumps({
         "provider": {"state": "value", "value": "codex"},
         "model": {"state": "value", "value": "gpt-6-sol"},
         "instructions": {"state": "omitted"},
-        "tools": {"state": "omitted"},
-        "permission_mode": {"state": "omitted"},
+        "tools": {"state": "value", "value": ["bash"]},
+        "permission_mode": {"state": "value", "value": "bypass"},
         "output_schema": {"state": "omitted"},
+        "compaction_trigger": {"state": "value", "value": "244800"},
+        "reasoning_effort": {"state": "value", "value": "medium"},
     },
 }, separators=(",", ":")).encode()
 client = socket.socket(socket.AF_UNIX)

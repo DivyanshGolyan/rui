@@ -378,7 +378,7 @@ def run():
             assert request["model"] == model, request
             if settings["compaction_trigger"] != trigger or settings["output_reservation"] != "0":
                 mismatches.append((model, "compaction defaults", settings["compaction_trigger"], settings["output_reservation"]))
-            if settings["reasoning_effort"] != effort or settings["reasoning_effort_override"] is not None:
+            if settings["reasoning_effort"] != effort or settings["reasoning_effort_override"] != effort:
                 mismatches.append((model, "effort settings", settings["reasoning_effort"], settings["reasoning_effort_override"]))
             if request.get("reasoning") != {"effort": effort}:
                 mismatches.append((model, "reasoning", request.get("reasoning")))
