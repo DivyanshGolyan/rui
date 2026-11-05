@@ -77,7 +77,7 @@ def main():
         def run(*args, env=None, accepted=True, input=None):
             result = subprocess.run([str(installed), *map(str, args)], env=environment if env is None else env,
                                     text=True, capture_output=True, timeout=15, input=input)
-            assert result.returncode == (0 if accepted else 1), f"unexpected CLI status: {args[:2]}: {result.stderr}"
+            assert result.returncode == (0 if accepted else 3), f"unexpected CLI status: {args[:2]}: {result.stderr}"
             return json.loads(result.stdout)
 
         def send(key, sender=None, handle=None, accepted=True):

@@ -2972,7 +2972,7 @@ fn reportUnconfirmed(context: protocol_reply.MutationIdentity, replay: client.Re
 }
 
 fn writeUnconfirmed(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) !void {
-    try notice.print("rui: admission not confirmed ({s}); do not replace uncertain work. Recover the same saved request: rui request recover ", .{@errorName(err)});
+    try notice.print("rui: admission not confirmed ({s}); do not replace uncertain work. Recover it with rui request recover ", .{@errorName(err)});
     switch (replay) {
         .generated => try notice.writeAll(context.key.slice()),
         .explicit => |record| {
@@ -3204,7 +3204,7 @@ test "unconfirmed guidance names the generated handle or the quoted explicit rec
     try context.store.set("/it's \\store");
     try context.key.set("0f8fad5b-d9cb-469f-a165-70867728950e");
     var buffer: [512]u8 = undefined;
-    const prefix = "rui: admission not confirmed (TruncatedResponse); do not replace uncertain work. Recover the same saved request: rui request recover ";
+    const prefix = "rui: admission not confirmed (TruncatedResponse); do not replace uncertain work. Recover it with rui request recover ";
     const suffix = ". Never resubmit with a new key. [reply_unconfirmed]\n";
     var generated = std.Io.Writer.fixed(&buffer);
     try writeUnconfirmed(&generated, context, .generated, error.TruncatedResponse);
@@ -3756,7 +3756,7 @@ test "stop-all refusal and uncertain recovery golden aggregates to exit four" {
     var out = std.Io.Writer.fixed(&storage);
     try writeSavedRejection(&out, reply);
     try writeUnconfirmed(&out, context, .generated, error.TruncatedResponse);
-    try std.testing.expectEqualStrings("rui session stop: --session / --to: No Session with this ID exists in this Store. Accepted: an existing Session ID from rui session list. Next: Select the right --store and an ID from rui session list, or create a Session with rui session start. This rejection was saved and replays as saved; a resend needs a new key. [unknown_session]\nrui: admission not confirmed (TruncatedResponse); do not replace uncertain work. Recover the same saved request: rui request recover uncertain-handle. Never resubmit with a new key. [reply_unconfirmed]\n", out.buffered());
+    try std.testing.expectEqualStrings("rui session stop: --session / --to: No Session with this ID exists in this Store. Accepted: an existing Session ID from rui session list. Next: Select the right --store and an ID from rui session list, or create a Session with rui session start. This rejection was saved and replays as saved; a resend needs a new key. [unknown_session]\nrui: admission not confirmed (TruncatedResponse); do not replace uncertain work. Recover it with rui request recover uncertain-handle. Never resubmit with a new key. [reply_unconfirmed]\n", out.buffered());
     const refused = caller_exit.forCode(.saved_refusal, savedRejectionCode(try reply.answer));
     const uncertain = caller_exit.forCode(.unconfirmed, .reply_unconfirmed);
     try std.testing.expectEqual(caller_exit.Status.unconfirmed, refused.merge(uncertain));

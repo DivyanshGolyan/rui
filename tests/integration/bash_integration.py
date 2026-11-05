@@ -304,7 +304,7 @@ def prove_stdin(state):
             elif name == "closed":
                 assert "closed" in result, result
             elif name in ("empty-send", "null-send"):
-                assert result == "Bash failed. Exit code: 1.\nstderr tail:\n" + empty_send_error, result
+                assert result == "Bash failed. Exit code: 2.\nstderr tail:\n" + empty_send_error, result
                 assert not (state / f"{name}.json").exists(), "empty input published a capture"
                 assert fixture.command("request", "inspect", "--store", store, "--key", name)["observation"]["status"] == "absent"
             fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)

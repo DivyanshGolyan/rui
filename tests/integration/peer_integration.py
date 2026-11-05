@@ -157,10 +157,10 @@ class PeerModel(TestHTTPServer):
             f"rui session send --store {shlex.quote(str(self.foreign_store))} --to {self.foreign_session} "
             f"--record {shlex.quote(str(self.workspace.parent / 'conflicting-store.json'))} --key conflicting-store "
             "> conflicting-store.out 2> conflicting-store.err; "
-            "[ $? -eq 1 ] || exit 91; "
+            "[ $? -eq 2 ] || exit 91; "
             f"printf %s 'must not arrive' | RUI_STORE={shlex.quote(str(self.foreign_store))} rui session send --to {self.foreign_session} "
             f"--record {shlex.quote(str(self.workspace.parent / 'foreign-send.json'))} --key foreign-send > foreign-send.out 2> foreign-send.err; "
-            "[ $? -eq 1 ] || exit 90; "
+            "[ $? -eq 3 ] || exit 90; "
             f'rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" --label {shlex.quote(A_LABEL)} '
             "> a-label.out 2> a-label.err || exit 89; "
             f"rui session start --workspace {shlex.quote(str(self.workspace))} --label {shlex.quote(B_LABEL)} "
