@@ -1757,7 +1757,9 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
             const Ceiling = IdentityCeiling(column);
             try self.engine.bind(null, Ceiling, &.{}, 0);
         };
-        if (@import("builtin").is_test) self.engine.mysql.state.testing_shape.identity_passes += 1;
+        if (@import("builtin").is_test) {
+            if (columns.count() != 0) self.engine.mysql.state.testing_shape.identity_passes += 1;
+        }
         try self.engine.startPass();
     }
     errdefer self.engine.finishPass() catch {};
