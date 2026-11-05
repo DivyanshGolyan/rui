@@ -9506,14 +9506,15 @@ test "MCP attempts serialize Sessions and recover without replay" {
     const first = (try storage.nextCoreWork()).?.mcp.action_id;
     // Selection repeats until admission: later calls cannot overtake it.
     try std.testing.expectEqual(first, (try storage.nextCoreWork()).?.mcp.action_id);
-    const binding = (try storage.admitMcpActionAttempt(first, .{})).?;
-    try std.testing.expect((try storage.admitMcpActionAttempt(first + 1, .{})) == null);
+    const binding = (try storage.admitMcpActionAttempt(first, 1234, .{})).?;
+    try std.testing.expect((try storage.admitMcpActionAttempt(first + 1, 600_000, .{})) == null);
     var input: action_domain.McpExecutionInput = undefined;
     try storage.readMcpExecutionInput(binding, &input);
     try std.testing.expectEqualStrings(sessions[0].slice(), input.session.slice());
     try std.testing.expectEqualStrings(input.session.slice(), input.root.slice());
     try std.testing.expect(input.parent == null);
     try std.testing.expectEqualStrings("fetch_page", input.name.slice());
+    try std.testing.expectEqual(@as(u64, 1234), input.timeout_ms);
     try std.testing.expectEqual(@as(usize, 32), input.sender_handle.slice().len);
     try std.testing.expectEqualStrings("docs", input.server.slice());
     try std.testing.expectEqual(@as(u64, mcp_record.input_schema.len), input.input_schema.length);
@@ -9527,12 +9528,12 @@ test "MCP attempts serialize Sessions and recover without replay" {
     try std.testing.expect(try storage.recoverOneUncertainAction(action_domain.ActiveOperationFilter.empty()));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='indeterminate' AND CAST(c.payload AS TEXT) LIKE ?2", .{ first, "%Host stopped%" }));
     try std.testing.expectEqual(first + 1, (try storage.nextCoreWork()).?.mcp.action_id);
-    const unsent = (try storage.admitMcpActionAttempt(first + 1, .{})).?;
+    const unsent = (try storage.admitMcpActionAttempt(first + 1, 600_000, .{})).?;
     var stop = try completeSessionStop("mcp-unsent-stop", sessions[0].slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
     _ = try storage.settleActionAttempt(unsent, .spawn_failed, "not available", .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not sent%" }));
-    const sent = (try storage.admitMcpActionAttempt(other, .{})).?;
+    const sent = (try storage.admitMcpActionAttempt(other, 5_000, .{})).?;
     var sent_stop = try completeSessionStop("mcp-sent-stop", sessions[1].slice());
     try std.testing.expect(storage.stopSession(&sent_stop, .{}) == .accepted);
     _ = try storage.settleActionAttempt(sent, .succeeded, "terminal result raced stop", .{});

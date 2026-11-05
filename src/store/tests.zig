@@ -8749,7 +8749,7 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.resolveMcpAction);
             const second = (try storage.nextMcpAction()).?;
             meter.start();
-            const binding = (try storage.admitMcpActionAttempt(second.action_id, .{})).?;
+            const binding = (try storage.admitMcpActionAttempt(second.action_id, 600_000, .{})).?;
             meter.stop(.admitMcpActionAttempt);
             var input: action_domain.McpExecutionInput = undefined;
             meter.start();

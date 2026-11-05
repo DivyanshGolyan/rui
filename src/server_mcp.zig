@@ -48,7 +48,7 @@ pub const Calls = struct {
         return false;
     }
 
-    pub noinline fn admit(self: *Calls, host: *Host, action_id: u64) @import("execution_turn.zig").Admission {
+    pub noinline fn admit(self: *Calls, host: *Host, call: store.McpAction) @import("execution_turn.zig").Admission {
         var place: ?*?*Active = null;
         for (&self.entries) |*entry| if (entry.* == null) {
             place = entry;
@@ -59,7 +59,10 @@ pub const Calls = struct {
         // commit every failure either settles or fences, never retries.
         const active = host.allocator.create(Active) catch return .retry_later;
         active.* = .{ .binding = undefined, .arena = .init(host.allocator) };
-        const binding = (host.store.admitMcpActionAttempt(action_id, host.hooks.storeFaults(.attempt_admission)) catch |err| {
+        const timeout_ms = for (host.mcp_servers.entries) |*server| {
+            if (std.mem.eql(u8, server.name, call.server.slice())) break server.timeout_ms;
+        } else @import("mcp/servers.zig").default_timeout_ms;
+        const binding = (host.store.admitMcpActionAttempt(call.action_id, timeout_ms, host.hooks.storeFaults(.attempt_admission)) catch |err| {
             active.destroy(host.allocator);
             fenceDispatch(host, "MCP admission", err);
             return .retry_later;
@@ -210,7 +213,7 @@ noinline fn prepare(host: *Host, active: *Active) !void {
         // It is not an action/call identity and never appears in _meta.
         .id = 1,
         .server_name = config.name,
-        .timeout_ms = config.timeout_ms,
+        .timeout_ms = input.timeout_ms,
     }, nowMs(host));
     active.started = true;
 }
@@ -246,7 +249,7 @@ test "MCP Host call bound refuses admission before touching the Store" {
     // There is deliberately no Host/Store to consult when every local place
     // is occupied. A full scan cannot record a seventeenth attempt.
     try std.testing.expect(calls.full());
-    try std.testing.expectEqual(@import("execution_turn.zig").Admission.retry_later, calls.admit(undefined, 17));
+    try std.testing.expectEqual(@import("execution_turn.zig").Admission.retry_later, calls.admit(undefined, .{ .action_id = 17, .server = .{} }));
     calls.entries[0] = null;
     try std.testing.expect(!calls.full());
 }

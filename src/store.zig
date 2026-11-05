@@ -31,6 +31,7 @@ pub const AttemptBinding = store_core.AttemptBinding;
 pub const mcp_stop_unknown_text = action_domain.mcp_stop_unknown_text;
 pub const mcp_stop_not_sent_text = action_domain.mcp_stop_not_sent_text;
 pub const McpExecutionInput = action_domain.McpExecutionInput;
+pub const McpAction = action_domain.McpAction;
 pub const BashExecutionInput = action_domain.BashExecutionInput;
 pub const CommandObservation = command_domain.CommandObservation;
 pub const ConfigureReply = configuration_domain.ConfigureReply;

@@ -119,7 +119,7 @@ fn run(case: Case) !void {
     defer if (case == .concurrent) other_script.stop();
     var other_url_buffer: [128]u8 = undefined;
     const other_url = try std.fmt.bufPrint(&other_url_buffer, "http://127.0.0.1:{d}/mcp", .{if (case == .concurrent) other_script.port else @as(u16, 1)});
-    var servers = [_]mcp.Server{ .{ .name = @constCast("docs"), .url = url, .token = @constCast("secret"), .target = try @import("http1/request.zig").parseTarget(url), .timeout_ms = if (case == .timeout) 50 else 5_000 }, .{ .name = @constCast("other"), .url = other_url, .token = @constCast("other-secret"), .target = try @import("http1/request.zig").parseTarget(other_url), .timeout_ms = 5_000 } };
+    var servers = [_]mcp.Server{ .{ .name = @constCast("docs"), .url = url, .token = @constCast("secret"), .target = try @import("http1/request.zig").parseTarget(url), .timeout_ms = if (case == .timeout) 50 else if (case == .success) @import("mcp/servers.zig").default_timeout_ms else 5_000 }, .{ .name = @constCast("other"), .url = other_url, .token = @constCast("other-secret"), .target = try @import("http1/request.zig").parseTarget(other_url), .timeout_ms = 5_000 } };
     var custody: [1]execution.CustodyRecord = @splat(.{});
     const host = try allocator.create(Host);
     defer allocator.destroy(host);
@@ -129,7 +129,13 @@ fn run(case: Case) !void {
     for (0..count) |ordinal| {
         const work = (try storage.nextCoreWork()).?;
         try expectHere(@src(), work == .mcp);
-        try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, work.mcp.action_id));
+        try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, work.mcp));
+        if (case != .down) {
+            const input = try allocator.create(store.McpExecutionInput);
+            defer allocator.destroy(input);
+            try storage.readMcpExecutionInput(.{ .action_id = work.mcp.action_id, .parent_operation_id = binding.operation_id, .turn_id = binding.turn_id }, input);
+            try std.testing.expectEqual(servers[0].timeout_ms, input.timeout_ms);
+        }
         if (case == .serial) try expectHere(@src(), (try storage.nextCoreWork()) == null);
         const Context = struct {
             active: *mcp.Calls,
@@ -162,7 +168,7 @@ fn run(case: Case) !void {
             const other_work = (try storage.nextCoreWork()).?;
             try expectHere(@src(), other_work == .mcp);
             try expectHere(@src(), other_work.mcp.action_id != work.mcp.action_id);
-            try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, other_work.mcp.action_id));
+            try std.testing.expectEqual(@import("execution_turn.zig").Admission.admitted, active.admit(host, other_work.mcp));
             const Other = struct {
                 active: *mcp.Calls,
                 host: *Host,

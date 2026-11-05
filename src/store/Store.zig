@@ -771,15 +771,16 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitNextActionAttempt(&candidate, &access, self.io, bash_timeout_ms, faults)));
     }
 
-    pub fn admitMcpActionAttempt(self: *Store, action_id: u64, faults: Faults) !?ActionAttemptBinding {
-        return self.queue().write(admitMcpActionAttemptHeld, .{ self, action_id, faults });
+    pub fn admitMcpActionAttempt(self: *Store, action_id: u64, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
+        return self.queue().write(admitMcpActionAttemptHeld, .{ self, action_id, timeout_ms, faults });
     }
-    fn admitMcpActionAttemptHeld(self: *Store, action_id: u64, faults: Faults) !?ActionAttemptBinding {
+    fn admitMcpActionAttemptHeld(self: *Store, action_id: u64, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
+        if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidMcpTimeout;
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitMcpActionAttempt(&access, self.io, action_id, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitMcpActionAttempt(&access, self.io, action_id, timeout_ms, faults)));
     }
     pub fn readMcpExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *McpExecutionInput) !void {
         return self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out });

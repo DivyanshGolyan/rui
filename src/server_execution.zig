@@ -1153,7 +1153,7 @@ noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_tur
     }) orelse return .no_work;
     return switch (work) {
         .stop => |*owed| runOwedStop(host, owed),
-        .mcp => |call| mcp.admit(host, call.action_id),
+        .mcp => |call| mcp.admit(host, call),
         .action => |*input| switch (input.tool) {
             .message_agent => runMessageAgent(host, input),
             .start_agent => runStartAgent(host, input),
