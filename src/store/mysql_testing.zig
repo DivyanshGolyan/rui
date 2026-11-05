@@ -33,9 +33,12 @@ fn connection() !*wire.Connection {
     return &root;
 }
 
-fn drain() !void {
+fn drain(source: anytype, changes: ?*i64) !void {
     var failed = false;
-    while (!root.isReady()) switch (try root.next()) {
+    while (!source.isReady()) switch (try source.next()) {
+        .ok => |ok| if (changes) |count| {
+            count.* +|= @intCast(@min(ok.affected_rows, std.math.maxInt(i64)));
+        },
         .err => |err| {
             std.debug.print("MySQL fixture error {d}: {s}\n", .{ err.code, err.message });
             failed = true;
@@ -47,7 +50,7 @@ fn drain() !void {
 
 fn run(sql: []const u8) !void {
     try root.query(sql);
-    try drain();
+    try drain(&root, null);
 }
 
 fn database(storage: *Store) []const u8 {
@@ -142,7 +145,10 @@ pub fn exec(storage: *Store, comptime sql: []const u8, args: anytype) !void {
     defer mutex.unlock(std.testing.io);
     try use(storage);
     try send(sql, args);
-    try drain();
+    // SQLite fixtures write through the Store connection, so totalChanges
+    // sees them. Attribute this fixture's write OKs to the target Store too,
+    // including writes preceding a later ERR; setup/control queries stay out.
+    try drain(&root, &storage.engine.mysql.state.changes);
 }
 
 pub fn queryU64(storage: *Store, comptime sql: []const u8, args: anytype) !u64 {
@@ -267,6 +273,56 @@ fn refusesGlobal(comptime name: []const u8, bad: []const u8, expected: anyerror)
     try probe.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = "mysql" }, &refusal.writer);
     defer probe.close();
     try std.testing.expectError(expected, @import("engine/mysql_open.zig").open(probe, std.testing.io, .{ .database = "mysql" }, "/mysql-refusal-probe"));
+}
+
+test "store.mysql fixture drain attributes write OKs even before failure" {
+    const Script = struct {
+        events: []const wire.mysql.Event,
+        at: usize = 0,
+
+        fn isReady(self: *const @This()) bool {
+            return self.at == self.events.len;
+        }
+
+        fn next(self: *@This()) error{ConnectionLost}!wire.mysql.Event {
+            const event = self.events[self.at];
+            self.at += 1;
+            return event;
+        }
+    };
+    const status: wire.mysql.Status = @bitCast(@as(u16, 0));
+    var changes: i64 = 10;
+    var success: Script = .{ .events = &.{
+        .{ .ok = .{ .affected_rows = 0, .status = status } },
+        .{ .ok = .{ .affected_rows = 2, .status = status } },
+        .{ .rows_end = status },
+        .{ .ok = .{ .affected_rows = 3, .status = status } },
+        .ready,
+    } };
+    try drain(&success, &changes);
+    try std.testing.expectEqual(@as(i64, 15), changes);
+    try std.testing.expect(success.isReady());
+
+    var failure: Script = .{ .events = &.{
+        .{ .ok = .{ .affected_rows = 4, .status = status } },
+        .{ .err = .{ .code = 1062, .sql_state = "23000".*, .message = "expected duplicate" } },
+        .ready,
+    } };
+    try std.testing.expectError(error.MysqlFixtureFailed, drain(&failure, &changes));
+    try std.testing.expectEqual(@as(i64, 19), changes);
+    try std.testing.expect(failure.isReady());
+
+    var uncounted = success;
+    uncounted.at = 0;
+    try drain(&uncounted, null);
+    try std.testing.expectEqual(@as(i64, 19), changes);
+
+    var overflow: Script = .{ .events = &.{
+        .{ .ok = .{ .affected_rows = std.math.maxInt(u64), .status = status } },
+        .{ .ok = .{ .affected_rows = 1, .status = status } },
+    } };
+    try drain(&overflow, &changes);
+    try std.testing.expectEqual(std.math.maxInt(i64), changes);
 }
 
 test "store.mysql live admission refuses read_only" {
