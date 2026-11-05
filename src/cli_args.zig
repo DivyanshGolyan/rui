@@ -4,7 +4,7 @@ const std = @import("std");
 const model_capability = @import("model_capability.zig");
 const product_defaults = @import("product_defaults.zig");
 
-pub const Resource = enum { session, request, action, host, defaults, auth };
+pub const Resource = enum { session, request, action, host, defaults, auth, store };
 pub const Command = enum {
     session_start,
     session_configure,
@@ -31,6 +31,7 @@ pub const Command = enum {
     defaults_inspect,
     defaults_configure,
     auth_login,
+    store_schema,
 
     pub fn definition(self: Command) Definition {
         // Option arrays have static storage, not a returned stack literal.
@@ -65,6 +66,7 @@ pub const Command = enum {
             .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}. --launch-frame reads the Store, the OpenAI key and the runtime directory from one frame on stdin instead, and the Host stops when stdin closes.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), .{ .name = "provider", .argument = "LABEL", .repeated = true }, value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS"), flag("launch-frame") } ++ serve_test, .conflicts = endpoint_conflicts ++ launch_conflicts },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
             .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default leaves each model at its own.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settings[8] }, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort" }} },
+            .store_schema => .{ .resource = .store, .name = "schema", .description = "Print this build's MySQL DDL for the database team to apply; the Host never changes MySQL tables.", .options = &.{value("engine", "mysql")}, .requires = &.{&.{"engine"}} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex signs in with ChatGPT; rui auth login openai saves an OpenAI API key read from stdin. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
     }
@@ -656,4 +658,13 @@ test "Host start help states the product default capacity and existing-Host prec
     var writer = std.Io.Writer.fixed(&bytes);
     try Command.host_start.definition().help(&writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "already-running Host keeps its original settings, including capacity") != null);
+}
+
+test "store schema requires an explicit mysql engine" {
+    const definition = Command.store_schema.definition();
+    var storage: [1024]u8 = undefined;
+    const parsed = try testParse(definition, &.{ "--engine", "mysql" }, &storage);
+    try std.testing.expect(parsed.missing() == null);
+    try std.testing.expectEqualStrings("mysql", parsed.get("engine").?);
+    try expectValidation(.store_schema, &.{ "--store", "/tmp/s" }, error.UnknownArgument);
 }

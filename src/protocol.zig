@@ -561,6 +561,8 @@ pub const HostInfo = struct {
     custody_occupied: []const u8,
     /// Whether the Host holds every new Turn until resumed (D193).
     paused: bool,
+    /// MySQL engine diagnostic (D200); absent on SQLite.
+    innodb_doublewrite: ?[]const u8 = null,
     capabilities: struct {
         bash: bool,
         providers: Routes,
@@ -2895,12 +2897,13 @@ pub const max_control_response_bytes = @max(
 /// (decimal or `unlimited`), start time, slots in use, whether new Turns
 /// are paused, and each provider's Route.
 pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean, ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
+pub const host_info_mysql_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = 32 }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean, ",\"innodb_doublewrite\":", Hole{ .string = 32 }, ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
 comptime {
     const names = @typeInfo(Provider).@"enum".field_names;
     if (names.len != 2 or !std.mem.eql(u8, names[0], "codex") or !std.mem.eql(u8, names[1], "openai"))
         @compileError("host_info_reply names one Route hole per provider, in Provider order");
 }
-pub const max_host_info_response_bytes = shapeBytes(host_info_reply);
+pub const max_host_info_response_bytes: usize = @max(shapeBytes(host_info_reply), shapeBytes(host_info_mysql_reply));
 
 /// Each served provider's models: `model_list.writeProviders` follows the
 /// head, then the tail.

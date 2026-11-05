@@ -21,7 +21,7 @@ import type { components } from "./wire.ts";
 type Schemas = components["schemas"];
 
 export interface ConnectOptions {
-	/** The Store: a SQLite Store directory today. The MySQL URL arrives with the Store's MySQL support. */
+	/** The Store: a SQLite directory or a mysql:// URL, sent only in the stdin launch frame. */
 	database: string;
 	/** The OpenAI-compatible provider. Only the key Adapter is offered to a launched Host (D149). */
 	provider: { baseUrl: string; key: string };
@@ -364,8 +364,8 @@ async function probe(launch: Launch): Promise<HostInfo | undefined> {
 		return undefined;
 	}
 	// The Host names a SQLite Store by its canonical path, which exists once the socket does.
-	let store = launch.store;
-	if (!store.includes("://")) {
+	let store = launch.store.startsWith("mysql://") ? "" : launch.store;
+	if (store !== "" && !store.includes("://")) {
 		try {
 			store = await realpath(store);
 		} catch {

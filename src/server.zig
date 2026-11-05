@@ -630,6 +630,13 @@ const Intake = struct {
             // readable, so the bounded poll below cannot sleep past it.
             var bytes: [256]u8 = undefined;
             while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
+            if (self.launched and self.host.store.engine == .mysql and self.host.store.isFenced() and (failure == null or failure.? != error.StoreFenced)) {
+                // Publish the named exit before any drain can reach the
+                // launched Host's hard shutdown deadline (D211).
+                launch_frame.writeRefusal(self.host.io, .{ .code = .store_fenced, .message = "the MySQL Store lost ownership or its connection; restart the Host" });
+                failure = error.StoreFenced;
+                _ = self.host.advance(.stopping);
+            }
             if (self.host.stopping()) {
                 self.armShutdownDeadline();
                 for (self.exchanges.items) |exchange| exchange.retireUnhanded();
@@ -851,6 +858,7 @@ pub const Launch = struct {
     runtime_dir: []const u8,
     socket_path: []const u8,
     stdin: std.posix.fd_t,
+    mysql_url: ?*launch_frame.MysqlUrl = null,
     /// Open with Turns paused (D196): set before execution starts, so a Turn
     /// recovered from the Store waits too.
     paused: bool = false,
@@ -961,9 +969,14 @@ pub fn serve(
         try std.fmt.bufPrint(&descriptor_limit_buffer, "{d}", .{limit})
     else
         "unlimited";
-    var lease = try platform.StoreLease.acquire(io, store_path);
+    const mysql_url = if (launch) |value| value.mysql_url else null;
+    var lease: platform.StoreLease = undefined;
+    if (mysql_url != null)
+        try lease.acquireMysql(io, launch.?.runtime_dir, launch.?.socket_path)
+    else
+        lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
-    if (launch) |value| try lease.useRuntimeDirectory(value.runtime_dir, value.socket_path);
+    if (mysql_url == null) if (launch) |value| try lease.useRuntimeDirectory(value.runtime_dir, value.socket_path);
     // fd1 may alias fd2. Exclude flag borrowing before any continuing
     // startup diagnostic, through readiness delivery and failed unwind.
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
@@ -991,19 +1004,22 @@ pub fn serve(
     defer catalog_memory.deinit();
     const mcp_servers: []const launch_frame.Frame.McpServer = if (launch) |value| value.mcp_servers else &.{};
     var storage: store_module.Store = undefined;
-    storage.openWithOptions(
-        io,
-        lease.paths.database.slice(),
-        lease.paths.store.slice(),
-        .{
-            .served = served.routes(),
-            .cache_spill = limits.sqlite_cache_spill,
-            .cache_kib = limits.sqlite_cache_kib,
-            .found_schema_version = &found_schema_version,
-            // With MCP servers the catalog is saved below, once they are listed.
-            .catalog = if (mcp_servers.len == 0) &tools.built_in else null,
-        },
-    ) catch |err| {
+    const store_options: store_module.OpenOptions = .{
+        .served = served.routes(),
+        .cache_spill = limits.sqlite_cache_spill,
+        .cache_kib = limits.sqlite_cache_kib,
+        .found_schema_version = &found_schema_version,
+        // With MCP servers the catalog is saved below, once they are listed.
+        .catalog = if (mcp_servers.len == 0) &tools.built_in else null,
+    };
+    if (mysql_url) |url| {
+        // Only this call borrows the login. Neither metadata nor filesystem
+        // paths ever see the URL, and admission failure wipes it too.
+        defer url.wipe();
+        try storage.openMysql(io, url.options(), url.database.slice(), store_options);
+        try lease.paths.store.set(storage.mysqlStoreId());
+        try storage.selector.set(storage.mysqlStoreId());
+    } else storage.openWithOptions(io, lease.paths.database.slice(), lease.paths.store.slice(), store_options) catch |err| {
         if (err == error.WrongStoreVersion) {
             try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
             if (diagnostics) |*writer| writer.record("failed", "unsupported_store_version");
@@ -1372,7 +1388,10 @@ noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, 
 
 /// `client_environment` holds a Message's checked environment.
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, client_environment: ?*SessionEnvironments.Offer) !void {
-    if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
+    // The first MySQL readiness probe learns the opaque id over the private
+    // socket. All subsequent work must name that exact id, never the URL.
+    const discovering = request.* == .host_info and request.store().len == 0 and host.store.engine == .mysql;
+    if (!discovering and !std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
     if (header.instance) |instance| {
@@ -1392,7 +1411,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             // Atomics and fixed values only: this reply never touches SQLite.
-            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.turns_paused.load(.acquire), host.providers.routes() });
+            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.turns_paused.load(.acquire), host.providers.routes(), host.store.mysqlDoublewrite() });
         },
         .host_pause => |pause| {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
@@ -2117,10 +2136,14 @@ fn renderHostInfo(
     custody_occupied: u64,
     paused: bool,
     routes: protocol.Routes,
+    doublewrite: ?[]const u8,
 ) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, routes.codex, routes.openai });
+    if (doublewrite) |value|
+        try response.appendShape(protocol.host_info_mysql_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, value, routes.codex, routes.openai })
+    else
+        try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, routes.codex, routes.openai });
 }
 
 fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
@@ -3114,8 +3137,11 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device) });
-    try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
+    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device), null });
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), host_info.len);
+    host_info.len = 0;
+    try host_info.render(renderHostInfo, .{ &@as([32]u8, @splat(0x01)), @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device), &@as([32]u8, @splat(0x01)) });
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_mysql_reply), host_info.len);
 
     const observations = protocol.command_observation_reply;
     var configured = store_module.CommandObservation{ .status = .accepted, .kind = .configure, .code = code, .revision = max, .created = false };
@@ -4182,4 +4208,18 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(retained_fd, std.c.F.GETFL));
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "request-7-1.tmp", .{}));
     }
+}
+
+test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged" {
+    const protocol_reply = @import("protocol_reply.zig");
+    var response: protocol.ResponseBuffer = .{};
+    const id = "0123456789abcdef0123456789abcdef";
+    try response.render(renderHostInfo, .{ id, @as(protocol.InstanceId, @splat(1)), 2, 100, 1024, 1792918800, 0, false, protocol.routesAll(.unserved), "OFF" });
+    const status = try protocol_reply.parseHostInfo(response.slice(), id);
+    try std.testing.expectEqualStrings("OFF", status.ready.innodb_doublewrite.?.slice());
+    response.len = 0;
+    try response.render(renderHostInfo, .{ "/sqlite", @as(protocol.InstanceId, @splat(1)), 2, 100, 1024, 1792918800, 0, false, protocol.routesAll(.unserved), null });
+    try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
+    // MySQL's bounded opaque id fits within SQLite's existing reply budget.
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), protocol.max_host_info_response_bytes);
 }

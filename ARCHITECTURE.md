@@ -1279,7 +1279,9 @@ Before any write, open compares the format and then each table's and index's sto
 The Host opens schema 51 (41 let a failed, overflowed or retry-exhausted Turn outcome reference its report content; 42 saves each Model Output Item's replay rule, judged once at import, and replaces raw items with the neutral form: `model_output_item` keeps kind, phase, part count and an item bag; `model_output_part` keeps each part's array, kind, text and part bag; no answer or string projection tables remain; and content payloads are non-null with their recorded length; 43 certifies a Tool Call by its name, call ID and arguments only, since the provider item ID lives in the item bag, stores usage as four neutral counts beside the provider's report, pins each Session's codec (`openai-responses/1` for `codex`) and optional codec options of at most 512 bytes at creation, checks a provider label's syntax instead of a provider list, so adding a provider is no format change, and keeps each Session's [prefix seal](#prefix-seal); 44 stores a message's text once, as the item's message text row, with each text part keeping only its length into it, while a reasoning part keeps its own private row; 45 orders the index of Messages without a Session sender by Admission position; 46 names each Tool Call's Session on its row, and indexes every Activity row source by Session and position, so an Activity page is a range seek whatever the history's length; 47 makes the schema's tables expressible on SQLite, Postgres and MySQL and holds every statement to the reserved-name and `rowid` rules: no name any engine reserves outside its keyword place, no `rowid` (Sessions carry `created_seq` and Commands `command_seq`, each allocated max+1 in its creating transaction), a stored Workspace digest and key, foreign keys checked when each row is written rather than at commit, non-null key columns, byte-length checks, and the format marker in `store_meta`, while statements keep SQLite-only forms such as `unixepoch`, `GLOB`, `||`, `IS`, `INDEXED BY`, `ON CONFLICT`, `INSERT OR IGNORE` and `printf` until the typed statements bring their dialect rules; 48 and 49 record OpenAI web search; 50 drops the per-Session read-through position that 46 added; 51 makes a Command's `command_seq` its primary key and `command_key` unique, and indexes Commands by target, kind and `command_seq` in place of `command_seq`'s own index, so a Session's decisions, stops and interruptions are a range seek, and indexes Tool Calls by Session, Operation and call ordinal, and rejected Tool Calls and resolved Actions by Session, Operation and acceptance position, in place of the rejected calls' index by Operation, so a Session's calls and Tool Results are a range seek on their own tables, indexes revisions by Session and content so a Full report finds each content's first revision in SQL, and limits `store_meta`'s key to its three names, because MySQL keys only bounded text): a Store at any earlier version is rejected as unsupported, and its users must reset it.
 Schema 51 is the migration baseline (Divyansh, D204): every later format change ships one forward step in `schema.migrations`, for SQLite and MySQL, and the build fails when `schema_version` and the steps disagree, and `tests/ci/test_store_schema_version.py` fails when a step whose `from` is below the released schema_version differs from its text at the release.
 A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
-Rui runs no DDL on MySQL (D203): the DB team runs `schema.mysqlMigration(from)`, which PR 8's `rui store schema --engine mysql [--from N]` will print.
+Rui runs no DDL on MySQL (D203).
+`rui store schema --engine mysql` prints this build's canonical `schema.ddl(.mysql)` as one SQL file for the DB team to apply to an empty database.
+Forward steps for an existing database are `schema.mysqlMigration(from)`; this command does not apply them.
 The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops an attached child owes (D38), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
@@ -3276,7 +3278,7 @@ Keep platform memory metrics and unavailable counters distinct.
 
 ### Exclusive Store ownership
 
-`rui host serve` acquires an exclusive OS-held Store lock before recovery, stale-endpoint reclamation or dispatch, retaining ownership until no dispatch or semantic writes remain possible.
+On SQLite, `rui host serve` acquires an exclusive OS-held Store lock before recovery, stale-endpoint reclamation or dispatch, retaining ownership until no dispatch or semantic writes remain possible.
 Locking and pathname Unix-socket discovery share one bounded canonical Store selector: equivalent supported paths cannot create two owners.
 The canonical selector is at most **492 bytes**, so its 504-byte `/rui.sqlite3` database path plus SQLite's eight-byte journal suffix fits the pinned Unix VFS 512-byte pathname bound.
 A longer raw CLI alias remains supported when the OS resolves it to a selector within that canonical bound; canonical overflow rejects before the Store lock, SQLite database or socket has an owner.
@@ -3288,6 +3290,50 @@ Protect socket/parent directory; validate Store identity/wire version before mut
 Reclaim only the expected stale socket after ownership.
 Unavailable/inaccessible/competing owners reject.
 Clients never auto-start or access SQLite; disconnects/timeouts do not cancel work.
+
+A MySQL Host starts only from `rui host serve --launch-frame`.
+Its stdin
+frame's `store` is `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE`; TCP verifies
+TLS with system trust.
+A Unix socket is an absolute path in place of HOST,
+usually percent-encoded (`%2Fvar%2Frun%2Fmysqld.sock`).
+User, password and
+database components accept percent escapes.
+The frame requires a private
+`runtimeDir`; every launched Host binds `runtimeDir/rui.sock` (D211).
+The URL travels only in stdin, never in argv, environment, files or
+refusal messages.
+Parsing wipes all JSON allocations, including failed
+parses; the connection handshake wipes the password and authentication
+buffer as soon as login finishes or fails.
+
+MySQL's `GET_LOCK` owns the Store.
+There is no `host.lock`: the runtime's
+`rui.lock` reserves only its socket, preventing two different Stores from
+reclaiming each other's endpoint.
+Scratch and diagnostics live in
+`runtimeDir`.
+Requests use the persistent `store_meta.store_id` (32 lowercase
+hex characters), never the URL or runtime path.
+An initial MySQL
+`host_info` probe may send an empty `store` to discover that id; every other
+request must match it.
+Bash gets `RUI_STORE` as this id and the non-secret
+`RUI_RUNTIME_DIR` as a socket-routing hint.
+CLI peers use the same hint;
+an opaque id cannot launch a replacement Host without the stdin login.
+SQLite keeps its canonical directory selector and existing filesystem layout.
+
+MySQL readiness and `host_status` also report `innodb_doublewrite`, including
+`OFF` (D200).
+Admission refusals use a single stdout
+`{"rui_start_error":{"code":"...","message":"..."}}` line and exit 1:
+`store_locked`, `store_schema_missing`, `store_schema_behind`,
+`mysql_version_unsupported`, `mysql_read_only`, `mysql_durability_unsafe`,
+or `mysql_binlog_unsafe`.
+Messages are static, never server diagnostics.
+A running MySQL Store that fences writes the same envelope with
+`store_fenced` before draining and exits 1 (D211); it does not reconnect.
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.

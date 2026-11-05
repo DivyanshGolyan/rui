@@ -518,6 +518,7 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         error.FileNotFound => .unavailable,
         else => .access_failure,
     };
+    if (paths.database.len == 0) return readHostInfo(io, &paths, deadline);
     var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .access_failure;
     defer store_dir.close(io);
     // A replaced lock node may be a FIFO: open must not wait for a writer

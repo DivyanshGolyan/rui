@@ -79,7 +79,7 @@ pub const routes = [_]Route{
         .kind = .host_info,
         .summary = "The Host's identity, capacity and provider routes. Also the readiness probe.",
         .variants = &.{variant(protocol.host_info_request, .{})},
-        .reply = jsonReply(.{protocol.host_info_reply}),
+        .reply = jsonReply(.{ protocol.host_info_reply, protocol.host_info_mysql_reply }),
     },
     .{
         .path = "/v1/control/host-stop",

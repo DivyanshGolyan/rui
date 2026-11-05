@@ -241,6 +241,21 @@ pub const Store = struct {
         }
     }
 
+    /// Stable opaque identity read at MySQL admission; never the URL or the
+    /// location selector used to validate the database's metadata.
+    pub fn mysqlStoreId(self: *const Store) []const u8 {
+        return &self.engine.mysql.state.store_id;
+    }
+
+    /// The immutable admission diagnostic; safe at readiness without queuing
+    /// work on the holder. SQLite has no MySQL setting to report.
+    pub fn mysqlDoublewrite(self: *const Store) ?[]const u8 {
+        return switch (self.engine) {
+            .sqlite => null,
+            .mysql => |mysql| mysql.state.doublewrite.slice(),
+        };
+    }
+
     /// The tools the Host offers, and the id of their saved set.
     pub fn catalog(self: *Store) *const HostTools {
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);

@@ -65,9 +65,8 @@ pub const Frame = struct {
         return self.mcp_servers[0..self.mcp_server_count];
     }
 
-    /// Where the Store is. A `mysql://` prefix selects the URL form, which
-    /// the Store thread's Host wiring adds (D175); anything else is a
-    /// SQLite Store directory.
+    /// A `mysql://` prefix selects the launch-only login (D175); anything
+    /// else is a SQLite directory. Only MySQL allocates URL storage.
     pub const Store = union(enum) {
         sqlite_dir: protocol.Bounded(protocol.max_store_bytes),
         mysql_url: *MysqlUrl,

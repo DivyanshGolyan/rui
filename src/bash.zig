@@ -311,7 +311,7 @@ pub const Prepared = struct {
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        const identity: environment.Identity = .{ .address = self.session.slice(), .store = self.store_selector, .sender_handle = self.sender_handle.slice() };
+        const identity: environment.Identity = .{ .address = self.session.slice(), .store = self.store_selector, .sender_handle = self.sender_handle.slice(), .runtime_dir = if (platform.isOpaqueStoreId(self.store_selector)) std.fs.path.dirname(self.scratch.path) else null };
         var environment_block = environment.childBlock(arena, base, facts, identity) catch return error.BashSpawnFailed;
         if (self.faults.arguments) environment_block = padArguments(arena, environment_block) catch return error.BashSpawnFailed;
         const path = arena.dupeSentinel(u8, self.bash_path, 0) catch return error.BashSpawnFailed;

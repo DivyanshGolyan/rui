@@ -6,8 +6,8 @@ const wire = @import("store/wire/mysql_connection.zig");
 const Url = @This();
 
 allocator: std.mem.Allocator,
-user: protocol.Bounded(256) = .{},
-password: protocol.Bounded(1024) = .{},
+user: protocol.Bounded(wire.mysql.max_user_bytes) = .{},
+password: protocol.Bounded(wire.mysql.max_password_bytes) = .{},
 host: protocol.Bounded(253) = .{},
 socket: protocol.Bounded(107) = .{},
 database: protocol.Bounded(64) = .{},

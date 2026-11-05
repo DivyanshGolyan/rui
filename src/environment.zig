@@ -18,6 +18,8 @@ pub const Identity = struct {
     store: []const u8,
     /// Empty when the Action has no handle; the variable is then left out.
     sender_handle: []const u8,
+    /// Non-secret socket routing for an opaque MySQL Store id.
+    runtime_dir: ?[]const u8 = null,
 };
 
 /// A client environment: `"NAME=VALUE\0"` entries in client order, no name
@@ -112,7 +114,7 @@ pub const Rank = struct {
 pub fn childBlock(arena: std.mem.Allocator, base: ?Value, facts: HostFacts, identity: Identity) error{OutOfMemory}!Block {
     const inherited = if (base) |value| std.mem.count(u8, value, "\x00") else 0;
     // PATH, HOME and the three identity variables are the most added.
-    const block = try arena.allocSentinel(?[*:0]const u8, inherited + 5, null);
+    const block = try arena.allocSentinel(?[*:0]const u8, inherited + 5 + @intFromBool(identity.runtime_dir != null), null);
     var length: usize = 1;
     var path = facts.system_path;
     if (base) |value| {
@@ -139,6 +141,10 @@ pub fn childBlock(arena: std.mem.Allocator, base: ?Value, facts: HostFacts, iden
     length += 2;
     if (identity.sender_handle.len != 0) {
         block[length] = (try variable(arena, "RUI_SENDER_HANDLE", identity.sender_handle)).ptr;
+        length += 1;
+    }
+    if (identity.runtime_dir) |runtime| {
+        block[length] = (try variable(arena, "RUI_RUNTIME_DIR", runtime)).ptr;
         length += 1;
     }
     block[length] = null;
@@ -332,4 +338,18 @@ test "Rank.outranks is a strict total order: a person first, then the later admi
             for (ranks) |c| if (a.outranks(b) and b.outranks(c)) try std.testing.expect(a.outranks(c));
         }
     }
+}
+
+test "MySQL Bash identity carries a non-secret runtime hint and opaque Store id" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const block = try childBlock(arena.allocator(), null, .{ .executable_dir = null, .system_path = "/bin", .home = null }, .{
+        .address = "k7m2qx",
+        .store = "0123456789abcdef0123456789abcdef",
+        .sender_handle = "call",
+        .runtime_dir = "/private/runtime",
+    });
+    try std.testing.expectEqual(@as(usize, 5), block.len);
+    try std.testing.expectEqualStrings("RUI_STORE=0123456789abcdef0123456789abcdef", std.mem.span(block[2].?));
+    try std.testing.expectEqualStrings("RUI_RUNTIME_DIR=/private/runtime", std.mem.span(block[4].?));
 }

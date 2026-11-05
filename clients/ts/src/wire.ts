@@ -978,6 +978,30 @@ export interface components {
                     openai: "unserved" | "endpoint" | "chatgpt_device" | "key_file";
                 };
             };
+        } | {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "host_info";
+            store: string;
+            instance: string;
+            active_capacity: components["schemas"]["Decimal"];
+            intake_capacity: components["schemas"]["Decimal"];
+            descriptor_limit: string;
+            started_at: components["schemas"]["Decimal"];
+            custody_occupied: components["schemas"]["Decimal"];
+            paused: boolean;
+            innodb_doublewrite: string;
+            capabilities: {
+                /** @constant */
+                bash: true;
+                providers: {
+                    /** @enum {string} */
+                    codex: "unserved" | "endpoint" | "chatgpt_device" | "key_file";
+                    /** @enum {string} */
+                    openai: "unserved" | "endpoint" | "chatgpt_device" | "key_file";
+                };
+            };
         };
         HostInfoRequest: {
             /** @constant */

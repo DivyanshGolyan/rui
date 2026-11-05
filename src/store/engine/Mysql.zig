@@ -46,6 +46,7 @@ pub const State = struct {
     committing: bool = false,
     sink: content.SinkState = .{},
     doublewrite: protocol.Bounded(32) = .{},
+    store_id: [32]u8 = undefined,
     testing_database: if (is_test) [40]u8 else void = if (is_test) @splat(0) else {},
     begin_sent: bool = false,
     savepoint_queued: bool = false,
@@ -68,6 +69,7 @@ pub fn open(io: std.Io, options: wire.Options, selector: []const u8, store_optio
     try state.connection.open(options, &refusal);
     const opened = try @import("mysql_open.zig").open(&state.connection, io, .{ .database = options.database, .found_schema_version = store_options.found_schema_version }, selector);
     state.doublewrite = opened.doublewrite;
+    state.store_id = opened.store_id;
     state.epoch = opened.epoch;
     state.commit_seq = opened.commit_seq;
     return .{ .state = state };
