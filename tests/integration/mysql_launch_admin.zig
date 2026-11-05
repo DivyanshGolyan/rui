@@ -17,8 +17,11 @@ pub fn main(init: std.process.Init) !void {
     var text: std.ArrayList(u8) = .empty;
     var buffer: [4096]u8 = undefined;
     while (true) {
-        const count = try std.Io.File.stdin().readStreaming(init.io, &.{&buffer});
-        if (count == 0) break;
+        // EOF arrives as error.EndOfStream; a zero-byte read is not EOF.
+        const count = std.Io.File.stdin().readStreaming(init.io, &.{&buffer}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
         if (text.items.len + count > 1024 * 1024) return error.SqlTooLarge;
         try text.appendSlice(allocator, buffer[0..count]);
     }
