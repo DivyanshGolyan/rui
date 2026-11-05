@@ -4259,6 +4259,7 @@ test "loaded tools select saved records even after the Host catalog changes or r
                 .{ .name = "find_tools", .owner = .rui },
                 tool_catalog.message_agent_record,
                 .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
+                tool_catalog.read_transcript_record,
                 tool_catalog.start_agent_record,
                 tool_catalog.web_search_record,
             };
