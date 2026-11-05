@@ -344,7 +344,8 @@ function presetFor(spec: AgentSpec): Schemas["AgentSpec"] {
 		}
 		schema = parsed;
 	}
-	return { ...settings, ...(schema === undefined ? {} : { outputSchema: schema }) };
+	// JSON serialization does not mutate the readonly array; the Host validates its value.
+	return { ...settings, tools: settings.tools as string[], ...(schema === undefined ? {} : { outputSchema: schema }) };
 }
 
 /** Starts one child and resolves once it answers host-info, or throws AttemptFailed. */
