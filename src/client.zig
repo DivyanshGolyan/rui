@@ -407,7 +407,10 @@ pub fn defaultCompactionTrigger(provider: @import("provider_name.zig").Provider,
     const capability = @import("model_capability.zig");
     const defaults = @import("product_defaults.zig");
     const model_trigger = capability.contextWindow(model) * defaults.compaction_trigger_percent / 100;
-    return @min(provider.facts().default_compaction_trigger orelse model_trigger, model_trigger);
+    const provider_trigger = for (defaults.provider_compaction_triggers) |entry| {
+        if (std.mem.eql(u8, entry.provider, @tagName(provider))) break entry.tokens;
+    } else model_trigger;
+    return @min(provider_trigger, model_trigger);
 }
 
 pub fn defaultStartEffort(model: []const u8, saved: ?@import("model_capability.zig").ReasoningEffort) OptionalPolicy {
@@ -427,7 +430,7 @@ test "client compaction defaults fit small ChatGPT model windows" {
     try std.testing.expectEqual(@as(u64, 115200), defaultCompactionTrigger(.openai, "gpt-5.3-codex-spark"));
 }
 
-test "client defaults use provider compaction facts and listed efforts" {
+test "client defaults use product compaction defaults and catalog effort admission" {
     try std.testing.expectEqual(@as(u64, 244800), defaultCompactionTrigger(.codex, "gpt-6.1-sol"));
     try std.testing.expectEqual(@as(u64, 945000), defaultCompactionTrigger(.openai, "gpt-6.1-sol"));
     try std.testing.expectEqual(@as(u64, 115200), defaultCompactionTrigger(.openai, "unlisted-model"));
@@ -438,8 +441,10 @@ test "client defaults use provider compaction facts and listed efforts" {
     try std.testing.expectEqualStrings("none", defaultStartEffort("gpt-6.1-terra", .none).value.?);
     try std.testing.expectEqualStrings("none", defaultStartEffort("@cf/moonshotai/kimi-k2.6", null).value.?);
     try std.testing.expectEqualStrings("high", defaultStartEffort("azure/gpt-5-pro", .low).value.?);
-    try std.testing.expect(defaultStartEffort("whisper-1", .low).value == null);
-    try std.testing.expect(defaultStartEffort("unlisted-model", .low).value == null);
+    try std.testing.expect(defaultStartEffort("openai/whisper-1", .low).value == null);
+    try std.testing.expectEqualStrings("low", defaultStartEffort("whisper-1", .low).value.?);
+    try std.testing.expectEqualStrings("low", defaultStartEffort("unlisted-model", null).value.?);
+    try std.testing.expectEqualStrings("max", defaultStartEffort("unlisted-model", .max).value.?);
     const catalog = @import("model_catalog.zig");
     for (catalog.shipped) |row| {
         const actual = defaultStartEffort(row.id, null);

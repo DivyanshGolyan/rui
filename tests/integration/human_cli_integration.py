@@ -533,6 +533,14 @@ def compaction_settings_case(home, store, workspace, socket_path):
         assert compact.startswith("115,200 tokens") and compact.endswith(" Session override"), status
         assert status_row(status, "Effort", "Permissions") == "unknown no catalog value; reasoning omitted", status
         assert "overflow recovery" not in status, status
+        efforts = command_frame(master, "/effort ", lambda frame: "xhigh" in frame and "default" in frame, end="")
+        levels = [row.split()[0] for row in efforts.split("\n") if row.split() and row.split()[0] in ("none", "low", "medium", "high", "xhigh", "max", "default")]
+        assert levels == ["none", "low", "medium", "high", "xhigh", "max", "default"], efforts
+        command_frame(master, "\x15", lambda frame: "xhigh" not in frame, end="")
+        configured_frame(master, "/effort max")
+        assert status_row(status_frame(master, unknown), "Effort", "Permissions") == "max Session override"
+        configured_frame(master, "/effort default")
+        assert status_row(status_frame(master, unknown), "Effort", "Permissions") == "low Session override"
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
 

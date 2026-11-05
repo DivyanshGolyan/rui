@@ -233,9 +233,9 @@ fn expectOrder(shown: Shown, ids: []const []const u8) !void {
     }
 }
 
-test "the default leads, known models follow in table order, then the others by name, each once with every sign-in that offers it" {
+test "the default leads, known models follow in catalog order, then the others by name, each once with every sign-in that offers it" {
     var menu = try testMenu(&.{
-        .{ .provider = .codex, .list = .table },
+        .{ .provider = .codex, .list = .catalog },
         .{ .provider = .openai, .list = .{ .live = .{ .bytes = "zz-unlisted\ngpt-6-luna\naa-unlisted\ngpt-5.5\n" } } },
     });
     defer menu.deinit(std.testing.allocator);
@@ -281,7 +281,7 @@ test "the default leads, known models follow in table order, then the others by 
     }
 }
 
-test "the Host's word decides which models are known; Rui's table only orders them" {
+test "the Host's word decides which models are known; Rui's catalog only orders them" {
     var menu = try read(std.testing.allocator, "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[" ++
         "{\"id\":\"o9\",\"known\":false},{\"id\":\"gpt-6-luna\",\"known\":false},{\"id\":\"zz-next\",\"known\":true},{\"id\":\"gpt-5.5\",\"known\":true}]}]");
     defer menu.deinit(std.testing.allocator);
@@ -307,11 +307,13 @@ test "a reply Rui cannot read is refused whole" {
     for ([_][]const u8{
         "",
         "{}",
-        "[{\"provider\":\"claude\",\"source\":\"table\",\"models\":[]}]",
+        "[{\"provider\":\"codex\",\"source\":\"table\",\"models\":[]}]",
+        "[{\"provider\":\"openai\",\"source\":\"table_fallback\",\"models\":[]}]",
+        "[{\"provider\":\"claude\",\"source\":\"catalog\",\"models\":[]}]",
         "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"a b\",\"known\":false}]}]",
         "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-luna\"}]}]",
         "[{\"provider\":\"openai\",\"source\":\"live\"}]",
-        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[]},{\"provider\":\"openai\",\"source\":\"table\",\"models\":[]}]",
+        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[]},{\"provider\":\"openai\",\"source\":\"catalog\",\"models\":[]}]",
         "[] []",
     }) |reply| try std.testing.expectError(error.InvalidModelList, read(std.testing.allocator, reply));
 }

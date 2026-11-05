@@ -3438,8 +3438,8 @@ fn pickerNote(state: *const State, provider: Provider) ?enum { pending, fallback
     const source = menu.sources.get(provider) orelse return .login;
     return switch (source) {
         .pending => .pending,
-        .table_fallback => .fallback,
-        .table, .live => null,
+        .catalog_fallback => .fallback,
+        .catalog, .live => null,
     };
 }
 
@@ -6951,7 +6951,7 @@ test "a loading list is read again with the next listing, and a failed read keep
     // The next listing asks for the lists again, once.
     const asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
     try expectEffects(&.{ .{ .list = testToken(1) }, .list_models }, asked);
-    try answerModels(&state, &.{.{ .provider = .openai, .list = .table_fallback }});
+    try answerModels(&state, &.{.{ .provider = .openai, .list = .catalog_fallback }});
     try std.testing.expect(!try onScreen(&state, "loading"));
     const fallback = try pickerScreen(&state);
     defer std.testing.allocator.free(fallback);

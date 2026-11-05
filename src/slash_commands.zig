@@ -773,6 +773,17 @@ test "the list names the listed commands a command word starts, and Tab puts the
     }
 }
 
+test "/effort offers every grammar value for an unlisted model" {
+    const list = conversation.suggest("/effort ", .{ .model = "unlisted-model", .effort = .max }).?;
+    const expected = [_][]const u8{ "none", "low", "medium", "high", "xhigh", "max", "default" };
+    try std.testing.expectEqual(expected.len, list.count);
+    for (expected, list.shown()) |word, entry| {
+        try std.testing.expectEqualStrings(word, entry.word);
+        const description = if (std.mem.eql(u8, word, "max")) "current" else if (std.mem.eql(u8, word, "default")) "the model's own" else "";
+        try std.testing.expectEqualStrings(description, entry.description);
+    }
+}
+
 test "/effort lists the efforts the screen's model offers, the one in force marked" {
     const model = "gpt-5.5";
     const list = conversation.suggest("/effort ", .{ .model = model, .effort = .high }).?;

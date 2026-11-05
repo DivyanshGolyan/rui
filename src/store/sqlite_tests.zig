@@ -6743,13 +6743,25 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     const revision_count = try testingRevisionEfforts(&storage, session.slice(), &revisions);
     try std.testing.expectEqualSlices(?protocol.ReasoningEffort, &.{ .high, .low, .medium, .medium }, revisions[0..revision_count]);
 
-    // A binding without a catalog entry has no effective effort and
-    // rejects every explicit value.
+    // D229: an unlisted model accepts the entire effort grammar, not arbitrary text.
     const unknown = try configureTestSession(&storage, "effort-unknown");
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), (try storage.inspectSessionForTesting(unknown.slice())).reasoning_effort);
-    const unknown_rejected = try configureTestEffort(&storage, "effort-unknown-low", unknown.slice(), .value, "low");
-    try std.testing.expect(unknown_rejected == .rejected);
-    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, unknown_rejected.rejected.code);
+    for (std.enums.values(protocol.ReasoningEffort)) |effort| {
+        var key: [64]u8 = undefined;
+        const accepted = try configureTestEffort(&storage, try std.fmt.bufPrint(&key, "effort-unknown-{s}", .{@tagName(effort)}), unknown.slice(), .value, @tagName(effort));
+        try std.testing.expect(accepted == .accepted);
+        const settings = try storage.inspectSessionForTesting(unknown.slice());
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, effort), settings.reasoning_effort);
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, effort), settings.reasoning_effort_override);
+    }
+    const unknown_revision = (try storage.inspectSessionForTesting(unknown.slice())).revision;
+    for ([_][]const u8{ "ultra", "HIGH", "" }, 0..) |invalid, index| {
+        var key: [64]u8 = undefined;
+        const rejected = try configureTestEffort(&storage, try std.fmt.bufPrint(&key, "effort-unknown-invalid-{d}", .{index}), unknown.slice(), .value, invalid);
+        try std.testing.expect(rejected == .rejected);
+        try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, rejected.rejected.code);
+        try std.testing.expectEqual(unknown_revision, (try storage.inspectSessionForTesting(unknown.slice())).revision);
+    }
 
     // A new Operation freezes the effective effort current at its admission,
     // and the frozen value survives reopening.

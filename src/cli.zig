@@ -3495,7 +3495,8 @@ test "cli fresh defaults are explicit for known and unknown models" {
     try std.testing.expect(known.present);
     try std.testing.expectEqualStrings(product_defaults.reasoning_effort, known.value.?);
     const unknown = client.defaultStartEffort("unlisted-model", null);
-    try std.testing.expect(unknown.present and unknown.value == null);
+    try std.testing.expect(unknown.present);
+    try std.testing.expectEqualStrings(product_defaults.reasoning_effort, unknown.value.?);
     try std.testing.expectEqual(@as(u64, 115200), client.defaultCompactionTrigger(.openai, "unlisted-model"));
     try std.testing.expectEqual(model_capability.contextWindow("gpt-6.1-sol") * 90 / 100, client.defaultCompactionTrigger(.openai, "gpt-6.1-sol"));
 }

@@ -2352,7 +2352,7 @@ Full's existing streaming consumer and inventory remain unchanged.
 Each exact ID has its listed efforts, optional context window and OpenAI membership; there is no catalog default effort or per-Adapter context cap.
 For duplicate IDs, models.dev's OpenAI entry wins, otherwise the first provider's entry wins.
 `rui session configure --help`, invalid-model errors and ChatGPT's model list render the catalog's OpenAI IDs in catalog order; help's effort exceptions derive from the same entries.
-The model-list source name remains `table` on the wire.
+The model-list source is `catalog` on the wire for the shipped catalog and `catalog_fallback` when a live fetch fails.
 `product_defaults.recommended_model` must name an OpenAI entry; a catalog test checks this.
 IDs are exact and case-sensitive, without aliases, prefix matching or inferred providers.
 Inclusion claims neither account entitlement nor cross-model continuation qualification.
@@ -2360,12 +2360,12 @@ Session binding and normal provider rejection remain unchanged.
 
 The Host does not check the saved future-Session model default at startup: any pin with valid syntax starts Sessions, and one outside the catalog runs with default limits.
 A missing or null catalog window uses the product's unlisted context estimate, while compactAt admission enforces only non-null known windows.
-A catalog entry accepts exactly its listed efforts, including `none` where listed; an unlisted model accepts no explicit effort.
+A catalog entry accepts exactly its listed efforts, including `none` where listed; an unlisted model accepts every effort in Rui's grammar, passing it through so a provider refusal remains the error.
 Missing or unreadable future defaults do not prevent a Host from serving existing saved work.
 A pin with invalid syntax rejects fresh CLI creation before capture rather than falling back to the recommendation.
 
-CLI and TUI clients supply explicit fresh spec values: a saved effort if listed, otherwise the product effort `low` if listed, otherwise the lowest listed effort, otherwise no effort.
-ChatGPT sign-in's default compactAt is the smaller of the provider fact 244,800 tokens and 90% of the catalog window, using the unlisted context estimate for a missing or null window.
+CLI and TUI clients supply explicit fresh spec values: a saved effort if accepted, otherwise the product effort `low` if accepted, otherwise the lowest listed effort, otherwise no effort.
+ChatGPT sign-in's default compactAt is the smaller of the provider-keyed client product default 244,800 tokens and 90% of the catalog window, using the unlisted context estimate for a missing or null window.
 This keeps 244,800 tokens for large windows but uses 115,200 for a 128,000-token window such as `gpt-5.3-codex-spark`, including when resetting compactAt to its default.
 Other providers default to 90% of the catalog window, or 115,200 tokens for a missing or null window.
 These client choices do not change existing Sessions, the Host's fixed fallback for stored null thresholds, or frozen Operations.
@@ -3027,9 +3027,9 @@ Query work may grow with history; item bounds do not promise traversal latency.
 
 `POST /v1/model-list` takes `kind:"model_list"` and returns `providers`: for each provider the Host serves, in Provider order, its `provider`, `source` and `models`, each an `id` with `known`, whether Rui's model catalog knows its facts.
 A model the catalog does not list runs with default limits (see compaction).
-ChatGPT has no public list, so its `source` is always `table` and its models are the catalog's OpenAI IDs in catalog order.
+ChatGPT has no public list, so its `source` is always `catalog` and its models are the catalog's OpenAI IDs in catalog order.
 For an OpenAI key the execution owner's HTTP/2 Client fetches `GET BASE/models` once as the Host starts, on a stream of its own beyond Active Capacity, so it never waits for a model request or makes one wait, and keeps the IDs (at most 512, 16 KiB together) in memory until it stops; the key never changes while it runs, so the list is never fetched again.
-While that fetch runs the source is `pending` with the catalog's OpenAI IDs; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `table_fallback` with the catalog's OpenAI IDs when it failed, answered with something else or listed more than that bound.
+While that fetch runs the source is `pending` with the catalog's OpenAI IDs; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `catalog_fallback` with the catalog's OpenAI IDs when it failed, answered with something else or listed more than that bound.
 The reply reads Host memory only, never SQLite or the network.
 
 Each row has position/ordinal, `at`, and one closed tagged `value`.

@@ -18,6 +18,7 @@ import bash_integration as bash
 import model_fixture as fixture
 import host_process
 from host_process import HostDiagnostics, retain_failure_state, start_ready_process
+from control_integration import raw_request
 
 
 ACCESS = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln"
@@ -131,6 +132,13 @@ def run():
         # Missing and uncertain credentials must never reach model transport.
         credentials(credential_file, state="refresh_pending")
         host = start(store, url)
+        head, listed_body = raw_request(host.rui_ready_fields["socket"], "/v1/model-list", json.dumps({
+            "version": host_process.WIRE_VERSION, "kind": "model_list", "store": str(store),
+        }).encode())
+        listed = json.loads(listed_body)["providers"]
+        assert b" 200 " in head and len(listed) == 1, (head, listed)
+        assert listed[0]["provider"] == "codex" and listed[0]["source"] == "catalog", listed
+        assert listed[0]["models"] and all(model["known"] for model in listed[0]["models"]), listed
         configured = fixture.command(
             "session", "configure", "--store", store, "--record", state / "configure.json",
             "--key", "configure", "--workspace", fixture.ROOT,
@@ -394,6 +402,35 @@ def run():
                 mismatches.append((model, "User-Agent", endpoint.user_agents[4 + index], expected_agent))
         assert len(endpoint.requests) == 13, endpoint.requests
         assert not mismatches, mismatches
+        # D229: every grammar effort reaches an unlisted model unchanged.
+        # A provider refusal stays final; Rui must not retry with another effort.
+        for index, effort in enumerate(("none", "low", "medium", "high", "xhigh", "max")):
+            key = f"unlisted-effort-{effort}"
+            response = (fixture.ResponseSpec(b'{"error":{"message":"unsupported effort"}}', {}, 400)
+                        if effort == "max" else fixture.sse_answer(key, key + "-r", key + "-m", key)[0])
+            with endpoint.lock:
+                endpoint.responses.append(response)
+            configured = fixture.command(
+                "session", "configure", "--store", stop_store, "--record", state / f"{key}-config.json",
+                "--key", key + "-config", "--workspace", fixture.ROOT, "--provider", "codex",
+                "--model", "unlisted-effort-model", "--tools", "none", "--reasoning-effort", effort,
+            )
+            assert configured["answer"]["status"] == "accepted", configured
+            selected = configured["answer"]["session"]
+            settings = fixture.command("session", "inspect", "--store", stop_store, "--session", selected)["session"]
+            assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == effort, settings
+            fixture.message(state, stop_store, key, selected, key)
+            observed = fixture.wait_for(
+                lambda: (value if (value := fixture.observe(stop_store, key)).get("result") else None), key)
+            if effort == "max":
+                assert observed["result"]["code"] == "provider_http_400", observed
+            else:
+                assert observed["result"]["status"] == "completed", observed
+                assert fixture.read_result(stop_store, key) == key.encode()
+            assert len(endpoint.requests) == 14 + index, endpoint.requests
+            request = json.loads(endpoint.requests[-1])
+            assert request["model"] == "unlisted-effort-model" and request["reasoning"] == {"effort": effort}, request
+        print("unlisted effort passed: all grammar values forwarded, provider refusal preserved without fallback or resend")
         print(f"codex request envelopes passed: nine exact model IDs, client low effort, ChatGPT 244800-token compaction/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
         print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
         complete = True

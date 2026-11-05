@@ -37,16 +37,17 @@ pub const ids_without_max_effort = blk: {
     break :blk text;
 };
 
-/// Configuration admission intersects Rui's closed grammar with the pinned
-/// model's advertised values. Frozen Operations do not consult this again.
+/// Listed models accept exactly their advertised efforts. D229: unlisted
+/// models pass Rui's closed grammar through; the provider decides support.
+/// Frozen Operations do not consult this again.
 pub fn supportsReasoningEffort(model: []const u8, effort: ReasoningEffort) bool {
-    const row = catalog.find(catalog.shipped, model) orelse return false;
+    const row = catalog.find(catalog.shipped, model) orelse return true;
     return row.efforts.contains(effort);
 }
 
 /// The effort a new Session on `model` starts at from the saved one: the
-/// saved one when the model offers it, else none. Client product defaults
-/// apply separately.
+/// saved one when the catalog allows it or the model is unlisted, else none.
+/// Client product defaults apply separately.
 pub fn startEffort(saved: ?ReasoningEffort, model: []const u8) ?ReasoningEffort {
     const effort = saved orelse return null;
     return if (supportsReasoningEffort(model, effort)) effort else null;
@@ -101,7 +102,7 @@ test "compaction policy never infers a spec from the model catalog" {
     try std.testing.expectEqual(@as(u64, 11), compactionPolicy("model-a", 11, null).compaction_trigger);
 }
 
-test "reasoning effort uses exactly the catalog list without expanding grammar" {
+test "reasoning effort checks listed models and passes grammar values for unlisted models" {
     for (catalog.shipped) |row| {
         try std.testing.expect(supportsModel(row.id));
         try std.testing.expectEqual(@as(u64, row.context_window orelse product_defaults.unlisted_context_window), contextWindow(row.id));
@@ -118,7 +119,7 @@ test "reasoning effort uses exactly the catalog list without expanding grammar" 
         try std.testing.expect(!supportsModel(unknown));
         try std.testing.expectEqual(product_defaults.unlisted_context_window, contextWindow(unknown));
         inline for (std.meta.tags(ReasoningEffort)) |effort|
-            try std.testing.expect(!supportsReasoningEffort(unknown, effort));
+            try std.testing.expect(supportsReasoningEffort(unknown, effort));
     }
     try std.testing.expect(std.meta.stringToEnum(ReasoningEffort, "ultra") == null);
 }
@@ -146,10 +147,10 @@ test "model help lists only OpenAI catalog ids in catalog order" {
     try std.testing.expectEqualStrings(exceptions.written(), ids_without_max_effort);
 }
 
-test "a new Session starts at the saved effort only when its model offers it" {
+test "a new Session keeps saved effort unless its listed model excludes it" {
     try std.testing.expectEqual(@as(?ReasoningEffort, .max), startEffort(.max, "gpt-6-luna"));
     try std.testing.expectEqual(@as(?ReasoningEffort, null), startEffort(.max, "gpt-5.5"));
-    try std.testing.expectEqual(@as(?ReasoningEffort, null), startEffort(.max, "unlisted-model"));
+    try std.testing.expectEqual(@as(?ReasoningEffort, .max), startEffort(.max, "unlisted-model"));
     try std.testing.expectEqual(@as(?ReasoningEffort, null), startEffort(null, "gpt-6-luna"));
 }
 

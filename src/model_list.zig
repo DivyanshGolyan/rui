@@ -12,17 +12,17 @@ const provider_name = @import("provider_name.zig");
 /// Where a provider's list came from.
 pub const Source = enum {
     /// Catalog OpenAI IDs: the provider has no list.
-    table,
+    catalog,
     /// Catalog OpenAI IDs while the fetch is still in flight; ask again later.
     pending,
     /// Catalog OpenAI IDs because the fetch failed: offline, refused or too long.
-    table_fallback,
+    catalog_fallback,
     /// The provider's own list for this account.
     live,
 };
 
 /// The most model IDs a live list keeps, and the most bytes they take
-/// together. A longer list falls back to the table rather than lose models
+/// together. A longer list falls back to the catalog rather than lose models
 /// without saying so.
 pub const max_live_models = 512;
 pub const max_live_id_bytes = 16 * 1024;
@@ -110,13 +110,13 @@ fn objectKey(scanner: *std.json.Scanner, scratch: std.mem.Allocator) !?[]const u
 /// Bytes one model entry adds to a reply beyond its ID's: an ID is printable
 /// ASCII, so JSON escapes at most double it.
 const model_overhead = "{\"id\":\"\",\"known\":false},".len;
-const provider_overhead = ",{\"provider\":\"\",\"source\":\"table_fallback\",\"models\":[]}".len + max_provider_name_bytes;
+const provider_overhead = ",{\"provider\":\"\",\"source\":\"catalog_fallback\",\"models\":[]}".len + max_provider_name_bytes;
 const max_provider_name_bytes = blk: {
     var bytes = 0;
     for (std.meta.fieldNames(provider_name.Provider)) |name| bytes = @max(bytes, name.len);
     break :blk bytes;
 };
-const max_table_bytes = blk: {
+const max_catalog_bytes = blk: {
     var bytes = 0;
     for (catalog.openai_ids) |id| bytes += model_overhead + 2 * id.len;
     break :blk bytes;
@@ -124,13 +124,13 @@ const max_table_bytes = blk: {
 const provider_count = std.meta.fieldNames(provider_name.Provider).len;
 
 /// The most bytes `writeProviders` writes.
-pub const max_providers_bytes = "[]".len + provider_count * (provider_overhead + @max(max_table_bytes, max_live_models * model_overhead + 2 * max_live_id_bytes));
+pub const max_providers_bytes = "[]".len + provider_count * (provider_overhead + @max(max_catalog_bytes, max_live_models * model_overhead + 2 * max_live_id_bytes));
 
 /// A provider's list: catalog OpenAI IDs, or the provider's own IDs.
 pub const List = union(Source) {
-    table,
+    catalog,
     pending,
-    table_fallback,
+    catalog_fallback,
     live: Ids,
 };
 
@@ -153,7 +153,7 @@ pub fn writeProviders(out: *std.Io.Writer, entries: []const Entry) !void {
                 var ids = live.iterator();
                 while (ids.next()) |id| try writeModel(out, id, &first);
             },
-            .table, .pending, .table_fallback => for (catalog.openai_ids) |id| try writeModel(out, id, &first),
+            .catalog, .pending, .catalog_fallback => for (catalog.openai_ids) |id| try writeModel(out, id, &first),
         }
         try out.writeAll("]}");
     }
@@ -209,20 +209,20 @@ test "a list past either bound is refused, not cut" {
     try std.testing.expectError(error.ModelListTooLarge, parseOpenAi(arena.allocator(), more, &out));
 }
 
-test "a reply lists each provider's models and whether the table knows them" {
+test "a reply lists each provider's models and whether the catalog knows them" {
     var bytes: [max_providers_bytes]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
     try writeProviders(&out, &.{
-        .{ .provider = .codex, .list = .table },
+        .{ .provider = .codex, .list = .catalog },
         .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nmy\"model\n" } } },
     });
-    const table = comptime blk: {
+    const listed_models = comptime blk: {
         var text: []const u8 = "";
         for (catalog.openai_ids, 0..) |id, index| text = text ++ (if (index == 0) "" else ",") ++ "{\"id\":\"" ++ id ++ "\",\"known\":true}";
         break :blk text;
     };
     try std.testing.expectEqualStrings(
-        "[{\"provider\":\"codex\",\"source\":\"table\",\"models\":[" ++ table ++ "]}," ++
+        "[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[" ++ listed_models ++ "]}," ++
             "{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-luna\",\"known\":true},{\"id\":\"my\\\"model\",\"known\":false}]}]",
         out.buffered(),
     );
@@ -243,7 +243,7 @@ test "the reply bound holds the largest lists" {
     for (&entries, std.enums.values(provider_name.Provider)) |*entry, provider|
         entry.* = .{ .provider = provider, .list = .{ .live = .{ .bytes = ids[0..len] } } };
     try writeProviders(&out, &entries);
-    entries[0] = .{ .provider = .codex, .list = .table_fallback };
+    entries[0] = .{ .provider = .codex, .list = .catalog_fallback };
     out = std.Io.Writer.fixed(&bytes);
     try writeProviders(&out, &entries);
 }
