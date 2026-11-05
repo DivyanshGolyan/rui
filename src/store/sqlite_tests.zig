@@ -9402,7 +9402,7 @@ test "read_transcript core runner reads other Session outlines before full windo
                 const expected = try std.fmt.allocPrint(arena, "{d}.0 admission person", .{newest});
                 try std.testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
                 try std.testing.expect(std.mem.indexOf(u8, bytes, "\"new message\"\n\"new message\"\n") != null);
-                const more = try std.fmt.allocPrint(arena, "More: call read_transcript with query \"MESSAGE\" before \"{d}.0\".", .{newest});
+                const more = try std.fmt.allocPrint(arena, "More: call read_transcript with {{\"id\":\"{s}\",\"query\":\"MESSAGE\",\"kinds\":[\"admission\"],\"limit\":1,\"before\":\"{d}.0\"}}.", .{ other.slice(), newest });
                 try std.testing.expect(std.mem.indexOf(u8, bytes, more) != null);
                 try std.testing.expect(std.mem.indexOf(u8, bytes, "old message") == null);
             },
