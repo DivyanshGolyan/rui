@@ -402,6 +402,7 @@ fn expectCatalog(comptime name: []const u8) !void {
         sum +%= schema.catalogLineDigest(row[colon + 1 ..]);
     }
     if (sum == schema.catalogDigest()) return;
+    // stderr, which the test runner always shows.
     const expected = comptime schema.catalogLinesForTesting();
     rows = std.mem.splitScalar(u8, lines.written(), '\n');
     while (rows.next()) |row| {
@@ -409,9 +410,15 @@ fn expectCatalog(comptime name: []const u8) !void {
         const line = row[std.mem.indexOfScalar(u8, row, ':').? + 1 ..];
         for (expected) |want| {
             if (std.mem.eql(u8, want, line)) break;
-        } else std.log.err("MySQL catalog check: {s} has the line the schema lacks: {s}", .{ name, line });
+        } else std.debug.print("MySQL catalog check: only {s} has: {s}\n", .{ name, line });
     }
-    for (expected) |want| if (std.mem.indexOf(u8, lines.written(), want) == null) std.log.err("MySQL catalog check: {s} lacks the line: {s}", .{ name, want });
+    for (expected) |want| {
+        rows = std.mem.splitScalar(u8, lines.written(), '\n');
+        while (rows.next()) |row| {
+            const colon = std.mem.indexOfScalar(u8, row, ':') orelse continue;
+            if (std.mem.eql(u8, row[colon + 1 ..], want)) break;
+        } else std.debug.print("MySQL catalog check: only the schema has, for {s}: {s}\n", .{ name, want });
+    }
     return error.MysqlCatalogDiffers;
 }
 

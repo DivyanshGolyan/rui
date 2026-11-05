@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 52;
+pub const schema_version: u32 = 53;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -30,7 +30,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 49, .digest = 0x7308286ccc227397 },
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
-    .{ .schema_version = 52, .digest = 0x0b75dc372084ab1e },
+    .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
+    .{ .schema_version = 53, .digest = 0x4556cd0c40c55c86 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -85,12 +86,6 @@ pub const migrations = [_]Migration{
     // max_catalog_records. Every record so far is Rui's or a provider's,
     // so its server is empty. MySQL names a table's CHECKs in order, so
     // the third of tool_record and of tool_set is the one replaced.
-    // 8b: each Store gets a random store_id. On MySQL, store_owner and
-    // content_chunk are new; each content's payload moves into chunks of
-    // content_chunk_bytes (chunk.i reaches 9999, past the 8192 chunks of
-    // the largest content) before the column goes; each leading partial
-    // index gets its generated first column; store_meta's one CHECK and
-    // content's fourth are the ones replaced.
     .{
         .from = 51,
         .sqlite = &.{
@@ -103,11 +98,6 @@ pub const migrations = [_]Migration{
             "INSERT INTO tool_set(tool_set_id,digest,member_count) SELECT tool_set_id,digest,member_count FROM tool_set_51",
             "DROP TABLE tool_set_51",
             "CREATE TABLE host_catalog(\n slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id)\n) STRICT",
-            "ALTER TABLE store_meta RENAME TO store_meta_51",
-            "CREATE TABLE store_meta(\n meta_key TEXT PRIMARY KEY NOT NULL CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id')),\n meta_value TEXT NOT NULL\n) STRICT",
-            "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_51",
-            "DROP TABLE store_meta_51",
-            "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
         },
         .mysql = &.{
             "ALTER TABLE tool_record ADD COLUMN server VARCHAR(64) NOT NULL DEFAULT '' AFTER owner",
@@ -116,6 +106,24 @@ pub const migrations = [_]Migration{
             "ALTER TABLE tool_record DROP CHECK tool_record_chk_3, ADD CHECK((owner='rui' OR owner='provider' OR owner='mcp')), ADD CHECK(OCTET_LENGTH(server)<=64 AND (NOT REGEXP_LIKE(server,'[^A-Za-z0-9_-]','c')) AND (owner='mcp' AND OCTET_LENGTH(server)>0 OR owner<>'mcp' AND OCTET_LENGTH(server)=0))",
             "ALTER TABLE tool_set DROP CHECK tool_set_chk_3, ADD CHECK(member_count BETWEEN 0 AND 1024)",
             "CREATE TABLE host_catalog(\n slot BIGINT NOT NULL,\n tool_set_id BIGINT NOT NULL,\n PRIMARY KEY(slot),\n FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),\n CHECK(slot=1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
+    // 53 (8b): each Store gets a random store_id. On MySQL, store_owner
+    // and content_chunk are new; each content's payload moves into chunks
+    // of content_chunk_bytes (chunk.i reaches 9999, past the 8192 chunks of
+    // the largest content) before the column goes; each leading partial
+    // index gets its generated first column; store_meta's one CHECK and
+    // content's fourth are the ones replaced.
+    .{
+        .from = 52,
+        .sqlite = &.{
+            "ALTER TABLE store_meta RENAME TO store_meta_52",
+            "CREATE TABLE store_meta(\n meta_key TEXT PRIMARY KEY NOT NULL CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id')),\n meta_value TEXT NOT NULL\n) STRICT",
+            "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_52",
+            "DROP TABLE store_meta_52",
+            "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
+        },
+        .mysql = &.{
             "ALTER TABLE store_meta DROP CHECK store_meta_chk_1, ADD CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id'))",
             "CREATE TABLE store_owner(\n owner_key BIGINT NOT NULL,\n epoch BIGINT NOT NULL,\n commit_seq BIGINT NOT NULL,\n PRIMARY KEY(owner_key),\n CHECK(owner_key=1),\n CHECK(epoch>=0),\n CHECK(commit_seq>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE TABLE content_chunk(\n content_id BIGINT NOT NULL,\n chunk_index BIGINT NOT NULL,\n bytes LONGBLOB NOT NULL,\n PRIMARY KEY(content_id,chunk_index),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n CHECK(chunk_index>=0),\n CHECK(length(bytes) BETWEEN 1 AND 131072)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -305,7 +313,7 @@ const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1,
 
 /// store_meta's keys, as bootstrap writes them: a closed set, so a key is
 /// a tag, which MySQL can key. `store_id` is the Store's own random id,
-/// drawn once when it is created and never changed (D204, format 52).
+/// drawn once when it is created and never changed (D204, format 53).
 const meta_keys = [_][]const u8{ "wire_version", "store_selector", "format", "store_id" };
 
 /// The bytes of one MySQL `content_chunk` row; the last of a content's
