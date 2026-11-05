@@ -4418,7 +4418,7 @@ def renderer_cases():
         env = {**os.environ, "HOME": str(home)}
         rejected = subprocess.run([str(fixture.RUI), "session", "resume", "--store", str(store), geometry],
             env=env, input=b"", capture_output=True, timeout=5)
-        assert rejected.returncode != 0 and b"InteractiveTerminalRequired" in rejected.stderr, rejected
+        assert rejected.returncode != 0 and b"rui needs terminal input and output" in rejected.stderr, rejected
         assert b"\x1b" not in rejected.stdout + rejected.stderr, rejected
         pipe_text = "/literal\nstdin café\n"
         pipe_answer = answer("pipe")
@@ -6430,7 +6430,7 @@ def main(selected="all"):
         no_tty_home.mkdir()
         no_terminal = subprocess.run([str(fixture.RUI)], cwd=workspace,
             env={**os.environ, "HOME": str(no_tty_home)}, capture_output=True, text=True, timeout=5)
-        assert no_terminal.returncode != 0 and "InteractiveTerminalRequired" in no_terminal.stderr
+        assert no_terminal.returncode != 0 and "rui needs terminal input and output" in no_terminal.stderr
         assert not (no_tty_home / ".config").exists(), "non-TTY invocation created preferences or a request"
         assert not (no_tty_home / ".local/share/rui/store").exists(), "non-TTY invocation changed the Store"
         before_missing = set(json.loads(run(preferences_home, "request", "list")))
@@ -6676,7 +6676,7 @@ def main(selected="all"):
         credential.unlink()
         initial = fixture.command("session", "inspect", "--store", store, "--session", session)
         assert initial["selected_message"] is None and initial["recent_messages"] == [], initial
-        assert "InteractiveTerminalRequired" in subprocess.run(
+        assert "rui needs terminal input and output" in subprocess.run(
             [str(fixture.RUI), "session", "resume", "--store", str(store), "--", session],
             env={**os.environ, "HOME": str(home)}, capture_output=True, text=True, timeout=5).stderr
         assert config["request"] in json.loads(run(home, "request", "list"))

@@ -120,10 +120,11 @@ fn run(init: std.process.Init) !void {
 
 /// Owners that print their own diagnostic before returning these errors:
 /// model rejection names the ID, supported IDs and repair; a saved rejection
-/// or conflict names its replay; a stopped Host says how to start it.
+/// or conflict names its replay; a stopped Host says how to start it; a
+/// missing terminal names the one-shot commands to use instead.
 /// `error.Reported` tells main the caller has already been told.
 fn reportedByOwner(err: anyerror) bool {
-    return err == error.InvalidModel or err == error.MutationNotAccepted or err == error.HostStopped;
+    return err == error.InvalidModel or err == error.MutationNotAccepted or err == error.HostStopped or err == error.InteractiveTerminalRequired;
 }
 
 // `run` stays under the Host for its whole life, so client-only buffers
@@ -1279,9 +1280,9 @@ const NewSessionOptions = struct {
         // The fresh-session grammar has no hex spellings to allocate.
         var nothing = std.heap.FixedBufferAllocator.init(&.{});
         var problem: cli_args.Problem = undefined;
-        const parsed = cli_args.fresh_session.parse(args, nothing.allocator(), &problem) catch |err| {
+        const parsed = cli_args.fresh_session.parse(args, nothing.allocator(), &problem) catch {
             reportParseProblem(problem, null, null, null);
-            return err;
+            return error.Reported;
         };
         if (parsed.help) return null;
         return .{ .store = parsed.get("store"), .provider = parsed.get("provider"), .model = parsed.get("model") };
