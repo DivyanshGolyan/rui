@@ -8916,7 +8916,7 @@ test "a stop or a context full ending stops every attached child below it, each 
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&key_buffer, "rui.core/stop/{s}/{s}/{d}", .{ child.slice(), parent.slice(), stop_position }), owed.key.slice());
     // A replayed parent stop owes nothing again.
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE settled=0", .{}));
 
     // The child's stop is an ordinary stop: it excludes the child's queued
     // task, settles what it owed and passes the stop down.
@@ -8982,6 +8982,41 @@ test "child endings deliver once with their answer and sender; standalone ending
         try settleItemsForTesting(&storage, &tmp, attempt.permit.binding, &.{item}, "hello");
     }
     try std.testing.expect(try storage.nextCoreWork() == null);
+}
+
+test "a child settles two parent stop obligations in place" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    const parent = try configureTestSession(&storage, "repeat-stop-parent");
+    const child = try configureTestSession(&storage, "repeat-stop-child");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+
+    for ([_][]const u8{ "repeat-stop-first", "repeat-stop-second" }, 0..) |key, index| {
+        if (index != 0) {
+            try submitTestMessage(&storage, &tmp, "repeat-stop-message", "repeat-stop-message", parent.slice(), "work again");
+        }
+        var stop = try completeSessionStop(key, parent.slice());
+        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        // Replaying the cause must not add another open obligation.
+        try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=0", .{child.slice()}));
+        try std.testing.expectEqual(@as(u64, index), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=1", .{child.slice()}));
+
+        const owed = (try storage.nextCoreWork()).?.stop;
+        try std.testing.expectEqualStrings(child.slice(), owed.session.slice());
+        var owed_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
+        try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=0", .{child.slice()}));
+        try std.testing.expectEqual(@as(u64, index + 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=1", .{child.slice()}));
+        try std.testing.expect(try storage.nextCoreWork() == null);
+    }
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1", .{child.slice()}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop WHERE session_ref=?1", .{child.slice()}));
+    try std.testing.expect(!storage.isFenced());
 }
 
 test "a client stopped child delivers a nonquiet stopped ending" {
@@ -9068,7 +9103,7 @@ test "an owed stop a client's stop already settled, or a newer one replaced, run
     const newer = (try storage.nextCoreWork()).?.stop;
     try std.testing.expect(!std.mem.eql(u8, newer.key.slice(), selected.key.slice()));
     try std.testing.expect(storage.stopOwedSession(&stale, .{}) == .conflict);
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE settled=0", .{}));
     var owed = try completeSessionStop(newer.key.slice(), newer.session.slice());
     try std.testing.expect(storage.stopOwedSession(&owed, .{}) == .accepted);
     const ending = (try storage.nextCoreWork()).?.ending;
@@ -9205,6 +9240,42 @@ test "a start_agent call creates its agent where its caller works, with the task
     // the attached one is its child.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref<>?1 AND workspace=?2 AND provider=(SELECT provider FROM session WHERE session_ref=?1)", .{ caller.slice(), workspace }));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{caller.slice()}));
+    // Public list and both report profiles expose only the attached agent's
+    // parent; the standalone agent and its caller have none.
+    {
+        var used = std.atomic.Value(u64).init(0);
+        const bytes = try tests.testingSessionList(&storage, &tmp, .{}, &used, 77);
+        defer std.testing.allocator.free(bytes);
+        const listed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer listed.deinit();
+        const rows = listed.value.object.get("sessions").?.array.items;
+        try std.testing.expectEqual(@as(usize, 3), rows.len);
+        var children: usize = 0;
+        for (rows) |row| {
+            const reference = row.object.get("reference").?.string;
+            const first = row.object.get("first_message").?;
+            const attached_child = !std.mem.eql(u8, reference, caller.slice()) and
+                std.mem.eql(u8, first.object.get("content").?.object.get("bytes").?.string, "14");
+            const parent = row.object.get("parent").?;
+            if (attached_child) {
+                try std.testing.expect(parent == .string);
+                try std.testing.expectEqualStrings(caller.slice(), parent.string);
+                children += 1;
+            } else try std.testing.expect(parent == .null);
+            for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
+                const report = try testingSessionReportWithProfile(&storage, &tmp, reference, 1024 * 1024, profile);
+                defer std.testing.allocator.free(report);
+                const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, report, .{});
+                defer parsed.deinit();
+                const reported_parent = parsed.value.object.get("session").?.object.get("parent").?;
+                if (attached_child) {
+                    try std.testing.expect(reported_parent == .string);
+                    try std.testing.expectEqualStrings(caller.slice(), reported_parent.string);
+                } else try std.testing.expect(reported_parent == .null);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), children);
+    }
     // Each task is its agent's first Message, from the caller, under the
     // call's own command key.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1 AND admission_position=1 AND command_key LIKE 'rui.core/start_agent/%'", .{caller.slice()}));

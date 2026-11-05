@@ -1243,10 +1243,11 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 10240;
 
 comptime {
-    // The settlement batch remains the larger use: 14480 bytes. A configure
-    // uses 13528 bytes, including saved tools and loaded names for subset
-    // updates; these fit in the existing scratch without growing the Store.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 13528 or scratch_bytes != 14480)
+    // The settlement batch is the larger use: 14480 bytes. The configure
+    // reads use 13552, including the saved parent reference and the saved
+    // tool and loaded names a subset update reads. Exact, so a change to
+    // either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 13552 or scratch_bytes != 14480)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1256,7 +1257,7 @@ comptime {
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
 /// resident for the Store's life: at most 14480 bytes, a settlement
-/// batch's size, of which a configure writes 4960.
+/// batch's size; a configure uses 4992.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {

@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { encodeFrame, startError } from "../src/client.ts";
 import { RuiStartError } from "../src/errors.ts";
 import { FEED_KINDS, listActivity } from "../src/feed.ts";
-import { environmentBytes, type Link } from "../src/sessions.ts";
+import { environmentBytes, Sessions, type Link } from "../src/sessions.ts";
 import { ConnectionError, post, WIRE_VERSION } from "../src/transport.ts";
 
 test("the wire version is the one openapi.json describes", () => {
@@ -124,4 +124,20 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 	for await (const entry of listActivity(link, "s", { follow: true, kinds: ["received"], signal: controller.signal })) assert.fail(String(entry));
 	assert.equal(bodies.length, 2);
 	assert.match(bodies[1] as string, /"position":"9","ordinal":null/);
+});
+
+test("session summaries preserve both parent references and top-level nulls", async () => {
+	const link: Link = {
+		exchange: async () => Buffer.from(JSON.stringify({
+			sessions: [
+				{ reference: "p33rs1", label: "caller", work: { state: { kind: "idle" } }, parent: null },
+				{ reference: "k7m2qx", label: "child", work: { state: { kind: "pending" } }, parent: "p33rs1" },
+			],
+			next: null,
+		})),
+	};
+	assert.deepEqual(await new Sessions(link).list(), [
+		{ id: "k7m2qx", label: "child", state: "pending", parent: "p33rs1" },
+		{ id: "p33rs1", label: "caller", state: "idle", parent: null },
+	]);
 });

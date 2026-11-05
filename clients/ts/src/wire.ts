@@ -2217,6 +2217,7 @@ export interface components {
             tools: string[];
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
+            parent: string | null;
             label: string | null;
             created_at: components["schemas"]["Decimal"];
             revision: components["schemas"]["Decimal"];
