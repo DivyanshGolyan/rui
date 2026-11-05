@@ -46,7 +46,13 @@ const ENDINGS_WITH_TEXT = new Set(["provider_refused", "failed"]);
 export interface ListActivityOptions {
 	/** The `cursor` of the last entry read. Left out, the feed starts at its beginning. */
 	after?: string;
-	/** Never ends: polls for new entries, 250 ms rising to 2 s while idle. */
+	/**
+	 * Follows new entries, polling at 250 ms rising to 2 s only while busy.
+	 * An empty idle/finished/failed/stopped page with nothing queued sleeps without a timer
+	 * until send/update/decide/interrupt/stop succeeds through any handle for this Session
+	 * on this Rui instance. Writes from another process to the same Store are not noticed
+	 * while asleep. `signal` abort ends the iterator even while asleep.
+	 */
 	follow?: boolean;
 	/** Only these kinds, by their wire names. Left out, every kind. */
 	kinds?: readonly FeedKind[];
@@ -54,25 +60,27 @@ export interface ListActivityOptions {
 	signal?: AbortSignal;
 }
 
-/**
- * One feed entry. `kind` and the fields of that kind's row follow in camelCase,
- * as the wire spells them. Rows with text carry it as `text`.
- */
-export interface FeedEntry {
-	kind: FeedKind;
-	/** Pass as `after` to continue after this entry. */
-	cursor: string;
-	position: string;
-	ordinal: string;
-	at: string;
-	/** The row's text, when it has some and the kind carries it. */
+/** Maps only the row's own keys; nested values retain their wire spelling (D128). */
+type CamelKey<Key extends string> = Key extends `${infer Head}_${infer Tail}` ? `${Head}${Capitalize<CamelKey<Tail>>}` : Key;
+type CamelRow<Payload> = { [Key in keyof Payload as Key extends "session" ? "sessionId" : Key extends string ? CamelKey<Key> : Key]: Payload[Key] };
+
+type EntryText = {
+	/** The row's text, when this kind carries it and it fits inline. */
 	text?: string;
-	/** True when the text is longer than 16 KiB and `text` is absent: use `session.readContent(entry)`. */
+	/** Text exceeds 16 KiB: use `session.readContent(entry)`. */
 	truncated?: boolean;
-	/** The text's length in bytes, when the row has text. */
+	/** The text's length in bytes, when this kind carries text. */
 	contentBytes?: string;
-	[field: string]: unknown;
-}
+};
+
+type EntryFromRow<R extends Row> = R extends Row ? {
+	[Kind in keyof R["value"]]: Omit<R, "value"> & { kind: Kind; cursor: string }
+		& CamelRow<R["value"][Kind]>
+		& ("content" extends keyof R["value"][Kind] ? EntryText : {});
+}[keyof R["value"]] : never;
+
+/** A discriminated wire-row union with top-level camelCase fields and an opaque continuation `cursor`. */
+export type FeedEntry = EntryFromRow<Row>;
 
 /** An opaque cursor: after the row at this position and ordinal. */
 export function encodeCursor(position: string, ordinal: string): string {
@@ -86,15 +94,12 @@ export function decodeCursor(cursor: string): { position: string; ordinal: strin
 }
 
 function camel(name: string): string {
+	if (name === "session") return "sessionId";
 	return name.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
 }
 
-function camelCase(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(camelCase);
-	if (value !== null && typeof value === "object") {
-		return Object.fromEntries(Object.entries(value).map(([name, inner]) => [camel(name), camelCase(inner)]));
-	}
-	return value;
+function camelCase(row: Record<string, unknown>): Record<string, unknown> {
+	return Object.fromEntries(Object.entries(row).map(([name, value]) => [camel(name), value]));
 }
 
 function isReference(value: unknown): value is Schemas["ActivityItemContent"] {
@@ -104,18 +109,17 @@ function isReference(value: unknown): value is Schemas["ActivityItemContent"] {
 /** Builds an entry from a row, without its text. Returns the content reference when text is to be read. */
 function entryOf(row: Row): { entry: FeedEntry; reference: Schemas["ActivityItemContent"] | undefined } {
 	const [kind, payload] = Object.entries(row.value)[0] as [FeedKind, Record<string, unknown>];
-	const { content, ...rest } = payload;
-	const entry: FeedEntry = {
+	const reference = isReference(payload.content) ? payload.content : undefined;
+	const wanted = kind !== "turn_ended" || ENDINGS_WITH_TEXT.has(String(payload.ending));
+	const entry = {
 		kind,
 		cursor: encodeCursor(row.position, row.ordinal),
 		position: row.position,
 		ordinal: row.ordinal,
 		at: row.at,
-		...(camelCase(rest) as object),
-	};
-	const reference = isReference(content) ? content : undefined;
-	const wanted = kind !== "turn_ended" || ENDINGS_WITH_TEXT.has(String(payload.ending));
-	if (reference && wanted) entry.contentBytes = reference.bytes;
+		...camelCase(payload),
+		...(reference && wanted ? { contentBytes: reference.bytes } : {}),
+	} as FeedEntry; // Object.entries erases the generated kind/payload correlation at this boundary.
 	return { entry, reference: reference && wanted ? reference : undefined };
 }
 
@@ -185,41 +189,97 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 	let pinnedEnd: string | null = null;
 	let wait = FIRST_POLL_MS;
 	const { signal } = options;
-	while (!signal?.aborted) {
-		const page = JSON.parse(
-			(await link.exchange("/v1/activity-page", (store) => activityBody(store, session, { end: pinnedEnd, position, ordinal, kinds }))).toString("utf8"),
-		) as Schemas["ActivityPageReply"];
-		for (const row of page.items) {
-			// Cancellation is honoured before each entry, and again after any read that took time.
-			if (signal?.aborted) return;
-			const { entry, reference } = entryOf(row);
-			if (reference) {
-				if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
-					entry.truncated = true;
-				} else {
-					const prefix = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, row), undefined, { prefix: INLINE_TEXT_BYTES });
-					entry.text = prefix.toString("utf8");
+	const watcher = options.follow ? link.activity?.watch(session) : undefined;
+	try {
+		while (!signal?.aborted) {
+			// Capture before I/O so a write racing an idle reply cannot be lost.
+			const revision = watcher?.revision ?? 0;
+			const page = JSON.parse(
+				(await link.exchange("/v1/activity-page", (store) => activityBody(store, session, { end: pinnedEnd, position, ordinal, kinds }))).toString("utf8"),
+			) as Schemas["ActivityPageReply"];
+			for (const row of page.items) {
+				// Cancellation is honoured before each entry, and again after any read that took time.
+				if (signal?.aborted) return;
+				const { entry, reference } = entryOf(row);
+				if (reference && "content" in entry) {
+					if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
+						entry.truncated = true;
+					} else {
+						const prefix = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, row), undefined, { prefix: INLINE_TEXT_BYTES });
+						entry.text = prefix.toString("utf8");
+					}
 				}
+				if (signal?.aborted) return;
+				yield entry;
+				position = row.position;
+				ordinal = row.ordinal;
 			}
-			if (signal?.aborted) return;
-			yield entry;
-			position = row.position;
-			ordinal = row.ordinal;
+			if (page.more) {
+				// A bounded read keeps the end the first page named; a following one asks again.
+				pinnedEnd = options.follow ? null : page.end;
+				wait = FIRST_POLL_MS;
+				continue;
+			}
+			if (!options.follow) return;
+			pinnedEnd = null;
+			// Exhausted: everything the filter matches up to the end has been read, so the next poll starts at the end
+			// rather than rescanning the rows between the last match and it.
+			position = page.end;
+			ordinal = null;
+			if (page.items.length > 0) wait = FIRST_POLL_MS;
+			else if (page.queued.count === "0" && dormant(page.work.state.kind)) {
+				await (watcher ? watcher.wait(revision, signal) : untilAbort(signal));
+				wait = FIRST_POLL_MS;
+			} else {
+				await pause(wait, signal);
+				wait = Math.min(wait * 2, MAX_POLL_MS);
+			}
 		}
-		if (page.more) {
-			// A bounded read keeps the end the first page named; a following one asks again.
-			pinnedEnd = options.follow ? null : page.end;
-			wait = FIRST_POLL_MS;
-			continue;
+	} finally {
+		watcher?.close();
+	}
+}
+
+function dormant(kind: Schemas["WorkStateJson"]["kind"]): boolean {
+	return kind === "idle" || kind === "finished" || kind === "failed" || kind === "stopped";
+}
+
+/** A bare internal Link has no local writes to observe; cancellation still ends its idle wait. */
+function untilAbort(signal: AbortSignal | undefined): Promise<void> {
+	return new Promise((resolve) => {
+		if (signal?.aborted) resolve();
+		else signal?.addEventListener("abort", () => resolve(), { once: true });
+	});
+}
+
+export interface SearchActivityOptions {
+	/** Resume before this search entry's cursor. */
+	before?: string;
+	kinds?: readonly FeedKind[];
+	limit?: number;
+	signal?: AbortSignal;
+}
+
+export type ActivitySearchEntry = Schemas["ActivitySearchReply"]["items"][number] & { cursor: string };
+
+/** Search public feed text newest first. Empty budget-limited pages still advance. */
+export async function* searchActivity(link: Link, session: string, query: string, options: SearchActivityOptions = {}): AsyncGenerator<ActivitySearchEntry, void, undefined> {
+	const bytes = Buffer.byteLength(query, "utf8");
+	if (bytes === 0 || bytes > 256 || Buffer.from(query, "utf8").toString("utf8") !== query) throw new RangeError("query must be 1–256 UTF-8 bytes");
+	const limit = options.limit ?? PAGE_ROWS;
+	if (!Number.isInteger(limit) || limit < 1 || limit > PAGE_ROWS) throw new RangeError("limit must be 1–16");
+	const kinds = options.kinds === undefined ? FEED_KINDS : FEED_KINDS.filter((kind) => options.kinds?.includes(kind));
+	let before = options.before === undefined ? null : decodeCursor(options.before);
+	while (!options.signal?.aborted) {
+		const page = JSON.parse((await link.exchange("/v1/activity-search", (store) => JSON.stringify({
+			version: WIRE_VERSION, kind: "activity_search", store, session, query, kinds: [...kinds],
+			before_position: before?.position ?? null, before_ordinal: before?.ordinal ?? null, limit: String(limit),
+		} satisfies Schemas["ActivitySearchRequest"]))).toString("utf8")) as Schemas["ActivitySearchReply"];
+		for (const item of page.items) {
+			if (options.signal?.aborted) return;
+			yield { ...item, cursor: encodeCursor(item.position, item.ordinal) };
 		}
-		if (!options.follow) return;
-		pinnedEnd = null;
-		// Exhausted: everything the filter matches up to the end has been read, so the next poll starts at the end
-		// rather than rescanning the rows between the last match and it.
-		position = page.end;
-		ordinal = null;
-		if (page.items.length > 0) wait = FIRST_POLL_MS;
-		else await pause(wait, signal);
-		if (page.items.length === 0) wait = Math.min(wait * 2, MAX_POLL_MS);
+		if (page.next === null) return;
+		before = page.next;
 	}
 }

@@ -14,6 +14,9 @@
 const std = @import("std");
 const protocol = @import("protocol.zig");
 const model_list = @import("model_list.zig");
+const store = @import("store.zig");
+const launch_frame = @import("launch_frame.zig");
+const core_tools = @import("core_tools.zig");
 const Hole = protocol.Hole;
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
@@ -56,8 +59,7 @@ const Reply = union(enum) {
     bytes,
     /// Text content (`text/plain`), as the result and Action reads send it.
     text,
-    /// A Session report (JSON, schema not described yet), or the failed
-    /// response's bytes.
+    /// A described Session report (JSON), or a failed response's raw bytes.
     report,
 };
 
@@ -102,6 +104,8 @@ pub const routes = [_]Route{
         .variants = &.{
             variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.tail, .{}),
             variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.require_model_tail, .{}),
+            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.preset_tail, .{}),
+            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.preset_require_model_tail, .{}),
         },
         .reply = jsonReply(.{ protocol.configuration_reply.accepted, protocol.configuration_reply.rejected }),
         .conflict = jsonReply(.{protocol.configuration_reply.conflict}),
@@ -218,6 +222,13 @@ pub const routes = [_]Route{
         .reply = .bytes,
     },
     .{
+        .path = "/v1/activity-search",
+        .kind = .activity_search,
+        .summary = "Search public Session activity newest first with bounded snippets.",
+        .variants = &.{variant(protocol.activity_search_request, .{})},
+        .reply = jsonReply(.{protocol.ActivitySearchFacts.head ++ .{ListOf(ActivitySearchItem)} ++ protocol.ActivitySearchFacts.tail}),
+    },
+    .{
         .path = "/v1/activity-page",
         .kind = .activity_page,
         .summary = "One page of a Session's activity feed, with its work and queue at the page's boundary.",
@@ -328,17 +339,22 @@ const ToolNameList = struct {
     }
 };
 
-/// Fields after `output_schema` are optional to the Host, in any order; the
-/// client always sends all four, in this order.
+/// Fields after `output_schema` are optional to the parser, in any order;
+/// the client always sends all four, in this order. Creation requires model,
+/// effort, compaction trigger, tools and permission mode, and a Workspace
+/// with bash (D113, D133); the schema states no `required` because an
+/// addressed configure may omit every field.
 fn configurationShape(comptime name: []const u8, comptime instructions: anytype, comptime output_schema: anytype) type {
     return struct {
         pub const openapi_name = name;
+        pub const openapi_optional_fields = .{"loaded_tools"};
         pub const openapi_shape = .{
             "{\"workspace\":",          State(Hole{ .string = protocol.max_workspace_bytes }, false),
             ",\"provider\":",           State(Hole{ .string = protocol.max_provider_bytes }, false),
             ",\"model\":",              State(Hole{ .string = protocol.max_model_bytes }, false),
             ",\"instructions\":",       instructions,
             ",\"tools\":",              State(ToolNameList, false),
+            ",\"loaded_tools\":",       State(ToolNameList, false),
             ",\"permission_mode\":",    State(Hole{ .string = 16 }, false),
             ",\"output_schema\":",      output_schema,
             ",\"compaction_trigger\":", State(Hole{ .string = 20 }, true),
@@ -381,7 +397,7 @@ const ModelListEntry = struct {
 /// `SessionRow`'s `tools`, written as raw JSON text.
 const ToolNames = struct {
     pub fn openapi_inline(d: *Document) !Value {
-        return d.holeSchema(Hole{ .tag_set = Tool }, false);
+        return ToolNameList.openapi_inline(d);
     }
 };
 
@@ -494,6 +510,9 @@ pub const Document = struct {
     /// A reference to `T`'s named schema, built on first use.
     fn typeRef(d: *Document, comptime T: type) !Value {
         if (@hasDecl(T, "openapi_inline")) return T.openapi_inline(d);
+        if (@hasDecl(T, "openapi_list")) return d.object(.{ .type = Value{ .string = "array" }, .items = try d.typeRef(T.openapi_list) });
+        if (@hasDecl(T, "openapi_tools")) return ToolNameList.openapi_inline(d);
+        if (@hasDecl(T, "openapi_content")) return Content.openapi_inline(d);
         const name = comptime componentName(T);
         if (!d.schemas.contains(name)) {
             // Claim the name first, so a type that refers to itself ends.
@@ -504,7 +523,26 @@ pub const Document = struct {
     }
 
     fn typeSchema(d: *Document, comptime T: type) !Value {
-        if (@hasDecl(T, "openapi_shape")) return d.shapeSchema(T.openapi_shape);
+        if (@hasDecl(T, "openapi_shape")) {
+            var schema = try d.shapeSchema(T.openapi_shape);
+            if (@hasDecl(T, "openapi_optional_fields")) {
+                const required = &schema.object.getPtr("required").?.array;
+                inline for (T.openapi_optional_fields) |optional| {
+                    for (required.items, 0..) |field, index| {
+                        if (std.mem.eql(u8, field.string, optional)) {
+                            _ = required.orderedRemove(index);
+                            break;
+                        }
+                    }
+                }
+            }
+            return schema;
+        }
+        if (@hasDecl(T, "openapi_shapes")) {
+            var values: [T.openapi_shapes.len]Value = undefined;
+            inline for (T.openapi_shapes, 0..) |shape, index| values[index] = try d.shapeSchema(shape);
+            return d.anyOf(&values);
+        }
         if (T == protocol.WorkStateJson) return d.anyOf(&.{
             try d.shapeSchema(T.plain_shape),
             try d.shapeSchema(T.retrying_shape),
@@ -524,6 +562,74 @@ pub const Document = struct {
         if (T == protocol.SessionRow) return d.shapeSchemaWith(T.json_shape, ToolNames);
         if (@hasDecl(T, "json_shape")) return d.shapeSchema(T.json_shape);
         @compileError("no wire schema for " ++ @typeName(T));
+    }
+
+    /// JSON decoded directly into a Zig wire type. Defaults permit omission,
+    /// whereas optional types permit null; these are independent on the wire.
+    fn wireSchema(d: *Document, comptime T: type) anyerror!Value {
+        return switch (@typeInfo(T)) {
+            .bool => d.object(.{ .type = Value{ .string = "boolean" } }),
+            .int => d.object(.{ .type = Value{ .string = "integer" } }),
+            .@"enum" => d.enumeration(T, false),
+            .optional => |optional| d.nullable(try d.wireSchema(optional.child)),
+            .pointer => |pointer| if (pointer.size == .slice and pointer.child == u8)
+                d.object(.{ .type = Value{ .string = "string" } })
+            else if (pointer.size == .slice)
+                d.object(.{ .type = Value{ .string = "array" }, .items = try d.wireSchema(pointer.child) })
+            else
+                @compileError("not a JSON wire slice: " ++ @typeName(T)),
+            .@"struct" => |fields| blk: {
+                var properties: ObjectMap = .empty;
+                var required: std.json.Array = .init(d.arena);
+                inline for (fields.field_names, fields.field_types, fields.field_attrs) |name, Field, attrs| {
+                    const schema = if (comptime T == launch_frame.Wire and std.mem.eql(u8, name, "presets"))
+                        try d.object(.{
+                            .type = Value{ .string = "object" },
+                            .additionalProperties = try d.ref("AgentSpec"),
+                            .maxProperties = Value{ .integer = core_tools.max_presets },
+                        })
+                    else
+                        try d.wireSchema(Field);
+                    try properties.put(d.arena, name, schema);
+                    if (attrs.default_value_ptr == null) try required.append(.{ .string = name });
+                }
+                break :blk d.object(.{
+                    .type = Value{ .string = "object" },
+                    .properties = Value{ .object = properties },
+                    .required = Value{ .array = required },
+                    .additionalProperties = Value{ .bool = false },
+                });
+            },
+            else => @compileError("not a JSON wire type: " ++ @typeName(T)),
+        };
+    }
+
+    fn launchSchemas(d: *Document) !void {
+        // Reuse start_agent's field vocabulary. Presets are complete specs,
+        // not partial overrides, and parseAgentSpec also permits creation's
+        // provider and workspace fields (start_agent inherits them instead).
+        const start_agent = try std.json.parseFromSliceLeaky(Value, d.arena, core_tools.start_agent_schema, .{});
+        var spec = start_agent.object.get("properties").?.object.get("spec").?;
+        try spec.object.put(d.arena, "required", try d.array(&.{
+            .{ .string = "model" }, .{ .string = "effort" }, .{ .string = "compactAt" }, .{ .string = "tools" }, .{ .string = "permissionMode" },
+        }));
+        const spec_properties = spec.object.getPtr("properties").?;
+        try spec_properties.object.put(d.arena, "provider", try d.enumeration(protocol.Provider, false));
+        try spec_properties.object.put(d.arena, "workspace", try d.wireSchema([]const u8));
+        // JSON Schema defaults object properties to unconstrained values.
+        // Spell that out so generated clients do not turn them into `never`.
+        const output_schema = spec.object.getPtr("properties").?.object.getPtr("outputSchema").?;
+        try output_schema.object.put(d.arena, "additionalProperties", .{ .bool = true });
+        try d.schemas.put(d.arena, "AgentSpec", spec);
+        var frame = try d.wireSchema(launch_frame.Wire);
+        const properties = frame.object.getPtr("properties").?;
+        try properties.object.put(d.arena, "v", try d.object(.{ .@"const" = Value{ .integer = launch_frame.version } }));
+        const provider = properties.object.getPtr("provider").?.object.getPtr("properties").?;
+        try provider.object.put(d.arena, "kind", try d.object(.{ .@"const" = Value{ .string = "openai_key" } }));
+        try d.schemas.put(d.arena, "LaunchFrame", frame);
+        try d.schemas.put(d.arena, "StartError", try d.wireSchema(struct {
+            rui_start_error: struct { code: launch_frame.StartError, message: []const u8 },
+        }));
     }
 
     /// The schema of a JSON shape.
@@ -684,10 +790,18 @@ pub const Document = struct {
                 .text => try responses.put(d.arena, "200", try d.response("The content, as text.", "text/plain", try d.object(.{ .type = Value{ .string = "string" } }))),
                 .report => {
                     var content: ObjectMap = .empty;
-                    try content.put(d.arena, "application/json", try d.object(.{ .schema = try d.object(.{}) }));
+                    const reply_name = try std.fmt.allocPrint(d.arena, "{s}Reply", .{base});
+                    const shapes = store.session_report_shapes;
+                    try d.schemas.put(d.arena, reply_name, try d.anyOf(&.{
+                        try d.shapeSchema(shapes.current),
+                        try d.shapeSchema(shapes.full),
+                        try d.shapeSchema(shapes.missing_current),
+                        try d.shapeSchema(shapes.missing_full),
+                    }));
+                    try content.put(d.arena, "application/json", try d.object(.{ .schema = try d.ref(reply_name) }));
                     try content.put(d.arena, "application/octet-stream", try d.object(.{ .schema = try d.binary() }));
                     try responses.put(d.arena, "200", try d.object(.{
-                        .description = Value{ .string = "The Session report (JSON; its schema is not described yet), or, for a failed response export, that response's bytes." },
+                        .description = Value{ .string = "The Session report, or, for a failed response export, that response's bytes." },
                         .content = Value{ .object = content },
                     }));
                 },
@@ -716,6 +830,7 @@ pub const Document = struct {
             try paths.put(d.arena, route.path, try d.object(.{ .post = operation }));
         }
         try d.schemas.put(d.arena, "ErrorReply", try d.shapeSchema(protocol.error_reply));
+        try d.launchSchemas();
         d.schemas.sort(SortKeys{ .keys = d.schemas.keys() });
         return d.object(.{
             .openapi = Value{ .string = "3.1.0" },
@@ -960,6 +1075,67 @@ test "the Host parses a generated example of every request variant" {
     }
 }
 
+test "every launch Wire field parses and conforms to its component schema" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var document: Document = .init(allocator);
+    _ = try document.build();
+    const preset = try std.json.parseFromSliceLeaky(Value, allocator,
+        \\{"review":{"model":"custom","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask","provider":"openai","workspace":"/tmp","instructions":"Review","outputSchema":{"type":"object"},"label":null}}
+    , .{});
+    const wire: launch_frame.Wire = .{
+        .v = launch_frame.version,
+        .store = "/tmp/store",
+        .provider = .{ .kind = "openai_key", .baseUrl = "https://api.openai.com/v1", .key = "test-key" },
+        .runtimeDir = "/tmp/rui",
+        .activeCapacity = 2,
+        .paused = true,
+        .presets = preset,
+        .mcpServers = &.{.{ .name = "tools", .url = "http://127.0.0.1:1234/mcp", .bearerToken = "test-token", .callTimeoutMs = 1000 }},
+    };
+    const bytes = try std.json.Stringify.valueAlloc(allocator, wire, .{});
+    var frame: launch_frame.Frame = .{};
+    defer frame.deinit();
+    var refusal: launch_frame.Refusal = undefined;
+    try launch_frame.parse(std.testing.allocator, bytes, &frame, &refusal);
+    const json = try std.json.parseFromSliceLeaky(Value, allocator, bytes, .{});
+    try std.testing.expectEqual(@typeInfo(launch_frame.Wire).@"struct".field_names.len, json.object.count());
+    const schema = document.schemas.get("LaunchFrame").?;
+    try std.testing.expect(conforms(document.schemas, schema, json));
+    try std.testing.expectEqual(@as(usize, 1), frame.presets.len);
+    try std.testing.expectEqual(@as(usize, 1), frame.mcp_server_count);
+    // Defaults are omittable; nullable capacity is distinct from omission.
+    const minimal = try std.json.parseFromSliceLeaky(Value, allocator,
+        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDir":"/tmp/rui","activeCapacity":null}
+    , .{});
+    try std.testing.expect(conforms(document.schemas, schema, minimal));
+    const minimal_bytes = try std.json.Stringify.valueAlloc(allocator, minimal, .{});
+    var minimal_frame: launch_frame.Frame = .{};
+    defer minimal_frame.deinit();
+    try launch_frame.parse(std.testing.allocator, minimal_bytes, &minimal_frame, &refusal);
+    // Closed wire objects must reject renamed or missing fields, including
+    // fields inside MCP entries and the reused agent-spec schema.
+    const invalid = [_][]const u8{
+        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDirectory":"/tmp/rui"}
+        ,
+        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDir":"/tmp/rui","mcpServers":[{"name":"tools","url":"http://127.0.0.1:1234/mcp","bearerToken":"test-token","timeoutMs":1000}]}
+        ,
+        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDir":"/tmp/rui","presets":{"review":{"model":"custom","tools":[],"effort":"low","permissionMode":"ask"}}}
+        ,
+    };
+    for (invalid) |text| {
+        const invalid_json = try std.json.parseFromSliceLeaky(Value, allocator, text, .{});
+        try std.testing.expect(!conforms(document.schemas, schema, invalid_json));
+        try std.testing.expectError(error.LaunchFrameInvalid, launch_frame.parse(std.testing.allocator, text, &minimal_frame, &refusal));
+    }
+    inline for (std.meta.tags(launch_frame.StartError)) |code| {
+        const line = try std.json.Stringify.valueAlloc(allocator, .{ .rui_start_error = .{ .code = code, .message = "refused" } }, .{});
+        const error_json = try std.json.parseFromSliceLeaky(Value, allocator, line, .{});
+        try std.testing.expect(conforms(document.schemas, document.schemas.get("StartError").?, error_json));
+    }
+}
+
 fn report(route: *const Route, index: usize, bytes: []const u8, err: anyerror) anyerror {
     std.debug.print("{s} variant {d} refused with {s}: {s}\n", .{ route.path, index, @errorName(err), bytes });
     return err;
@@ -968,6 +1144,7 @@ fn report(route: *const Route, index: usize, bytes: []const u8, err: anyerror) a
 /// Checks `json` against `schema`, resolving references in `schemas`: the
 /// subset of JSON Schema this document uses.
 fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
+    if (schema == .bool) return schema.bool;
     const rules = schema.object;
     if (rules.get("$ref")) |target| {
         const name = target.string["#/components/schemas/".len..];
@@ -982,7 +1159,16 @@ fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
         for (names.array.items) |name| if (equal(name, json)) return true;
         return false;
     }
-    const kind = rules.get("type").?.string;
+    const type_rule = rules.get("type") orelse return true;
+    if (type_rule == .array) {
+        for (type_rule.array.items) |kind| if (conformsKind(schemas, rules, kind.string, json)) return true;
+        return false;
+    }
+    return conformsKind(schemas, rules, type_rule.string, json);
+}
+
+fn conformsKind(schemas: ObjectMap, rules: ObjectMap, kind: []const u8, json: Value) bool {
+    if (std.mem.eql(u8, kind, "integer")) return json == .integer;
     if (std.mem.eql(u8, kind, "null")) return json == .null;
     if (std.mem.eql(u8, kind, "boolean")) return json == .bool;
     if (std.mem.eql(u8, kind, "string")) {
@@ -1004,12 +1190,13 @@ fn conforms(schemas: ObjectMap, schema: Value, json: Value) bool {
     }
     if (std.mem.eql(u8, kind, "object")) {
         if (json != .object) return false;
-        const properties = rules.get("properties").?.object;
+        if (rules.get("maxProperties")) |limit| if (json.object.count() > limit.integer) return false;
+        const properties = if (rules.get("properties")) |props| props.object else ObjectMap.empty;
         for (json.object.keys(), json.object.values()) |name, value| {
-            const property = properties.get(name) orelse return false;
+            const property = properties.get(name) orelse rules.get("additionalProperties") orelse continue;
             if (!conforms(schemas, property, value)) return false;
         }
-        for (rules.get("required").?.array.items) |name| if (!json.object.contains(name.string)) return false;
+        if (rules.get("required")) |required| for (required.array.items) |name| if (!json.object.contains(name.string)) return false;
         return true;
     }
     return false;
@@ -1025,11 +1212,17 @@ fn equal(a: Value, b: Value) bool {
     };
 }
 
-/// The two pattern forms this document writes: decimal, and fixed-length hex.
+/// The pattern forms this document writes: decimal, tool names and fixed-length hex.
 fn matches(pattern: []const u8, text: []const u8) bool {
     if (std.mem.eql(u8, pattern, "^(0|[1-9][0-9]*)$")) {
         if (text.len == 0 or (text.len > 1 and text[0] == '0')) return false;
         for (text) |byte| if (!std.ascii.isDigit(byte)) return false;
+        return true;
+    }
+    if (std.mem.startsWith(u8, pattern, "^[A-Za-z0-9_-]{1,")) {
+        const maximum = std.fmt.parseInt(usize, pattern["^[A-Za-z0-9_-]{1,".len .. pattern.len - "}$".len], 10) catch unreachable;
+        if (text.len == 0 or text.len > maximum) return false;
+        for (text) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return false;
         return true;
     }
     const length = std.fmt.parseInt(usize, pattern["^[0-9a-f]{".len .. pattern.len - "}$".len], 10) catch unreachable;
@@ -1052,6 +1245,12 @@ test "replies the Host renders conform to their schemas" {
                 return error.Nonconforming;
             }
         }
+        schemas: ObjectMap,
+        allocator: std.mem.Allocator,
+
+        pub fn report(self: @This(), bytes: []const u8) !void {
+            try check(self.schemas, "InspectSessionReply", bytes, self.allocator);
+        }
     };
     const a = arena.allocator();
     var out: std.Io.Writer.Allocating = .init(a);
@@ -1069,17 +1268,21 @@ test "replies the Host renders conform to their schemas" {
     out.clearRetainingCapacity();
     var facts: protocol.ActivityFacts = .{ .end = 9, .count = 2 };
     facts.items[0] = .{ .position = 1, .at = 7, .value = .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = .{ .length = 3, .digest = @splat(1) }, .admitted_at = 7 } } };
-    facts.items[1] = .{ .position = 2, .ordinal = 1, .at = 8, .value = .{ .turn_ended = .{ .turn = 1, .operation = 1, .ending = @fromBackingInt(@intCast(0)), .code = .{}, .content = null } } };
+    facts.items[1] = .{ .position = 2, .ordinal = 1, .at = 8, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = @fromBackingInt(@intCast(0)), .code = .{}, .content = null } } };
     facts.work.work.state = .{ .failed = .{ .since = 3, .code = .{}, .resets_at = 4 } };
     try facts.writeJson(&out.writer);
     try Case.check(schemas, "ActivityPageReply", out.written(), a);
 
     out.clearRetainingCapacity();
-    const row: protocol.SessionRow = .{ .tools = .initOne(.bash), .label = .{} };
+    const row: protocol.SessionRow = .{ .tools = try .of(&.{"bash"}), .label = .{} };
     try protocol.writeShape(&out.writer, protocol.session_list_reply.head, .{});
     try row.writeJson(&out.writer);
     try protocol.writeShape(&out.writer, protocol.session_list_reply.last_tail, .{ protocol.ListDelta.full, "x" });
     try Case.check(schemas, "ListSessionsReply", out.written(), a);
+
+    // These are the Store's real streaming reports, not schema examples:
+    // an added hand-written field must fail additionalProperties here.
+    try store.checkSessionReportsForTesting(Case{ .schemas = schemas, .allocator = a });
 }
 
 test "statuses, media types and required headers match what the Host sends" {
@@ -1101,6 +1304,7 @@ test "statuses, media types and required headers match what the Host sends" {
         .{ .path = "/v1/conversation-content", .type = "application/octet-stream" },
         .{ .path = "/v1/activity-content", .type = "application/octet-stream" },
         .{ .path = "/v1/inspect-session", .type = "application/json" },
+        .{ .path = "/v1/inspect-session", .type = "application/octet-stream" },
     };
     for (media) |each| {
         const responses = paths.get(each.path).?.object.get("post").?.object.get("responses").?.object;
@@ -1113,3 +1317,7 @@ test "statuses, media types and required headers match what the Host sends" {
     }
     try std.testing.expect(required);
 }
+
+const ActivitySearchItem = struct {
+    pub const openapi_shape = protocol.ActivitySearchFacts.Item.head ++ .{ ListOf(protocol.ActivitySearchFacts.Hit), "]}" };
+};

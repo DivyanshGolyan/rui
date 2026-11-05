@@ -20,6 +20,7 @@ const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_admission_domain = @import("model_admission.zig");
 const store_access = @import("../access.zig");
+const forward_domain = @import("forward.zig");
 const turn_domain = @import("turn.zig");
 const failure_class = @import("../../failure_class.zig");
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
@@ -541,7 +542,7 @@ pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: A
 /// Session's permission mode and revision, and the last Conversation
 /// ordinal.
 const success_facts = rsql.Read(.{
-    .sql = "SELECT CASE WHEN r.tool_set_id IS NULL THEN NULL ELSE " ++ tool_set.maskSql("r.tool_set_id") ++ " END AS tools_mask," ++
+    .sql = "SELECT CASE WHEN r.tool_set_id IS NULL THEN NULL ELSE " ++ tool_set.maskSql("coalesce(r.loaded_tool_set_id,r.tool_set_id)") ++ " END AS tools_mask," ++
         tool_set.everMaskSql("o.session_ref", "o.settings_revision") ++ " AS ever_mask,s.permission_mode,s.revision," ++
         "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=o.session_ref),0) AS entry_base " ++
         "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
@@ -878,7 +879,7 @@ const DuplicateVisitor = struct {
 
 const historical_mcp = rsql.Read(.{
     .sql = "SELECT tool.name,max(CASE WHEN r.revision=o.settings_revision THEN 1 ELSE 0 END) AS offered FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision<=o.settings_revision " ++
-        "JOIN tool_set_member member ON member.tool_set_id=r.tool_set_id JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "JOIN tool_set_member member ON member.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE o.operation_id=?1 AND tool.owner='mcp' AND tool.name IN (" ++ parameters(2, batch_items) ++ ") GROUP BY tool.name",
     .Args = NameArgs(),
     .Row = struct { name: protocol.Bounded(tool_catalog.max_name_bytes), offered: bool },
@@ -1203,7 +1204,9 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
 /// After the membership lookup, collect final rejections into the fourth
 /// identity slot reserved for each call. Failures stay with the write walk,
 /// which reports them in call order rather than during speculative collection.
-fn collectFinalRejections(batch: *Batch, output: *const ValidatedOutput, io: std.Io, offered: *const tool_catalog.Offered) void {
+/// Noinline: inspection scratch must not grow the import frame that drains
+/// queued writes and opens SQLite content sinks.
+noinline fn collectFinalRejections(batch: *Batch, output: *const ValidatedOutput, io: std.Io, offered: *const tool_catalog.Offered) void {
     var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch return;
     reader.offset = batch.start;
     var name: ?OutputMetadataRecord = null;
@@ -1726,15 +1729,7 @@ fn Settlement(comptime A: type) type {
             }
             // A call has its description whether or not it was offered; one
             // whose arguments the parser rejected has none.
-            var description = call_facts.description();
-            if (call_facts.tool) |*tool| if (tool.runner() == .mcp) {
-                // Use the offered name within the existing 100-byte description
-                // wire/schema. The richer 200-byte MCP rui_call_description
-                // projection is deferred; preserve raw arguments unchanged.
-                var fallback: tool_catalog.Description = .{ .len = 0 };
-                try fallback.set(tool.name);
-                description = fallback;
-            };
+            const description = try callDescription(&call_facts);
 
             s.a.write(insert_call, .{
                 .operation_id = s.binding.operation_id,
@@ -1754,8 +1749,9 @@ fn Settlement(comptime A: type) type {
             if (rejection_code != null) return;
             // A core tool acts only on the Store, so no person decides it.
             const authorized = call_facts.tool.?.runner() == .core or s.settling.permission_mode;
+            const action_id = try s.a.identity(.action_id);
             s.a.write(insert_action, .{
-                .action_id = try s.a.identity(.action_id),
+                .action_id = action_id,
                 .operation_id = s.binding.operation_id,
                 .call_ordinal = s.imported_calls,
                 .session = s.session,
@@ -1764,6 +1760,7 @@ fn Settlement(comptime A: type) type {
                 .timeout_ms = if (call_facts.bashArguments()) |arguments| arguments.timeout_ms else null,
                 .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
             });
+            if (!authorized) try forward_domain.queue(s.a, &s.session.ref, &s.session.ref, .approval, action_id);
         }
     };
 }
@@ -1889,6 +1886,19 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
     try writeChecked(sink, &decoded.hash, decoded.window[0..count], written, length);
 }
 
+/// Noinline: description rendering does not retain its bounded scratch on
+/// the import frame while that frame opens SQLite content sinks.
+noinline fn callDescription(facts: *const tool_catalog.CallFacts) !?tool_catalog.Description {
+    if (facts.tool) |*tool| if (tool.runner() == .mcp) {
+        // Keep the existing 100-byte description; the richer 200-byte MCP
+        // projection is deferred. The raw arguments remain unchanged.
+        var fallback: tool_catalog.Description = .{ .len = 0 };
+        try fallback.set(tool.name);
+        return fallback;
+    };
+    return facts.description();
+}
+
 /// One function call's catalog facts: its name and, for bash, its
 /// arguments. noinline: the arguments' content window lives in this frame
 /// only, not in the settlement frame that walks the output's metadata.
@@ -1902,6 +1912,21 @@ noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetad
 
 /// noinline: its read buffer serves the rare schema check, not every
 /// configure frame.
+/// D113: bounded start_agent schema bytes are validated without file capture.
+pub fn validateJsonBytes(bytes: []const u8) !bool {
+    var scanner = std.json.Scanner.initCompleteInput(std.heap.c_allocator, bytes);
+    defer scanner.deinit();
+    try scanner.ensureTotalStackCapacity(protocol.max_json_depth);
+    while (true) {
+        const token = scanner.next() catch |err| switch (err) {
+            error.SyntaxError, error.UnexpectedEndOfInput => return false,
+            else => return err,
+        };
+        if (scanner.stackHeight() > protocol.max_json_depth) return false;
+        if (token == .end_of_document) return true;
+    }
+}
+
 pub noinline fn validateJsonFile(io: std.Io, file: std.Io.File) !bool {
     var read_buffer: [protocol.content_window_bytes]u8 = undefined;
     var file_reader = file.reader(io, &read_buffer);

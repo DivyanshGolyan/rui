@@ -835,10 +835,11 @@ fn startInput(self: *const Self, start: *const view.OwnedStart) !client.MessageI
         .provider = held.given(start.binding().provider),
         .model = held.given(start.binding().model),
         .tools = held.at(start, "tools") orelse product_defaults.tools,
+        .loaded_tools = held.at(start, "loaded-tools"),
         .permission_mode = .{ .present = true, .value = held.at(start, "permission-mode") orelse product_defaults.permission_mode },
-        .compaction_trigger = held.policy(held.at(start, "compaction-trigger")),
+        .compaction_trigger = if (held.at(start, "compaction-trigger") != null and !std.mem.eql(u8, held.at(start, "compaction-trigger").?, "default")) held.policy(held.at(start, "compaction-trigger")) else .{ .present = true, .value = client.defaultCompactionTrigger(start.binding().model orelse product_defaults.recommended_model) },
         .output_reservation = held.policy(held.at(start, "output-reservation")),
-        .reasoning_effort = if (saved_effort) |chosen| .{ .present = true, .value = @tagName(chosen) } else effort,
+        .reasoning_effort = if (effort.present and effort.value != null) effort else client.defaultStartEffort(start.binding().model orelse product_defaults.recommended_model, if (effort.present) null else saved_effort),
         .label = label,
     } };
 }
@@ -1362,6 +1363,8 @@ const Seen = struct {
         provider: ?protocol.Bounded(64) = null,
         model: ?protocol.Bounded(64) = null,
         permission_mode: protocol.Bounded(64) = .{},
+        tools: ?protocol.Bounded(64) = null,
+        loaded_tools: ?protocol.Bounded(64) = null,
         label: ?protocol.Bounded(64) = null,
         reasoning_effort: ?protocol.Bounded(64) = null,
     } = .{},
@@ -1435,6 +1438,8 @@ const fake_operations: Operations = .{
                 .provider = if (settings.provider.present) Seen.bounded(settings.provider.value) else null,
                 .model = if (settings.model.present) Seen.bounded(settings.model.value) else null,
                 .permission_mode = Seen.bounded(settings.permission_mode.value),
+                .tools = if (settings.tools) |tools| Seen.bounded(tools) else null,
+                .loaded_tools = if (settings.loaded_tools) |loaded| Seen.bounded(loaded) else null,
                 .label = if (settings.label.value) |label| Seen.bounded(label) else null,
                 .reasoning_effort = if (settings.reasoning_effort.present) Seen.bounded(settings.reasoning_effort.value orelse "") else null,
             };
@@ -1842,6 +1847,23 @@ test "a start with no saved binding names no model, so the Host refuses it" {
     try std.testing.expect(Seen.now.start.label == null);
 }
 
+test "a start sends the held tools and loaded tools" {
+    const rig = try openComposer();
+    defer rig.close();
+    try std.testing.expect(try rig.press("/configure --tools bash --loaded-tools none\rhello\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqualStrings("bash", Seen.now.start.tools.?.slice());
+    try std.testing.expectEqualStrings("none", Seen.now.start.loaded_tools.?.slice());
+}
+
+test "a start with no held loaded tools sends none" {
+    const rig = try openComposer();
+    defer rig.close();
+    try std.testing.expect(try rig.press("hello\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(Seen.now.start.loaded_tools == null);
+}
+
 test "the save's notice names the effort the next start applies, as the start sends it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1870,7 +1892,7 @@ test "the save's notice names the effort the next start applies, as the start se
         try std.testing.expectEqualStrings(case.notice, rig.overview.state.notice.?.text());
         try std.testing.expect(try rig.press("hello\n") == null);
         try std.testing.expect(try rig.settle() == null);
-        if (case.sent) |effort| try std.testing.expectEqualStrings(effort, Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expect(Seen.now.start.reasoning_effort == null);
+        if (case.sent) |effort| try std.testing.expectEqualStrings(effort, Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expectEqualStrings(@tagName(model_capability.defaultReasoningEffort(Seen.now.start.model.?.slice()).?), Seen.now.start.reasoning_effort.?.slice());
     }
 }
 
@@ -1939,7 +1961,7 @@ test "a start takes the saved effort only when the launch read saved defaults" {
         defer rig.close();
         try std.testing.expect(try rig.press("hello\n") == null);
         try std.testing.expect(try rig.settle() == null);
-        if (explicit) try std.testing.expect(Seen.now.start.reasoning_effort == null) else try std.testing.expectEqualStrings("high", Seen.now.start.reasoning_effort.?.slice());
+        if (explicit) try std.testing.expectEqualStrings("medium", Seen.now.start.reasoning_effort.?.slice()) else try std.testing.expectEqualStrings("high", Seen.now.start.reasoning_effort.?.slice());
     }
     // A launch that named everything starts even over an unreadable file.
     var config = try tmp.dir.openDir(std.testing.io, ".config/rui", .{});

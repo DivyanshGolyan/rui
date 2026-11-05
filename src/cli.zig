@@ -7,6 +7,17 @@ const Overview = @import("Overview.zig");
 const session_reads = @import("session_reads.zig");
 const overview_view = @import("overview_view.zig");
 const TestObservation = @import("TestObservation.zig");
+const caller_error = @import("caller_error.zig");
+const caller_exit = @import("caller_exit.zig");
+const caller_rejection = @import("caller_rejection.zig");
+
+// One invocation, including every member of a multi-request command.
+var exit_status: caller_exit.Status = .done;
+
+fn recordExit(status: caller_exit.Status) void {
+    exit_status = exit_status.merge(status);
+}
+const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
@@ -51,11 +62,39 @@ test "detached launcher reports exec failure before claiming Host readiness" {
 
 pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
-        if (err == error.EmptyMessageInput) {
-            @import("stderr.zig").print("Standard input was empty; provide Message text. Nothing was sent.\n", .{});
-        } else if (err != error.HostStopped) stderr.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
-        std.process.exit(1);
+        // Even already-presented errors cross the classifier; their detection
+        // owner retains admission certainty and any recovery handle.
+        const code = caller_error.of(err);
+        if (err != error.Reported and err != error.CallerFailure and err != error.InvalidInvocation and !reportedByOwner(err)) {
+            reportCallerCode(code);
+        } else if (exit_status == .done) {
+            recordExit(if (err == error.InvalidInvocation) .invalid else caller_exit.forCode(.not_sent, code));
+        }
+        std.process.exit(@backingInt(exit_status));
     };
+}
+
+// One invocation-owned bounded witness survives unwinding. Store selectors
+// keep their existing borrowed input/buffer lifetimes, including in the UI.
+var failure_held: caller_error.Held = .{ .resource = "session", .operation = "start", .not_sent = false };
+var failure_store: [protocol.max_store_bytes]u8 = undefined;
+
+noinline fn reportCallerCode(code: caller_error.Code) void {
+    var buffer: [4 * protocol.max_store_bytes + 2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    caller_error.writeLine(&writer, code, failure_held) catch {
+        // stderr itself may be broken. A bounded fallback needs no allocation
+        // and never substitutes a raw Zig name for the original cause.
+        stderr.diagnosticBytes("rui: internal diagnostic could not be rendered. Report this to the Rui maintainer. [internal_unexpected]\n");
+        recordExit(.unclassified);
+        return;
+    };
+    stderr.diagnosticBytes(writer.buffered());
+    recordExit(caller_exit.forCode(.not_sent, code));
+}
+
+fn reportCallerError(err: anyerror) void {
+    reportCallerCode(caller_error.of(err));
 }
 
 fn run(init: std.process.Init) !void {
@@ -71,13 +110,13 @@ fn run(init: std.process.Init) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
         return std.Io.File.stdout().writeStreamingAll(init.io, version_text);
     }
-    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] });
+    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
     if (cli_args.retired(args[1])) |replacement| {
         const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
         stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n", .{ args[1], replacement, replacement_resource });
-        return error.InvalidArguments;
+        return error.InvalidInvocation;
     }
-    const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return @call(.never_inline, newSession, .{ init, args[1..] });
+    const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
     if (args.len == 2 or (args.len == 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h")))) {
         return printHelp(init.io, .{ .resource = resource });
     }
@@ -85,48 +124,56 @@ fn run(init: std.process.Init) !void {
         var operation: [64]u8 = undefined;
         if (std.fmt.bufPrint(&operation, "{s} {s}", .{ @tagName(resource), args[2] }) catch null) |name| if (cli_args.retired(name)) |replacement| {
             stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent.\n", .{ name, replacement, @tagName(resource) });
-            return error.InvalidArguments;
+            return error.InvalidInvocation;
         };
         stderr.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
-        return error.InvalidArguments;
+        return error.InvalidInvocation;
     };
     const definition = command.definition();
+    failure_held.resource = @tagName(resource);
+    failure_held.operation = definition.name;
     // The arena outlives this invocation, so decoded identities do too.
-    const parsed = definition.parse(args[3..], init.arena.allocator()) catch |err| {
-        const problem = switch (err) {
-            error.DuplicateArgument => "an option was repeated",
-            error.UnknownArgument => "unknown option",
-            error.MissingArgumentValue => "an option is missing its value",
-            error.ConflictingArguments => "conflicting selectors or input sources",
-            error.InvalidArguments => if (command == .session_send or command == .session_start)
-                "Message text must come from stdin; positional text is not accepted"
-            else
-                "unexpected argument",
-            error.InvalidInstructionsSource => "use --instructions - to read instructions from stdin",
-            error.InvalidHexIdentity => "a hex selector is not even-length UTF-8 hex within its bound",
-            error.OutOfMemory => "out of memory",
-        };
-        stderr.diagnostic("rui: {s} {s}: {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, problem, @tagName(resource), definition.name });
-        return err;
+    var problem: cli_args.Refusal = undefined;
+    const parsed = definition.parseSyntax(args[3..], init.arena.allocator(), &problem) catch {
+        reportParseProblem(problem, @tagName(resource), definition.name, null);
+        return error.InvalidInvocation;
     };
     if (parsed.help) return printHelp(init.io, .{ .command = definition });
-    if (parsed.missing()) |group| return reportMissing(resource, definition, group);
-    dispatching = true;
-    dispatch(init, command, &parsed, args) catch |err| {
-        if (err == error.InvalidArguments) {
-            stderr.diagnostic("rui: {s} {s}: invalid arguments. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
-            return err;
+    if (parsed.missing()) |group| {
+        reportMissing(resource, definition, group) catch {};
+        return error.InvalidInvocation;
+    }
+    // Fresh argv is checked before capture. A saved explicit capture instead
+    // belongs to its original validator and answer, even after enum changes.
+    validateFreshInvocation(init.io, &parsed, &problem) catch |err| {
+        switch (err) {
+            error.InvalidOptionValue, error.InvalidInstructionsSource, error.ConflictingArguments => {
+                reportParseProblem(problem, @tagName(resource), definition.name, null);
+                return error.InvalidInvocation;
+            },
+            else => return err,
         }
-        // Model rejection already names the ID, supported IDs and repair;
-        // Pre-admission refusals have one diagnostic, with no recovery handle.
-        // A saved rejection or conflict already named its replay.
-        // A stopped Host already said how to start it and resume.
-        if (err == error.InvalidModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted or err == error.HostStopped) return err;
+    };
+    dispatch(init, command, &parsed, args) catch |err| {
+        // The catalog line gives the code; this names the largest variables.
         if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
-        stderr.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
         return err;
     };
     try postCommandHold(init);
+}
+
+/// Owners that print their own diagnostic before returning these errors:
+/// model rejection names the ID, supported IDs and repair; a saved rejection
+/// or conflict names its replay; a stopped Host says how to start it; a
+/// missing terminal names the one-shot commands to use instead.
+/// `error.Reported` tells main the caller has already been told.
+fn reportedByOwner(err: anyerror) bool {
+    return err == error.InvalidModel or err == error.InvalidLabel or err == error.HostStopped or err == error.InteractiveTerminalRequired or err == error.CallerFailure;
+}
+
+fn reportedFailure(err: anyerror) anyerror {
+    if (err != error.CallerFailure) recordExit(caller_exit.knownError(err));
+    return error.Reported;
 }
 
 // `run` stays under the Host for its whole life, so client-only buffers
@@ -153,18 +200,51 @@ noinline fn reportEnvironmentTooLarge(environment: client.Environment) void {
     stderr.diagnostic("{s}", .{writer.buffered()});
 }
 
+/// All argument text, including option spellings copied from argv, crosses
+/// TerminalText before reaching the terminal. No allocation on a parse failure.
+fn writeArgument(writer: *std.Io.Writer, text: []const u8) !void {
+    var safe: TerminalText = .{ .mode = .line };
+    try safe.feed(writer, text);
+    try safe.finish(writer);
+}
+
+noinline fn reportParseProblem(problem: cli_args.Refusal, resource: ?[]const u8, operation: ?[]const u8, unchanged: ?[]const u8) void {
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var held = problem.held(resource, operation);
+    held.unchanged = unchanged;
+    caller_error.writeLine(&writer, problem.code, held) catch unreachable;
+    stderr.diagnosticBytes(writer.buffered());
+}
+
 noinline fn reportMissing(resource: cli_args.Resource, definition: cli_args.Definition, group: []const []const u8) !void {
-    var buffer: [256]u8 = undefined;
+    var buffer: [1024]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     try definition.writeGroup(&writer, group);
-    stderr.diagnostic("rui: {s} {s}: missing {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, writer.buffered(), @tagName(resource), definition.name });
+    reportParseProblem(.{ .code = .option_required, .token = writer.buffered(), .option = false, .accepted = .{ .grammar = writer.buffered() } }, @tagName(resource), definition.name, null);
     return error.InvalidArguments;
+}
+
+/// Existence only chooses the validation authority; Capture still opens,
+/// compares and sends the original record and owns any race or mismatch.
+fn validateFreshInvocation(io: std.Io, parsed: *const cli_args.Parsed, refusal: *cli_args.Refusal) !void {
+    if (!try existingCapture(io, parsed)) try parsed.validateValues(refusal);
+}
+
+fn existingCapture(io: std.Io, parsed: *const cli_args.Parsed) !bool {
+    // --kind selects how to open a capture; it does not revalidate its intent.
+    if (!parsed.definition.mutation or std.mem.eql(u8, parsed.definition.name, "recover")) return false;
+    const record = parsed.get("record") orelse return false;
+    _ = std.Io.Dir.cwd().statFile(io, record, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
 }
 
 fn dispatch(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed, args: []const []const u8) !void {
     if (parsed.get("session")) |id| {
         if (!protocol.validSessionId(id)) {
-            stderr.diagnostic("rui: Session ID must be exactly six lowercase Crockford characters, for example k7m2qx. Nothing was captured or sent.\n", .{});
             return error.InvalidSession;
         }
     }
@@ -258,7 +338,6 @@ fn createConfigDirectory(io: std.Io, home: []const u8) !void {
 const SetupReader = enum { command_line, conversation, overview };
 
 fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupReader) !void {
-    if (parsed.get("model")) |model| try admitModel(model);
     const home = init.environ_map.get("HOME") orelse {
         stderr.diagnostic("rui: setup needs an absolute HOME; no preferences saved.\n", .{});
         return error.HomeUnavailable;
@@ -273,12 +352,14 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     const readiness = localReadiness(init);
     const changed = edit.store != .keep or edit.provider != .keep or edit.model != .keep or edit.notifications != null or edit.reasoning_effort != .keep;
     const values = (if (changed) preferences.update(home, edit, &readiness) else preferences.load(home)) catch |err| {
+        if (err == error.InvalidPreferenceStore and edit.store == .set) holdStore(edit.store.set);
         const said = preferences.failure(err);
         if (said.reason) |reason| {
             stderr.diagnostic("rui: setup: {s}; {s}\n", .{ reason, if (said.saved) "no Session changed." else "no preferences saved." });
-        } else stderr.diagnostic("rui: setup {s}: {s}; inspect HOME/.config/rui/preferences and its private directory before retrying. No alternate Store selected.\n", .{ if (changed) "save failed" else "read failed", @errorName(err) });
-        return err;
+        } else stderr.diagnostic("rui: setup {s}: {s}; inspect HOME/.config/rui/preferences and its private directory before retrying. No alternate Store selected.\n", .{ if (changed) "save failed" else "read failed", @tagName(caller_error.of(preferenceFailure(err))) });
+        return preferenceFailure(err);
     };
+    if (parsed.get("model")) |model| try admitModel(model);
     var fallback_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const prospective_store: ?[]const u8 = if (values.store.len != 0) values.store.slice() else preferences.defaultStore(home, &fallback_buffer) catch null;
     const available_store: ?platform.Paths = if (prospective_store) |path| platform.resolveClientPaths(init.io, path) catch null else null;
@@ -441,35 +522,103 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
 // omitted destinations use the same saved/HOME rule in every CLI mode.
 // Missing HOME is an environment repair, not a Store or request outcome:
 // report what needed it before any capture or transmission.
-fn homeRequired(comptime need: []const u8) error{HomeUnavailable} {
-    stderr.diagnostic("rui: HOME is not set; " ++ need ++ ". Set HOME to an absolute directory and retry. Nothing was captured or sent.\n", .{});
+fn homeRequired(comptime _: []const u8) error{HomeUnavailable} {
     return error.HomeUnavailable;
 }
 
+/// How a command started under a Session's Bash drops the peer context the
+/// Host gave it, for diagnostics that refuse that context.
+const plain_caller = "env -u RUI_ADDRESS -u RUI_STORE -u RUI_SENDER_HANDLE rui ...";
+
 fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![]const u8 {
-    if (explicit) |path| {
-        if (path.len == 0) return error.InvalidStore;
-        return path;
-    }
+    if (explicit) |path| return rememberStore(init, path, false);
     if (init.environ_map.get("RUI_STORE")) |path| {
         const address = init.environ_map.get("RUI_ADDRESS") orelse return error.InvalidRuiAddress;
         const handle = init.environ_map.get("RUI_SENDER_HANDLE") orelse return error.InvalidRuiAddress;
         if (path.len == 0 or handle.len == 0 or !protocol.validSessionId(address)) return error.InvalidRuiAddress;
-        _ = try platform.resolveClientPaths(init.io, path);
-        return path;
+        return rememberStore(init, path, true);
     }
     if (init.environ_map.get("RUI_ADDRESS") != null or init.environ_map.get("RUI_SENDER_HANDLE") != null) return error.InvalidRuiAddress;
     const home = init.environ_map.get("HOME") orelse return homeRequired("without --store the Store comes from saved defaults or HOME/.local/share/rui/store");
-    const defaults = preferences.load(home) catch |err| {
-        stderr.diagnostic("rui: cannot read private setup defaults ({s}); use rui defaults inspect to inspect them. No Store selected.\n", .{@errorName(err)});
-        return err;
-    };
+    const defaults = preferences.load(home) catch |err| return preferenceFailure(err);
     if (defaults.store.len != 0) {
-        _ = try platform.resolveClientPaths(init.io, defaults.store.slice());
         @memcpy(buffer[0..defaults.store.len], defaults.store.slice());
-        return buffer[0..defaults.store.len];
+        return rememberStore(init, buffer[0..defaults.store.len], true);
     }
-    return preferences.defaultStore(home, buffer);
+    return rememberStore(init, try preferences.defaultStore(home, buffer), false);
+}
+
+fn rememberStore(init: std.process.Init, path: []const u8, require_existing: bool) ![]const u8 {
+    // Retain one bounded display witness, not one arena copy per interactive
+    // command. Return the original borrowed path; callers own its lifetime.
+    holdStore(path);
+    // Status observes first and preserves its existing stdout envelope, even
+    // for an unusable Store. host() classifies only after writing that value.
+    if (!require_existing and std.mem.eql(u8, failure_held.resource orelse "", "host") and std.mem.eql(u8, failure_held.operation orelse "", "status")) return path;
+    try validateStoreSpelling(path);
+    _ = platform.resolveClientPaths(init.io, path) catch |err| {
+        // Explicit/HOME Host administration may name an absent destination.
+        // Saved and inherited Stores must still exist; never recreate them.
+        if (err != error.FileNotFound or require_existing or !std.mem.eql(u8, failure_held.resource orelse "", "host")) return storeFailure(err);
+    };
+    return path;
+}
+
+fn validateStoreSpelling(path: []const u8) error{InvalidStorePath}!void {
+    if (path.len == 0 or !std.unicode.utf8ValidateSlice(path)) return error.InvalidStorePath;
+    for (path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidStorePath;
+}
+
+fn holdStore(path: []const u8) void {
+    // This is display-only storage, not a validated identity: malformed UTF-8
+    // must reach TerminalText rather than turning an invocation error into a trap.
+    const length = @min(path.len, failure_store.len);
+    std.mem.copyForwards(u8, failure_store[0..length], path[0..length]);
+    failure_held.store = failure_store[0..length];
+}
+
+fn storeFailure(err: anyerror) anyerror {
+    return switch (err) {
+        error.InvalidStore, error.InvalidStorePath, error.StorePathTooLong, error.NameTooLong, error.BadPathName => error.InvalidStorePath,
+        error.FileNotFound, error.NotDir, error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem, error.InsecureDirectoryPermissions, error.SymLinkLoop => error.StoreUnavailable,
+        else => err,
+    };
+}
+
+// A read never has admission uncertainty. Distinguish a lost Store directory
+// from a missing listener at this transport boundary, not by OS name in main.
+fn readTransportFailure(io: std.Io, store: []const u8, err: anyerror) anyerror {
+    holdStore(store);
+    if (!client.hostUnreachable(err)) return err;
+    const paths = platform.resolveClientPaths(io, store) catch |store_err| return storeFailure(store_err);
+    holdStore(paths.store.slice());
+    return hostTransportFailure(io, paths.store.slice(), err);
+}
+
+fn hostTransportFailure(io: std.Io, store: []const u8, err: anyerror) anyerror {
+    if (!client.hostUnreachable(err)) return err;
+    return classifyHostTransportFailure(err, client.hostLockState(io, store));
+}
+
+fn classifyHostTransportFailure(err: anyerror, lock: client.HostLockState) anyerror {
+    if (!client.hostUnreachable(err)) return err;
+    return switch (lock) {
+        .free => error.HostNotServing,
+        // A missing/refused socket with an owned Store denotes shutdown.
+        // A reset, cut-off reply or local socket() failure proves no such state.
+        .held => switch (err) {
+            error.FileNotFound, error.ConnectionRefused => error.HostStopping,
+            else => err,
+        },
+        .failure => err,
+    };
+}
+
+fn preferenceFailure(err: anyerror) anyerror {
+    return switch (err) {
+        error.AccessDenied, error.PermissionDenied, error.FileNotFound, error.NotDir, error.ReadOnlyFileSystem, error.SymLinkLoop => error.PreferencesUnavailable,
+        else => err,
+    };
 }
 
 fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_args.Parsed) !void {
@@ -479,6 +628,7 @@ fn host(init: std.process.Init, command: cli_args.Command, parsed: *const cli_ar
     if (command == .host_pause) return pauseHost(init.io, selected, if (parsed.get("instance")) |instance| try protocol.parseInstanceId(instance) else null);
     const status = client.hostStatus(init.io, selected);
     try writeHostStatus(init.io, status);
+    try validateStoreSpelling(selected);
     switch (status) {
         .incompatible => return error.IncompatibleHost,
         .access_failure => return error.StoreAccessFailed,
@@ -530,7 +680,7 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
     try std.Io.File.stderr().writeStreamingAll(io, notice.buffered());
     var reply: client.ReplyBuffer = .{};
     const outcome = client.stopHost(io, .{ .store = paths.store.slice(), .instance = target }, &reply) catch |err| {
-        stderr.diagnostic("rui: pause reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@errorName(err)});
+        stderr.diagnostic("rui: pause reply unconfirmed ({s}); inspect this Store and retry only the same --instance target. Do not target a replacement implicitly.\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
         return err;
     };
     switch (outcome) {
@@ -539,8 +689,10 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
             const writer = output.init(io, .stdout);
             try writer.print("{{\"version\":\"{s}\",\"type\":\"host_pause\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
             try std.json.Stringify.value(paths.store.slice(), .{}, writer);
-            try writer.print(",\"instance\":\"{s}\",\"retirement\":\"unconfirmed\"}}\n", .{&hex});
+            const retired = try awaitRetirement(io, paths.store.slice());
+            try writer.print(",\"instance\":\"{s}\",\"retirement\":\"{s}\"}}\n", .{ &hex, if (retired) "confirmed" else "unconfirmed" });
             try output.finish();
+            if (!retired) stderr.diagnostic("rui: the Host acknowledged the pause but still holds this Store after {d} seconds, usually because cleanup is still running. A new Host can start once rui host status reports unavailable.\n", .{product_defaults.host_shutdown_seconds});
         },
         .instance_changed => {
             stderr.diagnostic("rui: Host instance changed; replacement was not paused. Inspect rui host status before any new intent.\n", .{});
@@ -551,6 +703,20 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
             return error.HostStopUnconfirmed;
         },
     }
+}
+
+/// The old Host holds the Store's lease until it lets go of the Store, so a
+/// free lease confirms retirement. Only the lease is observed: asking the
+/// Host would add exchanges to the shutdown being watched. The wait shares
+/// the launched Host's drain bound.
+fn awaitRetirement(io: std.Io, store: []const u8) !bool {
+    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + product_defaults.host_shutdown_seconds * std.time.ns_per_s;
+    while (platform.StoreLease.observe(io, store) != .unowned) {
+        const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+        if (remaining <= 0) return false;
+        try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 50 * std.time.ns_per_ms))), .awake);
+    }
+    return true;
 }
 
 /// Null capacity leaves a new Host on product_defaults.active_capacity.
@@ -623,8 +789,8 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
         const count = std.c.read(startup_read, startup_bytes[startup_length..].ptr, startup_bytes.len - startup_length);
         if (count > 0) startup_length += @intCast(count);
         const startup = startup_bytes[0..startup_length];
-        if ((std.mem.indexOf(u8, startup, "(exit status 1)\n") != null or count == 0 or startup_length == startup_bytes.len) and
-            std.mem.indexOf(u8, startup, "error: StoreAlreadyOwned (exit status 1)\n") == null)
+        if ((count == 0 or startup_length == startup_bytes.len) and
+            std.mem.indexOf(u8, startup, "[store_locked]\n") == null)
         {
             // A competing candidate may have lost the lease to a ready Host.
             if (client.hostStatusUntil(io, paths.store.slice(), until) != .ready) {
@@ -655,7 +821,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 const notices = startup_bytes[0..startup_length];
                 // A competing launcher lost to this ready owner; its expected
                 // lease refusal is not a warning about the running Host.
-                if (startup_length != 0 and std.mem.indexOf(u8, notices, "error: StoreAlreadyOwned (exit status 1)\n") == null)
+                if (startup_length != 0 and std.mem.indexOf(u8, notices, "[store_locked]\n") == null)
                     _ = @import("stderr.zig").write(notices);
                 return reportStartedHost(io, ready, quiet, capacity);
             },
@@ -749,7 +915,7 @@ fn finishLogin(init: std.process.Init, provider: protocol.Provider, receipt: []c
     const name = providerPresentation(provider).name;
     const added = default_outcome catch |err| {
         var buffer: [256]u8 = undefined;
-        try stdout.writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "Rui: {s} may not be saved as the default for new Sessions ({s}). Check with: rui defaults inspect\n", .{ name, @errorName(err) }));
+        try stdout.writeStreamingAll(init.io, try std.fmt.bufPrint(&buffer, "Rui: {s} may not be saved as the default for new Sessions ({s}). Check with: rui defaults inspect\n", .{ name, preferences.loginDefaultFailureReason(err) }));
         return false;
     };
     var buffer: [64]u8 = undefined;
@@ -1139,7 +1305,7 @@ fn guideProviderLogin(init: std.process.Init, readiness: *const provider_selecti
     }
     if (readiness.get(provider).usable()) {
         _ = preferences.update(home, .{ .provider = .{ .set = @tagName(provider) } }, readiness) catch |err| {
-            stderr.diagnostic("rui: could not save {s} as the provider for new Sessions ({s}); use rui defaults configure --provider {s}.\n", .{ @tagName(provider), @errorName(err), @tagName(provider) });
+            stderr.diagnostic("rui: could not save {s} as the provider for new Sessions ({s}); use rui defaults configure --provider {s}.\n", .{ @tagName(provider), @tagName(caller_error.of(preferenceFailure(err))), @tagName(provider) });
             return;
         };
         var notice: [64]u8 = undefined;
@@ -1148,7 +1314,7 @@ fn guideProviderLogin(init: std.process.Init, readiness: *const provider_selecti
     }
     if (provider == .openai) {
         saveApiKey(init, .choose) catch |err| {
-            if (err != error.InvalidApiKey and err != error.LoginInterrupted) stderr.diagnostic("rui: the OpenAI key was not saved ({s}).\n", .{@errorName(err)});
+            if (err != error.InvalidApiKey and err != error.LoginInterrupted) stderr.diagnostic("rui: the OpenAI key was not saved ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
         };
         return;
     }
@@ -1175,7 +1341,11 @@ const NewSessionOptions = struct {
     fn parse(args: []const []const u8) !?NewSessionOptions {
         // The fresh-session grammar has no hex spellings to allocate.
         var nothing = std.heap.FixedBufferAllocator.init(&.{});
-        const parsed = cli_args.fresh_session.parse(args, nothing.allocator()) catch return usage();
+        var problem: cli_args.Refusal = undefined;
+        const parsed = cli_args.fresh_session.parse(args, nothing.allocator(), &problem) catch {
+            reportParseProblem(problem, null, null, null);
+            return error.InvalidInvocation;
+        };
         if (parsed.help) return null;
         return .{ .store = parsed.get("store"), .provider = parsed.get("provider"), .model = parsed.get("model") };
     }
@@ -1185,11 +1355,11 @@ const NewSessionOptions = struct {
 /// any Host or Session change when that terminal is absent or cannot draw.
 fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void {
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) {
-        stderr.diagnostic("rui needs terminal input and output {s}; scripts and agents use rui session start or rui session send --to ID, with Message text on stdin. No Host or Session changed.\n", .{purpose});
+        stderr.diagnostic("rui needs terminal input and output {s}; scripts and agents use rui session start or rui session send --to ID, with Message text on stdin. No Host or Session changed. [terminal_required]\n", .{purpose});
         return error.InteractiveTerminalRequired;
     }
     if (std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb")) {
-        stderr.diagnostic("rui needs a terminal that supports cursor addressing {s}; TERM=dumb does not. Set TERM for your terminal or use explicit one-shot commands. No Host or Session changed.\n", .{purpose});
+        stderr.diagnostic("rui needs a terminal that supports cursor addressing {s}; TERM=dumb does not. Set TERM for your terminal or use explicit one-shot commands. No Host or Session changed. [terminal_required]\n", .{purpose});
         return error.InteractiveTerminalRequired;
     }
 }
@@ -1259,8 +1429,8 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
         // Rebuild in stable storage on every pass; fully explicit intent never
         // reads preferences, even after login's independent default-save failure.
         snapshot = .{ .intent = intent, .defaults = if (intent.needsPreferences()) preferences.load(home) catch |err| {
-            if (!after_choice) stderr.diagnostic("rui: private setup defaults unreadable ({s}); use rui defaults inspect before creating a Session.\n", .{@errorName(err)});
-            return err;
+            if (!after_choice) stderr.diagnostic("rui: private setup defaults unreadable ({s}); use rui defaults inspect before creating a Session.\n", .{@tagName(caller_error.of(preferenceFailure(err)))});
+            return preferenceFailure(err);
         } else .{} };
         const destination = try snapshot.destination(home, &fallback);
         selected_store = destination.path;
@@ -1270,8 +1440,8 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
         const usable: provider_selection.Readinesses = .initFill(.configured);
         _ = snapshot.resolve(&usable) catch |err| {
             if (after_choice) {
-                stderr.diagnostic("rui: unsupported prospective provider/model after login ({s}); use rui defaults inspect. No Session created.\n", .{@errorName(err)});
-            } else stderr.diagnostic("rui: unsupported prospective provider/model ({s}); use rui defaults inspect or select codex / " ++ product_defaults.recommended_model ++ ". No Session created.\n", .{@errorName(err)});
+                stderr.diagnostic("rui: unsupported prospective provider/model after login ({s}); use rui defaults inspect. No Session created.\n", .{@tagName(caller_error.of(err))});
+            } else stderr.diagnostic("rui: unsupported prospective provider/model ({s}); use rui defaults inspect or select codex / " ++ product_defaults.recommended_model ++ ". No Session created.\n", .{@tagName(caller_error.of(err))});
             return err;
         };
         readiness = localReadiness(init);
@@ -1308,9 +1478,10 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
 }
 
 fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
+    holdStore(destination);
     if (saved) {
-        _ = try platform.resolveClientPaths(io, destination);
-    } else try platform.validateStoreDestination(io, destination);
+        _ = platform.resolveClientPaths(io, destination) catch |err| return storeFailure(err);
+    } else platform.validateStoreDestination(io, destination) catch |err| return storeFailure(err);
     switch (client.hostStatus(io, destination)) {
         .ready => |ready| if (!protocol.servesModel(ready.capabilities.providers)) return error.HostModelUnavailable,
         .unavailable => {},
@@ -1424,7 +1595,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     // and holds the frame for its life: the provider borrows the key.
     const launched: ?*launch_frame.Frame = if (parsed.has("launch-frame")) try readLaunchFrame(init) else null;
     defer if (launched) |frame| {
-        frame.wipe();
+        frame.deinit();
         std.heap.c_allocator.destroy(frame);
     };
     var launch_socket: [platform.max_launch_socket_path_bytes]u8 = undefined;
@@ -1570,7 +1741,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         bash_path,
         bash_timeout_ms,
         init.environ_map.get("HOME"),
-        if (launched) |frame| .{ .runtime_dir = frame.runtime_dir.slice(), .socket_path = frame.socketPath(&launch_socket), .stdin = 0, .paused = frame.paused, .mcp_servers = frame.mcpServerSlice() } else null,
+        if (launched) |frame| .{ .runtime_dir = frame.runtime_dir.slice(), .socket_path = frame.socketPath(&launch_socket), .stdin = 0, .paused = frame.paused, .mcp_servers = frame.mcpServerSlice(), .presets = frame.presets } else null,
     ) catch |err| {
         // A launched Host stops when its stdin closes; that is its clean end.
         if (launched != null and err == error.EffectAwareShutdown) return;
@@ -1627,7 +1798,7 @@ const LiveAddress = struct { store: []const u8, session: []const u8 };
 fn labelArgument(text: []const u8) error{InvalidLabel}!client.OptionalPolicy {
     if (text.len == 0) return .{ .present = true, .value = null };
     if (protocol.validLabel(text)) return .{ .present = true, .value = text };
-    _ = @import("stderr.zig").write("\nrui: --label must be one line of 1-100 bytes that is not blank. Nothing captured or changed.\n" ++ cli_args.label_help);
+    _ = @import("stderr.zig").write("\nrui: --label must be one line of 1-100 bytes that is not blank. Nothing captured or changed. [invalid_label]\n" ++ cli_args.label_help);
     return error.InvalidLabel;
 }
 
@@ -1664,7 +1835,7 @@ fn admitModel(model: []const u8) error{InvalidModel}!void {
     } else {
         out.print("ID ({d} bytes exceeds the {d}-byte limit)", .{ model.len, protocol.max_model_bytes }) catch unreachable;
     }
-    out.writeAll(": a model ID is 1–256 printable non-space ASCII bytes. Nothing captured or changed.\n" ++ model_capability.model_help ++ "See rui session configure --help.\n") catch unreachable;
+    out.writeAll(": a model ID is 1–256 printable non-space ASCII bytes. Nothing captured or changed.\n" ++ model_capability.model_help ++ "See rui session configure --help. [model_id_malformed]\n") catch unreachable;
     _ = @import("stderr.zig").write(out.buffered());
     return error.InvalidModel;
 }
@@ -1673,7 +1844,6 @@ fn admitModel(model: []const u8) error{InvalidModel}!void {
 /// its message instead and is never true.
 fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool) !bool {
     const io = init.io;
-    const interactive = live != null;
     const named = if (live) |address| address.session else parsed.get("session");
     var input = client.ConfigureInput{
         .store = "",
@@ -1688,6 +1858,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (parsed.get("workspace")) |workspace| input.workspace = .{ .present = true, .value = workspace };
     if (parsed.get("instructions")) |path| input.instructions = .{ .state = .value, .path = path };
     input.tools = parsed.get("tools");
+    input.loaded_tools = parsed.get("loaded-tools");
     if (parsed.get("permission-mode")) |mode| input.permission_mode = .{ .present = true, .value = mode };
     if (parsed.get("output-schema")) |path| input.output_schema = .{ .state = .value, .path = path };
     if (parsed.has("text-output")) input.output_schema = .{ .state = .explicit_null };
@@ -1696,6 +1867,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (parsed.get("reasoning-effort")) |text| input.reasoning_effort = policyArgument(text);
     if (parsed.get("label")) |text| input.label = try labelArgument(text);
     var binding: new_session_selection.Binding = .{};
+    var saved_effort: ?model_capability.ReasoningEffort = null;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     // Only fresh creation resolves defaults, once, into the capture, through
     // the same prospective selection as a new interactive Session. Addressed
@@ -1710,14 +1882,15 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         // spells them never depends on the preferences file.
         const snapshot: new_session_selection.Snapshot = .{ .intent = intent, .defaults = if (intent.provider == null or intent.model == null) blk: {
             const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider and --model reads saved defaults");
-            break :blk try preferences.load(home);
+            break :blk preferences.load(home) catch |err| return preferenceFailure(err);
         } else .{} };
+        saved_effort = snapshot.defaults.reasoning_effort;
         binding = try snapshot.resolveUnprompted();
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
-        if (!input.reasoning_effort.present) if (model_capability.startEffort(snapshot.defaults.reasoning_effort, binding.model.slice())) |effort| {
-            input.reasoning_effort = .{ .present = true, .value = @tagName(effort) };
-        };
+        if (!input.reasoning_effort.present) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), snapshot.defaults.reasoning_effort);
+        if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), null);
+        if (!input.compaction_trigger.present or input.compaction_trigger.value == null) input.compaction_trigger = .{ .present = true, .value = client.defaultCompactionTrigger(binding.model.slice()) };
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -1728,18 +1901,43 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
     if (start) {
-        try message(init, parsed, input);
+        try message(init, parsed, .{
+            .input = input,
+            .receipt = StartConfiguration.resolve(input, parsed.has("reasoning-effort"), saved_effort),
+        });
         return false;
     }
     var step: ?client.Step = .store;
-    errdefer reportFailureStep(step);
+    return configureCaptured(init, requester, parsed, live, input, &step) catch |err| {
+        return if (step == .store) storeFailure(err) else err;
+    };
+}
+
+fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, configuration: client.ConfigureInput, step: *?client.Step) !bool {
+    const io = init.io;
+    const interactive = live != null;
+    var input = configuration;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
+    if (input.session == .named and ((input.compaction_trigger.present and input.compaction_trigger.value == null) or (input.reasoning_effort.present and input.reasoning_effort.value == null))) {
+        var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
+        if (input.model.present) {
+            try current_model.set(input.model.value);
+        } else {
+            var discard: std.Io.Writer.Discarding = .init(&.{});
+            const observed = try inspectWorkTo(init, requester, input.store, input.session.named, &discard.writer);
+            defer observed.file.close(io);
+            try current_model.set(observed.current.settings.model.slice());
+        }
+        if (input.compaction_trigger.present and input.compaction_trigger.value == null) input.compaction_trigger.value = client.defaultCompactionTrigger(current_model.slice());
+        if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(current_model.slice(), null);
+    }
+
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var sender = requester;
     sender.drop_reply = parsed.get("test-drop-reply");
-    var captured = try takeCapture(&step, client.captureConfigure(io, input, target));
+    var captured = try takeCapture(step, client.captureConfigure(io, input, target));
     const saved = captured.identity().*;
     const replay = captured.replay;
     const human = replay == .generated;
@@ -1748,15 +1946,15 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     const reply = blk: {
         defer captured.close(io);
         if (!interactive) try announceCapture(io, &captured);
-        break :blk takeReply(&step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
+        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay);
     } catch |err| {
-        if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
+        if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
     // Record framed admission before presentation; writeMutationReply owns errors.
     if (human and interactive) admitted = if (reply.answer) |_| reply.isAccepted() else |_| null;
     writeMutationReply(io, reply, if (human and interactive) .interactive_configuration else .json, replay) catch |err| {
-        if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
+        if (human and interactive and err != error.CallerFailure) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
     };
     if (human and interactive) if (requester.cancellation) |token| if (token.stopped.load(.acquire)) {
@@ -1768,62 +1966,75 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
 fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) void {
     const status = if (admitted) |accepted| if (accepted) "accepted; do not resubmit it" else "rejected" else "not confirmed; do not replace uncertain work";
     if (admitted == null) {
-        stderr.diagnostic("rui: Configuration {s} ({s}). Inspect with rui request inspect {s}; if still unconfirmed, rui request recover {s} retransmits the same saved request.\n", .{ status, @errorName(err), key, key });
+        recordExit(caller_exit.forCode(.unconfirmed, .reply_unconfirmed));
+        stderr.diagnostic("rui: Configuration {s} ({s}). Inspect with rui request inspect {s}; if still unconfirmed, rui request recover {s} retransmits the same saved request.\n", .{ status, @tagName(caller_error.of(err)), key, key });
         return;
     }
-    stderr.diagnostic("rui: Configuration {s} ({s}). Use rui request inspect {s} to inspect the same saved request.\n", .{ status, @errorName(err), key });
+    stderr.diagnostic("rui: Configuration {s} ({s}). Use rui request inspect {s} to inspect the same saved request.\n", .{ status, @tagName(caller_error.of(err)), key });
 }
 
-fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?client.ConfigureInput) !void {
-    const io = init.io;
+const StartMessage = struct {
+    input: client.ConfigureInput,
+    receipt: StartConfiguration,
+};
+
+fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?StartMessage) !void {
     var step: ?client.Step = .input_parse;
-    errdefer reportFailureStep(step);
+    return messageWithStep(init, parsed, configuration, &step) catch |err| {
+        return if (step == .store) storeFailure(err) else err;
+    };
+}
+
+fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?StartMessage, step: *?client.Step) !void {
+    const io = init.io;
     const destination = if (configuration != null) "" else parsed.get("to").?;
     if (configuration == null and !protocol.validSessionId(destination)) {
-        stderr.diagnostic("rui: --to needs exactly six lowercase Crockford characters, for example k7m2qx. Nothing was sent.\n", .{});
         return error.InvalidSession;
     }
-    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration };
-    // Never let incomplete or malformed peer context fall back to HOME or
-    // become an anonymous send. The Host still authenticates the live handle.
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = if (configuration) |value| value.input else null };
+    // Peer context names a Session in its own Store, so it signs only sends
+    // to that Store; an explicit --store naming another Store is a plain
+    // caller's send there (#957). Incomplete or malformed context never falls
+    // back to HOME or becomes an anonymous send. The Host still
+    // authenticates the live handle.
     const address = init.environ_map.get("RUI_ADDRESS");
     const sender_store = init.environ_map.get("RUI_STORE");
-    input.sender_handle = init.environ_map.get("RUI_SENDER_HANDLE");
-    if (address != null or sender_store != null or input.sender_handle != null) {
-        if (address == null or sender_store == null or input.sender_handle == null or
-            !protocol.validSessionId(address.?) or sender_store.?.len == 0 or input.sender_handle.?.len == 0)
+    const handle = init.environ_map.get("RUI_SENDER_HANDLE");
+    if (address != null or sender_store != null or handle != null) {
+        if (address == null or sender_store == null or handle == null or
+            !protocol.validSessionId(address.?) or sender_store.?.len == 0 or handle.?.len == 0 or
+            std.meta.isError(client.validatePeer(sender_store.?, address.?, handle.?)))
         {
-            stderr.diagnostic("rui: invalid peer context; nothing was sent.\n", .{});
             return error.InvalidRuiAddress;
         }
-        input.sender = .{ .store = sender_store.?, .session = address.? };
-    }
-    step = .store;
-    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    if (sender_store) |trusted| {
-        const sender_paths = try platform.resolveClientPaths(io, trusted);
-        if (parsed.get("store")) |override| {
-            const override_paths = try platform.resolveClientPaths(io, override);
-            if (!override_paths.store.eql(sender_paths.store.slice())) {
-                stderr.diagnostic("rui: peer sends must use the sender's Store; nothing was sent.\n", .{});
-                return error.CrossStorePeerSend;
-            }
+        const elsewhere = if (parsed.get("store")) |override|
+            !(try platform.resolveClientPaths(io, override)).store.eql((try platform.resolveClientPaths(io, sender_store.?)).store.slice())
+        else
+            false;
+        if (!elsewhere) {
+            input.sender = .{ .store = sender_store.?, .session = address.? };
+            input.sender_handle = handle;
         }
-        input.store = trusted;
-    } else input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    }
+    step.* = .store;
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    input.store = if (input.sender != null) sender_store.? else try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
-    var captured = try takeCapture(&step, client.captureMessage(io, input, target));
+    var captured = try takeCapture(step, client.captureMessage(io, input, target));
     const sender: client.Requests = .{ .io = io, .drop_reply = parsed.get("test-drop-reply") };
-    if (configuration == null) return sendCapturedMutation(sender, &captured, .{ .map = init.environ_map }, &step);
+    if (configuration == null) return sendCapturedMutation(sender, &captured, .{ .map = init.environ_map }, step);
     defer captured.close(io);
     try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try takeReply(&step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
+    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer), captured.identity().*, captured.replay);
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     // This is the first Message's admission, never execution/completion.
-    try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
-    try std.Io.File.stdout().writeStreamingAll(io, "\n");
+    var output: JsonOutput = undefined;
+    const writer = output.init(io, .stdout);
+    writeMutationJson(writer, reply, configuration.?.receipt) catch |err| return output.failure(err);
+    writer.writeByte('\n') catch |err| return output.failure(err);
+    try output.finish();
 }
 
 /// The value of a capture or send, after recording the step a failure
@@ -1845,18 +2056,25 @@ fn takeCapture(step: *?client.Step, stepped: anytype) !client.CapturedRecord {
 
 /// A send's reply. A framed reply leaves nothing to report; an unreadable
 /// one leaves admission unknown.
-fn takeReply(step: *?client.Step, stepped: anytype) !protocol_reply.MutationReply {
-    const reply = try takeStep(step, stepped);
+fn takeReply(step: *?client.Step, stepped: anytype, context: protocol_reply.MutationIdentity, replay: client.Replay) !protocol_reply.MutationReply {
+    holdStore(context.store.slice());
+    const reply = takeStep(step, stepped) catch |err| {
+        if (step.*) |failed| {
+            if (failed.mayHaveReachedHost()) {
+                recordExit(caller_exit.forCode(.unconfirmed, .reply_unconfirmed));
+                reportUnconfirmed(context, replay, err);
+                if (err == error.Cancelled or err == error.Canceled) return err;
+                return error.CallerFailure;
+            }
+            if (failed == .connect or failed == .endpoint) {
+                return hostTransportFailure(std.Io.Threaded.global_single_threaded.io(), context.store.slice(), err);
+            }
+            if (failed == .store) return storeFailure(err);
+        }
+        return err;
+    };
     step.* = if (reply.answer) |_| null else |_| .admission_response;
     return reply;
-}
-
-/// Null once the Host's reply was presented.
-fn reportFailureStep(held: ?client.Step) void {
-    const step = held orelse return;
-    stderr.diagnostic("rui: failure during {s}; cause follows.\n", .{@tagName(step)});
-    if (step.mayHaveReachedHost())
-        stderr.diagnostic("rui: admission outcome is unconfirmed; inspect or recover the original request, never replace it with a fresh key.\n", .{});
 }
 
 /// An explicit --record and --key identity, which the grammar requires
@@ -1930,7 +2148,7 @@ test "/status takes the Session's facts from Current, lists every Action awaitin
     defer file.close(io);
     const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
     defer listed.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     const taken = try std.testing.allocator.create([2]status_page.Session);
@@ -1946,7 +2164,7 @@ test "/status takes the Session's facts from Current, lists every Action awaitin
         " Status · lane four · k7m2qx\n",
         "Folder          ~/w\n",
         "Tools           bash\n",
-        "Permissions     ask · Bash asks first\n",
+        "Permissions     ask · Bash and MCP ask first\n",
         "Effort          high  \x1b[90mSession override",
         "Compact at      1,000 tokens · now 310",
         "Model           gpt-6.1-sol · API key  \x1b[90mfixed",
@@ -2111,23 +2329,25 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             // there to leave alone.
             const reader: SetupReader = if (reference.len == 0) .overview else .conversation;
             const unchanged = if (reader == .conversation) "; active Session unchanged" else "";
-            const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator()) catch |err| {
-                stderr.diagnostic("rui: /setup: {s}{s}\n", .{ @errorName(err), unchanged });
+            var problem: cli_args.Refusal = undefined;
+            const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator(), &problem) catch {
+                reportParseProblem(problem, null, "/setup", unchanged);
                 return;
             };
             if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
             setup(init, &parsed, reader) catch |err| {
-                if (err != error.InvalidModel) stderr.diagnostic("rui: /setup: {s}{s}\n", .{ @errorName(err), unchanged });
+                // Saved defaults never touch the active Session, so no "unchanged" note.
+                if (err != error.InvalidModel) stderr.diagnostic("rui: /setup: {s}\n", .{@tagName(caller_error.of(preferenceFailure(err)))});
             };
         },
         .result => {
             const saved = protocol_reply.MessageAddress.init(destination, reference, command.argument) catch |err| {
-                stderr.diagnostic("rui: result key: {s}\n", .{@errorName(err)});
+                stderr.diagnostic("rui: result key: {s}\n", .{@tagName(caller_error.of(err))});
                 return;
             };
             showResult(init, requests_context, &saved) catch |err| {
                 if (err == error.CanonicalStoreFailure) return err;
-                stderr.diagnostic("rui: result: {s}\n", .{@errorName(err)});
+                stderr.diagnostic("rui: result: {s}\n", .{@tagName(caller_error.of(err))});
             };
         },
         .configure, .effort, .rename => {
@@ -2181,7 +2401,7 @@ test "/effort and /rename give what their /configure spelling gives" {
         .{ .short = "/effort high", .spelled = "/configure --reasoning-effort high", .option = "reasoning-effort" },
         .{ .short = "/effort \"high\"", .spelled = "/configure --reasoning-effort \"high\"", .option = "reasoning-effort" },
     };
-    for (cases) |case| {
+    inline for (cases) |case| {
         errdefer std.debug.print("short={s}\n", .{case.short});
         var values: [2][]const u8 = undefined;
         var lines: [2][64]u8 = undefined;
@@ -2191,7 +2411,8 @@ test "/effort and /rename give what their /configure spelling gives" {
             const command = slash_commands.parse(line[0..text.len]).command;
             const argument = line[@intFromPtr(command.argument.ptr) - @intFromPtr(line) ..][0..command.argument.len];
             var nothing = std.heap.FixedBufferAllocator.init(&.{});
-            const parsed = try cli_args.live_configure.parse(try liveArguments(command.name, argument, arguments), nothing.allocator());
+            var problem: cli_args.Refusal = undefined;
+            const parsed = try cli_args.live_configure.parse(try liveArguments(command.name, argument, arguments), nothing.allocator(), &problem);
             value.* = parsed.get(case.option).?;
         }
         try std.testing.expectEqualStrings(values[1], values[0]);
@@ -2247,7 +2468,9 @@ test "the CLI refuses a line the table does not admit, which the frontend never 
 /// Host accepted it.
 fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8) !bool {
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
-    const parsed = cli_args.live_configure.parse(arguments, nothing.allocator()) catch {
+    var problem: cli_args.Refusal = undefined;
+    const parsed = cli_args.live_configure.parse(arguments, nothing.allocator(), &problem) catch {
+        reportParseProblem(problem, null, "/configure", null);
         try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
         return false;
     };
@@ -2255,13 +2478,13 @@ fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live
         try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
         return false;
     }
-    for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-")) {
+    inline for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-")) {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
         return false;
     };
     return configure(init, requests_context, &parsed, live, false) catch |err| {
         if (err == error.InvalidModel or err == error.InvalidLabel) return false; // The pre-capture diagnostic already gives the repair.
-        stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@errorName(err)});
+        stderr.diagnostic("rui: configure: {s}; check saved requests before retrying\n", .{@tagName(caller_error.of(err))});
         if (err == error.CanonicalStoreFailure) return err;
         return false;
     };
@@ -2283,7 +2506,7 @@ fn saveEffortDefault(init: std.process.Init, level: []const u8) !void {
         const said = preferences.failure(err);
         if (said.saved) {
             stderr.diagnostic("rui: /effort saved for new Sessions; {s}.\n", .{said.reason.?});
-        } else stderr.diagnostic("rui: /effort changed this Session only; not saved for new Sessions ({s}).\n", .{said.reason orelse @errorName(err)});
+        } else stderr.diagnostic("rui: /effort changed this Session only; not saved for new Sessions ({s}).\n", .{said.reason orelse @tagName(caller_error.of(preferenceFailure(err)))});
         return;
     };
     try std.Io.File.stdout().writeStreamingAll(init.io, if (edit.reasoning_effort == .clear)
@@ -2308,7 +2531,8 @@ test "/setup takes every option in one line" {
     const count = try interactiveTokens(&line, &tokens);
     try std.testing.expectEqual(@as(usize, 10), count);
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
-    const parsed = try cli_args.live_setup.parse(tokens[0..count], nothing.allocator());
+    var problem: cli_args.Refusal = undefined;
+    const parsed = try cli_args.live_setup.parse(tokens[0..count], nothing.allocator(), &problem);
     try std.testing.expectEqualStrings("high", parsed.get("reasoning-effort").?);
     try std.testing.expectEqualStrings("/path/to/store", parsed.get("store").?);
 }
@@ -2379,7 +2603,7 @@ pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store
         if (!saved.store.eql(canonical.store.slice())) continue;
         if ((saved.kind == .configure or saved.kind == .message) and saved.session.len == 0) {
             var reply: client.ReplyBuffer = .{};
-            const observed = try checkedObservation(init.io, try requester.observeCommand(store, saved.key.slice(), &reply), saved.key.slice());
+            const observed = try checkedObservation(init.io, requester.observeCommand(store, saved.key.slice(), &reply) catch |err| return readTransportFailure(init.io, store, err), saved.key.slice());
             if (observed.status != .accepted or saved.kind != observed.kind.? or !observed.target.?.eql(session_ref)) continue;
         } else if (!saved.session.eql(session_ref)) continue;
         try out.writeAll("  ");
@@ -2456,10 +2680,10 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
     var traversal = protocol_reply.SessionTraversal.init(null);
     var asked: usize = 0;
     var failed: usize = 0;
-    var first_failure: ?anyerror = null;
+
     while (true) {
         const page = readSessionPage(init, store, null, traversal.cursor) catch |err| {
-            if (asked != 0) stderr.diagnostic("rui: the Session listing failed after {d} stops ({s}); Sessions it had not listed yet were not stopped.\n", .{ asked, @errorName(err) });
+            if (asked != 0) stderr.diagnostic("rui: the Session listing failed after {d} stops ({s}); Sessions it had not listed yet were not stopped.\n", .{ asked, @tagName(caller_error.of(err)) });
             return err;
         };
         for (page.rows[0..page.count]) |*row| {
@@ -2468,17 +2692,19 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
             asked += 1;
             stderr.diagnostic("rui: stopping {s}\n", .{session});
             sendSessionStop(init, parsed, .{ .store = store, .session = session }, target) catch |err| {
-                stderr.diagnostic("rui: stopping {s} failed ({s}).\n", .{ session, @errorName(err) });
+                if (err != error.CallerFailure) {
+                    recordExit(caller_exit.knownError(err));
+                    stderr.diagnostic("rui: stopping {s} failed ({s}).\n", .{ session, @tagName(caller_error.of(err)) });
+                }
                 failed += 1;
-                first_failure = first_failure orelse err;
             };
         }
         if (!traversal.advance(&page)) break;
     }
     if (asked == 0) stderr.diagnostic("rui: no Session in this Store has work to stop.\n", .{});
-    if (first_failure) |err| {
+    if (failed != 0) {
         stderr.diagnostic("rui: {d} of {d} stops failed.\n", .{ failed, asked });
-        return err;
+        return error.CallerFailure;
     }
 }
 
@@ -2505,7 +2731,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     const reply = blk: {
         defer captured.close(io);
         try announceCapture(io, captured);
-        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer));
+        break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured.identity().*, captured.replay);
     };
     try writeMutationReply(io, reply, .json, replay);
 }
@@ -2532,7 +2758,7 @@ fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try client.observeCommand(io, identity.store.slice(), target, &reply_buffer);
+    const reply = client.observeCommand(io, identity.store.slice(), target, &reply_buffer) catch |err| return readTransportFailure(io, identity.store.slice(), err);
     const observation = try checkedObservation(io, reply, target);
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
@@ -2554,7 +2780,8 @@ fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         };
         var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var response: client.ReplyBuffer = .{};
-        const reply = try (client.Requests{ .io = io }).exportFailedResponse(try selectedStore(init, parsed.get("store"), &store_buffer), parsed.get("session").?, selection, std.Io.File.stdout(), &response);
+        const store = try selectedStore(init, parsed.get("store"), &store_buffer);
+        const reply = (client.Requests{ .io = io }).exportFailedResponse(store, parsed.get("session").?, selection, std.Io.File.stdout(), &response) catch |err| return readTransportFailure(io, store, err);
         if (reply == .command) {
             try writeCommandReply(io, reply.command, .stderr);
             return error.HostInvocationFailed;
@@ -2573,11 +2800,11 @@ fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         const file = try renderScratch(init);
         defer file.close(io);
         var response: client.ReplyBuffer = .{};
-        const wire_reply = try client.inspectSession(io, selected_store, reference, .current, file, &response);
+        const wire_reply = client.inspectSession(io, selected_store, reference, .current, file, &response) catch |err| return readTransportFailure(io, selected_store, err);
         const reply = try protocol_reply.CurrentReply.decode(io, file, reference, wire_reply);
         if (reply == .failure) {
             try writeCommandReply(io, wire_reply.command, .stdout);
-            return reply.failure.err();
+            return readFailureError(reply.failure);
         }
         var output: JsonOutput = undefined;
         const writer = output.init(io, .stdout);
@@ -2607,9 +2834,10 @@ fn readConversation(init: std.process.Init, parsed: *const cli_args.Parsed) !voi
     const item = (try parsed.number(u64, "ordinal")).?;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const requests_: client.Requests = .{ .io = init.io };
-    if (try requests_.readConversationContent(try selectedStore(init, parsed.get("store"), &selected_buffer), reference, target, item, null, std.Io.File.stdout())) |failure| {
+    const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    if (requests_.readConversationContent(store, reference, target, item, null, std.Io.File.stdout()) catch |err| return readTransportFailure(init.io, store, err)) |failure| {
         try writeReadFailure(init.io, failure, reference, .stderr);
-        return failure.err();
+        return readFailureError(failure);
     }
 }
 
@@ -2624,18 +2852,18 @@ fn readResult(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try client.readResult(
+    const reply = client.readResult(
         io,
         identity.store.slice(),
         target,
         std.Io.File.stdout(),
         &reply_buffer,
-    );
+    ) catch |err| return readTransportFailure(io, identity.store.slice(), err);
     switch (reply) {
         .answer => {},
         .failure => |failure| {
             try writeReadFailure(io, failure, target, .stderr);
-            return failure.err();
+            return readFailureError(failure);
         },
     }
 }
@@ -2648,8 +2876,8 @@ fn readActionContent(init: std.process.Init, parsed: *const cli_args.Parsed, fie
     const selected = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = switch (field) {
-        .call_id => try client.readActionCallId(io, selected, reference, target, std.Io.File.stdout(), &reply_buffer),
-        .arguments => try client.readActionArguments(io, selected, reference, target, std.Io.File.stdout(), &reply_buffer),
+        .call_id => client.readActionCallId(io, selected, reference, target, std.Io.File.stdout(), &reply_buffer) catch |err| return readTransportFailure(io, selected, err),
+        .arguments => client.readActionArguments(io, selected, reference, target, std.Io.File.stdout(), &reply_buffer) catch |err| return readTransportFailure(io, selected, err),
     };
     switch (reply) {
         .answer => {},
@@ -2704,6 +2932,13 @@ fn writeCommandReply(io: std.Io, reply: protocol_reply.CommandReply, stream: Jso
     writer.writeAll("\n") catch |err| return output.failure(err);
     try output.finish();
     try protocol_reply.checkCanonicalFailure(reply);
+    if (reply.status == 503) {
+        const failure = try protocol_reply.decodeReadFailure(reply, false);
+        if (readFailureStatus(failure)) |status| {
+            recordExit(status);
+            return error.CallerFailure;
+        }
+    }
 }
 
 fn writeReadFailure(io: std.Io, failure: protocol_reply.ReadFailure, key: []const u8, stream: JsonOutput.Stream) !void {
@@ -2723,7 +2958,7 @@ fn checkedObservation(io: std.Io, reply: protocol_reply.ObservationReply, key: [
         .observation => |observation| observation,
         .failure => |failure| {
             try writeReadFailure(io, failure, key, .stdout);
-            return failure.err();
+            return readFailureError(failure);
         },
     };
 }
@@ -2771,17 +3006,35 @@ const MutationPresentation = enum {
 };
 
 fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentation: MutationPresentation, replay: client.Replay) !void {
-    if (reply.answer) |answer| {
-        if (answer.result == .rejected and answer.result.rejected.eql("unknown_session"))
-            stderr.diagnostic("rui: no session {s} in this Store\n", .{reply.context.session.slice()});
-    } else |_| {}
+    // Admission is known before output. A failed writer cannot turn a saved
+    // answer into uncertain work, or an unconfirmed answer into non-admission.
+    const answer = reply.answer catch |err| {
+        recordExit(caller_exit.forCode(.unconfirmed, .reply_unconfirmed));
+        reportUnconfirmed(reply.context, replay, err);
+        presentMutationOutput(io, reply, presentation) catch |presentation_error| {
+            if (presentation_error != err) recordExit(.unclassified);
+        };
+        // Canonical failure still reaches the terminal owner's fatal cleanup.
+        return if (err == error.CanonicalStoreFailure) err else error.CallerFailure;
+    };
+    if (answer.result != .accepted) {
+        recordExit(caller_exit.forCode(.saved_refusal, savedRejectionCode(answer)));
+        var bytes: [4096]u8 = undefined;
+        var notice = std.Io.Writer.fixed(&bytes);
+        try writeSavedRejection(&notice, reply);
+        stderr.diagnosticBytes(notice.buffered());
+    }
+    presentMutationOutput(io, reply, presentation) catch |err| {
+        if (err == error.MutationNotAccepted) return error.CallerFailure;
+        return err;
+    };
+    if (answer.result != .accepted and presentation == .json) return error.CallerFailure;
+}
+
+fn presentMutationOutput(io: std.Io, reply: protocol_reply.MutationReply, presentation: MutationPresentation) !void {
     if (presentation == .json) {
         var output: JsonOutput = undefined;
-        presentMutationReply(output.init(io, .stdout), reply, presentation) catch |err| {
-            const cause = output.failure(err);
-            if (cause == error.MutationNotAccepted) reportNotAccepted(reply.context, replay);
-            return cause;
-        };
+        presentMutationReply(output.init(io, .stdout), reply, presentation) catch |err| return output.failure(err);
         return output.finish();
     }
     var buffer: [protocol.content_window_bytes]u8 = undefined;
@@ -2789,19 +3042,39 @@ fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentat
     presentMutationReply(&output.interface, reply, presentation) catch |err| return output.err orelse err;
 }
 
-/// Names the replay the caller actually holds: a generated handle, or the
-/// explicit record, since repeating its capture refuses the existing --record.
-fn reportNotAccepted(context: protocol_reply.MutationIdentity, replay: client.Replay) void {
-    var bytes: [4 * (protocol.max_store_bytes + std.Io.Dir.max_path_bytes) + 512]u8 = undefined;
-    var notice = std.Io.Writer.fixed(&bytes);
-    writeNotAccepted(&notice, context, replay) catch return;
-    stderr.diagnostic("{s}", .{notice.buffered()});
+fn savedRejectionCode(answer: protocol_reply.MutationAnswer) caller_error.Code {
+    return switch (answer.result) {
+        .accepted => unreachable,
+        .conflict => .idempotency_key_conflict,
+        // The Host may be newer than this build; its saved answer stays authoritative.
+        .rejected => |code| caller_rejection.fromRejection(code.slice()) orelse .rejection_unrecognized,
+    };
 }
 
-fn writeNotAccepted(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, replay: client.Replay) !void {
-    try notice.writeAll("rui: the Host did not accept this request; stdout carries its saved answer and code. Replay returns that same answer and never resubmits: rui request recover ");
+fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply) !void {
+    const answer = try reply.answer;
+    const operation: []const u8 = switch (reply.target) {
+        .configure => "configure",
+        .message => |target| if (target.creates_session) "start" else "send",
+        .session_stop => "stop",
+        .model_interruption => "interrupt-model",
+        .permission_decision => |target| if (target.decision == .allow_once) "allow" else "deny",
+    };
+    // Only the saved rejection is authority. In particular, replay never
+    // borrows a current argv value or reads today's configuration for advice.
+    try caller_error.writeSavedLine(out, savedRejectionCode(answer), .{ .resource = if (reply.target == .permission_decision) "action" else "session", .operation = operation });
+}
+
+fn reportUnconfirmed(context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) void {
+    var bytes: [4 * (protocol.max_store_bytes + std.Io.Dir.max_path_bytes) + 512]u8 = undefined;
+    var notice = std.Io.Writer.fixed(&bytes);
+    writeUnconfirmed(&notice, context, replay, err) catch return;
+    stderr.diagnosticBytes(notice.buffered());
+}
+
+fn writeUnconfirmed(notice: *std.Io.Writer, context: protocol_reply.MutationIdentity, replay: client.Replay, err: anyerror) !void {
+    try notice.print("rui: admission not confirmed ({s}); do not replace uncertain work. Recover it with rui request recover ", .{@tagName(caller_error.of(err))});
     switch (replay) {
-        // validRequestHandle admits only shell-inert handle bytes.
         .generated => try notice.writeAll(context.key.slice()),
         .explicit => |record| {
             try notice.writeAll("--store ");
@@ -2813,7 +3086,21 @@ fn writeNotAccepted(notice: *std.Io.Writer, context: protocol_reply.MutationIden
             }
         },
     }
-    try notice.writeByte('\n');
+    try notice.writeAll(". Never resubmit with a new key. [reply_unconfirmed]\n");
+}
+
+fn readFailureError(failure: protocol_reply.ReadFailure) anyerror {
+    if (readFailureStatus(failure)) |status| {
+        recordExit(status);
+        return error.CallerFailure;
+    }
+    return failure.err();
+}
+
+fn readFailureStatus(failure: protocol_reply.ReadFailure) ?caller_exit.Status {
+    if (failure.diagnostic.code.eql("result_not_ready")) return caller_exit.forCode(.confirmed, .result_not_ready);
+    if (failure.diagnostic.type.eql("busy")) return caller_exit.forCode(.confirmed, .host_busy);
+    return null;
 }
 
 fn writeMutationField(writer: *std.Io.Writer, label: []const u8, value: []const u8) !void {
@@ -2830,7 +3117,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         return writer.flush();
     }
     if (presentation == .json) {
-        try writeMutationJson(writer, reply);
+        try writeMutationJson(writer, reply, null);
         try writer.writeByte('\n');
         try writer.flush();
         _ = try reply.answer;
@@ -2848,7 +3135,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
         else => {},
     }
     const answer = reply.answer catch |err| {
-        try writer.print("invocation: {s} (HTTP {d}); outcome unconfirmed\n", .{ @errorName(err), reply.status });
+        try writer.print("invocation: {s} (HTTP {d}); outcome unconfirmed\n", .{ protocol_reply.MutationReply.failureReason(err), reply.status });
         if (reply.diagnostic) |diagnostic| {
             try writeMutationField(writer, "type: ", diagnostic.type.slice());
             try writeMutationField(writer, "code: ", diagnostic.code.slice());
@@ -2876,8 +3163,29 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
     try writer.flush();
 }
 
+/// Borrowed from the resolved configuration sent with the first Message.
+/// A cleared/omitted override still reports the catalog's effective default.
+const StartConfiguration = struct {
+    provider: []const u8,
+    model: []const u8,
+    reasoning_effort: ?[]const u8,
+    effort_source: enum { flag, saved, model_default },
+
+    fn resolve(input: client.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
+        const model = input.model.value;
+        return .{
+            .provider = input.provider.value,
+            .model = model,
+            .reasoning_effort = input.reasoning_effort.value orelse if (model_capability.defaultReasoningEffort(model)) |effort| @tagName(effort) else null,
+            // A client may materialize the catalog default into input. Only
+            // the saved preference snapshot establishes saved provenance.
+            .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(saved_effort, model) != null) .saved else .model_default,
+        };
+    }
+};
+
 // Presentation of owned facts only: no wire representation or second parser.
-fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply) !void {
+fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply, configuration: ?StartConfiguration) !void {
     try writer.writeAll("{\"context\":");
     try std.json.Stringify.value(.{
         .store = reply.context.store.slice(),
@@ -2885,13 +3193,18 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         .key = reply.context.key.slice(),
         .kind = @tagName(reply.context.kind),
     }, .{}, writer);
+    if (configuration) |value| {
+        std.debug.assert(reply.isAccepted() and reply.target == .message and reply.target.message.creates_session);
+        try writer.writeAll(",\"configuration\":");
+        try std.json.Stringify.value(value, .{}, writer);
+    }
     switch (reply.target) {
         .model_interruption => |target| try writer.print(",\"request_target\":{{\"turn\":\"{d}\",\"operation\":\"{d}\"}}", .{ target.turn, target.operation }),
         .permission_decision => |target| try writer.print(",\"request_target\":{{\"action\":\"{d}\",\"decision\":\"{s}\"}}", .{ target.action, @tagName(target.decision) }),
         else => {},
     }
     const answer = reply.answer catch |err| {
-        try writer.print(",\"error\":{{\"status\":\"{d}\",\"reason\":\"{s}\",\"certainty\":\"unconfirmed\",\"type\":", .{ reply.status, @errorName(err) });
+        try writer.print(",\"error\":{{\"status\":\"{d}\",\"reason\":\"{s}\",\"certainty\":\"unconfirmed\",\"type\":", .{ reply.status, protocol_reply.MutationReply.failureReason(err) });
         try std.json.Stringify.value(if (reply.diagnostic) |diagnostic| diagnostic.type.slice() else null, .{}, writer);
         try writer.writeAll(",\"code\":");
         try std.json.Stringify.value(if (reply.diagnostic) |diagnostic| diagnostic.code.slice() else null, .{}, writer);
@@ -2935,6 +3248,65 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     try writer.writeByte('}');
 }
 
+test "session start configuration reports resolved effort and its source" {
+    const Case = struct {
+        model: []const u8 = "gpt-6.1-sol",
+        override: ?[]const u8 = null,
+        present: bool = false,
+        flag: bool = false,
+        saved: ?model_capability.ReasoningEffort = null,
+        effort: ?[]const u8 = "low",
+        source: @FieldType(StartConfiguration, "effort_source") = .model_default,
+    };
+    for ([_]Case{
+        .{},
+        .{ .model = "unlisted-model", .effort = null },
+        .{ .override = "high", .present = true, .saved = .high, .source = .saved, .effort = "high" },
+        // S1 fills the outgoing override even when no preference was read.
+        .{ .override = "low", .present = true },
+        .{ .override = "low", .present = true, .saved = .low, .source = .saved },
+        .{ .model = "gpt-5.5", .override = "medium", .present = true, .saved = .max, .effort = "medium" },
+        .{ .model = "unlisted-model", .present = true, .saved = .high, .effort = null },
+        .{ .override = "low", .present = true, .flag = true, .saved = .high, .source = .flag },
+        .{ .override = "xhigh", .present = true, .flag = true, .source = .flag, .effort = "xhigh" },
+        .{ .present = true, .flag = true, .source = .flag },
+        .{ .model = "unlisted-model", .present = true, .flag = true, .source = .flag, .effort = null },
+    }) |case| {
+        const value = StartConfiguration.resolve(.{
+            .store = "/store",
+            .session = .create,
+            .provider = .{ .present = true, .value = "openai" },
+            .model = .{ .present = true, .value = case.model },
+            .reasoning_effort = .{ .present = case.present, .value = case.override },
+        }, case.flag, case.saved);
+        try std.testing.expectEqualStrings("openai", value.provider);
+        try std.testing.expectEqualStrings(case.model, value.model);
+        try std.testing.expectEqual(case.source, value.effort_source);
+        if (case.effort) |effort| {
+            try std.testing.expect(value.reasoning_effort != null);
+            try std.testing.expectEqualStrings(effort, value.reasoning_effort.?);
+        } else try std.testing.expectEqual(@as(?[]const u8, null), value.reasoning_effort);
+    }
+}
+
+test "session start mutation receipt adds configuration without changing send" {
+    const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}}";
+    var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "", .{ .message = .{ .bytes = 3, .digest = @splat(0), .creates_session = true } });
+    try reply.context.store.set("/store");
+    try reply.context.key.set("handle");
+    reply.context.kind = .message;
+    const context = "{\"context\":{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"handle\",\"kind\":\"message\"}";
+    const tail = ",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"},\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}}";
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeMutationJson(&writer, reply, .{ .provider = "codex", .model = "gpt-6.1-sol", .reasoning_effort = "low", .effort_source = .model_default });
+    try std.testing.expectEqualStrings(context ++ ",\"configuration\":{\"provider\":\"codex\",\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\",\"effort_source\":\"model_default\"}" ++ tail, writer.buffered());
+    writer.end = 0;
+    reply.target.message.creates_session = false;
+    try writeMutationJson(&writer, reply, null);
+    try std.testing.expectEqualStrings(context ++ tail, writer.buffered());
+}
+
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
     const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"busy\\u002fµ\",\"wire_only\":true}";
     var bytes: [wire.len]u8 = wire.*;
@@ -2945,11 +3317,11 @@ test "mutation presentation renders owned diagnostics and context with bounded w
     @memset(&bytes, 'x');
     var buffer: [1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try writeMutationJson(&writer, reply);
+    try writeMutationJson(&writer, reply, null);
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/store\",\"session\":\"original/session\",\"key\":\"original\\\"key\",\"kind\":\"configure\"},\"error\":{\"status\":\"409\",\"reason\":\"HostInvocationFailed\",\"certainty\":\"unconfirmed\",\"type\":\"invocation_error\",\"code\":\"busy/µ\"}}", writer.buffered());
     var tiny: [1]u8 = undefined;
     var failing = std.Io.Writer.fixed(&tiny);
-    try std.testing.expectError(error.WriteFailed, writeMutationJson(&failing, reply));
+    try std.testing.expectError(error.WriteFailed, writeMutationJson(&failing, reply, null));
 }
 
 test "mutation presentation complete modes preserve escaped original context" {
@@ -3013,18 +3385,19 @@ test "mutation presentation wrong binding keeps caller context even interactivel
     try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/original-store\",\"session\":\"original\",\"key\":\"original-key\",\"kind\":\"configure\"},\"error\":{\"status\":\"200\",\"reason\":\"RequestBindingMismatch\",\"certainty\":\"unconfirmed\",\"type\":null,\"code\":null}}\n", writer.buffered());
 }
 
-test "not-accepted guidance names the generated handle or the quoted explicit recover form" {
+test "unconfirmed guidance names the generated handle or the quoted explicit recover form" {
     var context: protocol_reply.MutationIdentity = .{ .kind = .session_stop };
     try context.store.set("/it's \\store");
     try context.key.set("0f8fad5b-d9cb-469f-a165-70867728950e");
     var buffer: [512]u8 = undefined;
-    const prefix = "rui: the Host did not accept this request; stdout carries its saved answer and code. Replay returns that same answer and never resubmits: rui request recover ";
+    const prefix = "rui: admission not confirmed (internal_unexpected); do not replace uncertain work. Recover it with rui request recover ";
+    const suffix = ". Never resubmit with a new key. [reply_unconfirmed]\n";
     var generated = std.Io.Writer.fixed(&buffer);
-    try writeNotAccepted(&generated, context, .generated);
-    try std.testing.expectEqualStrings(prefix ++ "0f8fad5b-d9cb-469f-a165-70867728950e\n", generated.buffered());
+    try writeUnconfirmed(&generated, context, .generated, error.TruncatedResponse);
+    try std.testing.expectEqualStrings(prefix ++ "0f8fad5b-d9cb-469f-a165-70867728950e" ++ suffix, generated.buffered());
     var explicit = std.Io.Writer.fixed(&buffer);
-    try writeNotAccepted(&explicit, context, .{ .explicit = "stop\x1b.json" });
-    try std.testing.expectEqualStrings(prefix ++ "--store $'/it\\'s \\\\store' --record $'stop\\033.json' --kind session-stop\n", explicit.buffered());
+    try writeUnconfirmed(&explicit, context, .{ .explicit = "stop\x1b.json" }, error.TruncatedResponse);
+    try std.testing.expectEqualStrings(prefix ++ "--store $'/it\\'s \\\\store' --record $'stop\\033.json' --kind session-stop" ++ suffix, explicit.buffered());
 }
 
 const SavedRequest = protocol_reply.MutationIdentity;
@@ -3071,7 +3444,7 @@ fn readSessionPage(init: std.process.Init, store: []const u8, workspace: ?[]cons
     const file = try renderScratch(init);
     defer file.close(init.io);
     var buffer: client.ReplyBuffer = .{};
-    const reply = try client.listSessions(init.io, store, workspace, cursor, file, &buffer);
+    const reply = client.listSessions(init.io, store, workspace, cursor, file, &buffer) catch |err| return readTransportFailure(init.io, store, err);
     return switch (try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply)) {
         .page => |page| page,
         .failure => |failure| {
@@ -3080,7 +3453,7 @@ fn readSessionPage(init: std.process.Init, store: []const u8, workspace: ?[]cons
             try std.json.Stringify.value(.{ .status = failure.status, .type = failure.diagnostic.type.slice(), .code = failure.diagnostic.code.slice() }, .{}, &diagnostic.interface);
             try diagnostic.interface.writeAll("\n");
             try diagnostic.interface.flush();
-            return failure.err();
+            return readFailureError(failure);
         },
     };
 }
@@ -3164,11 +3537,7 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         .{ .generated = .{ .directory = try requestDirectory(init, &directory_buffer), .handle = handle } }
     else blk: {
         const store = parsed.get("store").?;
-        const kind = parseRetryName(parsed.get("kind").?) orelse {
-            // The Store is resolved before the kind is read, so its failure stays first.
-            _ = try platform.resolveClientPaths(init.io, store);
-            return error.InvalidRetryKind;
-        };
+        const kind = parseRetryName(parsed.get("kind").?) orelse return error.InvalidOptionValue;
         break :blk .{ .explicit = .{ .store = store, .record = parsed.get("record").?, .kind = kind } };
     };
     var captured = try client.openCaptured(init.io, saved);
@@ -3176,26 +3545,22 @@ fn recover(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(init.io);
-        break :blk try (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer).get();
+        var step: ?client.Step = null;
+        break :blk try takeReply(&step, (client.Requests{ .io = init.io }).sendCaptured(&captured, .{ .map = init.environ_map }, &buffer), captured.identity().*, replay);
     };
     try writeMutationReply(init.io, reply, .json, replay);
 }
 
 /// A command kind in its `rui request recover --kind` spelling.
 fn parseRetryName(name: []const u8) ?protocol.CommandKind {
-    inline for (comptime std.enums.values(protocol.CommandKind)) |kind| {
-        if (std.mem.eql(u8, name, comptime retryName(kind))) return kind;
-    }
-    return null;
+    return cli_value.commandKind(std.meta.stringToEnum(cli_value.RecoveryKind, name) orelse return null);
 }
 
 fn retryName(comptime kind: protocol.CommandKind) []const u8 {
-    comptime {
-        var name = @tagName(kind)[0..@tagName(kind).len].*;
-        std.mem.replaceScalar(u8, &name, '_', '-');
-        const final = name;
-        return &final;
+    inline for (comptime std.enums.values(cli_value.RecoveryKind)) |value| {
+        if (cli_value.commandKind(value) == kind) return @tagName(value);
     }
+    unreachable;
 }
 
 test "recover accepts only the hyphenated spelling of each command kind" {
@@ -3206,7 +3571,7 @@ test "recover accepts only the hyphenated spelling of each command kind" {
 }
 
 fn showResult(init: std.process.Init, requester: client.Requests, saved: *const protocol_reply.MessageAddress) !void {
-    const observed = try checkedObservation(init.io, try requester.observeMessage(saved), saved.key.slice());
+    const observed = try checkedObservation(init.io, requester.observeMessage(saved) catch |err| return readTransportFailure(init.io, saved.store.slice(), err), saved.key.slice());
     const state = observed.state();
     var line: [256]u8 = undefined;
     try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "admitted: {s}\nresult: {s}\n", .{ @tagName(observed.status), @tagName(state) }));
@@ -3221,7 +3586,7 @@ fn showResult(init: std.process.Init, requester: client.Requests, saved: *const 
         // transition may be buffered, so tracked style cannot prove terminal state.
         // Reset alone, before diagnostics; failed cleanup retains the original error.
         errdefer _ = std.c.write(1, "\x1b[0m", 4);
-        const answer = try requester.readResultStream(saved.store.slice(), saved.key.slice(), &renderer, &read_buffer);
+        const answer = requester.readResultStream(saved.store.slice(), saved.key.slice(), &renderer, &read_buffer) catch |err| return readTransportFailure(init.io, saved.store.slice(), err);
         if (answer == .answer) {
             try renderer.finish();
             try output.flush();
@@ -3230,7 +3595,7 @@ fn showResult(init: std.process.Init, requester: client.Requests, saved: *const 
     };
     if (answer == .failure) {
         try writeReadFailure(init.io, answer.failure, saved.key.slice(), .stdout);
-        return answer.failure.err();
+        return readFailureError(answer.failure);
     }
     try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
 }
@@ -3278,7 +3643,7 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
     const file = try renderScratch(init);
     errdefer file.close(init.io);
     var response: client.ReplyBuffer = .{};
-    const reply = try requester.inspectSession(store, session_ref, .current, file, &response);
+    const reply = requester.inspectSession(store, session_ref, .current, file, &response) catch |err| return readTransportFailure(init.io, store, err);
     switch (try protocol_reply.CurrentReply.decode(init.io, file, session_ref, reply)) {
         .current => |current| return .{ .current = current, .file = file },
         .unconfigured => return error.SessionNotConfigured,
@@ -3287,7 +3652,7 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
             try out.writeAll(reply.command.body);
             try out.writeByte('\n');
             try protocol_reply.checkCanonicalFailure(reply.command);
-            return failure.err();
+            return readFailureError(failure);
         },
     }
 }
@@ -3298,17 +3663,32 @@ fn inspectAction(init: std.process.Init, requester: client.Requests, store: ?[]c
     const selected = try selectedStore(init, store, &selected_buffer);
     const file = try renderScratch(init);
     defer file.close(io);
+    if (interactive) {
+        if (try session_view.actionTool(requester, selected, reference, target, file)) |tool| {
+            if (try tool.runner() == .mcp) {
+                var output_buffer: [256]u8 = undefined;
+                var output = std.Io.File.stdout().writerStreaming(io, &output_buffer);
+                var sink: JsonOutput.Sink = .{ .writer = &output.interface };
+                try output.interface.print("Action {d}\n", .{target});
+                _ = try session_view.permissionForTool(requester, selected, reference, target, file, &sink, false, &tool);
+                return output.flush();
+            }
+        }
+        // The metadata lookup used scratch; the raw inspection starts empty.
+        try io.vtable.fileSeekTo(io.userdata, file, 0);
+        try file.setLength(io, 0);
+    }
     var buffer: client.ReplyBuffer = .{};
     var call_bytes: u64 = 0;
     if (!interactive) {
-        const call = try requester.readActionCallId(selected, reference, target, file, &buffer);
+        const call = requester.readActionCallId(selected, reference, target, file, &buffer) catch |err| return readTransportFailure(io, selected, err);
         if (call == .command) {
             try writeCommandReply(io, call.command, .stdout);
             return error.ActionReadFailed;
         }
         call_bytes = call.answer.bytes;
     }
-    const arguments = try requester.readActionArguments(selected, reference, target, file, &buffer);
+    const arguments = requester.readActionArguments(selected, reference, target, file, &buffer) catch |err| return readTransportFailure(io, selected, err);
     if (arguments == .command) {
         try writeCommandReply(io, arguments.command, .stdout);
         return error.ActionReadFailed;
@@ -3327,7 +3707,7 @@ fn inspectAction(init: std.process.Init, requester: client.Requests, store: ?[]c
     // Quote provider-controlled fields so control and bidi bytes cannot alter the
     // proposal visible next to the human approval prompt.
     try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Action {d}\n", .{target}));
-    try std.Io.File.stdout().writeStreamingAll(io, "Bash arguments: \"");
+    try std.Io.File.stdout().writeStreamingAll(io, "Arguments: \"");
     try writeJsonFileAt(io, file, call_bytes, arguments.answer.bytes, true);
     try std.Io.File.stdout().writeStreamingAll(io, "\"\n");
 }
@@ -3368,7 +3748,7 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
 
 const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
 
-const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,message_agent,start_agent,web_search|none] [--permission-mode ask|bypass] [--reasoning-effort none|low|medium|high|xhigh|max|default] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
+const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,find_tools,message_agent,read_transcript,start_agent,web_search|none] [--loaded-tools a,b|none] [--permission-mode " ++ cli_args.live_configure.argumentOf("permission-mode").?.? ++ "] [--reasoning-effort " ++ cli_args.live_configure.argumentOf("reasoning-effort").?.? ++ "] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
 
 const usage_text =
     \\usage:
@@ -3388,10 +3768,15 @@ const usage_text =
     \\and return on admission, not completion. Set instructions separately using
     \\session configure --instructions - with instructions on stdin.
     \\Reads observe once; request read-result streams only the original saved answer.
-    \\session start prints its new ID; other metadata is JSON. Diagnostics use stderr.
+    \\Mutation receipts and metadata are JSON. Diagnostics use stderr.
     \\Non-interactive calls never implicitly start a Host or sign in. Administration is explicit.
     \\After uncertainty, inspect or recover the original handle or record, never a new key.
     \\A nonzero exit can follow acceptance. Inspection never admits work; recovery can.
+    \\Exit statuses: 0 done; 1 unclassified failure, read stderr;
+    \\  2 invalid fresh invocation, nothing sent; 3 saved refusal;
+    \\  4 admission unconfirmed: rui request recover HANDLE, never resubmit;
+    \\  5 retry unchanged later; 6 repair environment, retry unchanged.
+    \\Multiple outcomes choose: 4 > 1 > 6 > 5 > 3 > 2 > 0.
     \\Store selection: --store, saved defaults, then HOME/.local/share/rui/store.
     \\Generated captures: HOME/.config/rui/requests. Use explicit --record and --key
     \\to retain a pre-known identity even if every notice and receipt is lost.
@@ -3400,12 +3785,7 @@ const usage_text =
 
 const version_text = "rui " ++ @import("transport_options").version ++ " (" ++ @import("transport_options").revision ++ ")\n";
 
-/// Set while a resource operation runs; its failure names that operation's
-/// help instead of printing the root summary.
-var dispatching = false;
-
 fn usage() error{InvalidArguments} {
-    if (!dispatching) std.debug.print("{s}", .{usage_text});
     return error.InvalidArguments;
 }
 
@@ -3457,4 +3837,329 @@ fn testPipe() ![2]std.posix.fd_t {
 
 fn closeDescriptor(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
+}
+
+test "cli fresh defaults are explicit for known and unknown models" {
+    const known = client.defaultStartEffort("gpt-6.1-sol", null);
+    try std.testing.expect(known.present);
+    try std.testing.expectEqualStrings(@tagName(model_capability.defaultReasoningEffort("gpt-6.1-sol").?), known.value.?);
+    const unknown = client.defaultStartEffort("unlisted-model", null);
+    try std.testing.expect(unknown.present and unknown.value == null);
+    try std.testing.expectEqualStrings("115200", client.defaultCompactionTrigger("unlisted-model"));
+    try std.testing.expectEqual(model_capability.contextWindow("gpt-6.1-sol") * 90 / 100, try std.fmt.parseInt(u64, client.defaultCompactionTrigger("gpt-6.1-sol"), 10));
+}
+
+test "existing explicit captures bypass fresh option choices while new captures refuse" {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = path_buffer[0..try tmp.dir.realPath(io, &path_buffer)];
+    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const record = try std.fmt.bufPrint(&record_buffer, "{s}/saved.json", .{directory});
+    var refusal: cli_args.Refusal = undefined;
+    const parsed = try cli_args.Command.session_configure.definition().parseSyntax(&.{ "--record", record, "--key", "k", "--permission-mode", "historical-mode" }, std.testing.allocator, &refusal);
+    try std.testing.expectError(error.InvalidOptionValue, validateFreshInvocation(io, &parsed, &refusal));
+    try std.testing.expectEqual(.choice_unsupported, refusal.code);
+    const file = try tmp.dir.createFile(io, "saved.json", .{});
+    defer file.close(io);
+    // The shell does not interpret the capture: opening, matching intent and
+    // replay remain with Capture. Even a corrupt existing record goes there.
+    try file.writeStreamingAll(io, "capture-owner-validates-this");
+    try validateFreshInvocation(io, &parsed, &refusal);
+    try std.testing.expectEqualStrings("historical-mode", parsed.get("permission-mode").?);
+}
+
+test "fresh instruction validation renders both source and stdin conflict refusals" {
+    const Case = struct { args: []const []const u8, code: caller_error.Code, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .args = &.{ "--instructions", "file" }, .code = .instructions_source, .expected = "rui session configure: --instructions file: Instructions must be read from stdin. Accepted: -. Next: Use --instructions - and pipe or redirect the instructions into this command. Nothing was captured or sent. [instructions_source]\n" },
+        .{ .args = &.{ "--instructions", "-", "--output-schema", "-" }, .code = .stdin_sources_conflict, .expected = "rui session configure: --instructions with --output-schema: Instructions and the output schema cannot both read stdin. Accepted: --instructions - with --output-schema FILE, or --output-schema - without --instructions. Next: Read the schema from a file or supply instructions in a separate command. Nothing was captured or sent. [stdin_sources_conflict]\n" },
+    };
+    for (cases) |case| {
+        var refusal: cli_args.Refusal = undefined;
+        const parsed = try cli_args.Command.session_configure.definition().parseSyntax(case.args, std.testing.allocator, &refusal);
+        if (validateFreshInvocation(std.Io.Threaded.global_single_threaded.io(), &parsed, &refusal)) |_| return error.ExpectedRefusal else |_| {}
+        try std.testing.expectEqual(case.code, refusal.code);
+        var storage: [1024]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        try caller_error.writeLine(&out, refusal.code, refusal.held("session", "configure"));
+        try std.testing.expectEqualStrings(case.expected, out.buffered());
+    }
+}
+
+test "parser diagnostic hands off its complete line without a smaller format buffer" {
+    const descriptors = try testPipe();
+    defer closeDescriptor(descriptors[0]);
+    {
+        defer closeDescriptor(descriptors[1]);
+        const saved = std.c.dup(2);
+        if (saved < 0) return error.TestRedirectFailed;
+        defer closeDescriptor(saved);
+        if (std.c.dup2(descriptors[1], 2) != 2) return error.TestRedirectFailed;
+        defer std.debug.assert(std.c.dup2(saved, 2) == 2);
+        // The catalog owns this bound; the stderr wrapper must neither
+        // truncate it through its 1024-byte printf buffer nor add a line.
+        const grammar: [1200]u8 = @splat('a');
+        reportParseProblem(.{ .code = .count_malformed, .token = "active-capacity", .value = "bad", .accepted = .{ .grammar = &grammar } }, "host", "start", null);
+    }
+    var bytes: [2048]u8 = undefined;
+    const count = std.c.read(descriptors[0], &bytes, bytes.len);
+    if (count < 0) return error.TestReadFailed;
+    const line = bytes[0..@intCast(count)];
+    try std.testing.expect(line.len > 1200);
+    try std.testing.expect(std.mem.startsWith(u8, line, "rui host start: --active-capacity bad: "));
+    try std.testing.expect(std.mem.endsWith(u8, line, "Nothing was captured or sent. [count_malformed]\n"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
+}
+
+test "a saved rejection code this build does not know keeps the answer and says so" {
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"configuration_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"future_cause\"},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
+    var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .configure);
+    try reply.context.store.set("/s");
+    try reply.context.key.set("saved");
+    reply.context.kind = .configure;
+    var storage: [2048]u8 = undefined;
+    var out = std.Io.Writer.fixed(&storage);
+    try writeSavedRejection(&out, reply);
+    try std.testing.expect(std.mem.startsWith(u8, out.buffered(), "rui session configure: Rui saved a rejection whose code this rui build does not know"));
+    try std.testing.expect(std.mem.endsWith(u8, out.buffered(), "[rejection_unrecognized]\n"));
+    try std.testing.expectEqual(caller_exit.Status.refused, caller_exit.forCode(.saved_refusal, savedRejectionCode(try reply.answer)));
+    out = .fixed(&storage);
+    try std.testing.expectError(error.MutationNotAccepted, presentMutationReply(&out, reply, .json));
+    try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/s\",\"session\":\"k7m2qx\",\"key\":\"saved\",\"kind\":\"configure\"},\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"future_cause\"}}\n", out.buffered());
+}
+
+test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {
+    const cases = [_]struct { code: []const u8, session: []const u8, line: []const u8 }{
+        .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
+        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --workspace, --provider, --model: A new Session's spec is missing a required setting. Accepted: model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several. Next: State every required setting; rui session start fills them for you. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
+    };
+    for (cases) |case| {
+        var wire: [1024]u8 = undefined;
+        const body = try std.fmt.bufPrint(&wire, "{{\"version\":\"{s}\",\"type\":\"configuration_reply\",\"answer\":{{\"status\":\"rejected\",\"replayed\":true,\"session\":\"{s}\",\"code\":\"{s}\"}},\"execution\":{{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}}}", .{ protocol.wire_version, case.session, case.code });
+        var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, case.session, .configure);
+        try reply.context.store.set("/s");
+        try reply.context.key.set("saved");
+        reply.context.kind = .configure;
+        var storage: [2048]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        try writeSavedRejection(&out, reply);
+        try std.testing.expectEqualStrings(case.line, out.buffered());
+        try std.testing.expectEqual(caller_exit.Status.refused, caller_exit.forCode(.saved_refusal, savedRejectionCode(try reply.answer)));
+        out = .fixed(&storage);
+        try std.testing.expectError(error.MutationNotAccepted, presentMutationReply(&out, reply, .json));
+        var expected: [1024]u8 = undefined;
+        const json = try std.fmt.bufPrint(&expected, "{{\"context\":{{\"store\":\"/s\",\"session\":\"{s}\",\"key\":\"saved\",\"kind\":\"configure\"}},\"answer\":{{\"status\":\"rejected\",\"replayed\":true,\"session\":\"{s}\",\"code\":\"{s}\"}}}}\n", .{ case.session, case.session, case.code });
+        try std.testing.expectEqualStrings(json, out.buffered());
+    }
+}
+
+test "CLI read remedies distinguish busy pending and internal failures" {
+    const cases = [_]struct { kind: []const u8, code: []const u8, expected: ?caller_exit.Status }{
+        .{ .kind = "busy", .code = "ordinary_capacity_exhausted", .expected = .later },
+        .{ .kind = "result_unavailable", .code = "result_not_ready", .expected = .later },
+        .{ .kind = "invocation_error", .code = "canonical_store_failure", .expected = null },
+        .{ .kind = "result_unavailable", .code = "result_not_found", .expected = null },
+    };
+    for (cases) |case| {
+        var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+        try failure.diagnostic.type.set(case.kind);
+        try failure.diagnostic.code.set(case.code);
+        try std.testing.expectEqual(case.expected, readFailureStatus(failure));
+    }
+}
+
+test "stop-all refusal and uncertain recovery golden aggregates to exit four" {
+    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_stop_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"unknown_session\"},\"completion\":{\"status\":\"unavailable\"}}";
+    const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .session_stop);
+    var context: protocol_reply.MutationIdentity = .{ .kind = .session_stop };
+    try context.key.set("uncertain-handle");
+    var storage: [2048]u8 = undefined;
+    var out = std.Io.Writer.fixed(&storage);
+    try writeSavedRejection(&out, reply);
+    try writeUnconfirmed(&out, context, .generated, error.TruncatedResponse);
+    try std.testing.expectEqualStrings("rui session stop: --session / --to: No Session with this ID exists in this Store. Accepted: an existing Session ID from rui session list. Next: Select the right --store and an ID from rui session list, or create a Session with rui session start. This rejection was saved and replays as saved; a resend needs a new key. [unknown_session]\nrui: admission not confirmed (internal_unexpected); do not replace uncertain work. Recover it with rui request recover uncertain-handle. Never resubmit with a new key. [reply_unconfirmed]\n", out.buffered());
+    const refused = caller_exit.forCode(.saved_refusal, savedRejectionCode(try reply.answer));
+    const uncertain = caller_exit.forCode(.unconfirmed, .reply_unconfirmed);
+    try std.testing.expectEqual(caller_exit.Status.unconfirmed, refused.merge(uncertain));
+    try std.testing.expectEqual(caller_exit.Status.unconfirmed, uncertain.merge(refused));
+}
+
+test "CLI inspect selector dependencies give command help rather than tool guidance" {
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = [_][*:0]const u8{"rui"};
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = &environment, .preopens = .empty };
+    const cases = [_][]const []const u8{
+        &.{ "--session", "k7m2qx", "--operation", "1" },
+        &.{ "--session", "k7m2qx", "--attempt", "1" },
+        &.{ "--session", "k7m2qx", "--operation", "1", "--attempt", "1" },
+        &.{ "--session", "k7m2qx", "--failed-response", "body", "--operation", "1" },
+        &.{ "--session", "k7m2qx", "--failed-response", "metadata", "--attempt", "1" },
+    };
+    for (cases) |args| {
+        var refusal: cli_args.Refusal = undefined;
+        const parsed = try cli_args.Command.session_inspect.definition().parse(args, arena.allocator(), &refusal);
+        try std.testing.expectEqual(null, parsed.missing());
+        if (inspect(init, &parsed)) |_| return error.ExpectedRefusal else |err| {
+            try std.testing.expectEqual(error.InvalidArguments, err);
+            const code = caller_error.of(err);
+            var bytes: [1024]u8 = undefined;
+            var out = std.Io.Writer.fixed(&bytes);
+            try caller_error.writeLine(&out, code, .{ .resource = "session", .operation = "inspect" });
+            try std.testing.expectEqualStrings("rui session inspect: The command arguments are invalid. Accepted: options and values listed by rui session inspect --help. Next: Correct the invocation using this command's help. Nothing was captured or sent. [invocation_invalid]\n", out.buffered());
+            try std.testing.expectEqual(caller_exit.Status.invalid, caller_exit.forCode(.not_sent, code));
+        }
+    }
+}
+
+test "CLI boundary classifies local failures with repair lines and exits" {
+    const Case = struct { err: anyerror, code: caller_error.Code, exit: u8, phrase: []const u8 };
+    const cases = [_]Case{
+        .{ .err = error.HostNotServing, .code = .host_not_serving, .exit = 6, .phrase = "No Host serves this Store." },
+        .{ .err = error.HostStopping, .code = .host_stopping, .exit = 5, .phrase = "The Host for this Store is shutting down and no longer accepts requests." },
+        .{ .err = error.InvalidStorePath, .code = .store_path_malformed, .exit = 2, .phrase = "Supply --store PATH" },
+        .{ .err = error.InvalidStore, .code = .store_path_malformed, .exit = 2, .phrase = "canonical form is at most 492 bytes" },
+        .{ .err = error.StoreUnavailable, .code = .store_unavailable, .exit = 6, .phrase = "permissions to 0700" },
+        .{ .err = error.InvalidRuiAddress, .code = .peer_context_invalid, .exit = 2, .phrase = "unset RUI_STORE RUI_ADDRESS RUI_SENDER_HANDLE" },
+        .{ .err = error.InvalidSenderHandle, .code = .invalid_sender_handle, .exit = 2, .phrase = "Send from a live Rui Session" },
+        .{ .err = error.UnsupportedSelectionProvider, .code = .selection_provider_unsupported, .exit = 6, .phrase = "Accepted: codex, openai." },
+        .{ .err = error.UnsupportedSelectionModel, .code = .selection_model_unsupported, .exit = 6, .phrase = "rui defaults configure --clear-model" },
+        .{ .err = error.SavedPreferenceStoreInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "HOME/.config/rui/preferences" },
+        .{ .err = error.SavedPreferenceProviderInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "repair or remove that file" },
+        .{ .err = error.SavedPreferenceModelInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "repair or remove that file" },
+        .{ .err = error.SavedPreferenceProviderRequired, .code = .preferences_invalid, .exit = 6, .phrase = "repair or remove that file" },
+        .{ .err = error.InvalidPreferences, .code = .preferences_invalid, .exit = 6, .phrase = "HOME/.config/rui/preferences" },
+        .{ .err = error.UnsupportedPreferencesVersion, .code = .preferences_invalid, .exit = 6, .phrase = "repair or remove that file" },
+        .{ .err = error.PreferencesUnavailable, .code = .preferences_unavailable, .exit = 6, .phrase = "preferences file (0600)" },
+        .{ .err = error.InsecurePreferenceDirectory, .code = .preferences_unavailable, .exit = 6, .phrase = "HOME/.config/rui (0700)" },
+        .{ .err = error.InvalidPreferenceStore, .code = .preference_store_invalid, .exit = 2, .phrase = "rui defaults configure --store PATH" },
+        .{ .err = error.UnsupportedPreferenceProvider, .code = .preference_provider_invalid, .exit = 2, .phrase = "--provider codex or --provider openai" },
+        .{ .err = error.InvalidPreferenceModel, .code = .preference_model_invalid, .exit = 2, .phrase = "1-256 printable non-space ASCII bytes" },
+        .{ .err = error.PreferenceProviderRequired, .code = .preference_provider_required, .exit = 2, .phrase = "Saving a default model requires a provider." },
+        .{ .err = error.HomeUnavailable, .code = .home_unavailable, .exit = 6, .phrase = "Set HOME to your absolute home directory" },
+        .{ .err = error.InvalidModel, .code = .model_id_malformed, .exit = 2, .phrase = "1-256 printable non-space ASCII bytes" },
+        .{ .err = error.InteractiveTerminalRequired, .code = .terminal_required, .exit = 2, .phrase = "terminal input and output with cursor addressing" },
+        .{ .err = error.EmptyMessageInput, .code = .message_empty, .exit = 2, .phrase = "Pipe or redirect a nonempty Message" },
+        .{ .err = error.EnvironmentTooLarge, .code = .environment_too_large, .exit = 2, .phrase = "Unset or shorten the largest variables" },
+        .{ .err = error.Unexpected, .code = .internal_unexpected, .exit = 1, .phrase = "report this code with the command" },
+        .{ .err = error.CrossStorePeerSend, .code = .internal_unexpected, .exit = 1, .phrase = "internal fault" },
+    };
+    for (cases) |case| {
+        const code = caller_error.of(case.err);
+        try std.testing.expectEqual(case.code, code);
+        try std.testing.expectEqual(case.exit, @backingInt(caller_exit.forCode(.not_sent, code)));
+        var bytes: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try caller_error.writeLine(&writer, code, .{ .resource = "session", .operation = "start", .store = "/private/store", .not_sent = false });
+        const line = writer.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, line, case.phrase) != null);
+        try std.testing.expect(std.mem.indexOf(u8, line, "Store: \"/private/store\".") != null);
+        try std.testing.expect(std.mem.indexOf(u8, line, " Next: ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, line, "Nothing was captured") == null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
+    }
+    // Compile-time gate is exercised on a closed error set as well as the
+    // legacy anyerror values above.
+    try std.testing.expectEqual(caller_error.Code.store_unavailable, caller_error.of(error.StoreUnavailable));
+}
+
+test "Host transport classification requires Store lock evidence" {
+    const Case = struct { err: anyerror, free: anyerror, held: anyerror };
+    const cases = [_]Case{
+        .{ .err = error.FileNotFound, .free = error.HostNotServing, .held = error.HostStopping },
+        .{ .err = error.ConnectionRefused, .free = error.HostNotServing, .held = error.HostStopping },
+        .{ .err = error.UnixConnectFailed, .free = error.HostNotServing, .held = error.UnixConnectFailed },
+        .{ .err = error.ConnectionResetByPeer, .free = error.HostNotServing, .held = error.ConnectionResetByPeer },
+        .{ .err = error.BrokenPipe, .free = error.HostNotServing, .held = error.BrokenPipe },
+        .{ .err = error.TruncatedResponse, .free = error.HostNotServing, .held = error.TruncatedResponse },
+        .{ .err = error.WriteFailed, .free = error.WriteFailed, .held = error.WriteFailed },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.free, classifyHostTransportFailure(case.err, .free));
+        try std.testing.expectEqual(case.held, classifyHostTransportFailure(case.err, .held));
+        try std.testing.expectEqual(case.err, classifyHostTransportFailure(case.err, .failure));
+        try std.testing.expectEqual(@as(u8, if (case.free == error.HostNotServing) 6 else 1), @backingInt(caller_exit.knownError(case.free)));
+        try std.testing.expectEqual(@as(u8, if (case.held == error.HostStopping) 5 else 1), @backingInt(caller_exit.knownError(case.held)));
+        try std.testing.expectEqual(caller_exit.Status.unclassified, caller_exit.knownError(classifyHostTransportFailure(case.err, .failure)));
+    }
+
+    const code = caller_error.of(error.HostStopping);
+    try std.testing.expectEqual(caller_error.Code.host_stopping, code);
+    try std.testing.expectEqual(caller_error.Act.wait, caller_error.facts(code).act);
+    try std.testing.expectEqual(null, caller_error.facts(code).input);
+    var bytes: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try caller_error.writeLine(&writer, code, .{ .resource = "session", .operation = "inspect", .store = "/private/store", .not_sent = false });
+    try std.testing.expectEqualStrings("rui session inspect: The Host for this Store is shutting down and no longer accepts requests. Store: \"/private/store\". Next: Wait for it to exit, then start it again with rui host start --store PATH and retry. [host_stopping]\n", writer.buffered());
+}
+
+test "CLI boundary keeps Store and transport failures distinct" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "private", .fromMode(0o700));
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &path);
+    const root = path[0..root_len];
+    var store_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try std.fmt.bufPrint(&store_bytes, "{s}/private", .{root});
+    try std.testing.expectEqual(error.HostNotServing, readTransportFailure(io, store, error.FileNotFound));
+    try std.testing.expectEqualStrings(store, failure_held.store.?);
+    const witness = failure_held.store.?.ptr;
+    for (0..3) |_| {
+        try std.testing.expectEqual(error.HostNotServing, readTransportFailure(io, store, error.ConnectionRefused));
+        try std.testing.expectEqual(witness, failure_held.store.?.ptr);
+    }
+    try tmp.dir.deleteDir(io, "private");
+    try std.testing.expectEqual(error.StoreUnavailable, readTransportFailure(io, store, error.FileNotFound));
+    try std.testing.expectEqual(error.StoreUnavailable, storeFailure(error.InsecureDirectoryPermissions));
+    try std.testing.expectEqual(error.StoreUnavailable, storeFailure(error.AccessDenied));
+    try std.testing.expectEqual(error.InvalidStorePath, storeFailure(error.NameTooLong));
+    try std.testing.expectEqual(error.PreferencesUnavailable, preferenceFailure(error.AccessDenied));
+    try std.testing.expectEqual(error.WriteFailed, readTransportFailure(io, store, error.WriteFailed));
+}
+
+test "CLI boundary retains malformed Store display bytes without validating the witness" {
+    for ([_][]const u8{ "", "bad\xff", "bad\npath", @as([491]u8, @splat('a')) ++ "雪" }) |path| {
+        holdStore(path);
+        try std.testing.expect(failure_held.store.?.len <= protocol.max_store_bytes);
+        var bytes: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try caller_error.writeLine(&writer, .store_path_malformed, failure_held);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(writer.buffered()));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, writer.buffered(), "\n"));
+        try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), "[store_path_malformed]\n"));
+    }
+    try std.testing.expectError(error.InvalidStorePath, validateStoreSpelling("bad\xff"));
+    try std.testing.expectError(error.InvalidStorePath, validateStoreSpelling(""));
+}
+
+test "CLI boundary preserves Store selector provenance for Host administration" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root_bytes);
+    var path_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, "{s}/absent", .{root_bytes[0..root_len]});
+    var environment = std.process.Environ.Map.init(std.testing.allocator);
+    defer environment.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = [_][*:0]const u8{"rui"};
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
+    const previous = failure_held;
+    defer failure_held = previous;
+    for ([_][]const u8{ "start", "serve", "status", "pause" }) |operation| {
+        failure_held = .{ .resource = "host", .operation = operation, .not_sent = false };
+        try std.testing.expectEqualStrings(path, try rememberStore(init, path, false));
+        try std.testing.expectError(error.StoreUnavailable, rememberStore(init, path, true));
+        try std.testing.expectError(error.FileNotFound, tmp.dir.openDir(io, "absent", .{}));
+    }
+    failure_held = .{ .resource = "session", .operation = "list", .not_sent = false };
+    try std.testing.expectError(error.StoreUnavailable, rememberStore(init, path, false));
 }

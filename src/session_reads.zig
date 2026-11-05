@@ -447,7 +447,9 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
     if (job.result.work.work.first_action) |action| {
         try job.files.action.setLength(task.io, 0);
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
-        job.result.summary = try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour);
+        // A target resolved between reads is the same as a scan with no
+        // pending Action: leave result.action empty and refresh, without consent.
+        job.result.summary = (try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour)) orelse return;
         job.result.compact_tools = false;
         job.result.action = action;
     }
@@ -774,7 +776,7 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     const file = try tmp.dir.createFile(io, "output", .{ .read = true });
     defer file.close(io);
     var task: Task = .{ .io = io };
-    const outcome: protocol.ActivityItem = .{ .position = 19, .at = 1, .value = .{ .turn_ended = .{ .turn = 1, .operation = 1, .ending = .interrupted, .code = .{}, .content = null } } };
+    const outcome: protocol.ActivityItem = .{ .position = 19, .at = 1, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = .interrupted, .code = .{}, .content = null } } };
     const stop: protocol.ActivityItem = .{ .position = 20, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 5, .completion = .completed } } };
     // Another Session's Message 5 showed as its Admission and has no row:
     // nothing may begin a transcript until the stop answers it.
@@ -1573,7 +1575,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
             }
             try output.interface.writeAll("\n");
         }
-        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash when Bash asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAt an Action, Left/Right choose Allow once or Deny · Enter decides\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands, then their choices · Up/Down highlight one · Tab or Enter takes it\nOn /status, Up/Down choose a setting · Enter starts its change\n\n" ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: ");
+        try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash/MCP when Bash or MCP asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAt an Action, Left/Right choose Allow once or Deny · Enter decides\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands, then their choices · Up/Down highlight one · Tab or Enter takes it\nOn /status, Up/Down choose a setting · Enter starts its change\n\n" ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: ");
         try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
     } else {
         std.debug.assert(job.inspection_kind == .requests);
@@ -1604,7 +1606,7 @@ fn conversationItem(value: protocol.ActivityItem.Value) bool {
 test "a live page's beginning precedes its first item, without repeating or skipping one" {
     const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
     const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .applied, .content = content, .admitted_at = 1 };
-    const outcome: protocol.ActivityItem.TurnEnded = .{ .turn = 1, .operation = 1, .ending = .interrupted, .code = .{}, .content = null };
+    const outcome: protocol.ActivityItem.TurnEnded = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = .interrupted, .code = .{}, .content = null };
     const Case = struct { item: protocol.ActivityItem, cursor: ?protocol_reply.ConversationCursor };
     for ([_]Case{
         .{ .item = .{ .position = 5, .at = 1, .value = .{ .user = message } }, .cursor = .{ .end = 9, .before_position = 5 } },
@@ -1677,7 +1679,7 @@ test "the Session line takes its facts from Current and reads again after a chan
         .{ .label = "null", .mode = "bypass", .effort = "\"high\"", .trigger = "\"1000\"", .estimate = "\"1000\"", .first = "{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1\",\"sender\":null,\"content\":" ++ reference ++ "}", .name = "k7m2qx", .left = 0 },
     }) |case| {
         var bytes: [4096]u8 = undefined;
-        const report = try std.fmt.bufPrint(&bytes, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt\\u0001x\",\"revision\":\"3\",\"tools\":[],\"permission_mode\":\"{s}\",\"instructions\":" ++ reference_format ++ ",\"output_schema\":null,\"reasoning_effort\":{s},\"reasoning_effort_override\":null,\"compaction_trigger\":{s},\"context_estimate\":{s},\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":{s},\"created_at\":\"1\"}},\"pending_messages\":\"0\",\"work\":{{\"state\":{{\"kind\":\"idle\",\"since\":\"1\"}},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null}},\"peers\":{{\"from_person_at\":null}},\"first_message\":{s},\"selected_message\":null,\"recent_messages\":[],\"actions\":{{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]}},\"rejected_calls\":{{\"count\":\"0\",\"items\":[]}},\"actionable_permissions\":[],\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}}}", .{ case.mode, case.effort, case.trigger, case.estimate, case.label, case.first });
+        const report = try std.fmt.bufPrint(&bytes, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt\\u0001x\",\"revision\":\"3\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"{s}\",\"instructions\":" ++ reference_format ++ ",\"output_schema\":null,\"reasoning_effort\":{s},\"reasoning_effort_override\":null,\"compaction_trigger\":{s},\"context_estimate\":{s},\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":{s},\"created_at\":\"1\"}},\"pending_messages\":\"0\",\"work\":{{\"state\":{{\"kind\":\"idle\",\"since\":\"1\"}},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null}},\"peers\":{{\"from_person_at\":null}},\"first_message\":{s},\"selected_message\":null,\"recent_messages\":[],\"actions\":{{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]}},\"rejected_calls\":{{\"count\":\"0\",\"items\":[]}},\"actionable_permissions\":[],\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}}}", .{ case.mode, case.effort, case.trigger, case.estimate, case.label, case.first });
         try file.setLength(io, 0);
         try file.writePositionalAll(io, report, 0);
         const reply = protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } }) catch |err| {
@@ -1794,7 +1796,7 @@ const FakeHost = struct {
         if (position <= self.history) {
             var code: Bounded(protocol.max_code_bytes) = .{};
             code.set("completed") catch unreachable;
-            return .{ .position = position, .at = 1, .value = .{ .turn_ended = .{ .turn = position, .operation = position, .ending = .done, .code = code, .content = content() } } };
+            return .{ .position = position, .at = 1, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = position, .operation = position, .ending = .done, .code = code, .content = content() } } };
         }
         const tail = self.tail[position - self.history - 1];
         var value = tail.value;

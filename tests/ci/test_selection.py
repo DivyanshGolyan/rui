@@ -66,6 +66,14 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_catalog_sources_select_the_portable_catalog_tests(self):
+        for path in ("src/models_dev.zig", "src/model_catalog.zig",
+                     "src/model_catalog_main.zig", "src/model_catalog_snapshot.zig"):
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    expected = ["test-logic"] if phase == "development" else ["stack-frames", "test-logic"]
+                    self.assertEqual(select([path], phase, AVAILABLE)["targets"], expected)
+
     def test_development_does_not_claim_native_acceptance(self):
         # The Store keeps `test` for the live MySQL check (LIVE_RULES); nothing else widens.
         result = select(["src/bash_platform.c", "src/store.zig"], "development", AVAILABLE)
@@ -151,6 +159,14 @@ class SelectionTest(unittest.TestCase):
         for core in cores:
             with self.subTest(core=core):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
+
+    def test_cli_value_cores_keep_their_native_consumers(self):
+        for core in ("caller_error", "caller_exit", "cli_value", "retention_capacity"):
+            with self.subTest(core=core):
+                result = select([f"src/{core}.zig"], "review", AVAILABLE)
+                self.assertIn("test-logic", result["targets"])
+                self.assertIn("check", result["targets"])
+                self.assertIn("check", result["native_targets"])
 
     def test_http2_client_selects_its_own_tests(self):
         result = select(["src/h2/Engine.zig"], "review", AVAILABLE)
@@ -711,7 +727,32 @@ class SelectionTest(unittest.TestCase):
                                  workflow.count('uses: ./.github/actions/setup'))
         for path in Path('.github/workflows').glob('*.yml'):
             if path.name not in ('qualify-macos.yml', 'previous-release-upgrade.yml', 'release.yml'):
-                self.assertNotIn('publish-caches', path.read_text(), f'{path.name} must keep publishing')
+                workflow = path.read_text()
+                if path.name == 'check.yml':
+                    # Policy only needs a compiler for the first caller-error
+                    # inventory. Its conditional setup must not consume or
+                    # publish native build caches; every native setup still
+                    # uses the default publishing behavior below.
+                    policy = re.search(r'(?ms)^  policy:\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow).group(1)
+                    bootstrap_steps = re.findall(
+                        r'(?m)^      - uses: \./\.github/actions/setup\n(?:        .*\n)*', policy)
+                    self.assertEqual(len(bootstrap_steps), 1)
+                    self.assertEqual(policy.count('uses: ./.github/actions/setup'), 1)
+                    bootstrap = bootstrap_steps[0]
+                    self.assertEqual([line.strip() for line in bootstrap.splitlines()
+                                      if line.strip() and not line.lstrip().startswith('#')], [
+                        '- uses: ./.github/actions/setup',
+                        "if: ${{ steps.caller-bootstrap.outputs.needed == 'true' }}",
+                        'with:',
+                        "targets: '[]'",
+                        "compiled: 'true'",
+                        "cold: 'true'",
+                        "publish-caches: 'false'",
+                    ])
+                    self.assertIn('id: caller-bootstrap', policy)
+                    self.assertIn('python3 -B tests/ci/caller_errors.py --bootstrap-needed', policy)
+                    workflow = workflow.replace(bootstrap, '', 1)
+                self.assertNotIn('publish-caches', workflow, f'{path.name} native checks must keep publishing')
         setup = Path('.github/actions/setup/action.yml').read_text()
         self.assertNotIn('actions/cache/save@', setup)
         steps = re.findall(r'(?m)^    - uses: actions/cache(/restore)?@.*\n((?:      .*\n)+)', setup)

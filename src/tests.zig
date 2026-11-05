@@ -5,6 +5,8 @@ test {
     _ = @import("codex_credentials.zig");
     _ = @import("model_adapter.zig");
     _ = @import("model_capability.zig");
+    _ = @import("model_catalog.zig");
+    _ = @import("models_dev.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("os/descriptor_limit.zig");
     _ = @import("os/pages.zig");
@@ -24,6 +26,7 @@ test {
     _ = @import("mcp/Request.zig");
     _ = @import("protocol.zig");
     _ = @import("protocol_reply.zig");
+    _ = @import("caller_rejection.zig");
     _ = @import("platform.zig");
     _ = @import("socket_fixture.zig");
     _ = @import("HostDiagnostics.zig");
@@ -50,6 +53,8 @@ test {
     _ = @import("request_encoding.zig");
     _ = @import("tools.zig");
     _ = @import("core_tools.zig");
+    _ = @import("read_transcript.zig");
+    _ = @import("find_tools.zig");
     _ = @import("client.zig");
     _ = @import("cli.zig");
     _ = @import("cli_args.zig");

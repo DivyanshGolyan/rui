@@ -12,21 +12,33 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import { SessionNotifications } from "./notifications.ts";
 import { resolveBinary } from "./binary.ts";
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
-import { models, Session, Sessions, setPaused, type ModelSummary } from "./sessions.ts";
+import { models, Session, Sessions, setPaused, type AgentSpec, type ModelSummary } from "./sessions.ts";
 import { ConnectionError, post, WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
 type Schemas = components["schemas"];
 
+export interface McpServer {
+	name: string;
+	url: string;
+	bearerToken: string;
+	callTimeoutMs: number;
+}
+
 export interface ConnectOptions {
+	/** The MCP servers whose tools Sessions may name. */
+	tools?: McpServer[];
 	/** The Store: a SQLite Store directory today. The MySQL URL arrives with the Store's MySQL support. */
 	database: string;
 	/** The OpenAI-compatible provider. Only the key Adapter is offered to a launched Host (D149). */
 	provider: { baseUrl: string; key: string };
 	/** How many Turns may run at once. Left out, the Host picks its default. */
 	activeCapacity?: number;
+	/** Named creation specs, held only by this Host. No default preset is selected. */
+	presets?: Record<string, AgentSpec>;
 	/** How long connect keeps retrying while another Host holds the Store (D183, D198). Default 120 000. */
 	lockWaitMs?: number;
 	/** Opens the Host with Turns held, as if `rui.pause()` had just run (D196); `rui.resume()` lifts it. A restarted Host opens paused again. */
@@ -56,7 +68,7 @@ const READY_POLL_MS = 25;
 /** How long a refused connection waits for the child's exit before it counts as unanswered. */
 const EXIT_NOTICE_MS = 2_000;
 /** Refusals a restart cannot fix: the same frame would be refused again. */
-const RETRYABLE_START_CODES = new Set(["store_locked", "store_fenced"]);
+const RETRYABLE_START_CODES = new Set<RuiStartError["code"]>(["store_locked"]);
 
 interface Exit {
 	code: number | null;
@@ -78,7 +90,7 @@ interface Waiter {
 
 interface Launch {
 	binary: string;
-	frame: object;
+	frame: Schemas["LaunchFrame"];
 	socketPath: string;
 	store: string;
 	env: NodeJS.ProcessEnv;
@@ -107,6 +119,8 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	#restart: NodeJS.Timeout | undefined;
 	#closing: Promise<void> | undefined;
 	#dead: Error | undefined;
+	/** Local Session write notifications, shared by every handle. Internal. */
+	readonly activity = new SessionNotifications();
 	/** Create and list Sessions. */
 	readonly sessions: Sessions = new Sessions(this);
 
@@ -252,6 +266,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	#fail(error: Error): void {
+		this.activity.fail(error);
 		for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
 	}
 
@@ -289,7 +304,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 }
 
-function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
+export function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 	// A URL is passed through; anything else is a SQLite Store directory.
 	const store = /^[a-z][a-z0-9+.-]*:\/\//i.test(options.database) ? options.database : resolve(options.database);
 	const frame = {
@@ -298,8 +313,13 @@ function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 		runtimeDir,
 		...(options.activeCapacity === undefined ? {} : { activeCapacity: options.activeCapacity }),
 		...(options.paused ? { paused: true } : {}),
+		...(options.presets === undefined ? {} : {
+			presets: Object.fromEntries(Object.entries(options.presets).map(([name, spec]) => [name, presetFor(spec)])),
+		}),
 		provider: { kind: "openai_key", baseUrl: options.provider.baseUrl, key: options.provider.key },
-	};
+		// Only the Host's fields are copied: it refuses unknown ones.
+		mcpServers: (options.tools ?? []).map(({ name, url, bearerToken, callTimeoutMs }) => ({ name, url, bearerToken, callTimeoutMs })),
+	} satisfies Schemas["LaunchFrame"];
 	// The child gets only what it needs to find programs and its home (D185).
 	const env: NodeJS.ProcessEnv = {};
 	for (const name of ["PATH", "HOME", "TMPDIR"]) {
@@ -307,6 +327,20 @@ function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 		if (value !== undefined) env[name] = value;
 	}
 	return { binary: resolveBinary(options.binary), frame, socketPath: join(runtimeDir, SOCKET_NAME), store, env };
+}
+
+/** Decode the JSON-text convenience; leave preset validation to the Host. */
+function presetFor(spec: AgentSpec): Schemas["AgentSpec"] {
+	let serialized: unknown = spec;
+	if (typeof spec?.outputSchema === "string") {
+		try {
+			serialized = { ...spec, outputSchema: JSON.parse(spec.outputSchema) };
+		} catch {
+			// A raw string is not a valid wire schema; the Host will refuse it.
+		}
+	}
+	// The wire type is mutable, but JSON serialization does not mutate the preset.
+	return serialized as Schemas["AgentSpec"];
 }
 
 /** Starts one child and resolves once it answers host-info, or throws AttemptFailed. */
@@ -382,7 +416,7 @@ async function probe(launch: Launch): Promise<HostInfo | undefined> {
 }
 
 /** One length-prefixed JSON frame: a 4-byte big-endian length, then UTF-8 JSON (D130). */
-export function encodeFrame(frame: object): Buffer {
+export function encodeFrame(frame: Schemas["LaunchFrame"]): Buffer {
 	const json = Buffer.from(JSON.stringify(frame));
 	const out = Buffer.alloc(4 + json.length);
 	out.writeUInt32BE(json.length, 0);
@@ -396,8 +430,8 @@ export function startError(output: string): RuiStartError | undefined {
 	for (const line of output.split("\n").reverse()) {
 		if (!line.trim()) continue;
 		try {
-			const parsed = JSON.parse(line) as { rui_start_error?: { code?: unknown; message?: unknown } };
-			const refusal = parsed.rui_start_error;
+			const parsed: Partial<Schemas["StartError"]> | null = JSON.parse(line);
+			const refusal = parsed?.rui_start_error;
 			if (refusal && typeof refusal.code === "string") {
 				return new RuiStartError(refusal.code, typeof refusal.message === "string" ? refusal.message : refusal.code);
 			}

@@ -276,6 +276,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/activity-search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Search public Session activity newest first with bounded snippets. */
+        post: operations["activitySearch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/activity-page": {
         parameters: {
             query?: never;
@@ -427,6 +444,7 @@ export interface components {
             at: components["schemas"]["Decimal"];
             value: {
                 turn_ended: {
+                    session: string;
                     turn: components["schemas"]["Decimal"];
                     operation: components["schemas"]["Decimal"];
                     /** @enum {string} */
@@ -493,6 +511,7 @@ export interface components {
             at: components["schemas"]["Decimal"];
             value: {
                 approval_requested: {
+                    session: string;
                     action: components["schemas"]["Decimal"];
                     operation: components["schemas"]["Decimal"];
                     call_ordinal: components["schemas"]["Decimal"];
@@ -506,7 +525,7 @@ export interface components {
                 session_changed: {
                     revision: components["schemas"]["Decimal"];
                     /** @enum {string} */
-                    field: "provider" | "model" | "instructions" | "tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "label";
+                    field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "label";
                 };
             };
         } | {
@@ -554,6 +573,66 @@ export interface components {
             kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
             limit: components["schemas"]["Decimal"];
         };
+        ActivitySearchFactsCursor: {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+        };
+        ActivitySearchFactsHit: {
+            snippet: string;
+            offset: components["schemas"]["Decimal"];
+            length: components["schemas"]["Decimal"];
+        };
+        ActivitySearchItem: {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            kind: "admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted";
+            hits: components["schemas"]["ActivitySearchFactsHit"][];
+        };
+        ActivitySearchReply: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "activity_search";
+            items: components["schemas"]["ActivitySearchItem"][];
+            next: components["schemas"]["ActivitySearchFactsCursor"] | null;
+        };
+        ActivitySearchRequest: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            kind: "activity_search";
+            store: string;
+            session: string;
+            query: string;
+            /** @description Each at most once, in the order the enum lists them. */
+            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
+            before_position: components["schemas"]["Decimal"] | null;
+            before_ordinal: components["schemas"]["Decimal"] | null;
+            limit: components["schemas"]["Decimal"];
+        };
+        AgentSpec: {
+            model: string;
+            /** @enum {string|null} */
+            effort: null | "none" | "low" | "medium" | "high" | "xhigh" | "max";
+            /** @description Tokens of context at which the agent compacts. */
+            compactAt: number;
+            /** @description Tool names, each one of yours. */
+            tools: string[];
+            /** @enum {string} */
+            permissionMode: "ask" | "bypass";
+            /** @description Optional agent instructions. */
+            instructions?: string;
+            /** @description Optional JSON output schema. */
+            outputSchema?: {
+                [key: string]: unknown;
+            } | null;
+            /** @description A few words naming the agent's task. */
+            label?: string | null;
+            /** @enum {string} */
+            provider?: "codex" | "openai";
+            workspace?: string;
+        };
         CallActivity: {
             total: components["schemas"]["Decimal"];
             entries: {
@@ -597,6 +676,15 @@ export interface components {
                 value: string;
             };
             tools: {
+                /** @constant */
+                state: "omitted";
+            } | {
+                /** @constant */
+                state: "value";
+                /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                value: string[];
+            };
+            loaded_tools?: {
                 /** @constant */
                 state: "omitted";
             } | {
@@ -721,7 +809,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
+                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
             };
             execution: {
                 /** @constant */
@@ -748,6 +836,28 @@ export interface components {
             key: string;
             session: string;
             configuration: components["schemas"]["Configuration"];
+            /** @constant */
+            require_model: true;
+        } | {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            kind: "configure";
+            store: string;
+            key: string;
+            session: string;
+            configuration: components["schemas"]["Configuration"];
+            preset: string;
+        } | {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            kind: "configure";
+            store: string;
+            key: string;
+            session: string;
+            configuration: components["schemas"]["Configuration"];
+            preset: string;
             /** @constant */
             require_model: true;
         };
@@ -1016,6 +1126,76 @@ export interface components {
             kind: "host_stop";
             store: string;
         };
+        InspectSessionReply: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "session_report";
+            /** @constant */
+            profile: "current";
+            session: components["schemas"]["domainreportCurrentJsonSettings"];
+            pending_messages: components["schemas"]["Decimal"];
+            work: components["schemas"]["domainreportCurrentJsonWork"];
+            peers: components["schemas"]["PeerFacts"];
+            first_message: components["schemas"]["FirstMessage"] | null;
+            selected_message: string | null;
+            recent_messages: components["schemas"]["domainreportCurrentJsonRecent"][];
+            actions: components["schemas"]["domainreportCurrentJsonActions"];
+            rejected_calls: components["schemas"]["domainreportCurrentJsonRejectedCalls"];
+            actionable_permissions: components["schemas"]["domainreportCurrentJsonActionable"][];
+            execution: components["schemas"]["domainreportExecutionJson"];
+        } | {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "session_report";
+            /** @constant */
+            profile: "full";
+            session: components["schemas"]["domainreportCurrentJsonSettings"];
+            pending_messages: components["schemas"]["Decimal"];
+            work: components["schemas"]["domainreportCurrentJsonWork"];
+            peers: components["schemas"]["PeerFacts"];
+            first_message: components["schemas"]["FirstMessage"] | null;
+            selected_message: string | null;
+            recent_messages: components["schemas"]["domainreportCurrentJsonRecent"][];
+            actions: components["schemas"]["domainreportCurrentJsonActions"];
+            rejected_calls: components["schemas"]["domainreportCurrentJsonRejectedCalls"];
+            actionable_permissions: components["schemas"]["domainreportCurrentJsonActionable"][];
+            full: components["schemas"]["domainreport_full_shapeFull"];
+            execution: components["schemas"]["domainreportExecutionJson"];
+        } | {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "session_report";
+            /** @constant */
+            profile: "current";
+            session: null;
+            /** @constant */
+            pending_messages: "0";
+            execution: {
+                /** @constant */
+                status: "unavailable";
+                /** @constant */
+                reason: "session_not_found";
+            };
+        } | {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "session_report";
+            /** @constant */
+            profile: "full";
+            session: null;
+            /** @constant */
+            pending_messages: "0";
+            execution: {
+                /** @constant */
+                status: "unavailable";
+                /** @constant */
+                reason: "session_not_found";
+            };
+        };
         InspectSessionRequest: {
             /** @constant */
             version: "8";
@@ -1043,6 +1223,29 @@ export interface components {
             failed_response: "body" | "metadata";
             operation: components["schemas"]["Decimal"];
             attempt: components["schemas"]["Decimal"];
+        };
+        LaunchFrame: {
+            /** @constant */
+            v: 1;
+            store: string;
+            provider: {
+                /** @constant */
+                kind: "openai_key";
+                baseUrl: string;
+                key: string;
+            };
+            runtimeDir: string;
+            activeCapacity?: number | null;
+            paused?: boolean;
+            presets?: {
+                [key: string]: components["schemas"]["AgentSpec"];
+            };
+            mcpServers?: {
+                name: string;
+                url: string;
+                bearerToken: string;
+                callTimeoutMs: number;
+            }[];
         };
         ListSessionsReply: {
             /** @constant */
@@ -1143,6 +1346,15 @@ export interface components {
                 state: "omitted";
             };
             tools: {
+                /** @constant */
+                state: "omitted";
+            } | {
+                /** @constant */
+                state: "value";
+                /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+                value: string[];
+            };
+            loaded_tools?: {
                 /** @constant */
                 state: "omitted";
             } | {
@@ -1268,7 +1480,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
+                code: "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
             };
             input: {
                 /** @constant */
@@ -2195,10 +2407,11 @@ export interface components {
             /** @enum {string} */
             provider: "codex" | "openai";
             model: string;
-            /** @description Each at most once, in the order the enum lists them. */
-            tools: ("bash" | "message_agent" | "start_agent" | "web_search")[];
+            /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+            tools: string[];
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
+            parent: string | null;
             label: string | null;
             created_at: components["schemas"]["Decimal"];
             revision: components["schemas"]["Decimal"];
@@ -2278,6 +2491,13 @@ export interface components {
             operation: components["schemas"]["Decimal"] | null;
             first_action: components["schemas"]["Decimal"] | null;
         };
+        StartError: {
+            rui_start_error: {
+                /** @enum {string} */
+                code: "launch_frame_invalid" | "invalid_preset" | "store_locked" | "runtime_dir_unusable" | "tool_name_collision";
+                message: string;
+            };
+        };
         ToolPresentation: {
             description: string | null;
             /** @enum {string} */
@@ -2322,6 +2542,276 @@ export interface components {
             since: components["schemas"]["Decimal"];
             /** @enum {string} */
             cause: "stop" | "interruption";
+        };
+        domainreportCurrentJsonActionable: {
+            action: components["schemas"]["Decimal"];
+            permission_revision: components["schemas"]["Decimal"];
+        };
+        domainreportCurrentJsonActions: {
+            count: components["schemas"]["Decimal"];
+            unresolved: components["schemas"]["domainreportCurrentJsonUnresolved"][];
+            resolved: components["schemas"]["domainreportCurrentJsonResolved"][];
+        };
+        domainreportCurrentJsonOutcome: {
+            code: string;
+            content: components["schemas"]["ActivityItemContent"] | null;
+        };
+        domainreportCurrentJsonRecent: {
+            turn: components["schemas"]["Decimal"];
+            message: string;
+            outcome: string;
+        };
+        domainreportCurrentJsonRejected: {
+            parent_operation: components["schemas"]["Decimal"];
+            call_ordinal: components["schemas"]["Decimal"];
+            code: string;
+            acceptance_position: components["schemas"]["Decimal"];
+            result: components["schemas"]["domainreportCurrentJsonTextReference"];
+            name: components["schemas"]["domainreportCurrentJsonTextReference"];
+            call_id: components["schemas"]["domainreportCurrentJsonTextReference"];
+            arguments: components["schemas"]["domainreportCurrentJsonTextReference"];
+            presentation: components["schemas"]["ToolPresentation"];
+        };
+        domainreportCurrentJsonRejectedCalls: {
+            count: components["schemas"]["Decimal"];
+            items: components["schemas"]["domainreportCurrentJsonRejected"][];
+        };
+        domainreportCurrentJsonResolved: {
+            action: components["schemas"]["Decimal"];
+            parent_operation: components["schemas"]["Decimal"];
+            call_ordinal: components["schemas"]["Decimal"];
+            code: string;
+            acceptance_position: components["schemas"]["Decimal"];
+            result: components["schemas"]["domainreportCurrentJsonTextReference"];
+            presentation: components["schemas"]["ToolPresentation"];
+        };
+        domainreportCurrentJsonSettings: {
+            reference: string;
+            parent: string | null;
+            workspace: string;
+            /** @enum {string} */
+            provider: "codex" | "openai";
+            model: string;
+            compaction_trigger: components["schemas"]["Decimal"];
+            context_estimate: components["schemas"]["Decimal"] | null;
+            output_reservation: components["schemas"]["Decimal"];
+            compaction_trigger_override: components["schemas"]["Decimal"] | null;
+            output_reservation_override: components["schemas"]["Decimal"] | null;
+            /** @enum {unknown} */
+            reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+            /** @enum {unknown} */
+            reasoning_effort_override: "none" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+            revision: components["schemas"]["Decimal"];
+            /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+            tools: string[];
+            /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+            loaded_tools: string[];
+            /** @enum {string} */
+            permission_mode: "ask" | "bypass";
+            instructions: components["schemas"]["ActivityItemContent"];
+            output_schema: components["schemas"]["ActivityItemContent"] | null;
+            label: string | null;
+            created_at: components["schemas"]["Decimal"];
+        };
+        domainreportCurrentJsonTextReference: {
+            /** @constant */
+            type: "text";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+        };
+        domainreportCurrentJsonUnresolved: {
+            action: components["schemas"]["Decimal"];
+            parent_operation: components["schemas"]["Decimal"];
+            call_ordinal: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            tool: "bash" | "find_tools" | "message_agent" | "read_transcript" | "start_agent" | "web_search";
+            permission_revision: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            authorization: "core" | "pending" | "bypass" | "allow_once";
+            call_id: components["schemas"]["domainreportCurrentJsonTextReference"];
+            arguments: components["schemas"]["domainreportCurrentJsonTextReference"];
+            presentation: components["schemas"]["ToolPresentation"];
+        };
+        domainreportCurrentJsonWork: {
+            state: components["schemas"]["WorkStateJson"];
+            turn: components["schemas"]["Decimal"] | null;
+            operation: components["schemas"]["Decimal"] | null;
+            first_action: components["schemas"]["Decimal"] | null;
+            latest_outcome: components["schemas"]["domainreportCurrentJsonOutcome"] | null;
+        };
+        domainreportExecutionJson: {
+            /** @constant */
+            status: "partial";
+            dispatch_fenced: boolean;
+            custody_occupied: components["schemas"]["Decimal"];
+            scratch_used_bytes: components["schemas"]["Decimal"];
+            unavailable: [
+                "structured_output"
+            ];
+        };
+        domainreport_full_shapeFull: {
+            session_revisions: components["schemas"]["domainreport_full_shapeFullRevision"][];
+            messages: components["schemas"]["domainreport_full_shapeFullMessage"][];
+            conversation: components["schemas"]["domainreport_full_shapeFullConversation"][];
+            turns: components["schemas"]["domainreport_full_shapeFullTurn"][];
+            model_operations: components["schemas"]["domainreport_full_shapeFullOperation"][];
+            tool_calls: components["schemas"]["domainreport_full_shapeFullCall"][];
+            actions: components["schemas"]["domainreport_full_shapeFullAction"][];
+            permission_decisions: components["schemas"]["domainreport_full_shapeFullDecision"][];
+            session_stops: components["schemas"]["domainreport_full_shapeFullStop"][];
+            model_interruptions: components["schemas"]["domainreport_full_shapeFullInterruption"][];
+            tool_results: components["schemas"]["domainreport_full_shapeFullResult"][];
+        };
+        domainreport_full_shapeFullAction: {
+            action: components["schemas"]["Decimal"];
+            parent_operation: components["schemas"]["Decimal"];
+            call_ordinal: components["schemas"]["Decimal"];
+            permission_revision: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            permission: "denied" | "authorized" | "requested";
+            resolution: string | null;
+            result: components["schemas"]["domainreport_full_shapeFullInline"] | null;
+            acceptance_position: components["schemas"]["Decimal"] | null;
+        };
+        domainreport_full_shapeFullCall: {
+            operation: components["schemas"]["Decimal"];
+            call_ordinal: components["schemas"]["Decimal"];
+            item_ordinal: components["schemas"]["Decimal"];
+            rejection: string | null;
+            acceptance_position: components["schemas"]["Decimal"] | null;
+            name: components["schemas"]["domainreport_full_shapeFullInline"];
+            call_id: components["schemas"]["domainreport_full_shapeFullInline"];
+            arguments: components["schemas"]["domainreport_full_shapeFullInline"];
+            rejection_result: components["schemas"]["domainreport_full_shapeFullInline"] | null;
+        };
+        domainreport_full_shapeFullConversation: {
+            ordinal: components["schemas"]["Decimal"];
+            position: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            kind: "message" | "settings" | "assistant";
+            turn: components["schemas"]["Decimal"];
+            source_admission: components["schemas"]["Decimal"] | null;
+            source_revision: components["schemas"]["Decimal"] | null;
+            source_operation: components["schemas"]["Decimal"] | null;
+            content: components["schemas"]["ActivityItemContent"];
+        };
+        domainreport_full_shapeFullDecision: {
+            command_key: string;
+            action: string;
+            /** @enum {string} */
+            decision: "allow_once" | "deny";
+            /** @enum {string} */
+            status: "accepted" | "rejected";
+            code: string;
+        };
+        domainreport_full_shapeFullExclusion: {
+            /** @constant */
+            code: "session_stopped";
+            command_key: string;
+        };
+        domainreport_full_shapeFullInline: {
+            /** @constant */
+            type: "text";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+            /** @description Text of any length, saved as content. */
+            text: string;
+        };
+        domainreport_full_shapeFullInterruption: {
+            command_key: string;
+            /** @enum {string} */
+            status: "accepted" | "rejected";
+            code: string;
+            turn: string;
+            operation: string;
+        };
+        domainreport_full_shapeFullMessage: {
+            admission: components["schemas"]["Decimal"];
+            command_key: string;
+            content: components["schemas"]["domainreport_full_shapeFullInline"];
+            turn: components["schemas"]["Decimal"] | null;
+            /** @enum {string} */
+            application: "applied" | "pending" | "excluded";
+            exclusion: components["schemas"]["domainreport_full_shapeFullExclusion"] | null;
+            outcome: components["schemas"]["domainreport_full_shapeFullOutcome"] | null;
+        };
+        domainreport_full_shapeFullOperation: {
+            operation: components["schemas"]["Decimal"];
+            turn: components["schemas"]["Decimal"];
+            resolution: components["schemas"]["domainreport_full_shapeFullResolution"] | null;
+            interrupted_by: string | null;
+            settings_revision: components["schemas"]["Decimal"];
+            request_id: string | null;
+            /** @enum {unknown} */
+            reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+        };
+        domainreport_full_shapeFullOutcome: {
+            code: string;
+            content: components["schemas"]["ActivityItemContent"] | null;
+        };
+        domainreport_full_shapeFullResolution: {
+            code: string;
+            content: components["schemas"]["domainreport_full_shapeFullInline"] | null;
+        };
+        domainreport_full_shapeFullResult: {
+            operation: components["schemas"]["Decimal"];
+            call_ordinal: components["schemas"]["Decimal"];
+            acceptance_position: components["schemas"]["Decimal"];
+            call_id: components["schemas"]["domainreport_full_shapeFullInline"];
+            code: string;
+            result: components["schemas"]["domainreport_full_shapeFullInline"];
+        };
+        domainreport_full_shapeFullRevision: {
+            revision: components["schemas"]["Decimal"];
+            command_key: string;
+            workspace: string;
+            /** @enum {string} */
+            provider: "codex" | "openai";
+            model: string;
+            compaction_trigger: components["schemas"]["Decimal"] | null;
+            output_reservation: components["schemas"]["Decimal"] | null;
+            /** @enum {unknown} */
+            reasoning_effort: "none" | "low" | "medium" | "high" | "xhigh" | "max" | null;
+            label: string | null;
+            /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+            tools: string[];
+            /** @description Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
+            loaded_tools: string[];
+            /** @enum {string} */
+            permission_mode: "ask" | "bypass";
+            instructions: components["schemas"]["domainreport_full_shapeFullRevisionContent"];
+            output_schema: components["schemas"]["domainreport_full_shapeFullRevisionContent"] | null;
+        };
+        domainreport_full_shapeFullRevisionContent: {
+            /** @constant */
+            type: "text";
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+            /** @description Text of any length, saved as content. */
+            text: string;
+        } | {
+            bytes: components["schemas"]["Decimal"];
+            sha256: string;
+            owner: {
+                revision: components["schemas"]["Decimal"];
+                /** @enum {string} */
+                field: "instructions" | "output_schema";
+            };
+        };
+        domainreport_full_shapeFullStop: {
+            command_key: string;
+            /** @enum {string} */
+            status: "accepted" | "rejected";
+            code: string;
+            selected_turn: components["schemas"]["Decimal"] | null;
+            admission_cutoff: components["schemas"]["Decimal"] | null;
+        };
+        domainreport_full_shapeFullTurn: {
+            turn: components["schemas"]["Decimal"];
+            first_admission: components["schemas"]["Decimal"];
+            input_cutoff: components["schemas"]["Decimal"];
+            operation: components["schemas"]["Decimal"];
+            outcome: components["schemas"]["domainreport_full_shapeFullOutcome"] | null;
         };
     };
     responses: never;
@@ -2862,13 +3352,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The Session report (JSON; its schema is not described yet), or, for a failed response export, that response's bytes. */
+            /** @description The Session report, or, for a failed response export, that response's bytes. */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["InspectSessionReply"];
                     "application/octet-stream": string;
                 };
             };
@@ -2984,6 +3474,44 @@ export interface operations {
                 };
                 content: {
                     "application/octet-stream": string;
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    activitySearch: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActivitySearchRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivitySearchReply"];
                 };
             };
             /** @description A refusal or failure. */

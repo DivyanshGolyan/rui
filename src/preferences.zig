@@ -40,6 +40,18 @@ pub fn validate(values: *const Values) !void {
     if (values.model.len != 0 and values.provider.len == 0) return error.PreferenceProviderRequired;
 }
 
+// Preserve the precise saved-data cause, independently of the same invalid
+// fresh edit. CLI reads need environment repair; legacy login stdout still
+// carries its original reason spelling.
+fn validateSaved(values: *const Values) !void {
+    validate(values) catch |err| return switch (err) {
+        error.InvalidPreferenceStore => error.SavedPreferenceStoreInvalid,
+        error.InvalidPreferenceProvider => error.SavedPreferenceProviderInvalid,
+        error.InvalidPreferenceModel => error.SavedPreferenceModelInvalid,
+        error.PreferenceProviderRequired => error.SavedPreferenceProviderRequired,
+    };
+}
+
 const effort_key = "reasoning_effort=";
 
 fn read(dir: std.Io.Dir) !Values {
@@ -92,7 +104,7 @@ pub fn load(home: []const u8) !Values {
     };
     defer dir.close(io);
     const values = try read(dir);
-    try validate(&values);
+    try validateSaved(&values);
     return values;
 }
 
@@ -153,11 +165,21 @@ pub fn saveProviderAfterLogin(home: []const u8, provider: protocol.Provider, onl
     return (try save(home, .{ .provider = .{ .set = @tagName(provider) } }, &readiness, only_if_unset)) != null;
 }
 
+// Both preflight and locked application keep Store-selection failures
+// distinct from failures reading or publishing the preferences themselves.
+// Keep the Paths return temporaries out of apply's frame.
+noinline fn resolveStore(value: []const u8) !platform.Paths {
+    return platform.resolveClientPaths(io, value) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.AccessDenied, error.PermissionDenied, error.InsecureDirectoryPermissions, error.SymLinkLoop, error.StorePathTooLong, error.NameTooLong, error.InvalidStorePath => error.InvalidPreferenceStore,
+        else => err,
+    };
+}
+
 /// Apply explicit choices to the locked snapshot, never resolved recommendations.
 fn apply(saved: Values, edit: Edit, readiness: *const Readinesses) !Values {
     var values = saved;
     if (edit.store == .set) {
-        const paths = try platform.resolveClientPaths(io, edit.store.set);
+        const paths = try resolveStore(edit.store.set);
         values.store.set(paths.store.slice()) catch return error.InvalidPreferenceStore;
     }
     if (edit.provider == .set) {
@@ -208,7 +230,7 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, onl
         const value = edit.store.set;
         if (!std.fs.path.isAbsolute(value)) return error.InvalidPreferenceStore;
         for (value) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidPreferenceStore;
-        _ = try platform.resolveClientPaths(io, value);
+        _ = try resolveStore(value);
     }
     var dir = blk: {
         var home_dir = try std.Io.Dir.openDirAbsolute(io, home, .{ .iterate = true });
@@ -258,7 +280,7 @@ fn saveWithSync(home: []const u8, edit: Edit, readiness: *const Readinesses, onl
     defer lock.close(io);
     try privateFile(lock);
     const saved = try read(dir);
-    try validate(&saved);
+    try validateSaved(&saved);
     if (only_if_unset) {
         if (saved.provider.len != 0) return null;
     }
@@ -586,7 +608,7 @@ test "preference edits preserve unused deleted Store but validate supplied repla
     try std.testing.expect(cleared.store.eql(before.store.slice()) and cleared.model.len == 0);
     const independent = try update(home, .{ .model = .{ .set = "explicit-model" } }, &codexOnly(.missing));
     try std.testing.expect(independent.store.eql(old) and independent.model.eql("explicit-model"));
-    try std.testing.expectError(error.FileNotFound, update(home, .{ .store = .{ .set = old }, .model = .clear }, &codexOnly(.configured)));
+    try std.testing.expectError(error.InvalidPreferenceStore, update(home, .{ .store = .{ .set = old }, .model = .clear }, &codexOnly(.configured)));
     try std.testing.expect((try load(home)).model.eql("explicit-model"));
     const repaired = try update(home, .{ .store = .{ .set = replacement }, .model = .clear }, &codexOnly(.missing));
     try std.testing.expect(repaired.store.eql(replacement) and repaired.provider.eql("codex") and repaired.model.len == 0);
@@ -690,4 +712,52 @@ test "any built-in provider can be saved, and a model alone needs one ready prov
     try std.testing.expect(saved.provider.eql("openai") and saved.model.eql("gpt-6-luna"));
     try std.testing.expect(!try fillProviderAfterLogin(home, .codex));
     try std.testing.expect((try load(home)).provider.eql("openai"));
+}
+
+/// Legacy stdout login receipts are outside the CLI stderr migration. Derive
+/// their unchanged reason vocabulary from this owner's closed error set.
+pub fn loginDefaultFailureReason(err: @typeInfo(@typeInfo(@TypeOf(saveProviderAfterLogin)).@"fn".return_type.?).error_union.error_set) []const u8 {
+    switch (err) {
+        error.SavedPreferenceStoreInvalid => return "InvalidPreferenceStore",
+        error.SavedPreferenceProviderInvalid => return "InvalidPreferenceProvider",
+        error.SavedPreferenceModelInvalid => return "InvalidPreferenceModel",
+        error.SavedPreferenceProviderRequired => return "PreferenceProviderRequired",
+        else => {},
+    }
+    inline for (@typeInfo(@TypeOf(err)).error_set.error_names.?) |name| {
+        if (err == @field(anyerror, name)) return name;
+    }
+    unreachable;
+}
+
+test "saved invalid preference fields are environment failures and never get overwritten" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home_len = try tmp.dir.realPath(io, &home_bytes);
+    const home = home_bytes[0..home_len];
+    _ = try update(home, .{ .provider = .{ .set = "codex" } }, &codexOnly(.configured));
+    var config = try tmp.dir.openDir(io, ".config/rui", .{});
+    defer config.close(io);
+    const Case = struct { text: []const u8, err: anyerror, legacy: []const u8 };
+    const cases = [_]Case{
+        .{ .text = "version=1\nstore=relative\nprovider=codex\nmodel=\n", .err = error.SavedPreferenceStoreInvalid, .legacy = "InvalidPreferenceStore" },
+        .{ .text = "version=1\nstore=\nprovider=bad provider\nmodel=\n", .err = error.SavedPreferenceProviderInvalid, .legacy = "InvalidPreferenceProvider" },
+        .{ .text = "version=1\nstore=\nprovider=codex\nmodel=two words\n", .err = error.SavedPreferenceModelInvalid, .legacy = "InvalidPreferenceModel" },
+        .{ .text = "version=1\nstore=\nprovider=\nmodel=pin\n", .err = error.SavedPreferenceProviderRequired, .legacy = "PreferenceProviderRequired" },
+    };
+    for (cases) |case| {
+        const invalid = case.text;
+        const file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+        try file.writeStreamingAll(io, invalid);
+        file.close(io);
+        try std.testing.expectError(case.err, load(home));
+        try std.testing.expectError(case.err, update(home, .{ .notifications = false }, &codexOnly(.configured)));
+        const saved_failure = saveProviderAfterLogin(home, .codex, false);
+        if (saved_failure) |_| return error.ExpectedRefusal else |err| {
+            try std.testing.expectEqualStrings(case.legacy, loginDefaultFailureReason(err));
+        }
+        var saved: [512]u8 = undefined;
+        try std.testing.expectEqualStrings(invalid, try savedFile(config, &saved));
+    }
 }

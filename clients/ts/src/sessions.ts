@@ -1,42 +1,52 @@
-// Sessions: create, list, send, update, stop, interrupt and decide, plus the
+// Sessions: create, list, status, send, update, stop, interrupt and decide, plus the
 // model list and Host pause (D7, D8, D14 to D17, D121, D123, D128, D167,
 // D171). Every call is one request to a Host route that exists today.
 import { randomUUID } from "node:crypto";
 
-import { RuiRequestError } from "./errors.ts";
-import { FEED_KINDS, listActivity, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import type { SessionNotifications } from "./notifications.ts";
+import { RuiRequestError, type RequestAnswer } from "./errors.ts";
+import { listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
 /** What a Session handle needs from the client. */
 export interface Link {
+	readonly activity?: SessionNotifications;
 	exchange(path: string, build: (store: string) => string, environment?: Buffer, limits?: ReplyLimits): Promise<Buffer>;
 }
 
 type Schemas = components["schemas"];
 
 /** The Session settings the Host takes today. */
-export interface SessionSpec {
+export interface AgentSpec {
 	/** The working directory for Bash. Required with `bash`, fixed for the Session's life. */
 	workspace?: string;
 	/** `openai` or `codex`. Fixed for the Session's life. */
-	provider?: string;
+	provider?: NonNullable<Schemas["AgentSpec"]["provider"]>;
 	/** Fixed for the Session's life. */
-	model?: string;
+	model: string;
 	instructions?: string;
+	/** JSON output schema, or its JSON text; `null` clears it. */
+	outputSchema?: Record<string, unknown> | string | null;
 	/** Tool names the Host offers, such as `bash` and `web_search`. */
-	tools?: string[];
-	permissionMode?: "ask" | "bypass";
-	/** Reasoning effort. `null` returns to the model's default. */
-	effort?: string | null;
-	/** Compact the conversation at this many tokens. `null` returns to the default. */
-	compactAt?: number | null;
+	tools: readonly string[];
+	permissionMode: "ask" | "bypass";
+	/** Reasoning effort. `null` sends none, so the provider uses its own; only for a model Rui does not list (D111). */
+	effort: Schemas["AgentSpec"]["effort"];
+	/** Compact the conversation at this many tokens. */
+	compactAt: number;
 	/** A name shown in lists. `null` clears it. */
 	label?: string | null;
 }
 
+/** The same agent spec accepted by creation and connect-time presets. */
+export type SessionSpec = AgentSpec;
+
+/** Creation needs a complete spec, or a named preset with explicit overrides. */
+export type SessionCreate = (AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>);
+
 /** The settings `update` may change: everything but the ones fixed at creation. */
-export type SessionUpdate = Omit<SessionSpec, "workspace" | "provider" | "model">;
+export type SessionUpdate = Partial<Pick<SessionSpec, "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label">>;
 
 export interface WriteOptions {
 	/** Required on `create` and `send`, built as `kind:driftId`. Other writes get a fresh UUIDv4 when it is left out (D123). */
@@ -54,8 +64,25 @@ export interface SessionSummary {
 	label: string | null;
 	/** The Session's work state, such as `idle`, `working` or `approval`. */
 	state: string;
-	/** Always `null` until Sessions have parents. */
 	parent: string | null;
+}
+
+type CurrentReport = Extract<Schemas["InspectSessionReply"], { profile: "current"; work: unknown }>;
+
+/** Current Host facts. Decimal counts, times and IDs remain lossless strings. */
+export interface SessionStatus {
+	state: CurrentReport["work"]["state"]["kind"];
+	since: CurrentReport["work"]["state"]["since"];
+	turn: CurrentReport["work"]["turn"];
+	operation: CurrentReport["work"]["operation"];
+	pendingMessages: CurrentReport["pending_messages"];
+	parent: CurrentReport["session"]["parent"];
+	label: CurrentReport["session"]["label"];
+	model: CurrentReport["session"]["model"];
+	effort: CurrentReport["session"]["reasoning_effort"];
+	tools: CurrentReport["session"]["tools"];
+	permissionMode: CurrentReport["session"]["permission_mode"];
+	latestOutcome: CurrentReport["work"]["latest_outcome"];
 }
 
 export interface ModelSummary {
@@ -77,7 +104,7 @@ function clearable<T>(field: T | null | undefined): Omitted | typeof NULL | { st
 	return field === null ? NULL : { state: "value", value: field };
 }
 
-function configuration(spec: SessionSpec): Schemas["Configuration"] {
+function configuration(spec: Partial<SessionSpec>): Schemas["Configuration"] {
 	return {
 		workspace: optional(spec.workspace),
 		provider: optional(spec.provider),
@@ -87,15 +114,15 @@ function configuration(spec: SessionSpec): Schemas["Configuration"] {
 		// ASCII, so code-unit order is byte order.
 		tools: optional(spec.tools === undefined ? undefined : [...new Set(spec.tools)].sort()),
 		permission_mode: optional(spec.permissionMode),
-		output_schema: OMITTED,
-		compaction_trigger: clearable(spec.compactAt == null ? spec.compactAt : String(spec.compactAt)),
+		output_schema: clearable(typeof spec.outputSchema === "object" && spec.outputSchema !== null ? JSON.stringify(spec.outputSchema) : spec.outputSchema),
+		compaction_trigger: optional(spec.compactAt === undefined ? undefined : String(spec.compactAt)),
 		output_reservation: OMITTED,
 		reasoning_effort: clearable(spec.effort),
 		label: clearable(spec.label),
 	};
 }
 
-function configureBody(store: string, key: string, session: string, spec: SessionSpec): string {
+function configureBody(store: string, key: string, session: string, spec: Partial<AgentSpec> & { preset?: string }): string {
 	return JSON.stringify({
 		version: WIRE_VERSION,
 		kind: "configure",
@@ -103,6 +130,7 @@ function configureBody(store: string, key: string, session: string, spec: Sessio
 		key,
 		session,
 		configuration: configuration(spec),
+		...(spec.preset === undefined ? {} : { preset: spec.preset }),
 	} satisfies Schemas["ConfigureRequest"]);
 }
 
@@ -115,8 +143,8 @@ function parse<T>(reply: Buffer): T {
 }
 
 /** Throws the Host's rejection or conflict; returns the accepted answer. */
-function accepted<A extends { status: string; code?: string }>(answer: A): Extract<A, { status: "accepted" }> {
-	if (answer.status !== "accepted") throw new RuiRequestError(answer.status, answer.code ?? "rejected");
+function accepted<A extends RequestAnswer>(answer: A): Extract<A, { status: "accepted" }> {
+	if (answer.status !== "accepted") throw new RuiRequestError(answer.status, answer.code);
 	return answer as Extract<A, { status: "accepted" }>;
 }
 
@@ -139,10 +167,17 @@ export class Session {
 
 	/**
 	 * The Session's feed, in order, as an async iterator (D9). Without `follow`
-	 * it ends at the current end of the feed; with it, it never ends.
+	 * it ends at the current end. With it, busy Sessions poll with backoff; idle Sessions
+	 * wait for a local write on this Rui instance (not writes from another process).
+	 * See `ListActivityOptions.follow`; `signal` abort also ends an idle wait.
 	 */
 	listActivity(options?: ListActivityOptions): AsyncGenerator<FeedEntry, void, undefined> {
 		return listActivity(this.#link, this.id, options);
+	}
+
+	/** Search public feed text newest first, with bounded snippets. */
+	searchActivity(query: string, options?: SearchActivityOptions): AsyncGenerator<ActivitySearchEntry, void, undefined> {
+		return searchActivity(this.#link, this.id, query, options);
 	}
 
 	/** The whole text of an entry (D134). Past about 512 MiB a string cannot hold it and this throws: use `readContentBytes`. */
@@ -153,6 +188,33 @@ export class Session {
 	/** The whole text of an entry as UTF-8 bytes, up to the Host's limit of about 1 GiB. */
 	readContentBytes(entry: Pick<FeedEntry, "position" | "ordinal">): Promise<Buffer> {
 		return readContentBytes(this.#link, this.id, entry);
+	}
+
+	/** A Current report's summary (D12). A separate ending is not reported. */
+	async status(): Promise<SessionStatus> {
+		const reply = parse<Extract<Schemas["InspectSessionReply"], { profile: "current" }>>(
+			await this.#link.exchange("/v1/inspect-session", (store) => JSON.stringify({
+				version: WIRE_VERSION,
+				kind: "inspect_session",
+				store,
+				session: this.id,
+			} satisfies Schemas["InspectSessionRequest"])),
+		);
+		if (reply.session === null) throw new RuiRequestError("invocation_error", "session_not_found");
+		return {
+			state: reply.work.state.kind,
+			since: reply.work.state.since,
+			turn: reply.work.turn,
+			operation: reply.work.operation,
+			pendingMessages: reply.pending_messages,
+			parent: reply.session.parent,
+			label: reply.session.label,
+			model: reply.session.model,
+			effort: reply.session.reasoning_effort,
+			tools: reply.session.tools,
+			permissionMode: reply.session.permission_mode,
+			latestOutcome: reply.work.latest_outcome,
+		};
 	}
 
 	/** Sends a Message. The receipt is its admission number; the answer arrives in the feed (D8). */
@@ -169,7 +231,9 @@ export class Session {
 				text: { state: "value", value: text },
 			} satisfies Schemas["MessageRequest"]);
 		const reply = parse<Schemas["MessageReply"]>(await this.#link.exchange("/v1/message", body, environmentBytes(options.env)));
-		return { messageId: accepted(reply.answer).admission };
+		const messageId = accepted(reply.answer).admission;
+		this.#link.activity?.notify(this.id);
+		return { messageId };
 	}
 
 	/** Changes settings. Omitted fields stay as they are. Resolves once the Host accepted the change (D7). */
@@ -179,6 +243,7 @@ export class Session {
 			await this.#link.exchange("/v1/configure", (store) => configureBody(store, idempotencyKey, this.id, fields)),
 		);
 		accepted(reply.answer);
+		this.#link.activity?.notify(this.id);
 	}
 
 	/** Stops the current and queued work. The Session stays usable (D14). */
@@ -193,6 +258,7 @@ export class Session {
 				session: this.id,
 			} satisfies Schemas["SessionStopRequest"]);
 		accepted(parse<Schemas["SessionStopReply"]>(await this.#link.exchange("/v1/control/session-stop", body)).answer);
+		this.#link.activity?.notify(this.id);
 	}
 
 	/**
@@ -202,26 +268,12 @@ export class Session {
 	 * call is current, or when the call ended before the cut arrived (D167, D171).
 	 */
 	async interrupt(): Promise<void> {
-		const page = parse<Schemas["ActivityPageReply"]>(
-			await this.#link.exchange(
-				"/v1/activity-page",
-				(store) =>
-					JSON.stringify({
-						version: WIRE_VERSION,
-						kind: "activity_page",
-						store,
-						session: this.id,
-						end: null,
-						position: "0",
-						ordinal: null,
-						direction: "backward",
-						kinds: [...FEED_KINDS],
-						limit: "1",
-					} satisfies Schemas["ActivityPageRequest"]),
-			),
-		);
-		const { turn, operation } = page.work;
-		if (turn === null || operation === null || !modelCallCurrent(page.work.state.kind)) return;
+		const status = await this.status();
+		const { turn, operation } = status;
+		if (turn === null || operation === null || !modelCallCurrent(status.state)) {
+			this.#link.activity?.notify(this.id);
+			return;
+		}
 		const idempotencyKey = randomUUID();
 		const body = (store: string) =>
 			JSON.stringify({
@@ -238,6 +290,7 @@ export class Session {
 			const gone = error instanceof RuiRequestError && (error.code === "operation_resolved" || error.code === "target_mismatch");
 			if (!gone) throw error;
 		}
+		this.#link.activity?.notify(this.id);
 	}
 
 	/** Answers an approval. `requestId` is the Action id of the `approval_requested` entry (D15). */
@@ -255,6 +308,7 @@ export class Session {
 				decision: wire,
 			} satisfies Schemas["PermissionDecisionRequest"]);
 		accepted(parse<Schemas["PermissionDecisionReply"]>(await this.#link.exchange("/v1/control/permission-decision", body)).answer);
+		this.#link.activity?.notify(this.id);
 	}
 }
 
@@ -271,7 +325,7 @@ export class Sessions {
 	}
 
 	/** Creates a Session. The key is required: a repeat returns the same Session (D7, D17). */
-	async create(spec: SessionSpec, options: { idempotencyKey: string }): Promise<Session> {
+	async create(spec: SessionCreate, options: { idempotencyKey: string }): Promise<Session> {
 		const reply = parse<Schemas["ConfigureReply"]>(
 			await this.#link.exchange("/v1/configure", (store) => configureBody(store, options.idempotencyKey, "", spec)),
 		);
@@ -300,7 +354,7 @@ export class Sessions {
 				),
 			);
 			for (const row of page.sessions) {
-				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, parent: null });
+				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, parent: row.parent });
 			}
 			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;

@@ -402,6 +402,22 @@ pub const OptionalFile = struct {
     path: []const u8 = "",
 };
 
+/// Concrete client-side defaults for a fresh Session, never sparse updates.
+pub fn defaultCompactionTrigger(model: []const u8) []const u8 {
+    const capability = @import("model_capability.zig");
+    const defaults = @import("product_defaults.zig");
+    inline for (capability.models) |row| {
+        if (std.mem.eql(u8, model, row.id)) return std.fmt.comptimePrint("{d}", .{row.context_window * defaults.compaction_trigger_percent / 100});
+    }
+    return std.fmt.comptimePrint("{d}", .{defaults.unlisted_context_window * defaults.compaction_trigger_percent / 100});
+}
+
+pub fn defaultStartEffort(model: []const u8, saved: ?@import("model_capability.zig").ReasoningEffort) OptionalPolicy {
+    const capability = @import("model_capability.zig");
+    const effort = capability.startEffort(saved, model) orelse capability.defaultReasoningEffort(model);
+    return .{ .present = true, .value = if (effort) |value| @tagName(value) else null };
+}
+
 pub const ConfigureInput = struct {
     store: []const u8,
     session: union(enum) {
@@ -414,6 +430,7 @@ pub const ConfigureInput = struct {
     model: OptionalText = .{},
     instructions: OptionalFile = .{},
     tools: ?[]const u8 = null,
+    loaded_tools: ?[]const u8 = null,
     permission_mode: OptionalText = .{},
     output_schema: OptionalFile = .{},
     compaction_trigger: OptionalPolicy = .{},
@@ -518,7 +535,24 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         error.FileNotFound => .unavailable,
         else => .access_failure,
     };
-    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .access_failure;
+    return switch (lockState(io, &paths)) {
+        .free => .unavailable,
+        .held => readHostInfo(io, &paths, deadline),
+        .failure => .access_failure,
+    };
+}
+
+pub const HostLockState = enum { free, held, failure };
+
+/// Probe without contacting the Host; a failed probe proves neither absence
+/// nor ownership and must not be treated as a held lock by diagnostic callers.
+pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
+    const paths = platform.resolveClientPaths(io, store_path) catch |err| return if (err == error.FileNotFound) .free else .failure;
+    return lockState(io, &paths);
+}
+
+fn lockState(io: std.Io, paths: *const platform.Paths) HostLockState {
+    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .failure;
     defer store_dir.close(io);
     // A replaced lock node may be a FIFO: open must not wait for a writer
     // before the nonblocking lock probe can classify the selected Store.
@@ -528,17 +562,17 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0) catch |err| return switch (err) {
-        error.FileNotFound => .unavailable,
-        else => .access_failure,
+        error.FileNotFound => .free,
+        else => .failure,
     };
     const lock_file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
     defer lock_file.close(io);
-    const stat = lock_file.stat(io) catch return .access_failure;
-    if (stat.kind != .file) return .access_failure;
+    const stat = lock_file.stat(io) catch return .failure;
+    if (stat.kind != .file) return .failure;
     return switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
-        .SUCCESS => .unavailable,
-        .AGAIN => readHostInfo(io, &paths, deadline),
-        else => .access_failure,
+        .SUCCESS => .free,
+        .AGAIN => .held,
+        else => .failure,
     };
 }
 
@@ -1051,6 +1085,17 @@ fn writeConfigureCapture(io: std.Io, paths: *const platform.Paths, input: Config
     return finishCapture(io, &capture, &location, paths.store.slice(), session, .configure);
 }
 
+/// The one check of a peer identity's shape, shared by the CLI (which
+/// must refuse malformed context even when it then sends unsigned to
+/// another Store) and the message capture.
+pub fn validatePeer(store: []const u8, session: []const u8, handle: ?[]const u8) !void {
+    if (handle) |bytes| if (bytes.len > protocol.max_sender_handle_bytes) return error.InvalidSenderHandle;
+    var address: protocol.Address = .{};
+    try address.store.set(store);
+    try address.session.set(session);
+    try address.validate();
+}
+
 pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) Stepped(CaptureError, CapturedRecord) {
     return stepCapture(io, input, target, writeMessageCapture);
 }
@@ -1058,15 +1103,11 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) St
 fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageInput, target: CaptureTarget, input_failure: *?Step) !CapturedRecord {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
-    if (input.sender_handle) |handle| if (handle.len > protocol.max_sender_handle_bytes) return error.InvalidSenderHandle;
     // Validate the full sender before resolving or opening any capture.
     // The Host authenticates admission, including legitimate self-sends.
-    if (input.sender) |sender| {
-        var address: protocol.Address = .{};
-        try address.store.set(sender.store orelse return error.InvalidRuiAddress);
-        try address.session.set(sender.session);
-        try address.validate();
-    }
+    if (input.sender) |sender|
+        try validatePeer(sender.store orelse return error.InvalidRuiAddress, sender.session, input.sender_handle)
+    else if (input.sender_handle) |handle| if (handle.len > protocol.max_sender_handle_bytes) return error.InvalidSenderHandle;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     if (input.configuration != null) {
         if (input.session.len != 0 or location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidSession;
@@ -1320,6 +1361,10 @@ const Capture = struct {
         try self.writeOptionalFile(input.instructions, false);
         try self.write(",\"tools\":");
         try self.writeTools(input.tools);
+        if (input.loaded_tools != null) {
+            try self.write(",\"loaded_tools\":");
+            try self.writeTools(input.loaded_tools);
+        }
         try self.write(",\"permission_mode\":");
         try self.writeOptionalText(input.permission_mode);
         try self.write(",\"output_schema\":");
@@ -1392,7 +1437,7 @@ const Capture = struct {
                 chosen[count] = name;
                 count += 1;
             }
-            std.mem.sort([]const u8, chosen[0..count], {}, struct {
+            std.mem.sortUnstable([]const u8, chosen[0..count], {}, struct {
                 fn lessThan(_: void, left: []const u8, right: []const u8) bool {
                     return std.mem.order(u8, left, right) == .lt;
                 }
@@ -3960,4 +4005,36 @@ test "a refused environment's reason fits its bound with the longest escaped nam
     try std.testing.expect(std.mem.indexOfAny(u8, text, "\x01\x02\x03") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "SMALLEST") == null);
     try std.testing.expect(std.mem.endsWith(u8, text, "\\x03."));
+}
+
+test "capture loaded tools uses the tools comma-list grammar" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_][]const u8{ "web_search,bash", "none" }) |names| {
+        var captured = try captureConfigure(io, .{
+            .store = root,
+            .session = .create,
+            .tools = "bash,web_search",
+            .loaded_tools = names,
+        }, .{ .generated = root }).get();
+        defer captured.close(io);
+        var bytes: [2048]u8 = undefined;
+        const length = try captured.file.readPositionalAll(io, &bytes, 0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+        defer parsed.deinit();
+        const loaded = parsed.value.object.get("configuration").?.object.get("loaded_tools").?.object;
+        try std.testing.expectEqualStrings("value", loaded.get("state").?.string);
+        const chosen = loaded.get("value").?.array.items;
+        if (std.mem.eql(u8, names, "none")) {
+            try std.testing.expectEqual(@as(usize, 0), chosen.len);
+        } else {
+            try std.testing.expectEqual(@as(usize, 2), chosen.len);
+            try std.testing.expectEqualStrings("bash", chosen[0].string);
+            try std.testing.expectEqualStrings("web_search", chosen[1].string);
+        }
+    }
 }

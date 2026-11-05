@@ -206,15 +206,19 @@ def run():
         assert len(endpoint.requests) == 2 and proof.read_text() == "once\n"
         settings = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
         assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == "high", settings
-        for effort in ("none", "ultra"):
+        for effort in ("none",):
             rejected = fixture.command(
                 "session", "configure", "--store", store, "--session", session,
                 "--record", state / f"effort-{effort}.json", "--key", f"effort-{effort}",
-                "--reasoning-effort", effort, "--permission-mode", "bypass", expect=1,
+                "--reasoning-effort", effort, "--permission-mode", "bypass", expect=3,
             )
             assert rejected["answer"]["status"] == "rejected", rejected
             unchanged = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             assert unchanged == settings and len(endpoint.requests) == 2, unchanged
+        invalid_effort = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(store),
+            "--session", session, "--reasoning-effort", "ultra"], capture_output=True, text=True, timeout=10)
+        assert invalid_effort.returncode == 2 and not invalid_effort.stdout, invalid_effort
+        assert "[choice_unsupported]" in invalid_effort.stderr, invalid_effort
         configured = fixture.command(
             "session", "configure", "--store", store, "--session", session,
             "--record", state / "effort-default.json", "--key", "effort-default",
@@ -341,11 +345,11 @@ def run():
         # and public effective settings rather than capability helpers alone.
         expected_agent = expected_user_agent()
         mismatches = []
-        for index, (model, effort) in enumerate((
-            ("gpt-6-luna", "medium"), ("gpt-6.1-sol", "low"),
-            ("gpt-6-sol", "medium"), ("gpt-6-astra", "low"),
-            ("gpt-5.6-sol", "low"), ("gpt-5.6-terra", "medium"),
-            ("gpt-5.6-luna", "medium"), ("gpt-5.5", "medium"),
+        for index, (model, effort, trigger) in enumerate((
+            ("gpt-6-luna", "medium", "244800"), ("gpt-6.1-sol", "low", "244800"), ("gpt-6.1-terra", "low", "450000"),
+            ("gpt-6-sol", "medium", "244800"), ("gpt-6-astra", "low", "244800"),
+            ("gpt-5.6-sol", "low", "244800"), ("gpt-5.6-terra", "medium", "244800"),
+            ("gpt-5.6-luna", "medium", "244800"), ("gpt-5.5", "medium", "244800"),
         )):
             key = f"envelope-{index}"
             with endpoint.lock:
@@ -362,7 +366,7 @@ def run():
                 rejected = fixture.command(
                     "session", "configure", "--store", stop_store, "--session", selected,
                     "--record", state / "effort-unsupported-max.json", "--key", "effort-unsupported-max",
-                    "--reasoning-effort", "max", expect=1,
+                    "--reasoning-effort", "max", expect=3,
                 )
                 assert rejected["answer"]["status"] == "rejected", rejected
                 assert fixture.command("session", "inspect", "--store", stop_store, "--session", selected)["session"] == settings
@@ -371,9 +375,9 @@ def run():
             assert observation["result"]["status"] == "completed" and answer == key.encode(), observation
             request = json.loads(endpoint.requests[4 + index])
             assert request["model"] == model, request
-            if settings["compaction_trigger"] != "244800" or settings["output_reservation"] != "0":
+            if settings["compaction_trigger"] != trigger or settings["output_reservation"] != "0":
                 mismatches.append((model, "compaction defaults", settings["compaction_trigger"], settings["output_reservation"]))
-            if settings["reasoning_effort"] != effort or settings["reasoning_effort_override"] is not None:
+            if settings["reasoning_effort"] != effort or settings["reasoning_effort_override"] != effort:
                 mismatches.append((model, "effort settings", settings["reasoning_effort"], settings["reasoning_effort_override"]))
             if request.get("reasoning") != {"effort": effort}:
                 mismatches.append((model, "reasoning", request.get("reasoning")))
@@ -383,9 +387,9 @@ def run():
                 mismatches.append((model, "parallel_tool_calls", request.get("parallel_tool_calls")))
             if endpoint.user_agents[4 + index] != expected_agent:
                 mismatches.append((model, "User-Agent", endpoint.user_agents[4 + index], expected_agent))
-        assert len(endpoint.requests) == 12, endpoint.requests
+        assert len(endpoint.requests) == 13, endpoint.requests
         assert not mismatches, mismatches
-        print(f"codex request envelopes passed: eight exact model IDs, catalog effort defaults, 244800/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
+        print(f"codex request envelopes passed: nine exact model IDs, catalog effort defaults, 90% compaction/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
         print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
         complete = True
     finally:

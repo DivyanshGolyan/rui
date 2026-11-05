@@ -60,8 +60,8 @@ def settled(api, repo, number, main_sha, attempts=10, delay=6, sleep=time.sleep)
 def alert(api, repo, main_sha, sleep=time.sleep):
     """Comment on every open PR into main that conflicts with main_sha.
 
-    Returns the PRs commented on and the PRs that could not be judged; one
-    PR's failure does not stop the others.
+    Returns the PRs commented on, the PRs GitHub had not judged in time, and
+    the PRs whose reads failed; one PR's failure does not stop the others.
     """
     numbers = [pr["number"] for pr in pages(api, f"repos/{repo}/pulls?state=open&base=main")]
     for number in numbers:  # Start GitHub computing every PR's mergeability before waiting on any.
@@ -69,13 +69,13 @@ def alert(api, repo, main_sha, sleep=time.sleep):
             api("GET", f"repos/{repo}/pulls/{number}")
         except subprocess.CalledProcessError:
             pass  # Only a head start: the judging read below retries this PR and reports its failure.
-    alerted, unjudged = [], []
+    alerted, late, failed = [], [], []
     for number in numbers:
         try:
             pr = settled(api, repo, number, main_sha, sleep=sleep)
             if pr is None:
                 print(f"::warning::#{number}: GitHub did not judge its merge with {main_sha[:12]} in time")
-                unjudged.append(number)
+                late.append(number)
                 continue
             if pr["state"] != "open" or pr["mergeable"]:
                 continue
@@ -88,14 +88,16 @@ def alert(api, repo, main_sha, sleep=time.sleep):
             alerted.append(number)
         except (subprocess.CalledProcessError, KeyError, IndexError) as failure:
             print(f"::warning::#{number}: {failure}: {getattr(failure, 'stderr', '') or ''}".strip())
-            unjudged.append(number)
-    return alerted, unjudged
+            failed.append(number)
+    return alerted, late, failed
 
 
 def main():
-    alerted, unjudged = alert(github, os.environ["GITHUB_REPOSITORY"], os.environ["MAIN_SHA"])
+    alerted, _late, failed = alert(github, os.environ["GITHUB_REPOSITORY"], os.environ["MAIN_SHA"])
     print("commented on:", " ".join(f"#{number}" for number in alerted) or "none")
-    sys.exit(1 if unjudged else 0)
+    # A late answer is GitHub being slow, not a fault here: its warning is the report,
+    # and the next move of main checks that PR again. Only a failed read fails the job.
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":

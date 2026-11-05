@@ -136,13 +136,13 @@ def failed_response_export_case(state, processes, endpoints):
     def fd256():
         resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
 
-    def export(operation, part, *, target=session, attempt="1", extra=(), error=None):
+    def export(operation, part, *, target=session, attempt="1", extra=(), error=None, status=1):
         result = subprocess.run([str(RUI), "session", "inspect", "--store", str(store),
                                  "--session", target, "--operation", str(operation), "--attempt", attempt,
                                  "--failed-response", part, *extra], capture_output=True, timeout=15,
                                 preexec_fn=fd256)
         if error is not None:
-            assert result.returncode != 0 and result.stdout == b"" and error.encode() in result.stderr, result
+            assert result.returncode == status and result.stdout == b"" and error.encode() in result.stderr, result
         else:
             assert result.returncode == 0 and result.stderr == b"", result
         return result.stdout
@@ -168,9 +168,9 @@ def failed_response_export_case(state, processes, endpoints):
         export(operation, "body", target=other_session, error="ContentNotFound")
         export(operation, "body", attempt="2", error="ContentNotFound")
     export("999999", "metadata", error="ContentNotFound")
-    export(records[0][0]["operation"], "body", extra=("--profile", "full"), error="conflicting")
-    export(records[0][0]["operation"], "unknown", error="InvalidArguments")
-    export("0", "body", error="InvalidTarget")
+    export(records[0][0]["operation"], "body", extra=("--profile", "full"), error="[profile_excludes_failed_response]", status=2)
+    export(records[0][0]["operation"], "unknown", error="Accepted: body, metadata.", status=2)
+    export("0", "body", error="--operation 0: That is not an ID.", status=2)
     stop_host(host)
     processes.remove(host)
     assert snapshot() == before, "export mutated canonical data, retained bytes or write timestamps"
@@ -253,7 +253,7 @@ def failed_response_export_case(state, processes, endpoints):
     assert observe(store, "export-incomplete")["result"]["code"] == "malformed_provider_output"
     stop_host(host)
     processes.remove(host)
-    export(operation, "body", error="ConnectionRefused")
+    export(operation, "body", error="[host_not_serving]", status=6)
     stop_endpoint(endpoint, endpoints)
     print(f"failed-response export: IncompleteProviderOutput {len(incomplete)} bytes and binary {len(binary)} bytes exact; "
           "metadata exact; fd256; read-only; partial/omitted/missing/identity/symlink/corruption errors empty stdout; "
@@ -487,7 +487,7 @@ def compaction_cases(state, processes, endpoints, releases):
         processes.append(host)
         patch(store, session, f"{route}-reset", "--compaction-trigger", "default", "--output-reservation", "default")
         current = command("session", "inspect", "--store", store, "--session", session)["session"]
-        assert current["compaction_trigger"] == "244800" and current["compaction_trigger_override"] is None, current
+        assert current["compaction_trigger"] == "244800" and current["compaction_trigger_override"] == "244800", current
         assert current["output_reservation"] == "0" and current["output_reservation_override"] is None, current
         overflowed = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")["full"]["model_operations"][0]
         assert overflowed["request_id"] == (overflow_request_id if route == "http" else "request-1"), overflowed
@@ -1460,7 +1460,7 @@ def main(mode="all", correlation_case="all"):
         stale = command(
             "action", "deny", "--store", proposal_store, "--record", state / "proposal-stale.json",
             "--key", "proposal-stale", "--session", proposal_session, "--action", second["action"],
-            expect=1,
+            expect=3,
         )
         assert stale["answer"]["status"] == "rejected" and stale["answer"]["code"] == "action_not_pending", stale
         assert not forbidden_effect.exists()
@@ -1508,7 +1508,7 @@ def main(mode="all", correlation_case="all"):
                 gate_release = proposal_milestones.wait("control_gate_released", subject=first_key)[0]
                 first_result = finish_command(first_process)
                 second_lock = proposal_milestones.wait("control_lock_acquired", subject=second_key)[0]
-                second_result = finish_command(second_process, expect=1 if order == "stop-first" else 0)
+                second_result = finish_command(second_process, expect=3 if order == "stop-first" else 0)
                 assert int(first_lock["at_ns"]) < int(second_request["at_ns"])
                 assert int(second_request["at_ns"]) < int(gate_release["at_ns"])
                 assert int(gate_release["at_ns"]) < int(second_lock["at_ns"])
@@ -1747,7 +1747,7 @@ def main(mode="all", correlation_case="all"):
             "--record", state / "continuation-stale-denial.json",
             "--key", "continuation-stale-denial", "--session", continuation_session,
             "--action", continuation_actions[0]["action"],
-            expect=1,
+            expect=3,
         )
         assert stale_denial["answer"]["status"] == "rejected", stale_denial
         assert stale_denial["answer"]["code"] == "action_not_pending", stale_denial
@@ -1977,7 +1977,7 @@ def main(mode="all", correlation_case="all"):
             "--tools",
             "bash",
         )
-        incompatible = command(*incompatible_args, expect=1)
+        incompatible = command(*incompatible_args, expect=3)
         assert incompatible["answer"]["status"] == "rejected", incompatible
         assert incompatible["answer"]["code"] == "model_is_immutable", incompatible
         replayed_incompatible = command(
@@ -1988,7 +1988,7 @@ def main(mode="all", correlation_case="all"):
             state / "incompatible-model.json",
             "--kind",
             "configure",
-            expect=1,
+            expect=3,
         )
         assert replayed_incompatible["answer"]["status"] == "rejected", replayed_incompatible
         assert replayed_incompatible["answer"]["replayed"] is True, replayed_incompatible
@@ -3478,7 +3478,7 @@ def main(mode="all", correlation_case="all"):
             "gpt-6.1-sol",
             "--tools",
             "none",
-            expect=1,
+            expect=3,
         ))
         assert active_model_change["answer"]["status"] == "rejected", active_model_change
         assert active_model_change["answer"]["code"] == "model_is_immutable"
@@ -3537,7 +3537,7 @@ def main(mode="all", correlation_case="all"):
             "gpt-6.1-sol",
             "--permission-mode",
             "bypass",
-            expect=1,
+            expect=3,
         ))
         assert post_failure_model_change["answer"]["status"] == "rejected"
         assert post_failure_model_change["answer"]["code"] == "model_is_immutable"
@@ -5106,7 +5106,7 @@ def main(mode="all", correlation_case="all"):
         )
         # The already-spawned client may finish while the listener owner is
         # beginning shutdown; its reply does not determine Host lifecycle.
-        assert shutdown_trigger.returncode in (0, 1), shutdown_trigger
+        assert shutdown_trigger.returncode in (0, 1, 6), shutdown_trigger
         assert preparation_shutdown_host.wait(timeout=10) != 0
         stop_process(preparation_shutdown_host)
         processes.remove(preparation_shutdown_host)

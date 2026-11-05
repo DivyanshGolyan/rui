@@ -1,4 +1,5 @@
 const std = @import("std");
+const core_tools = @import("core_tools.zig");
 const TestObservation = @import("TestObservation.zig");
 const trace_native = @import("posix");
 const bash = @import("bash.zig");
@@ -22,8 +23,7 @@ const stderr = @import("stderr.zig");
 pub const default_bash_timeout_ms: u64 = 5 * 60 * 1000;
 pub const default_bash_path = "/bin/bash";
 pub const scratch_limit_bytes: u64 = 8 * 1024 * 1024 * 1024;
-pub const default_retention_entry_capacity =
-    output_retention.orchestration_bytes / @sizeOf(output_retention.Entry);
+pub const default_retention_entry_capacity = @import("retention_capacity.zig").entries;
 /// Real operating limits. Tests may narrow them; production uses the defaults.
 pub const Limits = struct {
     request_scratch_limit_bytes: u64 = scratch_limit_bytes,
@@ -263,6 +263,9 @@ pub const Host = struct {
     limits: Limits = .{},
     /// What this Host serves, owned by its caller for the Host's life.
     providers: *const providers_module.Providers = &providers_module.none,
+    /// Named creation specs, borrowed from the launch frame for the Host's life.
+    /// Never part of the Store or any Session after resolution (D22).
+    presets: []const core_tools.Preset = &.{},
     /// The OpenAI API key's model list, fetched once at start.
     model_lists: ModelLists = .{},
     auth_worker: ?*AuthWorker = null,

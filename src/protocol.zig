@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli_value = @import("cli_value.zig");
 const built_in_tool = @import("built_in_tool.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
@@ -40,6 +41,8 @@ pub const max_tool_name_bytes = 64;
 /// The most names one `tools` list holds, and their bytes together (D214).
 pub const max_tools = 128;
 pub const max_tool_list_name_bytes = 4096;
+/// A preset name passed at connect or named at Session creation.
+pub const max_preset_name_bytes = 64;
 /// A Session Label obeys the saved Bash description rule.
 pub const max_label_bytes = max_tool_description_bytes;
 
@@ -90,14 +93,10 @@ pub const session_list_page_size: usize = 8;
 
 pub const Bounded = @import("bounded.zig").Bounded;
 
-pub const session_id_bytes = 6;
-pub const session_alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
-
-pub fn validSessionId(value: []const u8) bool {
-    if (value.len != session_id_bytes) return false;
-    for (value) |byte| if (std.mem.indexOfScalar(u8, session_alphabet, byte) == null) return false;
-    return true;
-}
+const session_id = @import("session_id.zig");
+pub const session_id_bytes = session_id.bytes;
+pub const session_alphabet = session_id.alphabet;
+pub const validSessionId = session_id.valid;
 
 /// Exact peer address. The issuing Host authenticates the sender separately.
 pub const Address = struct {
@@ -130,6 +129,11 @@ pub const ContentField = struct {
     // A parsed request owns an unlinked file descriptor. The Store imports
     // through this sealed custody; no pathname can be swapped after capture.
     file: ?std.Io.File = null,
+    /// D113: bounded start_agent content borrows its call arena through commit;
+    /// `length` counts it. Wire content still uses sealed file custody; this
+    /// pointer is never saved. A bare pointer keeps ContentField, which the
+    /// configure path copies, no larger than one word.
+    borrowed: ?[*]const u8 = null,
     scratch_budget: ?ScratchBudget = null,
     charged: u64 = 0,
     length: u64 = 0,
@@ -137,6 +141,11 @@ pub const ContentField = struct {
     /// While a request is parsed, which Ingress capture holds this value,
     /// counted from 1 in arrival order; 0 once it holds its own file.
     capture: u8 = 0,
+
+    pub fn borrowedBytes(self: *const ContentField) ?[]const u8 {
+        const bytes = self.borrowed orelse return null;
+        return bytes[0..@intCast(self.length)];
+    }
 
     pub fn hasFile(self: *const ContentField) bool {
         return self.file != null;
@@ -189,36 +198,11 @@ pub const ToolsField = struct {
 /// A `tools` list's names, one space apart.
 pub const max_tool_names_bytes = max_tool_list_name_bytes + max_tools - 1;
 
+/// A JSON list of validated tool names, including brackets, quotes and commas.
+pub const max_tool_names_json_bytes = 2 + max_tool_list_name_bytes + 2 * max_tools + max_tools - 1;
+
 pub const BuiltInTool = built_in_tool.BuiltInTool;
 pub const ToolSelection = built_in_tool.Selection;
-
-/// The longest JSON list of tool names a report or row writes.
-pub const max_tool_selection_json_bytes = blk: {
-    var bytes: usize = "[]".len;
-    for (std.enums.values(BuiltInTool)) |tool| bytes += @tagName(tool).len + "\"\",".len;
-    break :blk bytes - 1;
-};
-
-/// Writes `tools` as a JSON list of names, in the catalog's order, into
-/// `buffer`, which holds `max_tool_selection_json_bytes`.
-pub fn toolSelectionJson(tools: ToolSelection, buffer: *[max_tool_selection_json_bytes]u8) []const u8 {
-    var length: usize = 0;
-    buffer[length] = '[';
-    length += 1;
-    for (std.enums.values(BuiltInTool)) |tool| if (tools.contains(tool)) {
-        if (length != 1) {
-            buffer[length] = ',';
-            length += 1;
-        }
-        buffer[length] = '"';
-        @memcpy(buffer[length + 1 ..][0..@tagName(tool).len], @tagName(tool));
-        length += 1 + @tagName(tool).len;
-        buffer[length] = '"';
-        length += 1;
-    };
-    buffer[length] = ']';
-    return buffer[0 .. length + 1];
-}
 
 /// The built-in tool `name` names, or null.
 pub fn builtInTool(name: []const u8) ?BuiltInTool {
@@ -244,6 +228,7 @@ pub const Configuration = struct {
     model: OptionalBounded(max_model_bytes) = .{},
     instructions: ContentField = .{},
     tools: ToolsField = .{},
+    loaded_tools: ToolsField = .{},
     permission_mode: OptionalBounded(16) = .{},
     output_schema: ContentField = .{},
     compaction_trigger: OptionalBounded(20) = .{},
@@ -282,6 +267,7 @@ pub const Kind = enum {
     conversation_page,
     conversation_content,
     activity_page,
+    activity_search,
     activity_content,
     model_list,
 };
@@ -291,6 +277,8 @@ pub const ConfigureCommand = struct {
     key: Bounded(max_key_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
     configuration: Configuration = .{},
+    /// Host-memory creation seed; its resolution or refusal is supplied to the Store.
+    preset: ?Bounded(max_preset_name_bytes) = null,
     require_model: bool = false,
 
     pub fn removeTemporaryContent(self: *ConfigureCommand, io: std.Io) !void {
@@ -299,6 +287,17 @@ pub const ConfigureCommand = struct {
 
     pub fn semanticDigest(self: *const ConfigureCommand) [32]u8 {
         return configureDigest(self.session.slice(), &self.configuration, self.require_model);
+    }
+
+    /// A preset refusal binds the unresolved request, including its name;
+    /// unlike an accepted creation, it has no resolved spec to identify.
+    pub fn presetRequestDigest(self: *const ConfigureCommand) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, "rui/core/configure-preset-request/v1");
+        hash.update(&self.semanticDigest());
+        hash.update(&.{@intFromBool(self.preset != null)});
+        if (self.preset) |name| hashField(&hash, name.slice());
+        return hash.finalResult();
     }
 };
 
@@ -312,12 +311,7 @@ fn configureDigest(session: []const u8, configuration: *const Configuration, req
     hashOptional(&hash, &configuration.provider);
     hashOptional(&hash, &configuration.model);
     hashContent(&hash, &configuration.instructions);
-    hash.update(&.{@backingInt(configuration.tools.state)});
-    if (configuration.tools.state == .value) {
-        hash.update(&.{configuration.tools.count});
-        var names = configuration.tools.iterator();
-        while (names.next()) |name| hashField(&hash, name);
-    }
+    hashTools(&hash, &configuration.tools);
     hashOptional(&hash, &configuration.permission_mode);
     hashContent(&hash, &configuration.output_schema);
     hashOptional(&hash, &configuration.compaction_trigger);
@@ -325,6 +319,12 @@ fn configureDigest(session: []const u8, configuration: *const Configuration, req
     hashOptional(&hash, &configuration.reasoning_effort);
     hashOptional(&hash, &configuration.label);
     hash.update(&.{@intFromBool(require_model)});
+    // Omission retains the pre-loaded-tools digest, including creating
+    // Messages: saved requests must still replay after a Store upgrade.
+    if (configuration.loaded_tools.state != .omitted) {
+        hashField(&hash, "rui/core/configure/loaded-tools/v1");
+        hashTools(&hash, &configuration.loaded_tools);
+    }
     return hash.finalResult();
 }
 
@@ -414,12 +414,17 @@ pub const ConfigurationRejection = enum {
     model_capability_unavailable,
     invalid_output_schema,
     invalid_compaction_trigger,
+    compact_at_too_large,
     invalid_output_reservation,
     unsupported_reasoning_effort,
     unknown_tool,
     provider_tool_missing,
+    loaded_tools_not_in_tools,
+    loaded_tools_unreachable,
     invalid_label,
     incomplete_initial_configuration,
+    unknown_preset,
+    preset_on_update,
     invalid_workspace,
     workspace_is_immutable,
     provider_is_immutable,
@@ -436,36 +441,24 @@ pub const MessageRejection = enum {
     model_capability_unavailable,
     invalid_output_schema,
     invalid_compaction_trigger,
+    compact_at_too_large,
     invalid_output_reservation,
     unsupported_reasoning_effort,
     unknown_tool,
     provider_tool_missing,
+    loaded_tools_not_in_tools,
+    loaded_tools_unreachable,
     invalid_label,
     incomplete_initial_configuration,
+    unknown_preset,
+    preset_on_update,
     invalid_workspace,
     workspace_is_immutable,
     provider_is_immutable,
     model_is_immutable,
     revision_exhausted,
 };
-pub const CommandKind = enum {
-    configure,
-    message,
-    session_stop,
-    model_interruption,
-    permission_decision,
-
-    /// The route a command's request is sent to and served from.
-    pub fn route(self: CommandKind) []const u8 {
-        return switch (self) {
-            .configure => "/v1/configure",
-            .message => "/v1/message",
-            .session_stop => "/v1/control/session-stop",
-            .model_interruption => "/v1/control/model-interruption",
-            .permission_decision => "/v1/control/permission-decision",
-        };
-    }
-};
+pub const CommandKind = cli_value.CommandKind;
 pub const CommandObservationStatus = enum { absent, accepted, rejected };
 pub const SessionStopCompletion = enum { pending, completed };
 
@@ -542,9 +535,9 @@ pub const ReadResult = struct {
     key: Bounded(max_key_bytes) = .{},
 };
 
-pub const ReportProfile = enum { current, full };
+pub const ReportProfile = cli_value.ReportProfile;
 
-pub const FailedResponsePart = enum { body, metadata };
+pub const FailedResponsePart = cli_value.FailedResponsePart;
 pub const FailedResponseExport = struct {
     operation: u64,
     attempt: u64,
@@ -671,13 +664,90 @@ pub const ActivityPage = struct {
     pub const Kinds = std.EnumSet(ActivityItem.Kind);
     pub const items = @typeInfo(@FieldType(ActivityFacts, "items")).array.len;
 
-    pub fn validate(self: ActivityPage) !void {
+    /// By pointer: a by-value copy sat in the Store read frame on every
+    /// engine chain that reads a page.
+    pub fn validate(self: *const ActivityPage) !void {
         if (self.position > std.math.maxInt(i64) or (self.ordinal != null and
             (self.position == 0 or self.ordinal.? > std.math.maxInt(i64)))) return error.InvalidCursor;
         if (self.end) |end| if (end > std.math.maxInt(i64) or self.position > end) return error.InvalidCursor;
         if (self.kinds.count() == 0 or self.limit == 0 or self.limit > items) return error.InvalidCursor;
     }
 };
+pub const ActivitySearch = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: Bounded(max_session_bytes) = .{},
+    query: Bounded(256) = .{},
+    kinds: ActivityPage.Kinds = .full,
+    before_position: ?u64 = null,
+    before_ordinal: ?u64 = null,
+    limit: u8 = ActivityPage.items,
+
+    pub fn validate(self: *const ActivitySearch) !void {
+        if (self.query.len == 0 or !std.unicode.utf8ValidateSlice(self.query.slice())) return error.InvalidCursor;
+        if (self.before_position) |position| {
+            if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidCursor;
+        }
+        if (self.before_ordinal) |ordinal| {
+            if (self.before_position == null or ordinal > std.math.maxInt(i64)) return error.InvalidCursor;
+        }
+        if (self.kinds.count() == 0 or self.limit == 0 or self.limit > ActivityPage.items) return error.InvalidCursor;
+    }
+};
+
+pub const ActivitySearchFacts = struct {
+    items: [ActivityPage.items]Item = undefined,
+    count: usize = 0,
+    next: ?Cursor = null,
+
+    pub const Hit = struct {
+        snippet: Bounded(160) = .{},
+        offset: usize,
+        length: usize,
+        pub const json_shape = .{ "{\"snippet\":", Hole{ .string = 160 }, ",\"offset\":\"", Hole.decimal, "\",\"length\":\"", Hole.decimal, "\"}" };
+        pub const max_json_bytes = shapeBytes(json_shape);
+        pub fn writeJson(self: *const Hit, out: *std.Io.Writer) !void {
+            try writeShape(out, json_shape, .{ self.snippet.slice(), self.offset, self.length });
+        }
+    };
+    pub const Cursor = struct {
+        position: u64,
+        ordinal: u64,
+        pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
+        pub const max_json_bytes = shapeBytes(json_shape);
+        pub fn writeJson(self: *const Cursor, out: *std.Io.Writer) !void {
+            try writeShape(out, json_shape, .{ self.position, self.ordinal });
+        }
+    };
+    pub const Item = struct {
+        position: u64,
+        ordinal: u64,
+        kind: ActivityItem.Kind,
+        hits: [3]Hit = undefined,
+        count: usize = 0,
+        pub const head = .{ "{\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"kind\":\"", Hole{ .tag = ActivityItem.Kind }, "\",\"hits\":[" };
+        pub const max_json_bytes = shapeBytes(Item.head) + jsonListBytes(3, Hit.max_json_bytes) + 2;
+        pub fn writeJson(self: *const Item, out: *std.Io.Writer) !void {
+            try writeShape(out, Item.head, .{ self.position, self.ordinal, self.kind });
+            for (self.hits[0..self.count], 0..) |*hit, index| {
+                if (index != 0) try out.writeByte(',');
+                try hit.writeJson(out);
+            }
+            try out.writeAll("]}");
+        }
+    };
+    pub const head = .{"{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":["};
+    pub const tail = .{ "],\"next\":", Hole{ .optional_json = Cursor }, "}" };
+    pub const max_json_bytes = shapeBytes(head) + jsonListBytes(ActivityPage.items, Item.max_json_bytes) + shapeBytes(tail);
+    pub fn writeJson(self: *const ActivitySearchFacts, out: *std.Io.Writer) !void {
+        try writeShape(out, head, .{});
+        for (self.items[0..self.count], 0..) |*item, index| {
+            if (index != 0) try out.writeByte(',');
+            try item.writeJson(out);
+        }
+        try writeShape(out, tail, .{self.next});
+    }
+};
+
 pub const ToolPresentation = struct {
     description: ?Bounded(max_tool_description_bytes),
     code: Code,
@@ -742,7 +812,7 @@ pub const NamedPeer = struct {
 
 /// A Session setting a revision can change, named on the wire as in a
 /// configuration.
-pub const SessionField = enum { provider, model, instructions, tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
+pub const SessionField = enum { provider, model, instructions, tools, loaded_tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
 
 pub const ActivityItem = struct {
     position: u64,
@@ -772,7 +842,7 @@ pub const ActivityItem = struct {
     pub const Assistant = struct { content: Content, final: bool = false };
     /// `code` is the saved code the ending was judged from; `content` a
     /// done Turn's answer or a failed one's report.
-    pub const TurnEnded = struct { turn: u64, operation: u64, ending: TurnEnding, code: Bounded(max_code_bytes), content: ?Content };
+    pub const TurnEnded = struct { session: Bounded(session_id_bytes), turn: u64, operation: u64, ending: TurnEnding, code: Bounded(max_code_bytes), content: ?Content };
     pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: SessionStopCompletion };
     /// A Message this Session sent: admitted to `target`, or rejected there.
     pub const Sent = struct { admission: u64, target: NamedPeer, content: Content, admitted_at: u64 };
@@ -780,7 +850,7 @@ pub const ActivityItem = struct {
     /// A call that waits on a person's decision because the Session asked
     /// for approval when it was made: `action` is the id a
     /// `permission_decision` names. The row follows its call at ordinal 1.
-    pub const ApprovalRequested = struct { action: u64, operation: u64, call_ordinal: u64 };
+    pub const ApprovalRequested = struct { session: Bounded(session_id_bytes), action: u64, operation: u64, call_ordinal: u64 };
     /// One setting a revision changed, at the position the revision was
     /// accepted; a revision's changes share it, one ordinal each.
     pub const SessionChanged = struct { revision: u64, field: SessionField };
@@ -809,7 +879,7 @@ pub const ActivityItem = struct {
         /// A call the provider ran, shown by its line alone. Hole: presentation.
         pub const hosted_call = .{ "{\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
         /// Holes: turn, operation, ending, code, content.
-        pub const turn_ended = .{ "{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"ending\":\"", Hole{ .tag = TurnEnding }, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
+        pub const turn_ended = .{ "{\"session\":", Hole{ .string = session_id_bytes }, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"ending\":\"", Hole{ .tag = TurnEnding }, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
         /// Holes: key, turn, cutoff, completion.
         pub const stop = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"cutoff\":\"", Hole.decimal, "\",\"completion\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
         /// Holes: admission, admitted at, target, content.
@@ -817,7 +887,7 @@ pub const ActivityItem = struct {
         /// Holes: key, target, code.
         pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = NamedPeer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
         /// Holes: action, operation, call ordinal.
-        pub const approval_requested = .{ "{\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\"}" };
+        pub const approval_requested = .{ "{\"session\":", Hole{ .string = session_id_bytes }, ",\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\"}" };
         /// Holes: revision, field.
         pub const session_changed = .{ "{\"revision\":\"", Hole.decimal, "\",\"field\":\"", Hole{ .tag = SessionField }, "\"}" };
         /// Holes: operation, dropped.
@@ -841,7 +911,7 @@ pub const ActivityItem = struct {
             }),
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
-            .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.action, request.operation, request.call_ordinal }),
+            .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal }),
             .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field }),
             .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ assistant.content, assistant.final }),
@@ -853,7 +923,7 @@ pub const ActivityItem = struct {
                 for (call.fields, &fields) |field, *content| content.* = .{ .length = field.length, .digest = field.digest };
                 try writeShape(out, value_shapes.call, .{ call.operation, call.turn, call.call_ordinal, call.action, call.rejection, fields[0], fields[1], fields[2] });
             },
-            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.turn, ended.operation, ended.ending, ended.code.slice(), ended.content }),
+            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.session.slice(), ended.turn, ended.operation, ended.ending, ended.code.slice(), ended.content }),
             .stop => |stop| try writeShape(out, value_shapes.stop, .{ stop.key.slice(), stop.turn, stop.cutoff, stop.completion }),
         }
         try writeShape(out, tail, .{});
@@ -1029,7 +1099,7 @@ pub const FirstMessage = struct {
     }
 };
 
-pub const PermissionMode = enum { ask, bypass };
+pub const PermissionMode = cli_value.PermissionMode;
 
 /// One `list-sessions` row. Every fact comes from the Store read that
 /// produced its page.
@@ -1038,8 +1108,9 @@ pub const SessionRow = struct {
     workspace: Bounded(max_workspace_bytes) = .{},
     provider: Provider = .codex,
     model: Bounded(max_model_bytes) = .{},
-    tools: ToolSelection = .empty,
+    tools: ToolsField = .{ .state = .value },
     permission_mode: PermissionMode = .ask,
+    parent: ?Bounded(session_id_bytes) = null,
     label: ?Bounded(max_label_bytes) = null,
     created_at: u64 = 0,
     revision: u64 = 0,
@@ -1051,18 +1122,19 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"reference\":",       Hole{ .string = max_session_bytes },           ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",      Hole{ .tag = Provider },                       "\",\"model\":",           Hole{ .string = max_model_bytes },
-        ",\"tools\":",           Hole{ .text = max_tool_selection_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
-        "\",\"label\":",         Hole{ .optional_string = max_label_bytes },    ",\"created_at\":\"",      Hole.decimal,
-        "\",\"revision\":\"",    Hole.decimal,                                  "\",\"end\":\"",           Hole.decimal,
-        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },         ",\"work\":",              Hole{ .json = SessionWork },
-        ",\"peers\":",           Hole{ .json = PeerFacts },                     "}",
+        "{\"reference\":",    Hole{ .string = max_session_bytes },         ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",   Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },
+        ",\"tools\":",        Hole{ .text = max_tool_names_json_bytes },   ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
+        "\",\"parent\":",     Hole{ .optional_string = session_id_bytes }, ",\"label\":",             Hole{ .optional_string = max_label_bytes },
+        ",\"created_at\":\"", Hole.decimal,                                "\",\"revision\":\"",      Hole.decimal,
+        "\",\"end\":\"",      Hole.decimal,                                "\",\"first_message\":",   Hole{ .optional_json = FirstMessage },
+        ",\"work\":",         Hole{ .json = SessionWork },                 ",\"peers\":",             Hole{ .json = PeerFacts },
+        "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     /// A row may never exceed this, whatever its fields hold: a new field that
     /// would grow every page's scratch charge past it fails the build.
-    pub const budget_bytes = 32 * 1024;
+    pub const budget_bytes = 36 * 1024;
     comptime {
         std.debug.assert(max_json_bytes <= budget_bytes);
     }
@@ -1074,8 +1146,10 @@ pub const SessionRow = struct {
         workspace: []const u8,
         provider: Provider,
         model: []const u8,
-        tools: ToolSelection,
+        /// Already-rendered JSON borrowed from the Store read.
+        tools: []const u8,
         permission_mode: PermissionMode,
+        parent: ?[]const u8,
         label: ?[]const u8,
         created_at: u64,
         revision: u64,
@@ -1087,24 +1161,35 @@ pub const SessionRow = struct {
         pub const max_json_bytes = SessionRow.max_json_bytes;
 
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
-            var tools_buffer: [max_tool_selection_json_bytes]u8 = undefined;
             try writeShape(out, json_shape, .{
-                f.reference,                               f.workspace,       f.provider,      f.model,
-                toolSelectionJson(f.tools, &tools_buffer), f.permission_mode, f.label,         f.created_at,
-                f.revision,                                f.end,             f.first_message, f.work,
-                f.peers,
+                f.reference,  f.workspace,       f.provider, f.model,
+                f.tools,      f.permission_mode, f.parent,   f.label,
+                f.created_at, f.revision,        f.end,      f.first_message,
+                f.work,       f.peers,
             });
         }
     };
 
     pub fn writeJson(self: *const SessionRow, out: *std.Io.Writer) !void {
+        var tools_buffer: [max_tool_names_json_bytes]u8 = undefined;
+        var tools_writer = std.Io.Writer.fixed(&tools_buffer);
+        try tools_writer.writeByte('[');
+        var names = self.tools.iterator();
+        var first = true;
+        while (names.next()) |name| {
+            if (!first) try tools_writer.writeByte(',');
+            first = false;
+            try tools_writer.print("\"{s}\"", .{name});
+        }
+        try tools_writer.writeByte(']');
         const fields: Fields = .{
             .reference = self.reference.slice(),
             .workspace = self.workspace.slice(),
             .provider = self.provider,
             .model = self.model.slice(),
-            .tools = self.tools,
+            .tools = tools_writer.buffered(),
             .permission_mode = self.permission_mode,
+            .parent = if (self.parent) |*parent| parent.slice() else null,
             .label = if (self.label) |*label| label.slice() else null,
             .created_at = self.created_at,
             .revision = self.revision,
@@ -1178,6 +1263,7 @@ pub const Request = union(Kind) {
     conversation_page: ConversationPage,
     conversation_content: ConversationContent,
     activity_page: ActivityPage,
+    activity_search: ActivitySearch,
     activity_content: ReadActivityContent,
     model_list: struct { store: Bounded(max_store_bytes) = .{} },
 
@@ -1185,7 +1271,7 @@ pub const Request = union(Kind) {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .host_pause, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_content, .model_list => {},
+            .host_info, .host_stop, .host_pause, .session_stop, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .model_list => {},
         }
     }
 
@@ -1202,6 +1288,7 @@ fn removeContent(content: *ContentField, io: std.Io) !void {
     if (content.scratch_budget) |budget| budget.release(content.charged);
     content.charged = 0;
     content.file = null;
+    content.borrowed = null;
     content.state = .omitted;
 }
 
@@ -1210,6 +1297,15 @@ fn hashField(hash: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
     std.mem.writeInt(u64, &length, value.len, .big);
     hash.update(&length);
     hash.update(value);
+}
+
+fn hashTools(hash: *std.crypto.hash.sha2.Sha256, tools: *const ToolsField) void {
+    hash.update(&.{@backingInt(tools.state)});
+    if (tools.state == .value) {
+        hash.update(&.{tools.count});
+        var names = tools.iterator();
+        while (names.next()) |name| hashField(hash, name);
+    }
 }
 
 fn hashOptional(hash: *std.crypto.hash.sha2.Sha256, field: anytype) void {
@@ -1285,7 +1381,7 @@ pub const Ingress = struct {
     // bytes), plus punctuation and one preserved whitespace separator at
     // every lexical boundary.
     const metadata_limit = 2 * (6 * (max_store_bytes + max_key_bytes + max_session_bytes +
-        max_workspace_bytes + max_provider_bytes + max_model_bytes + 16 + max_tool_list_name_bytes + 128 * 32) + (128 + max_tools) * 8);
+        max_workspace_bytes + max_provider_bytes + max_model_bytes + 16 + 2 * max_tool_list_name_bytes + 128 * 32) + (128 + 2 * max_tools) * 8);
 
     /// Builds the Ingress in its home. `request` stays unwritten.
     pub fn init(self: *Ingress, allocator: std.mem.Allocator, options: ParseOptions) void {
@@ -1563,6 +1659,10 @@ const Parser = struct {
                 out.* = .{ .conversation_content = .{ .store = store } };
                 try self.parseConversationContent(&out.conversation_content, &members);
             },
+            .activity_search => {
+                out.* = .{ .activity_search = .{ .store = store } };
+                try self.parseActivitySearch(&out.activity_search, &members);
+            },
             .activity_page => {
                 out.* = .{ .activity_page = .{ .store = store } };
                 try self.parseActivityPage(&out.activity_page, &members);
@@ -1757,21 +1857,26 @@ const Parser = struct {
     /// Each parser fills its command `out`, whose Store is already set.
     fn parseConfigure(self: *Parser, out: *ConfigureCommand, members: *Members) !void {
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        const Field = enum { key, session, configuration, require_model };
+        const Field = enum { key, session, configuration, preset, require_model };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
             .key => try self.readCommandKey(&out.key),
             .session => try self.readSmallString(&out.session),
             .configuration => try self.parseConfiguration(true, &out.configuration),
+            .preset => {
+                out.preset = .{};
+                try self.readSmallString(&out.preset.?);
+            },
             .require_model => out.require_model = try self.readBoolean(),
         };
         try require(Field, seen, &.{ .key, .session, .configuration });
+        if (out.session.len == 0 and out.preset == null) try validateCreatingConfiguration(&out.configuration);
     }
 
     /// Fills `out`, which holds its defaults.
     fn parseConfiguration(self: *Parser, allow_content: bool, out: *Configuration) !void {
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        const Field = enum { workspace, provider, model, instructions, tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
+        const Field = enum { workspace, provider, model, instructions, tools, loaded_tools, permission_mode, output_schema, compaction_trigger, output_reservation, reasoning_effort, label };
         try self.expectByte('{');
         var members: Members = .{};
         var seen: std.EnumSet(Field) = .empty;
@@ -1781,6 +1886,7 @@ const Parser = struct {
             .model => try self.readOptionalSmall(max_model_bytes, &out.model),
             .instructions => try self.readContent(&out.instructions, false, allow_content),
             .tools => try self.readTools(&out.tools),
+            .loaded_tools => try self.readTools(&out.loaded_tools),
             .permission_mode => try self.readOptionalSmall(16, &out.permission_mode),
             .output_schema => try self.readContent(&out.output_schema, true, allow_content),
             .compaction_trigger => try self.readOptionalPolicy(&out.compaction_trigger),
@@ -1788,7 +1894,19 @@ const Parser = struct {
             .reasoning_effort => try self.readOptionalSmallNullable(16, &out.reasoning_effort, true),
             .label => try self.readOptionalSmallNullable(max_label_bytes, &out.label, true),
         };
-        try require(Field, seen, &.{ .workspace, .provider, .model, .instructions, .tools, .permission_mode, .output_schema });
+    }
+
+    fn validateCreatingConfiguration(configuration: *const Configuration) !void {
+        if (configuration.model.state != .value or
+            configuration.compaction_trigger.state != .value or
+            configuration.tools.state != .value or
+            configuration.permission_mode.state != .value or
+            configuration.reasoning_effort.state == .omitted) return error.MissingField;
+        var tools = configuration.tools.iterator();
+        while (tools.next()) |tool| {
+            if (std.mem.eql(u8, tool, "bash") and configuration.workspace.state != .value)
+                return error.MissingField;
+        }
     }
 
     fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
@@ -1819,6 +1937,7 @@ const Parser = struct {
         // configuration and a capability condition, and it must carry the
         // configuration.
         if (out.session.len == 0 and out.configuration == null) return error.MissingField;
+        if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
         if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
         if (out.text.state != .value) return error.InvalidMessage;
         if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
@@ -2051,6 +2170,40 @@ const Parser = struct {
             .limit => out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor,
         };
         try require(Field, seen, &.{ .session, .end, .position, .ordinal, .direction, .kinds, .limit });
+        try out.validate();
+    }
+
+    fn parseActivitySearch(self: *Parser, out: *ActivitySearch, members: *Members) !void {
+        const Field = enum { session, query, before_position, before_ordinal, kinds, limit };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .session => try self.readSmallString(&out.session),
+            .query => try self.readSmallString(&out.query),
+            .before_position => if (!try self.readNull()) {
+                out.before_position = try self.readCanonicalU64();
+            },
+            .before_ordinal => if (!try self.readNull()) {
+                out.before_ordinal = try self.readCanonicalU64();
+            },
+            .kinds => {
+                try self.expectByte('[');
+                // Each kind at most once, in tag order, so one set has one spelling.
+                out.kinds = .empty;
+                var last: ?ActivityItem.Kind = null;
+                if (!try self.consumeIf(']')) while (true) {
+                    var name: Bounded(32) = .{};
+                    try self.readSmallString(&name);
+                    const kind = std.meta.stringToEnum(ActivityItem.Kind, name.slice()) orelse return error.InvalidCursor;
+                    if (last) |previous| if (@backingInt(kind) <= @backingInt(previous)) return error.InvalidJsonShape;
+                    out.kinds.insert(kind);
+                    last = kind;
+                    if (try self.consumeIf(']')) break;
+                    try self.expectByte(',');
+                };
+            },
+            .limit => out.limit = std.math.cast(u8, try self.readCanonicalU64()) orelse return error.InvalidCursor,
+        };
+        try require(Field, seen, &.{ .session, .query });
         try out.validate();
     }
 
@@ -2711,6 +2864,9 @@ pub const conversation_content_request = .{ "{\"version\":\"" ++ wire_version ++
 /// Holes: Store, Session, end, before position, before ordinal.
 pub const conversation_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":\"", Hole.decimal, "\",\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, end, position, ordinal, direction, kinds, limit.
+pub const activity_search_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"query\":", Hole{ .string = 256 }, ",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"before_position\":", Hole.optional_id, ",\"before_ordinal\":", Hole.optional_id, ",\"limit\":\"", Hole.decimal, "\"}" };
+pub const max_activity_search_request_bytes = shapeBytes(activity_search_request);
+pub const max_activity_search_response_bytes = ActivitySearchFacts.max_json_bytes;
 pub const activity_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"limit\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, position, ordinal.
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
@@ -2721,6 +2877,8 @@ pub const configure_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"configuration\":" };
     pub const tail = .{"}"};
     pub const require_model_tail = .{",\"require_model\":true}"};
+    pub const preset_tail = .{ ",\"preset\":", Hole{ .string = max_preset_name_bytes }, "}" };
+    pub const preset_require_model_tail = .{ ",\"preset\":", Hole{ .string = max_preset_name_bytes }, ",\"require_model\":true}" };
 };
 pub const message_request = struct {
     /// Holes: Store, key, Session, sender handle.
@@ -2760,8 +2918,8 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     observe_command_request,       host_info_request,           host_stop_request,
     host_pause_request,            read_result_request,         list_sessions_changed_request,
     read_action_arguments_request, read_action_call_id_request, conversation_content_request,
-    conversation_page_request,     activity_page_request,       activity_content_request,
-    model_list_request,
+    conversation_page_request,     activity_search_request,     activity_page_request,
+    activity_content_request,      model_list_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -3542,7 +3700,7 @@ test "configuration provider envelope preserves exact spelling and omission" {
     try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &codex_digest));
 }
 
-test "configuration tools are tool names, sorted, each once" {
+test "configuration tools and loaded tools are tool names, sorted, each once" {
     const cases = [_]struct { value: []const u8, names: []const u8 = "", count: u8 = 0, failure: ?anyerror = null }{
         .{ .value = "[]" },
         .{ .value = "[\"bash\"]", .names = "bash", .count = 1 },
@@ -3561,27 +3719,31 @@ test "configuration tools are tool names, sorted, each once" {
         .{ .value = "[\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
         .{ .value = "[\"bash\",\"web_search\",\"bash\"]", .failure = error.InvalidJsonShape },
     };
-    for (cases) |case| {
-        var buffer: [1024]u8 = undefined;
-        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
-            "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
-            "\"instructions\":{{\"state\":\"omitted\"}},\"tools\":{{\"state\":\"value\",\"value\":{s}}}," ++
-            "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
-        var source: MetadataSource = .{ .input = json };
-        var retained: ?named_scratch.Owner = null;
-        var parser = Parser{ .source = &source, .options = .{
-            .io = std.testing.io,
-            .content_length = json.len,
-            .scratch_path = "unused",
-            .request_number = 0,
-            .retained_scratch = &retained,
-        } };
-        if (case.failure) |failure| {
-            try std.testing.expectError(failure, parseForTest(&parser));
-        } else {
-            const request = try parseForTest(&parser);
-            try std.testing.expectEqual(case.count, request.configure.configuration.tools.count);
-            try std.testing.expectEqualStrings(case.names, request.configure.configuration.tools.names.slice());
+    inline for (.{ "tools", "loaded_tools" }) |field_name| {
+        for (cases) |case| {
+            var buffer: [1024]u8 = undefined;
+            const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"store\",\"key\":\"key\",\"session\":\"session\",\"configuration\":{{" ++
+                "\"workspace\":{{\"state\":\"omitted\"}},\"provider\":{{\"state\":\"omitted\"}},\"model\":{{\"state\":\"omitted\"}}," ++
+                "\"instructions\":{{\"state\":\"omitted\"}}," ++
+                (if (comptime std.mem.eql(u8, field_name, "loaded_tools")) "\"tools\":{{\"state\":\"omitted\"}}," else "") ++
+                "\"" ++ field_name ++ "\":{{\"state\":\"value\",\"value\":{s}}}," ++
+                "\"permission_mode\":{{\"state\":\"omitted\"}},\"output_schema\":{{\"state\":\"omitted\"}}}}}}", .{case.value});
+            var source: MetadataSource = .{ .input = json };
+            var retained: ?named_scratch.Owner = null;
+            var parser = Parser{ .source = &source, .options = .{
+                .io = std.testing.io,
+                .content_length = json.len,
+                .scratch_path = "unused",
+                .request_number = 0,
+                .retained_scratch = &retained,
+            } };
+            if (case.failure) |failure| {
+                try std.testing.expectError(failure, parseForTest(&parser));
+            } else {
+                const request = try parseForTest(&parser);
+                try std.testing.expectEqual(case.count, @field(request.configure.configuration, field_name).count);
+                try std.testing.expectEqualStrings(case.names, @field(request.configure.configuration, field_name).names.slice());
+            }
         }
     }
 }
@@ -3791,8 +3953,8 @@ test "initial Message ingress retains text custody and rejects extra content bef
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
     const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
-        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":";
-    const between = ",\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":";
+        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"value\",\"value\":\"model\"},\"instructions\":";
+    const between = ",\"tools\":{\"state\":\"value\",\"value\":[]},\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"},\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"},\"reasoning_effort\":{\"state\":\"null\"},\"output_schema\":";
     const suffix = "},\"text\":{\"state\":\"value\",\"value\":\"assignment\\u0000雪\\n\\n\"}}";
     const omitted = "{\"state\":\"omitted\"}";
     const value = "{\"state\":\"value\",\"value\":\"rules\\n\"}";
@@ -3848,8 +4010,8 @@ test "only a creating Message carries require_model, and it binds the digest" {
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
     const creating = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
-        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":{\"state\":\"omitted\"}," ++
-        "\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"value\",\"value\":\"model\"},\"instructions\":{\"state\":\"omitted\"}," ++
+        "\"tools\":{\"state\":\"value\",\"value\":[]},\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"},\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"},\"reasoning_effort\":{\"state\":\"null\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
     const addressed = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
     const cases = [_]struct { bytes: []const u8, require_model: bool = false, failure: ?anyerror = null }{
         .{ .bytes = creating ++ "}" },
@@ -4074,4 +4236,151 @@ test "an order-free request still names each member once, carries every required
     }
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expect(retained == null);
+}
+
+test "omitted loaded tools preserve pre-T4a Configure and creating Message digests" {
+    // Golden bytes of the pre-T4a hash stream, not recomputed by the
+    // implementation under test. Keys are deliberately outside identity.
+    var configure: ConfigureCommand = .{};
+    try std.testing.expectEqualStrings("e983bd4a7dce4a1ec777d065815928f654ac824dc57a57b397b8f78e7a4ede3a", &std.fmt.bytesToHex(configure.semanticDigest(), .lower));
+    var message: MessageCommand = .{ .configuration = .{} };
+    message.text = .{ .state = .value, .length = 2, .digest = contentDigest("go") };
+    try std.testing.expectEqualStrings("29da99db4ed9dcdf55128d1f956d9551106135b126ec23d2e97cc768618b8127", &std.fmt.bytesToHex(message.semanticDigest(), .lower));
+    const previous = configure.semanticDigest();
+    configure.configuration.loaded_tools = try .of(&.{});
+    try std.testing.expect(!std.mem.eql(u8, &previous, &configure.semanticDigest()));
+    const empty = configure.semanticDigest();
+    configure.configuration.loaded_tools = try .of(&.{"bash"});
+    try std.testing.expect(!std.mem.eql(u8, &empty, &configure.semanticDigest()));
+}
+
+test "SessionRow borrowed fields preserve offered tool names" {
+    const fields: SessionRow.Fields = .{
+        .reference = "peer",
+        .workspace = "/w",
+        .provider = .codex,
+        .model = "model",
+        .tools = "[\"bash\",\"offered_tool\"]",
+        .permission_mode = .ask,
+        .parent = null,
+        .label = null,
+        .created_at = 0,
+        .revision = 0,
+        .end = 0,
+        .first_message = null,
+        .work = &.{},
+        .peers = &.{},
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try fields.writeJson(&out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"tools\":[\"bash\",\"offered_tool\"]") != null);
+    try std.testing.expect(out.written().len <= SessionRow.max_json_bytes);
+}
+
+test "protocol creation requires five explicit settings independent of field order" {
+    const fields = [_][]const u8{
+        "\"model\":{\"state\":\"value\",\"value\":\"model\"}",
+        "\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"}",
+        "\"tools\":{\"state\":\"value\",\"value\":[]}",
+        "\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"}",
+        "\"reasoning_effort\":{\"state\":\"null\"}",
+    };
+    inline for (.{ "configure", "message" }) |kind| {
+        for (0..fields.len + 1) |skip| {
+            var buffer: [2048]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            try writer.writeAll("{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",\"key\":\"k\",\"configuration\":{");
+            var comma = false;
+            for (fields, 0..) |field, index| {
+                if (index == skip) continue;
+                if (comma) try writer.writeByte(',');
+                try writer.writeAll(field);
+                comma = true;
+            }
+            try writer.writeAll("},\"session\":\"\"");
+            if (comptime std.mem.eql(u8, kind, "message"))
+                try writer.writeAll(",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"omitted\"}");
+            try writer.writeByte('}');
+            const json = writer.buffered();
+            var source: MetadataSource = .{ .input = json };
+            var retained: ?named_scratch.Owner = null;
+            var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+            if (skip < fields.len) {
+                try std.testing.expectError(error.MissingField, parseForTest(&parser));
+            } else if (comptime std.mem.eql(u8, kind, "message")) {
+                // Configuration passed without workspace or provider; only text is invalid.
+                try std.testing.expectError(error.InvalidMessage, parseForTest(&parser));
+            } else {
+                _ = try parseForTest(&parser);
+            }
+        }
+    }
+}
+
+test "activity search wire validates query and paired backward cursor" {
+    const cases = [_]struct { fields: []const u8, failure: ?anyerror = null }{
+        .{ .fields = "\"query\":\"start_agent\"" },
+        .{ .fields = "\"query\":\"雪\",\"before_position\":\"1\",\"before_ordinal\":\"0\",\"kinds\":[\"call\"],\"limit\":\"1\"" },
+        .{ .fields = "\"query\":\"\"", .failure = error.InvalidCursor },
+        .{ .fields = "\"query\":\"x\",\"before_position\":\"0\"", .failure = error.InvalidCursor },
+        .{ .fields = "\"query\":\"x\",\"before_ordinal\":\"0\"", .failure = error.InvalidCursor },
+        .{ .fields = "\"query\":\"x\",\"kinds\":[]", .failure = error.InvalidCursor },
+        .{ .fields = "\"query\":\"x\",\"limit\":\"17\"", .failure = error.InvalidCursor },
+        .{ .fields = "\"query\":\"x\",\"query\":\"y\"", .failure = error.UnexpectedField },
+    };
+    for (cases) |case| {
+        var buffer: [1024]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buffer, "{{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":\"s\",\"session\":\"x\",{s}}}", .{case.fields});
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parseForTest(&parser));
+        } else {
+            const request = try parseForTest(&parser);
+            try std.testing.expect(request == .activity_search);
+        }
+    }
+}
+
+test "activity search reply bounds preserve snippets and nullable continuation" {
+    var facts: ActivitySearchFacts = .{};
+    facts.count = 1;
+    facts.items[0] = .{ .position = 9, .ordinal = 2, .kind = .call, .count = 1 };
+    facts.items[0].hits[0] = .{ .offset = 1, .length = 3 };
+    try facts.items[0].hits[0].snippet.set("\"雪\n");
+    facts.next = .{ .position = 8, .ordinal = 0 };
+    var buffer: [max_activity_search_response_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    try facts.writeJson(&out);
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[{\"position\":\"9\",\"ordinal\":\"2\",\"kind\":\"call\",\"hits\":[{\"snippet\":\"\\\"雪\\n\",\"offset\":\"1\",\"length\":\"3\"}]}],\"next\":{\"position\":\"8\",\"ordinal\":\"0\"}}", out.buffered());
+    facts.count = 0;
+    facts.next = null;
+    out = std.Io.Writer.fixed(&buffer);
+    try facts.writeJson(&out);
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[],\"next\":null}", out.buffered());
+}
+
+test "presets allow partial creating configure in either field order" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",";
+    for ([_][]const u8{
+        head ++ "\"configuration\":{},\"preset\":\"review\"}",
+        head ++ "\"preset\":\"review\",\"configuration\":{\"reasoning_effort\":{\"state\":\"null\"}}}",
+        head ++ "\"preset\":\"review\",\"configuration\":{},\"require_model\":true}",
+    }, 0..) |json, index| {
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser: Parser = .{ .source = &source, .options = .{
+            .io = std.testing.io,
+            .content_length = json.len,
+            .scratch_path = "unused",
+            .request_number = 0,
+            .retained_scratch = &retained,
+        } };
+        const request = try parseForTest(&parser);
+        try std.testing.expectEqualStrings("review", request.configure.preset.?.slice());
+        try std.testing.expectEqual(index == 2, request.configure.require_model);
+        try std.testing.expectEqual(if (index == 1) FieldState.explicit_null else FieldState.omitted, request.configure.configuration.reasoning_effort.state);
+    }
 }

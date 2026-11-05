@@ -142,18 +142,30 @@ pub fn queueCloseOr(a: anytype, positions: *store_access.Positions, turn_id: u64
         .position = try positions.take(1),
         .session = positions.head,
     });
+    a.write(owe_ending, .{ .turn_id = turn_id, .session = positions.head.ref[0..] });
 }
+
+/// An attached child's Turn ending is owed to its parent as a Message
+/// (D39), unless the child already owes a stop: its parent stopped, and
+/// delivery would wake it again (D139). The Host delivers it
+/// (`Store.nextCoreWork`).
+const owe_ending = rsql.Write(.{
+    .sql = "INSERT INTO session_ending_owed(turn_id,delivered) SELECT ?1,0 FROM session WHERE session_ref=?2 AND parent_ref IS NOT NULL " ++
+        "AND NOT EXISTS(SELECT 1 FROM session_stop_owed WHERE child_ref=?2 AND settled=0)",
+    .Args = struct { turn_id: u64, session: []const u8 },
+    .expect = .{ .at_most = 1 },
+});
 
 /// How many attached children of the Session the parameter `parent` names
 /// do not owe a stop yet: what `queueOwedStops` inserts.
 pub fn unowedChildrenSql(comptime parent: []const u8) []const u8 {
     return "(SELECT count(*) FROM session child @index(session_parent) WHERE child.parent_ref=" ++ parent ++
-        " AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=child.session_ref))";
+        " AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=child.session_ref AND owed.settled=0))";
 }
 
 const owe_child_stops = rsql.Write(.{
-    .sql = "INSERT INTO session_stop_owed(child_ref,cause_ref,cause_position) SELECT child.session_ref,?1,?2 FROM session child " ++
-        "WHERE child.parent_ref=?1 AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=child.session_ref)",
+    .sql = "INSERT INTO session_stop_owed(child_ref,cause_ref,cause_position,settled) SELECT child.session_ref,?1,?2,0 FROM session child " ++
+        "WHERE child.parent_ref=?1 AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=child.session_ref AND owed.settled=0)",
     .Args = struct { parent: []const u8, position: u64 },
     .expect = .{ .counted = .{ .otherwise = error.CorruptStore } },
 });

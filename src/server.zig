@@ -22,6 +22,7 @@ const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
 const launch_frame = @import("launch_frame.zig");
+const core_tools = @import("core_tools.zig");
 const tools = @import("tools.zig");
 const mcp_offered = @import("mcp/offered.zig");
 const stderr = @import("stderr.zig");
@@ -618,7 +619,7 @@ const Intake = struct {
         self.deadline_armed = true;
         const default: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.DFL }, .mask = std.posix.sigemptyset(), .flags = 0 };
         std.posix.sigaction(.ALRM, &default, null);
-        _ = std.c.alarm(launch_shutdown_seconds);
+        _ = std.c.alarm(product_defaults.host_shutdown_seconds);
     }
 
     fn run(self: *Intake, listener: *std.Io.net.Server, listener_open: *bool, socket_owned: *bool) !void {
@@ -863,10 +864,8 @@ pub const Launch = struct {
     paused: bool = false,
     /// The MCP servers whose tools the Host offers (M3a).
     mcp_servers: []const launch_frame.Frame.McpServer = &.{},
+    presets: []const core_tools.Preset = &.{},
 };
-
-/// How long a launched Host's shutdown may take after stdin closes.
-pub const launch_shutdown_seconds = 10;
 
 /// Lists each MCP server and saves the Host's catalog: the built-ins and
 /// the servers' tools, with an unreachable server's last saved tools kept
@@ -1067,6 +1066,7 @@ pub fn serve(
         .hooks = hooks,
         .limits = limits,
         .providers = served,
+        .presets = if (launch) |value| value.presets else &.{},
         .bash_path = bash_path,
         .bash_facts = bash_facts,
         .environments = environments,
@@ -1324,6 +1324,7 @@ const Route = enum {
     conversation_page,
     conversation_content,
     activity_page,
+    activity_search,
     activity_content,
     model_list,
     unsupported_control,
@@ -1384,6 +1385,44 @@ noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, 
     return host.store.submitMessageWithModel(command, .{ .context = &install, .call = Install.call }, faults);
 }
 
+/// Resolve before the Store hashes or saves. Normal answers bind the resolved
+/// configuration; a preset lookup/update refusal binds the original request,
+/// including its name. The Store keeps that identity for a saved refusal even
+/// if the preset later exists: the same request cannot become an acceptance.
+noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureCommand) store_module.ConfigureReply {
+    const name = command.preset orelse return host.store.configure(command, host.hooks.storeFaults(.command));
+    var decision: store_module.PresetDecision = .{ .request_digest = command.presetRequestDigest() };
+    if (command.session.len != 0) {
+        decision.rejection = .preset_on_update;
+        return host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
+    }
+    const preset = for (host.presets) |*entry| {
+        if (std.mem.eql(u8, entry.name, name.slice())) break entry;
+    } else {
+        decision.rejection = .unknown_preset;
+        return host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
+    };
+    var memory: std.heap.ArenaAllocator = .init(host.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    // Configuration is kilobytes, owned by this request rather than the stack.
+    const resolved = arena.create(protocol.ConfigureCommand) catch return .infrastructure_failure;
+    resolved.* = .{
+        .store = command.store,
+        .key = command.key,
+        .session = command.session,
+        .require_model = command.require_model,
+    };
+    const checked = core_tools.parseAgentSpec(arena, preset.spec, &resolved.configuration) catch return .infrastructure_failure;
+    // The immutable launch frame checked this same spec with this parser.
+    std.debug.assert(checked == .accepted);
+    inline for (@typeInfo(protocol.Configuration).@"struct".field_names) |field| {
+        const override = &@field(command.configuration, field);
+        if (override.state != .omitted) @field(resolved.configuration, field) = override.*;
+    }
+    return host.store.configureWithPreset(resolved, &decision, host.hooks.storeFaults(.command));
+}
+
 /// `client_environment` holds a Message's checked environment.
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, client_environment: ?*SessionEnvironments.Offer) !void {
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
@@ -1419,7 +1458,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
-            const result = host.store.configure(command, host.hooks.storeFaults(.command));
+            const result = submitConfigure(host, command);
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
             }
@@ -1614,6 +1653,18 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try fd.json(200, protocol.max_activity_page_response_bytes, renderActivityPage, .{page});
         },
+        .activity_search => |*command| {
+            const page = try createUnfilled(host.allocator, protocol.ActivitySearchFacts);
+            defer host.allocator.destroy(page);
+            host.store.searchActivity(command, page) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                else => {
+                    fenceDispatch(host, "activity search", err);
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                },
+            };
+            try fd.json(200, protocol.max_activity_search_response_bytes, renderActivitySearch, .{page});
+        },
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
@@ -1645,6 +1696,9 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
 }
 
 fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
+    page.writeJson(out.writer) catch return error.BufferTooLarge;
+}
+fn renderActivitySearch(out: protocol.JsonOut, page: *const protocol.ActivitySearchFacts) error{BufferTooLarge}!void {
     page.writeJson(out.writer) catch return error.BufferTooLarge;
 }
 
@@ -1742,6 +1796,8 @@ const HeaderReader = struct {
             .conversation_page
         else if (std.mem.eql(u8, path, "/v1/conversation-content"))
             .conversation_content
+        else if (std.mem.eql(u8, path, "/v1/activity-search"))
+            .activity_search
         else if (std.mem.eql(u8, path, "/v1/activity-page"))
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
@@ -3210,12 +3266,12 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field) } },
         .{ .tool_result = .{ .content = reference, .presentation = presentation } },
         .{ .hosted_call = presentation },
-        .{ .turn_ended = .{ .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
+        .{ .turn_ended = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
         .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
-        .{ .approval_requested = .{ .action = max, .operation = max, .call_ordinal = max } },
+        .{ .approval_requested = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .action = max, .operation = max, .call_ordinal = max } },
         .{ .session_changed = .{ .revision = max, .field = .output_reservation } },
         .{ .compacted = .{ .operation = max, .dropped = max } },
     };
@@ -3755,6 +3811,12 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try configure.configuration.provider.value.set("codex");
         configure.configuration.model.state = .value;
         try configure.configuration.model.value.set("model-a");
+        configure.configuration.tools = try .of(&.{ "bash", "web_search" });
+        configure.configuration.permission_mode.state = .value;
+        try configure.configuration.permission_mode.value.set("bypass");
+        configure.configuration.compaction_trigger.state = .value;
+        try configure.configuration.compaction_trigger.value.set("115200");
+        configure.configuration.reasoning_effort.state = .explicit_null;
         const configured = storage.configure(&configure, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session.slice();
@@ -4057,6 +4119,12 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     try configure.configuration.provider.value.set("codex");
     configure.configuration.model.state = .value;
     try configure.configuration.model.value.set("model-a");
+    configure.configuration.tools = try .of(&.{ "bash", "web_search" });
+    configure.configuration.permission_mode.state = .value;
+    try configure.configuration.permission_mode.value.set("bypass");
+    configure.configuration.compaction_trigger.state = .value;
+    try configure.configuration.compaction_trigger.value.set("115200");
+    configure.configuration.reasoning_effort.state = .explicit_null;
     const configured = storage.configure(&configure, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session.slice();
@@ -4206,4 +4274,122 @@ test "MCP socket capacity is reserved beside model and Bash descriptors" {
     try std.testing.expectEqual(before.total + @import("server_mcp.zig").capacity, requirement.total);
     try std.testing.expectEqual(before.clients, requirement.clients);
     try std.testing.expectEqual(before.inherited, requirement.inherited);
+}
+
+test "presets seed configure before Store validation and idempotency" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite", .{root});
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
+        \\{"model":"gpt-6.1-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
+    , .{})).object;
+    const presets = [_]core_tools.Preset{.{ .name = "review", .spec = spec }};
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .presets = &presets };
+    const create = try arena.create(protocol.ConfigureCommand);
+    create.* = .{ .preset = .{} };
+    try create.preset.?.set("review");
+    try create.key.set("preset-create");
+    const first = submitConfigure(&host, create);
+    try std.testing.expect(first == .accepted);
+    try std.testing.expect(!first.accepted.replayed);
+    const session = first.accepted.session;
+    var observed = try storage.inspectSessionForTesting(session.slice());
+    try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
+    try std.testing.expectEqual(@as(?u64, 10000), observed.compaction_trigger_override);
+    try std.testing.expectEqual(protocol.ReasoningEffort.low, observed.reasoning_effort_override.?);
+    try std.testing.expectEqualStrings("ask", observed.permission_mode.slice());
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Preset instructions"), &observed.instructions.digest);
+    try std.testing.expect(observed.output_schema != null);
+    const replay = submitConfigure(&host, create);
+    try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+    try std.testing.expectEqualStrings(session.slice(), replay.accepted.session.slice());
+    try std.testing.expectEqual(first.accepted.revision, replay.accepted.revision);
+
+    const override = try arena.create(protocol.ConfigureCommand);
+    override.* = .{ .preset = create.preset };
+    try override.key.set("preset-overrides");
+    override.configuration.model.state = .value;
+    try override.configuration.model.value.set("preset-override-model");
+    override.configuration.provider.state = .value;
+    try override.configuration.provider.value.set("codex");
+    override.configuration.workspace.state = .value;
+    try override.configuration.workspace.value.set(root);
+    override.configuration.reasoning_effort.state = .explicit_null;
+    override.configuration.compaction_trigger.state = .value;
+    try override.configuration.compaction_trigger.value.set("12000");
+    override.configuration.tools = try .of(&.{"start_agent"});
+    override.configuration.permission_mode.state = .value;
+    try override.configuration.permission_mode.value.set("bypass");
+    override.configuration.label.state = .explicit_null;
+    override.configuration.output_schema.state = .explicit_null;
+    override.configuration.instructions = .{
+        .state = .value,
+        .borrowed = "Overridden instructions".ptr,
+        .length = "Overridden instructions".len,
+        .digest = protocol.contentDigest("Overridden instructions"),
+    };
+    const overridden = submitConfigure(&host, override);
+    try std.testing.expect(overridden == .accepted);
+    try storage.inspectSession(overridden.accepted.session.slice(), &observed);
+    try std.testing.expectEqualStrings("preset-override-model", observed.model.slice());
+    try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+    try std.testing.expectEqualStrings(root, observed.workspace.slice());
+    try std.testing.expectEqual(@as(?u64, 12000), observed.compaction_trigger_override);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort_override);
+    try std.testing.expectEqualStrings("bypass", observed.permission_mode.slice());
+    try std.testing.expectEqual(@as(u8, tools.toolBit(.start_agent)), observed.tools_mask);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Overridden instructions"), &observed.instructions.digest);
+    try std.testing.expect(observed.output_schema == null);
+
+    // An edited preset is not saved or looked up by name in the Store. A
+    // request overriding its edited field still has the same resolved digest.
+    const edited_spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
+        \\{"model":"gpt-6-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
+    , .{})).object;
+    const edited_presets = [_]core_tools.Preset{.{ .name = "review", .spec = edited_spec }};
+    host.presets = &edited_presets;
+    const same = submitConfigure(&host, override);
+    try std.testing.expect(same == .accepted and same.accepted.replayed);
+    try std.testing.expectEqualStrings(overridden.accepted.session.slice(), same.accepted.session.slice());
+    try std.testing.expect(submitConfigure(&host, create) == .conflict);
+    // Changing the catalog does not change the already created Session.
+    try storage.inspectSession(session.slice(), &observed);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
+
+    const invalid = try arena.create(protocol.ConfigureCommand);
+    invalid.* = .{ .preset = create.preset };
+    try invalid.key.set("preset-invalid-resolved");
+    invalid.configuration.compaction_trigger.state = .explicit_null;
+    const refused = submitConfigure(&host, invalid);
+    try std.testing.expect(refused == .rejected);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused.rejected.code);
+    host.presets = &.{};
+    try std.testing.expect(submitConfigure(&host, create) == .conflict);
+    const missing = try arena.create(protocol.ConfigureCommand);
+    missing.* = .{ .preset = create.preset };
+    try missing.key.set("preset-missing");
+    const unknown = submitConfigure(&host, missing);
+    try std.testing.expect(unknown == .rejected);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, unknown.rejected.code);
+    host.presets = &presets;
+    const refused_again = submitConfigure(&host, missing);
+    try std.testing.expect(refused_again == .rejected and refused_again.rejected.replayed);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, refused_again.rejected.code);
+    invalid.session = session;
+    try invalid.key.set("preset-on-update");
+    const update = submitConfigure(&host, invalid);
+    try std.testing.expect(update == .rejected);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update.rejected.code);
+    const update_replay = submitConfigure(&host, invalid);
+    try std.testing.expect(update_replay == .rejected and update_replay.rejected.replayed);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update_replay.rejected.code);
 }

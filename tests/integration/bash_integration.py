@@ -236,7 +236,10 @@ def prove_stdin(state):
         "pathlib.Path('input.bin').write_bytes(sys.stdin.buffer.read())"
     )
     probe = "import os,stat; print('null' if stat.S_ISCHR(os.fstat(0).st_mode) else 'file'); print(len(os.read(0,1)))"
-    empty_send_error = "\nrui: failure during input_parse; cause follows.\nStandard input was empty; provide Message text. Nothing was sent.\n"
+    empty_send_error = ("rui session send: Standard input was empty; provide Message text. "
+                        "Accepted: nonempty Message text on stdin. "
+                        "Next: Pipe or redirect a nonempty Message into this command. "
+                        "[message_empty]\n")
     retained_output_bytes = {"large": 524288, "over": 0, "null": 7, "missing": 7, "empty": 7,
                              "closed": 6, "timeout": 0, "empty-send": len(empty_send_error), "null-send": len(empty_send_error)}
     cases = [
@@ -304,7 +307,7 @@ def prove_stdin(state):
             elif name == "closed":
                 assert "closed" in result, result
             elif name in ("empty-send", "null-send"):
-                assert result == "Bash failed. Exit code: 1.\nstderr tail:\n" + empty_send_error, result
+                assert result == "Bash failed. Exit code: 2.\nstderr tail:\n" + empty_send_error, result
                 assert not (state / f"{name}.json").exists(), "empty input published a capture"
                 assert fixture.command("request", "inspect", "--store", store, "--key", name)["observation"]["status"] == "absent"
             fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)
@@ -1308,7 +1311,7 @@ def main():
             session,
             "--action",
             success_action["action"],
-            expect=1,
+            expect=3,
         )
         assert conflict["answer"]["status"] == "conflict", conflict
         bash_cleanup_started = success_milestones.wait(
@@ -1498,10 +1501,10 @@ def main():
         dropped = subprocess.run([str(fixture.RUI), "session", "stop", "--all", "--store", str(store), "--test-drop-reply", "after-commit"],
                                  env=stop_all_env, text=True, capture_output=True, timeout=15)
         # The second Session is still stopped after the first reply was lost.
-        assert dropped.returncode == 1 and dropped.stdout == "", dropped
+        assert dropped.returncode == 4 and dropped.stdout == "", dropped
         unconfirmed = re.findall(r"^rui: stopping (\S+)\n+request: (\S+) ", dropped.stderr, re.M)
         assert {waiter for waiter, _ in unconfirmed} == set(lost) and len(unconfirmed) == 2, dropped
-        assert {waiter for waiter in re.findall(r"^rui: stopping (\S+) failed \(\w+\)\.$", dropped.stderr, re.M)} == set(lost), dropped
+        assert dropped.stderr.count("[reply_unconfirmed]") == 2, dropped
         assert "rui: 2 of 2 stops failed." in dropped.stderr, dropped
         for (waiter, handle) in unconfirmed:
             fixture.wait_for(lambda: resolution(store, waiter) == "cancelled", "saved stop of a lost reply")

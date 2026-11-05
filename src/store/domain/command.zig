@@ -6,6 +6,7 @@ const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
+const forward_domain = @import("forward.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
@@ -449,7 +450,7 @@ pub fn deliverAgentMessage(
     const key = agentMessageKey(&key_buffer, binding.action_id);
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var receiver: target_session.Result = null;
@@ -499,6 +500,99 @@ pub fn deliverAgentMessage(
     return if (delivered) .delivered else .failed;
 }
 
+fn childEndingKey(buffer: *[protocol.max_key_bytes]u8, turn_id: u64) []const u8 {
+    return std.fmt.bufPrint(buffer, "rui.core/ending/{d}", .{turn_id}) catch unreachable;
+}
+
+/// The owed ending of `turn_id`: its child's Session, its parent, and how
+/// its Turn ended, with the answer's digest when it is done.
+const owed_ending_facts = rsql.Read(.{
+    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest," ++
+        action_domain.ending_stop_sql ++ " FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id " ++
+        "JOIN session child ON child.session_ref=t.session_ref LEFT JOIN content c ON c.content_id=t.outcome_content_id WHERE e.turn_id=?1 AND e.delivered=0",
+    .Args = struct { turn_id: u64 },
+    .Row = struct {
+        child: rsql.SessionHead,
+        parent: protocol.Bounded(protocol.session_id_bytes),
+        outcome_code: protocol.Bounded(protocol.max_code_bytes),
+        outcome_content_id: ?rsql.Positive,
+        digest: ?[32]u8,
+        stopped: bool,
+        quiet: bool,
+    },
+    .cardinality = .optional,
+});
+
+const settle_owed_ending = rsql.Write(.{
+    .sql = "UPDATE session_ending_owed SET delivered=1 WHERE turn_id=?1 AND delivered=0",
+    .Args = struct { turn_id: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// What the parent of a child that ended without an answer reads, as a
+/// Message from the child (D161).
+fn endingText(buffer: []u8, ending: protocol.TurnEnding) []const u8 {
+    return std.fmt.bufPrint(buffer, "[Rui: this agent's Turn ended without an answer: {s}.]", .{@tagName(ending)}) catch unreachable;
+}
+
+/// Delivers the ending of an attached child's Turn `turn_id` to its parent
+/// as a Message from the child (D39), which wakes the parent, and settles
+/// what was owed, in one transaction. A done Turn's Message is its saved
+/// answer itself, so nothing is copied; any other ending is a short line
+/// naming it. An ending its parent's own stop caused only settles (D139).
+/// False when nothing was owed any more. Its `rui.core/` key is free:
+/// clients cannot use one, and settling marks the row with the admission.
+pub fn deliverChildEnding(a: anytype, turn_id: u64, faults: Faults) !bool {
+    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    const key = childEndingKey(&key_buffer, turn_id);
+    var owed: owed_ending_facts.Result = undefined;
+    a.read(owed_ending_facts, .{ .turn_id = turn_id }, &owed);
+    try a.run();
+    const found = owed orelse {
+        try a.abandon(.{});
+        return false;
+    };
+    a.write(settle_owed_ending, .{ .turn_id = turn_id });
+    // The ending's feed row climbs the tree from here (D180): queued with
+    // the owed Message, so a root Session's Turn end writes nothing more.
+    try forward_domain.queue(a, &found.child.ref, &found.child.ref, .ending, turn_id);
+    if (found.quiet) {
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try a.commit();
+        return true;
+    }
+    const outcome = try TurnOutcome.decode(found.outcome_code.slice(), if (found.outcome_content_id) |id| @intCast(id.get()) else null);
+    var text_buffer: [96]u8 = undefined;
+    const text = endingText(&text_buffer, outcome.ending(found.stopped));
+    var receiver: target_session.Result = null;
+    readTarget(a, found.parent.slice(), &receiver);
+    var message: content_domain.Import = .ofBytes(text, false);
+    if (outcome != .completed) content_domain.lookup(a, &message);
+    try a.run();
+    if (faults.content_import) return error.InjectedContentImportFailure;
+    const head = (receiver orelse return error.CorruptStore).session;
+    const content_id: u64, const content_digest: [32]u8 = switch (outcome) {
+        .completed => |answer| .{ @intCast(answer), found.digest orelse return error.CorruptStore },
+        else => .{ try content_domain.importBytes(a, &message, text), protocol.contentDigest(text) },
+    };
+    var digest = std.crypto.hash.sha2.Sha256.init(.{});
+    digest.update("rui/core/child_ending/v1");
+    digest.update(&content_digest);
+    try queueCommand(a, key, .message, found.parent.slice(), &digest.finalResult(), content_id, null, &.{ .accepted = true });
+    a.write(admit_sent_message, .{
+        .admission_id = try a.identity(.admission_id),
+        .session = head,
+        .key = key,
+        .content_id = content_id,
+        .position = try (try a.positions(head)).take(1),
+        .sender = found.child,
+        .sender_position = try (try a.positions(found.child)).take(1),
+    });
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    return true;
+}
+
 /// What running a `start_agent` call did.
 pub const AgentStart = enum {
     /// The agent's Session was created with the task as its first Message,
@@ -522,11 +616,11 @@ const parent_settings = rsql.Read(.{
 
 /// Runs a `start_agent` call as one core command (D24, D122): creates a
 /// Session with `configuration` in the caller's Workspace and with its
-/// provider, as its child when `attached`, admits `task` to it from the
-/// caller, and resolves the call with what happened, in one transaction.
-/// The spec may only narrow the caller's tools and permission mode.
-/// `configuration` is the caller's; its Workspace and provider are filled
-/// here. `committed` runs once the task's admission commits.
+/// provider (D122, D221), as its child when `attached`, admits `task` to it
+/// from the caller, and resolves the call with what happened, in one
+/// transaction. The spec may only narrow the caller's tools and permission
+/// mode. `configuration` is the caller's; its Workspace and provider are
+/// filled here. `committed` runs once the task's admission commits.
 pub fn startAgent(
     a: anytype,
     io: std.Io,
@@ -542,7 +636,7 @@ pub fn startAgent(
     const key = std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     configuration.workspace = .{ .state = .value, .value = .{ .len = 0 } };
@@ -626,13 +720,12 @@ pub fn startAgent(
     return .started;
 }
 
-/// Fails the core tool call `binding` names with `result`, which says why
-/// nothing was done, and lets its Turn continue, in one transaction. A
-/// call whose Turn a stop selected is left to the stop.
-pub fn failCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
+/// Resolves a core tool call and lets its Turn continue in one transaction.
+/// A call whose Turn a stop selected is left to the stop.
+pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, code: action_domain.ActionResolutionCode, result: []const u8, faults: Faults) !bool {
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
     var outcome: content_domain.Import = .ofBytes(result, false);
     content_domain.lookup(a, &outcome);
     try a.run();
@@ -643,7 +736,7 @@ pub fn failCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, res
     }
     if (faults.content_import) return error.InjectedContentImportFailure;
     const outcome_id = try content_domain.importBytes(a, &outcome, result);
-    try action_domain.queueCoreResolution(a, binding, found.session, .failed, outcome_id);
+    try action_domain.queueCoreResolution(a, binding, found.session, code, outcome_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return true;
@@ -655,7 +748,7 @@ pub fn failCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, res
 const stop_target = rsql.Read(.{
     .sql = "SELECT session_ref,workspace_key,next_position,(SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1) AS admission_cutoff," ++
         turn_domain.unowedChildrenSql("?1") ++ " AS unowed_children," ++
-        "(SELECT cause_ref FROM session_stop_owed WHERE child_ref=?1) AS owed_cause,(SELECT cause_position FROM session_stop_owed WHERE child_ref=?1) AS owed_position " ++
+        "(SELECT cause_ref FROM session_stop_owed WHERE child_ref=?1 AND settled=0) AS owed_cause,(SELECT cause_position FROM session_stop_owed WHERE child_ref=?1 AND settled=0) AS owed_position " ++
         "FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -708,7 +801,7 @@ const insert_stop = rsql.Write(.{
 });
 
 const settle_owed_stop = rsql.Write(.{
-    .sql = "DELETE FROM session_stop_owed WHERE child_ref=?1",
+    .sql = "UPDATE session_stop_owed SET settled=1 WHERE child_ref=?1 AND settled=0",
     .Args = struct { session: []const u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -1139,10 +1232,12 @@ pub fn interruptModel(a: anytype, command: *const protocol.ModelInterruptionComm
 
 /// The Action a permission decision names, with its Turn.
 const decision_action = rsql.Read(.{
-    .sql = "SELECT a.session_ref,a.authorized,a.resolution_code IS NULL AS unresolved,t.outcome_code IS NULL AS turn_open,t.turn_id FROM action_operation a " ++
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,a.authorized,a.resolution_code IS NULL AS unresolved,t.outcome_code IS NULL AS turn_open,t.turn_id," ++
+        "EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=?2 AND f.kind=1 AND f.source_id=a.action_id AND f.position IS NOT NULL) AS forwarded " ++
+        "FROM action_operation a JOIN session s ON s.session_ref=a.session_ref " ++
         "JOIN model_operation operation ON operation.operation_id=a.parent_operation_id JOIN turn t ON t.turn_id=operation.turn_id WHERE a.action_id=?1",
-    .Args = struct { action_id: u64 },
-    .Row = struct { session_ref: protocol.Bounded(protocol.max_session_bytes), authorized: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive },
+    .Args = struct { action_id: u64, target: []const u8 },
+    .Row = struct { session: rsql.SessionHead, authorized: bool, unresolved: bool, turn_open: bool, turn_id: rsql.Positive, forwarded: bool },
     .cardinality = .optional,
 });
 
@@ -1184,7 +1279,7 @@ fn decisionRejection(
     if (!validId(command.action_id)) return .invalid_target;
     if (target == null) return .unknown_session;
     const found = action orelse return .unknown_action;
-    if (!found.session_ref.eql(command.session.slice())) return .target_mismatch;
+    if (!std.mem.eql(u8, &found.session.ref, command.session.slice()) and !found.forwarded) return .target_mismatch;
     if (found.authorized or !found.unresolved or !found.turn_open) return .action_not_pending;
     return null;
 }
@@ -1203,7 +1298,7 @@ pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionC
     var content = denial;
     if (validId(command.action_id)) {
         readTarget(a, session, &target);
-        if (protocol.validSessionId(session)) a.read(decision_action, .{ .action_id = command.action_id }, &action);
+        if (protocol.validSessionId(session)) a.read(decision_action, .{ .action_id = command.action_id, .target = session }, &action);
     }
     if (command.decision == .deny) content_domain.lookup(a, &content);
     try a.run();
@@ -1230,7 +1325,7 @@ pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionC
     var action_buffer: [20]u8 = undefined;
     a.write(save_decision, .{ .key = command.key.slice(), .action_id = try std.fmt.bufPrint(&action_buffer, "{d}", .{command.action_id}), .decision = command.decision });
     if (rejection == null) {
-        const head = target.?.session;
+        const head = action.?.session;
         switch (command.decision) {
             .allow_once => a.write(allow_action, .{ .action_id = command.action_id, .session = head }),
             .deny => {

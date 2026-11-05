@@ -9,13 +9,19 @@ const mcp = @import("server_mcp.zig");
 const Script = @import("mcp/test_server.zig");
 const poll = @import("test_poll");
 
-const records = [_]tools.Record{
-    tools.record(.bash).*,
-    .{ .name = "fetch_other", .owner = .mcp, .server = "other", .description = "Fetch elsewhere.", .input_schema = "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}" },
-    .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}" },
-    tools.record(.message_agent).*,
-    tools.record(.start_agent).*,
-    tools.record(.web_search).*,
+// Compose the fixture with the canonical built-ins so a new core tool cannot
+// make every MCP Host test fail before it reaches the runner.
+const records = blk: {
+    var out = tools.built_in.records[0..tools.built_in.records.len].* ++ [_]tools.Record{
+        .{ .name = "fetch_other", .owner = .mcp, .server = "other", .description = "Fetch elsewhere.", .input_schema = "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}" },
+        .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}" },
+    };
+    std.mem.sort(tools.Record, &out, {}, struct {
+        fn lessThan(_: void, a: tools.Record, b: tools.Record) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+    break :blk out;
 };
 const digests = blk: {
     @setEvalBranchQuota(1_000_000);

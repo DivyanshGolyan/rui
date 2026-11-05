@@ -26,6 +26,7 @@ import human_cli_integration as human
 import host_process
 from host_process import HostDiagnostics, HostStartError, canonical_fixture_root, cleanup_failure, copy_failure_diagnostics, dispose_all, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process
 import os_semantics
+from product_defaults import DEFAULTS
 
 
 def assert_file_flags(actual, expected):
@@ -1185,7 +1186,7 @@ def persistent_cases(state, library, home, store, host, session):
             assert caller.wait(timeout=5) == expected, caller.stderr.read()
             errors = caller.stderr.read().decode()
             if expected:
-                assert ("TerminalRestoreFailed" if fault in ("restore", "both") else "TerminalCleanupFailed") in errors, errors
+                assert "[internal_unexpected]" in errors, errors
             if fault in ("disable", "both"):
                 assert log.read_text().count("scroll-reset\n") == 1, ("failed paste disable skipped the owned scroll reset", log.read_text())
             if case.startswith("incomplete-"):
@@ -1451,9 +1452,9 @@ def secret_entry_restore_case(state, library):
             if select.select([master], [], [], 0.1)[0]:
                 shown += os.read(master, 4096)
         os.write(master, b"sk-refused\r")
-        assert caller.wait(timeout=10) != 0, "a key was accepted with the terminal unrestored"
+        assert caller.wait(timeout=10) == 1, "a key was accepted with the terminal unrestored"
         errors = caller.stderr.read().decode()
-        assert "TerminalRestoreFailed" in errors, errors
+        assert "[internal_unexpected]" in errors, errors
         assert "restore-flush" in log.read_text(), log.read_text()
         assert not (home / ".config" / "rui" / "openai.key").exists(), "a key was saved with the terminal unrestored"
     finally:
@@ -1722,11 +1723,13 @@ def command_interruption_cases(state, library, only=None):
                     assert "replayed-into-scratch" not in marks, (case, marks)
                     assert caller.returncode == 1, (case, caller.returncode, output, errors)
                     if case.endswith("stdout"):
-                        assert "replayed-to-safe-sink" in marks and b"error: TerminalCleanupFailed" in errors, (case, marks, errors)
+                        assert "replayed-to-safe-sink" in marks and b"Configuration accepted; do not resubmit it" in errors, (case, marks, errors)
+                        assert b"error: TerminalCleanupFailed" not in errors, errors
                     else:
                         assert b"rui: Interrupted command output:" not in errors, (case, errors)
                 elif case == "configure-canonical":
-                    assert caller.returncode == 1 and b"error: CanonicalStoreFailure" in errors and b"Resume: " in errors, (case, output, errors)
+                    assert caller.returncode == 4 and b"Configuration not confirmed; do not replace uncertain work (internal_unexpected)" in errors and b"Resume: " in errors, (case, output, errors)
+                    assert b"error: CanonicalStoreFailure" not in errors, errors
                 else:
                     assert caller.returncode == 0, (case, caller.returncode, output, errors)
                 if case == "requests" or case.startswith("inspect-"):
@@ -1756,7 +1759,7 @@ def command_interruption_cases(state, library, only=None):
                     elif restoring or case in ("configure-admitted", "configure-presentation", "configure-rejected"):
                         assert (b"rejected" if case == "configure-rejected" else b"accepted; do not resubmit it") in errors and b"not confirmed" not in errors, errors
                         if case == "configure-presentation":
-                            assert b"InputOutput" in errors, errors
+                            assert b"internal_unexpected" in errors, errors
                     else:
                         assert b"not confirmed" in errors and f"rui request recover {key}".encode() in errors, errors
                 else:
@@ -1815,9 +1818,9 @@ def fatal_reporting_cases(state):
             "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
         missing_session = "000000" if session != "000000" else "000001"
         diagnostics = [
-            (["session", "resume", "--store", str(store), missing_session], b"SessionNotConfigured"),
-            (["defaults", "configure", "--provider", "unsupported"], b"UnsupportedPreferenceProvider"),
-            (["--store", str(store), "--provider", "unsupported", "--model", "gpt-6-sol"], b"UnsupportedSelectionProvider"),
+            (["session", "resume", "--store", str(store), missing_session], b"[internal_unexpected]"),
+            (["defaults", "configure", "--provider", "unsupported"], b"[choice_unsupported]"),
+            (["--store", str(store), "--provider", "unsupported", "--model", "gpt-6-sol"], b"[choice_unsupported]"),
         ]
         for args, error, stopped in ((args, error, stopped) for args, error in diagnostics for stopped in (False, True)):
             master, slave = open_pty()
@@ -1829,7 +1832,7 @@ def fatal_reporting_cases(state):
                     termios.tcflow(error_slave, termios.TCOOFF)
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
-                assert caller.wait(timeout=3) == 1, "fatal diagnostic did not exit"
+                assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "fatal diagnostic did not exit"
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(error_slave, fcntl.F_GETFL), error_flags)
                 if not stopped:
@@ -1853,7 +1856,7 @@ def fatal_reporting_cases(state):
             try:
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
-                assert caller.wait(timeout=3) == 1, "disconnected stderr replaced the real exit"
+                assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "disconnected stderr replaced the real exit"
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
                 print(f"fatal reporting: {error.decode()} disconnected stderr passed", flush=True)
@@ -1881,9 +1884,9 @@ def fatal_reporting_cases(state):
             saved = (home / ".config/rui/requests" / f"{second['key']}.json").read_bytes()
             os.write(master, b"\x1b[")
             output, errors = human.terminal_exit(caller, master, timeout=6)
-            assert caller.returncode == 1, (output, errors)
+            assert caller.returncode == 2, (output, errors)
             assert second["key"].encode() in errors and first["key"].encode() not in errors, errors
-            assert b"not confirmed" in errors and b"rui request recover" in errors and b"IncompleteTerminalInput" in errors, errors
+            assert b"not confirmed" in errors and b"rui request recover" in errors and b"[terminal_input_incomplete]" in errors, errors
             assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved, "fatal exit replaced original"
             assert proxy.mutations == [("/v1/message", body) for body, _ in proxy.exchanges]
             after = {path: path.read_bytes() for path in records.glob("*.json")}
@@ -1908,7 +1911,7 @@ def fatal_reporting_cases(state):
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
             human.read_terminal(master, "› ", composer=True)
             os.write(master, b"\x1b[")
-            assert caller.wait(timeout=6) == 1, "disconnected stderr bypassed acquired-terminal cleanup"
+            assert caller.wait(timeout=6) == 2, "disconnected stderr bypassed acquired-terminal cleanup"
             actual = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
             assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
@@ -1985,7 +1988,7 @@ def decision_reporting_cases(state):
                     assert "Original reserved request:" not in status, status
                     os.write(master, b"\x1b[")
                 output, errors = human.terminal_exit(caller, master, timeout=6)
-                assert caller.returncode == (0 if lost else 1), (output, errors)
+                assert caller.returncode == (0 if lost else 2), (output, errors)
                 records = [path for path in (home / ".config/rui/requests").glob("*.json")
                     if json.loads(path.read_bytes()).get("session") == session]
                 record, = [path for path in records if json.loads(path.read_bytes())["kind"] == "permission_decision"]
@@ -2005,7 +2008,7 @@ def decision_reporting_cases(state):
                 assert b"rui request read-result" not in errors, errors
                 assert (b"Decision not confirmed" if lost else b"Decision accepted; do not repeat it") in errors, errors
                 if not lost:
-                    assert b"IncompleteTerminalInput" in errors and b"not confirmed" not in errors, errors
+                    assert b"[terminal_input_incomplete]" in errors and b"not confirmed" not in errors, errors
                 if lost:
                     assert proxy.exchanges[0][0] == saved and not reply_release.is_set()
                     reply_release.set()
@@ -2072,7 +2075,7 @@ def entry_enable_cases(state, library):
                             "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": name},
                         stdin=input_slave, stdout=output_slave, stderr=subprocess.PIPE)
                     _, errors = caller.communicate(timeout=6)
-                    assert caller.returncode == 1 and b"TerminalCleanupFailed" in errors, errors
+                    assert caller.returncode == 1 and b"[internal_unexpected]" in errors, errors
                     assert b"Detached" not in errors and b"accepted" not in errors, errors
                     assert termios.tcgetattr(input_slave) == original
                     for fd, saved, index in zip(slaves, flags, (0, 1)):
@@ -2162,7 +2165,7 @@ def detach_reporting_cases(state, library):
                     assert caller.returncode == 0 and not errors, (output, errors)
                     assert b"Detached. Host work continues." in output and session.encode() in output, output
                 else:
-                    assert caller.returncode == 1 and b"TerminalCleanupFailed" in errors, (output, errors)
+                    assert caller.returncode == 1 and b"error: TerminalCleanupFailed" not in errors, (output, errors)
                     assert guide in errors and request["key"].encode() in errors, errors
                     assert (b"rui request read-result " if kind == "message" else b"rui request inspect ") + request["key"].encode() in errors
                 assert "cleanup-flags-restored\ndetach-enable\n" in log.read_text(), log.read_text()
@@ -2277,7 +2280,7 @@ def startup_reporting_cases(state, library):
             os.write(master, event)
             output, errors = human.terminal_exit(caller, master)
             assert caller.returncode == 1, (output, errors)
-            assert (b"TerminalRestoreFailed" if kind == "message-restore" else b"SystemResources") in errors, errors
+            assert b"[internal_unexpected]" in errors, errors
             assert log.read_text().count("worker-not-started\n") == 1, log.read_text()
             if kind == "retry":
                 request, = [json.loads(body) for body in before.values()
@@ -2406,13 +2409,14 @@ def visible_stream_handoff_cases(state, library):
                     tail, errors = human.terminal_exit(caller, master)
                     # Without output credit, cleanup cannot claim delivery: an
                     # explicit failure that still names exact recovery.
-                    assert caller.returncode == 1 and b"error: TerminalCleanupFailed" in errors, (phase, tail, errors)
+                    assert caller.returncode == 1 and b"Message accepted; do not resubmit it" in errors, (phase, tail, errors)
+                    assert b"error: TerminalCleanupFailed" not in errors, errors
                     assert b"Use rui request read-result " in errors and b"Resume: rui session resume --store " in errors, errors
                     assert f" Status · {session}".encode() not in tail, "interrupted pending command ran"
                 else:
                     arm.unlink()
                     # Long pages open at their top; the exact Action's inspection starts there.
-                    expected = "Bash arguments: " if phase == "permission" else f" Status · {session}"
+                    expected = "Arguments: " if phase == "permission" else f" Status · {session}"
                     page = human.read_terminal(master, expected)
                     shown = human.current_screen(master)
                     assert expected in shown or expected in page, (phase, shown)
@@ -2836,8 +2840,10 @@ def host_diagnostic_cases(state, library):
                     # file before provider launch, so its correct charge is 0.
                     assert int(resources["scratch_used_bytes"]) == leftovers[0].stat().st_size == 0, resources
                     assert not endpoint.requests, endpoint.requests
+                    # Retained cleanup keeps the lease, so pause waits out its
+                    # whole retirement bound and reports it unconfirmed.
                     stopped = subprocess.run([str(fixture.RUI), "host", "pause", "--store", str(store), "--instance", instance],
-                        capture_output=True, text=True, timeout=8)
+                        capture_output=True, text=True, timeout=30)
                     (root / "host-stop.stdout").write_text(stopped.stdout)
                     (root / "host-stop.stderr").write_text(stopped.stderr)
                     assert stopped.returncode == 0, stopped
@@ -2845,6 +2851,7 @@ def host_diagnostic_cases(state, library):
                     assert {key: stop_reply[key] for key in ("type", "status", "instance", "retirement")} == {
                         "type": "host_pause", "status": "acknowledged", "instance": instance, "retirement": "unconfirmed"}, stopped
                     assert "pause interrupts all work in this Store" in stopped.stderr, stopped
+                    assert f"still holds this Store after {DEFAULTS.host_shutdown_seconds} seconds" in stopped.stderr, stopped
                     print(f"Host diagnostics: retained response file, charge=0, custody=1; stop reply={stopped.stdout!r}", flush=True)
                     # A stop acknowledgement is not cleanup completion: the
                     # injected unlink refusal remains active during shutdown.

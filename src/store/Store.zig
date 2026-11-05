@@ -23,11 +23,14 @@ const Access = @import("access.zig").Access;
 const ReadAccess = reads_domain.ReadAccess;
 const Engine = @import("engine.zig").Engine;
 const Sqlite = @import("engine/Sqlite.zig");
+const Mysql = @import("engine/Mysql.zig");
+const mysql_connection = @import("wire/mysql_connection.zig");
 const ActionAttemptAdmission = action_domain.ActionAttemptAdmission;
 const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 const AgentDelivery = command_domain.AgentDelivery;
 const AgentStart = command_domain.AgentStart;
 const CoreActionInput = action_domain.CoreActionInput;
+const forward_domain = @import("domain/forward.zig");
 const CoreWork = action_domain.CoreWork;
 const ActionResolutionCode = action_domain.ActionResolutionCode;
 const ActionSettlement = action_domain.ActionSettlement;
@@ -86,7 +89,6 @@ pub const Store = struct {
     /// The Host hands out every id and sequence value, and each
     /// transaction's second; see `HostValues`. Out of line beside the
     /// change ring, so a new identity does not grow the Store.
-    ids: *HostValues,
     /// The labels of the providers whose Sessions get model Attempts, each
     /// between commas, fixed at open.
     served: protocol.Routes = protocol.routesAll(.unserved),
@@ -103,6 +105,13 @@ pub const Store = struct {
     savepoint: bool = false,
     // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) TestingContentWork else void = if (@import("builtin").is_test) .{} else {},
+
+    /// The identity allocator already lives beside the change ring. Derive
+    /// its address instead of retaining a redundant pointer in the Store;
+    /// these eight bytes pay for the engine union's tag on both engines.
+    pub inline fn identities(self: *const Store) *HostValues {
+        return &@as(*OutOfLine, @fieldParentPtr("ring", self.changes)).ids;
+    }
 
     /// Whether nothing changed since `since` on this opening: atomics only,
     /// no lock. Never while fenced, so a read reports the failure.
@@ -180,7 +189,7 @@ pub const Store = struct {
         errdefer destroyRing(changes);
         const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
         ids.* = .{ .next = undefined };
-        self.* = .{ .io = io, .engine = .{ .sqlite = opened }, .selector = stored_selector, .changes = changes, .ids = ids };
+        self.* = .{ .io = io, .engine = .{ .sqlite = opened }, .selector = stored_selector, .changes = changes };
         self.served = options.served;
         self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch });
         // The Store is in final storage, so the function may keep its address.
@@ -191,6 +200,41 @@ pub const Store = struct {
         io.random(&self.instance);
         errdefer self.engine.sqlite.statements.deinit();
         try self.engine.sqlite.prepareRollback();
+        try loadIdentities(self, .full);
+        self.queue().opened();
+        if (options.catalog) |offered| try self.saveCatalog(offered) else {
+            const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+            owned.tools = .{ .catalog = &tool_catalog.built_in, .set_id = 0 };
+        }
+    }
+
+    /// Opens the network engine in place. Its buffers live out of line;
+    /// SQLite never allocates them. The existing holder remains the sole owner.
+    pub noinline fn openMysql(
+        self: *Store,
+        io: std.Io,
+        connection: mysql_connection.Options,
+        selector: []const u8,
+        options: OpenOptions,
+    ) !void {
+        errdefer self.* = undefined;
+        var opened = try Mysql.open(io, connection, selector, options);
+        errdefer opened.close() catch {};
+        var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
+        try stored_selector.set(selector);
+        const changes = try createRing();
+        errdefer destroyRing(changes);
+        const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
+        ids.* = .{ .next = undefined };
+        self.* = .{ .io = io, .engine = .{ .mysql = opened }, .selector = stored_selector, .changes = changes };
+        self.served = options.served;
+        self.engine.mysql.state.served = &self.served;
+        if (@import("builtin").is_test) {
+            if (connection.database.len >= self.engine.mysql.state.testing_database.len) return error.MysqlConfigTooLong;
+            @memcpy(self.engine.mysql.state.testing_database[0..connection.database.len], connection.database);
+        }
+        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch });
+        io.random(&self.instance);
         try loadIdentities(self, .full);
         self.queue().opened();
         if (options.catalog) |offered| try self.saveCatalog(offered) else {
@@ -354,6 +398,14 @@ pub const Store = struct {
         return self.engine.sqlite.diagnostic();
     }
 
+    pub fn mysqlDiagnostic(self: *Store) Mysql.Diagnostic {
+        return self.queue().run(mysqlDiagnosticHeld, .{self});
+    }
+
+    fn mysqlDiagnosticHeld(self: *Store) Mysql.Diagnostic {
+        return self.engine.mysql.diagnostic();
+    }
+
     /// The SQLite connection, for SQLite-only tests and fixtures.
     pub fn sqliteDatabase(self: *const Store) Sqlite.Database {
         return self.engine.sqlite.database;
@@ -420,19 +472,32 @@ pub const Store = struct {
         command: *const protocol.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, faults });
+        return self.queue().write(configureHeld, .{ self, command, @as(?*const configuration_domain.PresetDecision, null), faults });
+    }
+
+    /// A Host-resolved preset or its refusal uses the same key lookup,
+    /// rejection persistence and transaction as every other configure.
+    /// Borrows `preset` until the synchronous queued write returns.
+    pub fn configureWithPreset(
+        self: *Store,
+        command: *const protocol.ConfigureCommand,
+        preset: *const configuration_domain.PresetDecision,
+        faults: Faults,
+    ) ConfigureReply {
+        return self.queue().write(configureHeld, .{ self, command, @as(?*const configuration_domain.PresetDecision, preset), faults });
     }
 
     fn configureHeld(
         self: *Store,
         command: *const protocol.ConfigureCommand,
+        preset: ?*const configuration_domain.PresetDecision,
         faults: Faults,
     ) ConfigureReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, faults))) catch .infrastructure_failure;
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, faults))) catch .infrastructure_failure;
     }
 
     /// A fresh Message admission, as `MessageCommitted` receives it.
@@ -633,6 +698,19 @@ pub const Store = struct {
         return entry.finish(Ordinary.page, reads_domain.activityPage(&access, request, out));
     }
 
+    pub fn searchActivity(self: *Store, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+        return self.queue().run(searchActivityHeld, .{ self, request, out });
+    }
+
+    fn searchActivityHeld(self: *Store, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+        try request.validate();
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.page, reads_domain.searchActivity(&access, request, out));
+    }
+
     pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
         return self.queue().run(openActivityContentHeld, .{ self, request });
     }
@@ -644,6 +722,19 @@ pub const Store = struct {
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
+    }
+
+    pub fn activityTool(self: *Store, request: *const protocol.ReadActivityContent) !reads_domain.ActivityTool {
+        return self.queue().run(activityToolHeld, .{ self, request });
+    }
+
+    fn activityToolHeld(self: *Store, request: *const protocol.ReadActivityContent) !reads_domain.ActivityTool {
+        if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.content, reads_domain.activityTool(&access, request));
     }
 
     /// Authenticates the Session/Operation/Attempt before reading optional
@@ -813,6 +904,13 @@ pub const Store = struct {
     fn revokeActionSenderHeld(self: *Store, binding: ActionAttemptBinding) !void {
         const entry = try enter(self, .none);
         defer entry.release();
+        // SQLite's one-statement autocommit is already atomic. Network
+        // writes must include the ownership fence in the same transaction.
+        if (self.engine == .mysql) {
+            var access: Access(.write, error{}) = .open(&entry);
+            defer access.deinit();
+            return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
+        }
         var access: Access(.single, error{}) = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.none, action_domain.revokeActionSender(&access, binding));
@@ -878,8 +976,34 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttempt(&access, binding, code, result, faults)));
     }
 
-    /// The core's next work, or null: a stop an attached child owes
-    /// (D38), else the next core tool call to run (D24).
+    /// Delivers the owed child ending (D39) `nextCoreWork` names, or only
+    /// settles one its parent's stop caused (D139).
+    pub fn deliverChildEnding(self: *Store, turn_id: u64, faults: Faults) !bool {
+        return self.queue().write(deliverChildEndingHeld, .{ self, turn_id, faults });
+    }
+
+    fn deliverChildEndingHeld(self: *Store, turn_id: u64, faults: Faults) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, faults)));
+    }
+
+    /// Positions one ancestor feed row and durably queues its next hop.
+    pub fn deliverSessionForward(self: *Store, forward_id: u64, faults: Faults) !bool {
+        return self.queue().write(deliverSessionForwardHeld, .{ self, forward_id, faults });
+    }
+
+    fn deliverSessionForwardHeld(self: *Store, forward_id: u64, faults: Faults) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, forward_domain.deliver(&access, forward_id, faults)));
+    }
+
+    /// Owed stops, ending Messages and ancestor feed hops precede calls.
     pub fn nextCoreWork(self: *Store) !?CoreWork {
         return self.nextCoreWorkForHost(true);
     }
@@ -925,18 +1049,36 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, faults)));
     }
 
-    /// Fails the core tool call `binding` names with `result`, in one
-    /// transaction; false when a stop selected its Turn first.
-    pub fn failCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
-        return self.queue().write(failCoreCallHeld, .{ self, binding, result, faults });
+    /// Loads matching saved tools and resolves the call in one transaction.
+    pub fn findTools(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../core_tools.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
+        return self.queue().write(findToolsHeld, .{ self, binding, arena, words, refusal, faults });
     }
 
-    fn failCoreCallHeld(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
+    fn findToolsHeld(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../core_tools.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.failCoreCall(&access, binding, result, faults)));
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, @import("domain/find_tools.zig").run(&access, binding, arena, words, refusal, faults)));
+    }
+
+    /// Fails the core tool call `binding` names with `result`, in one
+    /// transaction; false when a stop selected its Turn first.
+    pub fn failCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
+        return self.queue().write(resolveCoreCallHeld, .{ self, binding, ActionResolutionCode.failed, result, faults });
+    }
+
+    /// Succeeds a core tool call; false when a stop selected its Turn first.
+    pub fn succeedCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
+        return self.queue().write(resolveCoreCallHeld, .{ self, binding, ActionResolutionCode.succeeded, result, faults });
+    }
+
+    fn resolveCoreCallHeld(self: *Store, binding: ActionAttemptBinding, code: ActionResolutionCode, result: []const u8, faults: Faults) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.resolveCoreCall(&access, binding, code, result, faults)));
     }
 
     pub fn nextMcpAction(self: *Store) !?action_domain.McpAction {
@@ -1247,7 +1389,8 @@ const TestingContentWork = struct {
 
 // The frame that holds a Store keeps every byte of it resident, so a fixed
 // buffer belongs in memory of its own, like the change ring's. The production
-// Store is 688 bytes; test builds add 24 bytes of counters and sit exactly at
+// Store remains 688 bytes: its engine tag replaces the redundant ids pointer.
+// Test builds add 24 bytes of counters and sit exactly at
 // 712, so a new field must come out of existing padding, or out of the Store.
 comptime {
     if (@sizeOf(TestingContentWork) != 24) @compileError("TestingContentWork grew past 24 bytes; the test-build Store has no room");
@@ -1278,10 +1421,12 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    // The settlement batch is 19240 bytes: the original 14480 plus 4760
-    // for per-batch call names, membership flags and their lookup visitor.
-    // Configure reads remain 4968 bytes. Keep both sizes explicit.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 4968 or scratch_bytes != 19240)
+    // The settlement batch is the larger use: 19240 bytes, the original
+    // 14480 plus 4760 for per-batch call names, membership flags and their
+    // lookup visitor. The configure reads use 13552, including the saved
+    // parent reference and the saved tool and loaded names a subset update
+    // reads. Exact, so a change to either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 13552 or scratch_bytes != 19240)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1291,7 +1436,7 @@ comptime {
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
 /// resident for the Store's life: at most 19240 bytes, a settlement
-/// batch's size, of which a configure writes 4968.
+/// batch's size; a configure uses 13552.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
@@ -1490,12 +1635,12 @@ pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
 pub fn begin(self: *Store) !void {
     switch (self.batch) {
         .none => {
-            std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
+            std.debug.assert(self.identities().taken.count() == 0 and self.identities().second == 0);
             try self.engine.control(.begin);
             return;
         },
         .ready => {
-            std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
+            std.debug.assert(self.identities().taken.count() == 0 and self.identities().second == 0);
             try self.engine.control(.begin);
             self.batch = .first;
             return;
@@ -1526,8 +1671,8 @@ pub fn commit(self: *Store) !void {
         .ready, .lost => unreachable,
     }
     try self.engine.control(.commit);
-    self.ids.taken = .empty;
-    self.ids.second = 0;
+    self.identities().taken = .empty;
+    self.identities().second = 0;
 }
 
 fn startBatch(context: *anyopaque) void {
@@ -1546,8 +1691,8 @@ fn finishBatch(context: *anyopaque) bool {
     std.debug.assert(!self.savepoint);
     defer {
         self.batch = .none;
-        self.ids.taken = .empty;
-        self.ids.second = 0;
+        self.identities().taken = .empty;
+        self.identities().second = 0;
     }
     commitBatch(self) catch return false;
     return true;
@@ -1567,10 +1712,10 @@ fn commitBatch(self: *Store) !void {
 /// round of a write Access dates its rows with one second. Outside a
 /// transaction (a read Access), each use reads the clock.
 pub fn transactionSecond(self: *Store) error{ClockReadFailed}!i64 {
-    if (self.ids.second != 0) return self.ids.second;
+    if (self.identities().second != 0) return self.identities().second;
     const second = std.math.cast(u32, @divFloor(try readUnixMilliseconds(self.io), 1000)) orelse return error.ClockReadFailed;
     if (second == 0) return error.ClockReadFailed;
-    if (self.engine.inTransaction()) self.ids.second = second;
+    if (self.engine.inTransaction()) self.identities().second = second;
     return second;
 }
 
@@ -1589,12 +1734,18 @@ pub fn workspaceDigest(workspace: []const u8) [32]u8 {
 pub fn untouchedForTesting(self: *Store) ?change_ring.Id {
     if (!@import("builtin").is_test) @compileError("test-only check");
     if (self.touched.everything) return null;
-    return self.engine.sqlite.untouchedForTesting(&self.touched);
+    return switch (self.engine) {
+        .sqlite => |*s| s.untouchedForTesting(&self.touched),
+        .mysql => @import("mysql_testing.zig").untouchedForTesting(self, &self.touched),
+    };
 }
 
 fn clearTouchOracleForTesting(self: *Store) void {
     if (!@import("builtin").is_test) @compileError("test-only oracle");
-    self.engine.sqlite.clearTouchOracleForTesting();
+    switch (self.engine) {
+        .sqlite => |*s| s.clearTouchOracleForTesting(),
+        .mysql => @import("mysql_testing.zig").clearTouchOracleForTesting(self),
+    }
 }
 
 /// The only fence setter. Returns `err` so callers can propagate it.
@@ -1633,7 +1784,7 @@ pub fn publicConversationPageForTesting(self: *Store, request: protocol.Conversa
 
 /// A column whose values the Host hands out: a row's id, or its place in
 /// a Store-wide order.
-pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id };
+pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id, forward_id };
 
 /// What the Host hands to transactions. The next value of each `Identity`
 /// is the Store's maximum plus one, read at open and again for each column
@@ -1711,10 +1862,10 @@ const HostValues = struct {
 pub fn takeIdentity(self: *Store, comptime column: Identity) error{ IdentityExhausted, IdentityOutsideTransaction }!u64 {
     // Rollback is what gives an id back; outside a transaction nothing would.
     if (!self.engine.inTransaction()) return error.IdentityOutsideTransaction;
-    const value = self.ids.next.get(column);
+    const value = self.identities().next.get(column);
     if (value > std.math.maxInt(i64)) return error.IdentityExhausted;
-    self.ids.next.set(column, value + 1);
-    self.ids.taken.insert(column);
+    self.identities().next.set(column, value + 1);
+    self.identities().taken.insert(column);
     return value;
 }
 
@@ -1730,33 +1881,50 @@ pub fn reloadIdentitiesForTesting(self: *Store) !void {
 /// a COMMIT's outcome is unknown, because only committed rows count: a
 /// value whose row committed is never handed out twice, and one whose row
 /// did not is handed out again.
+fn IdentityCeiling(comptime column: Identity) type {
+    const table = switch (column) {
+        .turn_id => "turn",
+        .operation_id => "model_operation",
+        .action_id => "action_operation",
+        .content_id => "content",
+        .created_seq => "session",
+        .command_seq => "core_command",
+        .admission_id => "message_admission",
+        .tool_record_id => "tool_record",
+        .tool_set_id => "tool_set",
+        .forward_id => "session_forward",
+    };
+    return rsql.Read(.{
+        .sql = "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) AS ceiling FROM " ++ table,
+        .Args = struct {},
+        .Row = struct { ceiling: u64 },
+        .cardinality = .one,
+    });
+}
+
 fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
-    inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
-        const table = switch (column) {
-            .turn_id => "turn",
-            .operation_id => "model_operation",
-            .action_id => "action_operation",
-            .content_id => "content",
-            .created_seq => "session",
-            .command_seq => "core_command",
-            .admission_id => "message_admission",
-            .tool_record_id => "tool_record",
-            .tool_set_id => "tool_set",
+    if (self.engine == .mysql) {
+        inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
+            const Ceiling = IdentityCeiling(column);
+            try self.engine.bind(null, Ceiling, &.{}, 0);
         };
-        const Ceiling = rsql.Read(.{
-            .sql = "SELECT coalesce(max(" ++ @tagName(column) ++ "),0) AS ceiling FROM " ++ table,
-            .Args = struct {},
-            .Row = struct { ceiling: u64 },
-            .cardinality = .one,
-        });
+        if (@import("builtin").is_test) {
+            if (columns.count() != 0) self.engine.mysql.state.testing_shape.identity_passes += 1;
+        }
+        try self.engine.startPass();
+    }
+    errdefer self.engine.finishPass() catch {};
+    inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
+        const Ceiling = IdentityCeiling(column);
         const statement = try self.engine.statementFor(Ceiling);
         defer self.engine.endStatement(statement);
         if (!(self.engine.nextRow(statement) catch false)) return error.IdentityReadFailed;
         var row: Ceiling.Row = undefined;
         try self.engine.decodeRow(Ceiling.Row, statement, &row);
-        self.ids.next.set(column, row.ceiling + 1);
+        self.identities().next.set(column, row.ceiling + 1);
     };
-    self.ids.taken = .empty;
+    try self.engine.finishPass();
+    self.identities().taken = .empty;
 }
 
 pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
@@ -1776,7 +1944,7 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
                 self.engine.control(.rollback_to) catch return error.CanonicalRollbackFailed;
                 self.engine.control(.release) catch return error.CanonicalRollbackFailed;
             }
-            loadIdentities(self, self.ids.taken) catch return error.CanonicalRollbackFailed;
+            loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
             return;
         },
         // The batch's first write rolls back as a lone write does, and the
@@ -1799,8 +1967,8 @@ fn rollbackTransaction(self: *Store, faults: Faults) error{CanonicalRollbackFail
         self.engine.control(.rollback) catch return error.CanonicalRollbackFailed;
         if (self.engine.inTransaction()) return error.CanonicalRollbackFailed;
     }
-    self.ids.second = 0;
-    loadIdentities(self, self.ids.taken) catch return error.CanonicalRollbackFailed;
+    self.identities().second = 0;
+    loadIdentities(self, self.identities().taken) catch return error.CanonicalRollbackFailed;
 }
 
 pub fn readUnixMilliseconds(io: std.Io) !i64 {
