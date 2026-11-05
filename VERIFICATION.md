@@ -455,6 +455,7 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 | --- | --- | --- |
 | [Capture, recovery and descriptor bound](ARCHITECTURE.md#caller-capture-and-recovery) | `'capture retransmits'`, `'capture publication'`, `human_cli_integration.py`, `saved_request_resources.py BASELINE CANDIDATE` | The `fsync` cut is Linux-only and not power loss. The resource fixture needs `/proc` and samples descriptors without asserting the bound |
 | Configuration binding, Message admission and selection | `'immutable binding'`, `'message admissions remain'`, `'runnable discovery'`, `dispatch_integration.py`, `canonical_failure_integration.py` | Sizes are qualification workloads, not request quotas |
+| [Loaded tools](ARCHITECTURE.md#authorizing-exact-actions) | `store/tests.zig` `'loaded tools configure'`; loaded-set history and call rejection regressions in `store/sqlite_tests.zig`; schema 53-to-54 forward migration | Strict subsets require a future `find_tools` catalog entry; visibility tests seed stored subsets |
 | Core key domain, including empty keys | `'core preserves empty keys'` | 128-byte accept and 129-byte reject bounds, recovery-binding retention: none located |
 
 ## Context, provider output and compaction

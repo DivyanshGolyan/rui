@@ -59,6 +59,7 @@ pub const SessionReport = report_domain.SessionReport;
 pub const SessionReportExecution = report_domain.SessionReportExecution;
 pub const SessionStopReply = command_domain.SessionStopReply;
 pub const settleCompactionForTesting = store_testing.settleCompactionForTesting;
+pub const setLoadedToolsForTesting = store_testing.setLoadedToolsForTesting;
 pub const setHistoryFloorForTesting = store_testing.setHistoryFloorForTesting;
 pub const settleAnswerItemsForTesting = store_testing.settleItemsForTesting;
 pub const turnEndedForTesting = store_testing.turnEndedForTesting;

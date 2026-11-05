@@ -514,7 +514,7 @@ pub const AgentStart = enum {
 /// The calling Session's settings a `start_agent` call inherits or may
 /// only narrow. Its Workspace fills the creating Configuration in place.
 const parent_settings = rsql.Read(.{
-    .sql = "SELECT workspace,provider," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,permission_mode FROM session WHERE session_ref=?1",
+    .sql = "SELECT workspace,provider," ++ tool_set.maskSql("coalesce(session.loaded_tool_set_id,session.tool_set_id)") ++ " AS tools_mask,permission_mode FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct { workspace: *protocol.Bounded(protocol.max_workspace_bytes), provider: protocol.Provider, tools_mask: c_int, permission_mode: u8 },
     .cardinality = .optional,

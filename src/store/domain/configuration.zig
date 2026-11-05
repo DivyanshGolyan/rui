@@ -132,6 +132,8 @@ pub const CurrentConfiguration = struct {
     tools_mask: u8 = default_tools_mask,
     /// The saved tool set; 0 until a creation saves its first.
     tool_set_id: u64 = 0,
+    /// Null means every configured tool is loaded.
+    loaded_tool_set_id: ?u64 = null,
     permission_mode: u8 = permissionModeCode(product_defaults.permission_mode),
     output_schema_id: ?i64 = null,
     revision: u64 = 0,
@@ -367,6 +369,7 @@ const Settings = struct {
     model: protocol.Bounded(protocol.max_model_bytes),
     instructions_id: ?i64,
     tool_set_id: u64,
+    loaded_tool_set_id: ?u64,
     permission_mode: u8,
     output_schema_id: ?i64,
     compaction_trigger: ?u64,
@@ -380,6 +383,7 @@ const Settings = struct {
             .model = current.model,
             .instructions_id = current.instructions_id,
             .tool_set_id = current.tool_set_id,
+            .loaded_tool_set_id = current.loaded_tool_set_id,
             .permission_mode = current.permission_mode,
             .output_schema_id = current.output_schema_id,
             .compaction_trigger = current.compaction_trigger,
@@ -396,6 +400,8 @@ const Settings = struct {
         fields.setPresent(.model, !before.model.eql(after.model.slice()));
         fields.setPresent(.instructions, before.instructions_id != after.instructions_id);
         fields.setPresent(.tools, before.tool_set_id != after.tool_set_id);
+        // Equality follows tools implicitly: its existing tools event suffices.
+        fields.setPresent(.loaded_tools, before.loaded_tool_set_id != after.loaded_tool_set_id);
         fields.setPresent(.permission_mode, before.permission_mode != after.permission_mode);
         fields.setPresent(.output_schema, before.output_schema_id != after.output_schema_id);
         fields.setPresent(.compaction_trigger, before.compaction_trigger != after.compaction_trigger);
@@ -433,6 +439,11 @@ pub const ConfigurationReads = struct {
     /// The tool set a creation or a `tools` change saves, when it does;
     /// null too when the catalog lacks a name, which the configure refuses.
     tools: ?tool_set.Selection = null,
+    loaded_tools: ?tool_set.Selection = null,
+    /// Saved names used only when a tool update must preserve or narrow a
+    /// previously loaded subset. Keep these in Store scratch, not a frame.
+    saved_tools: protocol.ToolsField = undefined,
+    saved_loaded: protocol.ToolsField = undefined,
     /// The Session a creation starts as the child of, when it has one.
     parent: ?[protocol.session_id_bytes]u8 = null,
 
@@ -446,7 +457,7 @@ pub const ConfigurationReads = struct {
 /// A Session's saved configuration, decoded into a CurrentConfiguration in
 /// place; `checkSaved` holds it to its types.
 const saved_session = rsql.Read(.{
-    .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,permission_mode," ++
+    .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("coalesce(session.loaded_tool_set_id,session.tool_set_id)") ++ " AS tools_mask,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
         "reasoning_effort,label,created_at,workspace_key FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
@@ -468,8 +479,8 @@ const creation_facts = rsql.Read(.{
 /// the `created_seq` of its first Session.
 const insert_session = rsql.Write(.{
     .sql = "INSERT INTO session(session_ref,workspace,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,next_position," ++
-        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref) " ++
-        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17)",
+        "provider,compaction_trigger,output_reservation,reasoning_effort,label,codec,workspace_digest,created_at,created_seq,workspace_key,parent_ref,loaded_tool_set_id) " ++
+        "VALUES(@session(?1),?2,?3,?4,?5,?6,?7,1,1,?8,?9,?10,?11,?12,?13,?14,@now,?15,?16,?17,?18)",
     .Args = struct {
         session: rsql.SessionHead,
         workspace: []const u8,
@@ -488,6 +499,7 @@ const insert_session = rsql.Write(.{
         created_seq: u64,
         workspace_key: u64,
         parent: ?protocol.Bounded(protocol.session_id_bytes),
+        loaded_tool_set_id: ?u64,
     },
     // Its round read the reference free, under the single writer.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -520,12 +532,13 @@ pub fn insertSession(a: anytype, head: rsql.SessionHead, next: *const CurrentCon
         .created_seq = created_seq,
         .workspace_key = head.workspace_key.get(),
         .parent = parent_ref,
+        .loaded_tool_set_id = next.loaded_tool_set_id,
     });
 }
 
 const update_session = rsql.Write(.{
     .sql = "UPDATE session SET model=?2,instructions_content_id=?3,tool_set_id=?4,permission_mode=?5,output_schema_content_id=?6,revision=?7,provider=?8," ++
-        "compaction_trigger=?9,output_reservation=?10,reasoning_effort=?11,label=?12 WHERE session_ref=@session(?1)",
+        "compaction_trigger=?9,output_reservation=?10,reasoning_effort=?11,label=?12,loaded_tool_set_id=?13 WHERE session_ref=@session(?1)",
     .Args = struct {
         session: rsql.SessionHead,
         model: []const u8,
@@ -539,6 +552,7 @@ const update_session = rsql.Write(.{
         output_reservation: ?u64,
         reasoning_effort: ?protocol.ReasoningEffort,
         label: ?[]const u8,
+        loaded_tool_set_id: ?u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SessionUpdateFailed } },
 });
@@ -550,9 +564,9 @@ pub const update_session_sql = update_session.sql;
 /// The one writer of session_revision: it copies the Session row as
 /// written under `command_key`, which an earlier write of the round saved.
 const insert_revision = rsql.Write(.{
-    .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id," ++
+    .sql = "INSERT INTO session_revision(session_ref,revision,command_key,workspace,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id," ++
         "permission_mode,output_schema_content_id,provider,compaction_trigger,output_reservation,reasoning_effort,label) " ++
-        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,permission_mode,output_schema_content_id,provider," ++
+        "SELECT session_ref,revision,?2,workspace,model,instructions_content_id,?3,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,provider," ++
         "compaction_trigger,output_reservation,reasoning_effort,label FROM session WHERE session_ref=@session(?1)",
     .Args = struct { session: rsql.SessionHead, command_key: []const u8, instructions_updated: bool },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -572,7 +586,7 @@ pub fn readSaved(a: anytype, session_ref: []const u8, current: *CurrentConfigura
 pub fn checkSaved(current: *const CurrentConfiguration) error{CorruptStore}!void {
     const instructions = current.instructions_id orelse return error.CorruptStore;
     if (instructions == 0 or current.output_schema_id == @as(?i64, 0) or current.revision == 0 or current.next_position == 0 or
-        current.compaction_trigger == @as(?u64, 0) or current.created_at == 0 or current.workspace_key == 0 or current.tool_set_id == 0) return error.CorruptStore;
+        current.compaction_trigger == @as(?u64, 0) or current.created_at == 0 or current.workspace_key == 0 or current.tool_set_id == 0 or current.loaded_tool_set_id == @as(?u64, 0)) return error.CorruptStore;
     _ = try toolSet(current.tools_mask);
     _ = try permissionMode(current.permission_mode);
     if (current.label) |*label| try checkLabel(label.slice());
@@ -610,6 +624,84 @@ pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *con
         reads.pair = .{ .first = null, .second = null };
         content_domain.lookupPair(a, instructions.?, output_schema.?, &reads.pair.?);
     } else if (instructions orelse output_schema) |value| content_domain.lookup(a, value);
+}
+
+/// Sorted saved names, streamed into the configure's Store scratch. The
+/// optional filter implements preserving a loaded subset across a tools change.
+const selected_names = rsql.Read(.{
+    .sql = "SELECT tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "WHERE member.tool_set_id=?1 ORDER BY tool.name",
+    .Args = struct { set: u64 },
+    .Row = struct { name: protocol.Bounded(tool_catalog.max_name_bytes) },
+    .cardinality = .each,
+});
+
+fn containsName(names: *const protocol.ToolsField, wanted: []const u8) bool {
+    var each = names.iterator();
+    while (each.next()) |name| if (std.mem.eql(u8, name, wanted)) return true;
+    return false;
+}
+
+const NameSelection = struct {
+    names: *protocol.ToolsField,
+    filter: ?*const protocol.ToolsField = null,
+    invalid: bool = false,
+
+    pub fn visit(self: *NameSelection, row: *const selected_names.Row) bool {
+        if (self.filter) |filter| if (!containsName(filter, row.name.slice())) return true;
+        self.names.append(row.name.slice()) catch {
+            self.invalid = true;
+            return false;
+        };
+        return true;
+    }
+};
+
+/// The reachability rule is name-based, so adding find_tools to the Host
+/// catalog is all that is needed to make strict subsets configurable.
+fn loadedToolsRejection(tools: *const protocol.ToolsField, loaded: *const protocol.ToolsField) ?protocol.ConfigurationRejection {
+    var names = loaded.iterator();
+    while (names.next()) |name| if (!containsName(tools, name)) return .loaded_tools_not_in_tools;
+    if (loaded.count < tools.count and !containsName(loaded, "find_tools")) return .loaded_tools_unreachable;
+    return null;
+}
+
+/// Resolves the loaded set before importing content or changing the Session.
+/// Omitted loaded_tools follows the entire tools set unless it was already a
+/// strict subset; that subset is intersected with a newly requested tools set.
+fn prepareLoadedTools(a: anytype, creating: bool, requested: *const protocol.Configuration, reads: *ConfigurationReads) !?protocol.ConfigurationRejection {
+    if (!creating and requested.tools.state != .value and requested.loaded_tools.state != .value) return null;
+    if (requested.loaded_tools.state != .value and (creating or reads.next.loaded_tool_set_id == null)) return null;
+
+    const tools: *const protocol.ToolsField = if (creating or requested.tools.state == .value) requestedNames(requested) else saved: {
+        reads.saved_tools.state = .value;
+        reads.saved_tools.count = 0;
+        reads.saved_tools.names.len = 0;
+        var names: NameSelection = .{ .names = &reads.saved_tools };
+        a.readEach(selected_names, .{ .set = reads.next.tool_set_id }, protocol.max_tools + 1, &names);
+        try a.run();
+        if (names.invalid) return error.CorruptStore;
+        break :saved &reads.saved_tools;
+    };
+    const loaded: *const protocol.ToolsField = if (requested.loaded_tools.state == .value) &requested.loaded_tools else saved: {
+        reads.saved_loaded.state = .value;
+        reads.saved_loaded.count = 0;
+        reads.saved_loaded.names.len = 0;
+        var names: NameSelection = .{ .names = &reads.saved_loaded, .filter = tools };
+        a.readEach(selected_names, .{ .set = reads.next.loaded_tool_set_id.? }, protocol.max_tools + 1, &names);
+        try a.run();
+        if (names.invalid) return error.CorruptStore;
+        break :saved &reads.saved_loaded;
+    };
+    if (loadedToolsRejection(tools, loaded)) |rejection| return rejection;
+    if (loaded.count == tools.count) return null;
+    reads.loaded_tools = if (creating or requested.tools.state == .value)
+        tool_set.Selection.of(a.store.catalog().catalog, loaded) orelse return error.CorruptStore
+    else
+        try tool_set.Selection.ofSaved(a, reads.next.tool_set_id, loaded);
+    tool_set.lookupSelection(a, &reads.loaded_tools.?);
+    try a.run();
+    return null;
 }
 
 fn readCreation(a: anytype, reads: *ConfigurationReads) void {
@@ -672,6 +764,8 @@ pub fn applyConfiguration(
         break :matches true;
     } else null;
 
+    if (try prepareLoadedTools(a, creating, configuration, reads)) |rejection| return .{ .rejected = rejection };
+
     const created = !reads.found.get();
     const before: ?Settings = if (created) null else .of(next);
     const content_actions = switch (planConfigurationUpdate(
@@ -708,6 +802,11 @@ pub fn applyConfiguration(
         const tools = &(reads.tools orelse return error.CorruptStore);
         next.tool_set_id = try tool_set.finishSelection(a, tools, a.store.catalog().set_id);
     }
+    if (reads.loaded_tools) |*loaded| {
+        next.loaded_tool_set_id = try tool_set.finishSelection(a, loaded, next.tool_set_id);
+    } else if (creating or configuration.loaded_tools.state == .value or configuration.tools.state == .value) {
+        next.loaded_tool_set_id = null;
+    }
     var target: protocol.Bounded(protocol.max_session_bytes) = .{};
     var head: rsql.SessionHead = undefined;
     if (created) {
@@ -735,6 +834,7 @@ pub fn applyConfiguration(
             .model = next.model.slice(),
             .instructions_id = if (next.instructions_id) |id| @intCast(id) else null,
             .tool_set_id = next.tool_set_id,
+            .loaded_tool_set_id = next.loaded_tool_set_id,
             .permission_mode = next.permission_mode,
             .output_schema_id = if (next.output_schema_id) |id| @intCast(id) else null,
             .revision = next.revision,

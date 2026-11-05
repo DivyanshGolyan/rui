@@ -64,7 +64,7 @@ pub const Command = enum {
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_serve => .{ .resource = .host, .name = "serve", .description = std.fmt.comptimePrint("Run a foreground Host. Provider credentials belong to this Host, not its peer callers. Each --provider LABEL serves that provider at its own endpoint with its own credential. Without --provider or a development endpoint it makes no model requests. --active-capacity defaults to {d}. --launch-frame reads the Store, the OpenAI key and the runtime directory from one frame on stdin instead, and the Host stops when stdin closes.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{ value("active-capacity", "N"), .{ .name = "provider", .argument = "LABEL", .repeated = true }, value("provider-endpoint", "URL"), value("provider-ca-file", "PATH"), value("bash-path", "PATH"), value("bash-timeout-ms", "MILLISECONDS"), flag("launch-frame") } ++ serve_test, .conflicts = endpoint_conflicts ++ launch_conflicts },
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
-            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default leaves each model at its own.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settings[8] }, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort" }} },
+            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default leaves each model at its own.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settings[9] }, .conflicts = &.{.{ "model", "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort" }} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex signs in with ChatGPT; rui auth login openai saves an OpenAI API key read from stdin. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
     }
@@ -144,11 +144,11 @@ const need_action = need_session ++ &[_][]const []const u8{&.{"action"}};
 const saved_identity = &[_][]const u8{ "store", "store-hex", "key", "key-hex" };
 /// Session settings shared by `session configure` and the live /configure.
 const settings = &[_]Option{
-    value("workspace", "PATH"),                                          value("instructions", "-"), value("tools", "bash,message_agent,start_agent,web_search|none"), value("permission-mode", "bypass|ask"),
-    value("output-schema", "FILE|-"),                                    flag("text-output"),        value("compaction-trigger", "TOKENS|default"),                    value("output-reservation", "TOKENS|default"),
-    value("reasoning-effort", "none|low|medium|high|xhigh|max|default"), value("label", "TEXT"),
+    value("workspace", "PATH"),       value("instructions", "-"), value("tools", "bash,message_agent,start_agent,web_search|none"), value("loaded-tools", "a,b|none"),             value("permission-mode", "bypass|ask"),
+    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"),                    value("output-reservation", "TOKENS|default"), value("reasoning-effort", "none|low|medium|high|xhigh|max|default"),
+    value("label", "TEXT"),
 };
-const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[6], settings[7], settings[8], settings[9] };
+const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[4], settings[7], settings[8], settings[9], settings[10] };
 const settings_conflicts = &[_][2][]const u8{.{ "output-schema", "text-output" }};
 /// The managed endpoint and development endpoints are exclusive.
 /// A launch frame on stdin names the Store, the provider and the capacity.
@@ -212,7 +212,7 @@ pub const fresh_session: Definition = .{ .resource = .session, .name = "", .desc
 /// The live Session's /configure: settings only; the Session is its address.
 pub const live_configure: Definition = .{ .resource = .session, .name = "/configure", .description = "", .options = binding ++ settings, .conflicts = settings_conflicts };
 /// The live Session's /setup: the defaults grammar, where none means inspect.
-pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1], flag("clear-model"), notifications, settings[8] }, .conflicts = &.{.{ "model", "clear-model" }} };
+pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1], flag("clear-model"), notifications, settings[9] }, .conflicts = &.{.{ "model", "clear-model" }} };
 
 pub const Definition = struct {
     resource: Resource,
@@ -656,4 +656,14 @@ test "Host start help states the product default capacity and existing-Host prec
     var writer = std.Io.Writer.fixed(&bytes);
     try Command.host_start.definition().help(&writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "already-running Host keeps its original settings, including capacity") != null);
+}
+
+test "loaded tools are accepted beside tools on configure and start" {
+    inline for (.{ Command.session_configure.definition(), Command.session_start.definition(), live_configure }) |grammar| {
+        var storage: [256]u8 = undefined;
+        const parsed = try testParse(grammar, &.{ "--tools", "bash,web_search", "--loaded-tools", "bash" }, &storage);
+        try std.testing.expectEqualStrings("bash,web_search", parsed.get("tools").?);
+        try std.testing.expectEqualStrings("bash", parsed.get("loaded-tools").?);
+        try std.testing.expectError(error.DuplicateArgument, testParse(grammar, &.{ "--loaded-tools", "none", "--loaded-tools", "bash" }, &storage));
+    }
 }

@@ -4623,7 +4623,7 @@ test "arrows move the command list's highlight, and Enter takes it: a word anoth
     // An option that takes a value is added for it, and the next list
     // starts at its top, however far down the highlight was.
     draft = try typeText(&state, "/configure ");
-    state.commands.?.highlight = 3;
+    state.commands.?.highlight = 4;
     try expectEffects(&.{.{ .append = "--label " }}, try submit(&state, draft));
     // A draft too full for the word refuses it and stays as it was; its
     // next frame lists it from the top too.
@@ -4766,7 +4766,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
 }
 
 test "start settings are the options session start shares with /configure" {
-    const expected = [_][]const u8{ "provider", "model", "workspace", "tools", "permission-mode", "compaction-trigger", "output-reservation", "reasoning-effort", "label" };
+    const expected = [_][]const u8{ "provider", "model", "workspace", "tools", "loaded-tools", "permission-mode", "compaction-trigger", "output-reservation", "reasoning-effort", "label" };
     try std.testing.expectEqual(expected.len, start_options.len);
     for (expected, start_options) |want, got| try std.testing.expectEqualStrings(want, got);
 }

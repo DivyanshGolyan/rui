@@ -414,6 +414,7 @@ pub const ConfigureInput = struct {
     model: OptionalText = .{},
     instructions: OptionalFile = .{},
     tools: ?[]const u8 = null,
+    loaded_tools: ?[]const u8 = null,
     permission_mode: OptionalText = .{},
     output_schema: OptionalFile = .{},
     compaction_trigger: OptionalPolicy = .{},
@@ -1320,6 +1321,10 @@ const Capture = struct {
         try self.writeOptionalFile(input.instructions, false);
         try self.write(",\"tools\":");
         try self.writeTools(input.tools);
+        if (input.loaded_tools != null) {
+            try self.write(",\"loaded_tools\":");
+            try self.writeTools(input.loaded_tools);
+        }
         try self.write(",\"permission_mode\":");
         try self.writeOptionalText(input.permission_mode);
         try self.write(",\"output_schema\":");
@@ -1392,7 +1397,7 @@ const Capture = struct {
                 chosen[count] = name;
                 count += 1;
             }
-            std.mem.sort([]const u8, chosen[0..count], {}, struct {
+            std.mem.sortUnstable([]const u8, chosen[0..count], {}, struct {
                 fn lessThan(_: void, left: []const u8, right: []const u8) bool {
                     return std.mem.order(u8, left, right) == .lt;
                 }
@@ -3960,4 +3965,36 @@ test "a refused environment's reason fits its bound with the longest escaped nam
     try std.testing.expect(std.mem.indexOfAny(u8, text, "\x01\x02\x03") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "SMALLEST") == null);
     try std.testing.expect(std.mem.endsWith(u8, text, "\\x03."));
+}
+
+test "capture loaded tools uses the tools comma-list grammar" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_][]const u8{ "web_search,bash", "none" }) |names| {
+        var captured = try captureConfigure(io, .{
+            .store = root,
+            .session = .create,
+            .tools = "bash,web_search",
+            .loaded_tools = names,
+        }, .{ .generated = root }).get();
+        defer captured.close(io);
+        var bytes: [2048]u8 = undefined;
+        const length = try captured.file.readPositionalAll(io, &bytes, 0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+        defer parsed.deinit();
+        const loaded = parsed.value.object.get("configuration").?.object.get("loaded_tools").?.object;
+        try std.testing.expectEqualStrings("value", loaded.get("state").?.string);
+        const chosen = loaded.get("value").?.array.items;
+        if (std.mem.eql(u8, names, "none")) {
+            try std.testing.expectEqual(@as(usize, 0), chosen.len);
+        } else {
+            try std.testing.expectEqual(@as(usize, 2), chosen.len);
+            try std.testing.expectEqualStrings("bash", chosen[0].string);
+            try std.testing.expectEqualStrings("web_search", chosen[1].string);
+        }
+    }
 }
