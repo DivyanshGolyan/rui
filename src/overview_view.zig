@@ -4731,9 +4731,9 @@ test "/configure holds start settings for the Session the next Enter starts" {
     try expectScreenLine(&state, 23, " start settings: --model gpt-5.5 --permission-mode ask --label \"la… · esc clear");
 
     var held: StartSettings = .{};
-    try held.put(1, "gpt-5.5");
-    try held.put(4, "ask");
-    try held.put(8, "lane \"five\"");
+    try held.put(startOption("model").?, "gpt-5.5");
+    try held.put(startOption("permission-mode").?, "ask");
+    try held.put(startOption("label").?, "lane \"five\"");
     draft = try typeText(&state, "Run the tests");
     try expectEffects(&.{.{ .start = .{ .settings = &held, .text = "Run the tests" } }}, try submit(&state, draft));
     _ = try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } });
