@@ -2,7 +2,7 @@
 
 Extraction only, 2026-11-04. Each decision is written once. Nothing here is new, improved or judged.
 
-Sources: map #838 and tickets #839 to #851 with every comment; the design doc "Rui core and Seams: design with Drift as first user" (https://claude.ai/artifact/Qs5UEecjciB2Cxp7KR3Uyr, rev 14); a Simple Made Easy review of every decision with the outcomes recorded in rui-seams-decisions-1104.md. Times of individual 11-04 and 11-03 log lines come from /mnt/project-files/rui-seams/critique/all-decisions.md, the log the review was run against.
+Sources: map #838 and tickets #839 to #851 with every comment; the design doc "Rui core and Seams: design with Drift as first user" (https://claude.ai/artifact/Qs5UEecjciB2Cxp7KR3Uyr, rev 14); memory files rui-seams-decisions-1104.md, rui-seams-map.md and rui-db-seam-drift-calls.md; /mnt/project-files/rui-seams/critique/hickey-review.md with the outcomes recorded in rui-seams-decisions-1104.md. Times of individual 11-04 and 11-03 log lines come from /mnt/project-files/rui-seams/critique/all-decisions.md, the log the review was run against.
 
 How to read the sources:
 - `#NNN` is that ticket's Resolution comment (2026-11-03). `#838 map` is a "Settled while charting" line on the map.
@@ -15,7 +15,7 @@ How to read the sources:
 ## Client API and launch
 
 D1. Rui ships its own revised interface and Drift is ported to it. There is no pi or pi-durable drop-in package. (source: #838 map)
-D2. Drift talks to Rui through one small TypeScript package whose shape follows the Azure TypeScript SDK guidelines, Temporal's client, Stripe's idempotency rules and the Codex SDK. Notes kept in the project folder (source: #849)
+D2. Drift talks to Rui through one small TypeScript package whose shape follows the Azure TypeScript SDK guidelines, Temporal's client, Stripe's idempotency rules and the Codex SDK. Notes: /mnt/project-files/rui-seams/research/849-ts-api-practices.md. (source: #849)
 D3. Drift starts Rui with `Rui.connect({ database, provider: { baseUrl, key }, tools, presets })`, which uses the existing `/v1/host-info` route plus auto-start, and adds two new Host pieces: the MySQL URL and the stdin key handoff. (source: #849)
 D4. Drift's npm package starts Rui as a child program in the background on the same machine, pointed at Drift's MySQL. Drift is a single instance. (source: #838 map; 11-04 03:35Z)
 D5. Rui lives exactly as long as the Drift process. Rui exits when the stdin pipe that carried the key closes, so a crashed Drift never leaves an orphan holding the Store. Drift owns starting and restarting Rui, and starts it again if Rui alone crashes; state is in the database. (source: 11-04 03:35Z, 03:40Z)
@@ -320,6 +320,20 @@ D217. (lane K K6 premise, accepted) D191's drop is a history floor: a nullable `
 D218. (lane K calls, accepted) A revision takes its feed position at acceptance: `session_revision.position` and `revised_at` are written by `configure` and by core-made revisions (D174). `session_changed {revision, field}` rows are stored: one `session_change` row per changed field (session_ref, position, ordinal, revision, field, changed_at), written in the same commit as the revision and never edited. Events that change no setting (D137's refused effort change) are rows too. Stored, not derived, because those events have no revision diff and the Store caps a compound query at 4 terms. Creation emits none. Revisions saved before format 52 have a NULL position and no rows.
 
 D219. (lane K call, accepted) D179's `model_call` is one feed row per resolved model Operation, at its admission position. `latency_ms` (request sent to resolution) and `first_event_ms` (request sent to first response event) are measured on the final attempt and saved as two nullable `model_operation` columns. The served model comes from the stored model evidence, tokens from the usage columns, status from the resolution code, and `attempts` from the attempt ordinal. There is no per-attempt history. The row says its timings are the final attempt's.
+
+## Decided from the design audit (11-05, my technical calls; audit/report.md)
+
+D220. Call checking reads the same saved tool set that the request was built from. A call is accepted when its name is a member of the offered set, whoever runs it. The `tools_mask` bitmask, `maskSql`, `everMaskSql` and `toolBit` are deleted, and K1's child narrowing compares sets of tool names. This is D48 and D49 as written; the mask was a staging step that outlived T1b.
+D221. D122 and D140 stand for `start_agent`: a child inherits its parent's provider and workspace, and a spec naming either is refused. D133's provider default and workspace rule apply only to `sessions.create`.
+D222. The start error codes are D136's list exactly: `mysql_version`, `mariadb`, `read_only_replica`, `durability_<variable>` (one per variable, so the message names what to fix, D86) and `binlog_statement`. Two codes are added for a database Rui cannot reach: `mysql_unreachable` (connect or TLS failure, with the driver's text) and `mysql_login` (refused credentials).
+D223. `rui store schema --engine mysql --from N` prints the forward migration from format N to this build's format, as SQL for the DB team to apply (D203, D204). Without `--from` it prints the full schema, as now.
+D224. The MySQL URL accepts `ssl-ca=<path>` for a private CA bundle, such as the RDS bundle. Without it, Rui verifies against system trust. There is never an option that skips verification.
+D225. A Host tool set is named "Host tool set", not "catalog", so "catalog" means only the model catalog (D78). The `host_catalog` table is renamed in its own unreleased format step.
+D226. Each format PR takes its own schema number (D173). An unreleased step is never rewritten in place; C2a takes 55.
+D227. An MCP call's conversation line is `rui_call_description`, extracted once at settlement and saved at up to 200 bytes (D62, D143). The feed and the TS client read the saved line; no client re-parses tool arguments.
+D228. The TS client's `Rui.connect` takes `tools`, written to the launch frame as `mcpServers` (D3, D132).
+D229. Effort is checked only for a model the catalog lists (D137). For a model it does not list, any effort is passed through and the provider's refusal is the error (D80, D194).
+D230. The PR 7 Store thread was built as a combining queue on the Host's existing threads (D94). That replaces the "Store thread" wording in D91 and D215. On MySQL, a network fault exits the Host with `store_fenced` (D157); reconnect is deferred to 8e.
 
 ## Replaced
 
