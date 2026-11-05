@@ -20,6 +20,10 @@ pub const find_tools_description = "Find and load tools available to this Sessio
 pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces; each word is at most 64 bytes.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
 
 pub const find_tools_max_word_bytes = 64;
+/// Eight words of 64 bytes fit with room for JSON escapes and spacing; a
+/// larger payload is refused before it is read or parsed.
+pub const find_tools_max_argument_bytes = 4096;
+pub const find_tools_too_long = std.fmt.comptimePrint("words must fit arguments of at most {d} bytes", .{find_tools_max_argument_bytes});
 
 pub const FindTools = struct {
     words: [8][]const u8 = @splat(""),
@@ -28,6 +32,7 @@ pub const FindTools = struct {
 
 /// Checked when the core call runs, not when its model output settles.
 pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindTools) error{OutOfMemory}!StartAgentCheck {
+    if (bytes.len > find_tools_max_argument_bytes) return refused(find_tools_too_long);
     const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return refused("words must be the only field of one well-formed JSON object"),
@@ -738,6 +743,7 @@ test "find_tools checks words at execution time" {
         .{ .bytes = "{\"words\":\"one\",\"extra\":true}" },
         .{ .bytes = "{\"words\":\"one\",\"words\":\"two\"}" },
         .{ .bytes = "{\"words\":\"one\"} {}" },
+        .{ .bytes = "{\"words\":\"one" ++ @as([find_tools_max_argument_bytes]u8, @splat(' ')) ++ "\"}" },
     }) |case| {
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();

@@ -142,6 +142,18 @@ test "find_tools no match and bad words resolve without revisions then equality 
                 try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ input.binding.action_id, code }));
                 if (index != 0) try std.testing.expect(std.mem.indexOf(u8, try result(&storage, session, alloc), "words") != null);
             }
+            // A huge argument is refused before it is read: a 16 KiB arena
+            // cannot hold its 64 KiB, so success proves it was never copied.
+            const huge = try alloc.alloc(u8, 64 * 1024);
+            @memset(huge, 'x');
+            @memcpy(huge[0..10], "{\"words\":\"");
+            @memcpy(huge[huge.len - 2 ..], "\"}");
+            const huge_input = try call(&storage, &tmp, session.slice(), huge, "find-huge", alloc);
+            var small_buffer: [16 * 1024]u8 = undefined;
+            var small: std.heap.FixedBufferAllocator = .init(&small_buffer);
+            try loader.run(&storage, small.allocator(), &huge_input, .{});
+            try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code='failed'", .{huge_input.binding.action_id}));
+            try std.testing.expect(std.mem.indexOf(u8, try result(&storage, session, alloc), "words") != null);
             const input = try call(&storage, &tmp, session.slice(), "{\"words\":\"bash\"}", "find-equality", alloc);
             try loader.run(&storage, alloc, &input, .{});
             try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL AND revision=2", .{session.slice()}));
