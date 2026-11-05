@@ -8,6 +8,7 @@ const std = @import("std");
 const api_key = @import("api_key.zig");
 const protocol = @import("protocol.zig");
 const platform = @import("platform.zig");
+pub const MysqlUrl = @import("mysql_url.zig");
 const http1 = @import("http1/request.zig");
 
 /// The one frame version.
@@ -23,6 +24,13 @@ pub const max_runtime_dir_bytes = platform.max_launch_socket_path_bytes - "/".le
 pub const StartError = enum {
     launch_frame_invalid,
     store_locked,
+    store_schema_missing,
+    store_schema_behind,
+    mysql_version_unsupported,
+    mysql_durability_unsafe,
+    mysql_read_only,
+    mysql_binlog_unsafe,
+    store_fenced,
     runtime_dir_unusable,
     tool_name_collision,
 };
@@ -62,9 +70,14 @@ pub const Frame = struct {
     /// SQLite Store directory.
     pub const Store = union(enum) {
         sqlite_dir: protocol.Bounded(protocol.max_store_bytes),
+        mysql_url: *MysqlUrl,
     };
 
     pub fn wipe(self: *Frame) void {
+        if (self.store == .mysql_url) {
+            self.store.mysql_url.destroy();
+            self.store = .{ .sqlite_dir = .{} };
+        }
         self.key.wipe();
         for (&self.mcp_servers) |*server| server.bearer_token.wipe();
     }
@@ -125,7 +138,8 @@ const Wire = struct {
 /// Parses `bytes` into `frame`; the key is copied, and every other copy of
 /// it is zeroed before this returns.
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: *Refusal) !void {
-    var arena: std.heap.ArenaAllocator = .init(gpa);
+    var wiping: WipingAllocator = .{ .backing = gpa };
+    var arena: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer arena.deinit();
     const wire = std.json.parseFromSliceLeaky(Wire, arena.allocator(), bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
         error.OutOfMemory => return err,
@@ -135,10 +149,16 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: 
     defer for (wire.mcpServers) |server| std.crypto.secureZero(u8, @constCast(server.bearerToken));
     errdefer frame.wipe();
     if (wire.v != version) return refuse(refusal, "v must be 1");
-    if (wire.store.len == 0) return refuse(refusal, "store must name a Store directory");
-    if (std.mem.startsWith(u8, wire.store, "mysql://")) return refuse(refusal, "this build opens SQLite Stores only");
-    frame.store = .{ .sqlite_dir = .{} };
-    frame.store.sqlite_dir.set(wire.store) catch return refuse(refusal, "store is too long");
+    if (wire.store.len == 0) return refuse(refusal, "store must name a Store directory or a MySQL URL");
+    if (std.mem.startsWith(u8, wire.store, "mysql://")) {
+        frame.store = .{ .mysql_url = MysqlUrl.create(gpa, wire.store) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return refuse(refusal, "store must be a MySQL URL with user, password, host or socket, and database"),
+        } };
+    } else {
+        frame.store = .{ .sqlite_dir = .{} };
+        frame.store.sqlite_dir.set(wire.store) catch return refuse(refusal, "store is too long");
+    }
     if (!std.mem.eql(u8, wire.provider.kind, "openai_key")) return refuse(refusal, "provider.kind must be openai_key");
     frame.base_url.set(wire.provider.baseUrl) catch return refuse(refusal, "provider.baseUrl is too long");
     if (!api_key.valid(wire.provider.key)) return refuse(refusal, "provider.key must be one line of visible characters, at most 1024 bytes");
@@ -293,8 +313,6 @@ test "a launch frame is refused with launch_frame_invalid when it is wrong" {
         ,
         \\{"v":1,"store":"","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r"}
         ,
-        \\{"v":1,"store":"mysql://u:p@h/db","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r"}
-        ,
         \\{"v":1,"store":"/s","provider":{"kind":"chatgpt","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r"}
         ,
         \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"two words"},"runtimeDir":"/r"}
@@ -357,4 +375,59 @@ test "an oversized frame length is refused before any body is read" {
     var frame: Frame = .{};
     var refusal: Refusal = undefined;
     try std.testing.expectError(error.LaunchFrameInvalid, read(io, reader, std.testing.allocator, &frame, &refusal));
+}
+
+/// Wipe every JSON allocation, including partial strings on a parse error.
+/// The arena's backing allocations never move or shrink behind this owner.
+const WipingAllocator = struct {
+    backing: std.mem.Allocator,
+
+    fn allocator(self: *WipingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+    }
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const self: *WipingAllocator = @ptrCast(@alignCast(context));
+        return self.backing.rawAlloc(len, alignment, ret);
+    }
+    fn free(context: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const self: *WipingAllocator = @ptrCast(@alignCast(context));
+        std.crypto.secureZero(u8, bytes);
+        self.backing.rawFree(bytes, alignment, ret);
+    }
+};
+
+/// Only static messages cross the refusal boundary: never server text or URL.
+pub fn mysqlRefusal(err: anyerror) ?Refusal {
+    return switch (err) {
+        error.StoreLocked => .{ .code = .store_locked, .message = "another Host owns this Store" },
+        error.StoreSchemaMissing => .{ .code = .store_schema_missing, .message = "apply this build's MySQL schema before starting the Host" },
+        error.StoreSchemaBehind, error.WrongStoreVersion, error.WrongStoreSchema => .{ .code = .store_schema_behind, .message = "the MySQL schema does not match this build" },
+        error.UnsupportedMysqlVersion, error.UnsupportedServer => .{ .code = .mysql_version_unsupported, .message = "MySQL 8.4 or newer is required; MariaDB is not supported" },
+        error.MysqlReadOnly => .{ .code = .mysql_read_only, .message = "the MySQL server must be writable" },
+        error.MysqlDurabilityTooWeak => .{ .code = .mysql_durability_unsafe, .message = "MySQL requires innodb_flush_log_at_trx_commit=1 and sync_binlog=1 when binlogging" },
+        error.MysqlStatementBinlog => .{ .code = .mysql_binlog_unsafe, .message = "MySQL STATEMENT binlogging is not supported" },
+        else => null,
+    };
+}
+
+test "a MySQL launch frame keeps its login only in the stdin-owned frame" {
+    var frame: Frame = .{};
+    defer frame.wipe();
+    var refusal: Refusal = undefined;
+    try parse(std.testing.allocator,
+        \\{"v":1,"store":"mysql://u:secret@h/db","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r"}
+    , &frame, &refusal);
+    try std.testing.expectEqualStrings("secret", frame.store.mysql_url.options().password);
+    frame.store.mysql_url.wipe();
+    try std.testing.expectEqualStrings("", frame.store.mysql_url.options().password);
+    try std.testing.expectEqualStrings("db", frame.store.mysql_url.database.slice());
+}
+
+test "each MySQL policy refusal has a static launch-frame code" {
+    inline for (@typeInfo(@import("store.zig").MysqlStartError).error_set.error_names.?) |name|
+        try std.testing.expect(mysqlRefusal(@field(anyerror, name)) != null);
+    try std.testing.expectEqual(StartError.store_locked, mysqlRefusal(error.StoreLocked).?.code);
+    try std.testing.expectEqual(StartError.store_schema_missing, mysqlRefusal(error.StoreSchemaMissing).?.code);
+    try std.testing.expectEqual(StartError.store_schema_behind, mysqlRefusal(error.StoreSchemaBehind).?.code);
+    try std.testing.expect(mysqlRefusal(error.ConnectFailed) == null);
 }
