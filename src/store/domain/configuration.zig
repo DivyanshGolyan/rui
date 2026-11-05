@@ -357,16 +357,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
     prepareConfiguration(a, command.session.slice(), &command.configuration, reads);
     try a.run();
 
-    // A saved preset refusal keeps its original request identity, even when
-    // this Host can now resolve it. All other answers bind the resolved spec.
-    const saved_preset_refusal = if (saved) |row|
-        !row.accepted and std.meta.stringToEnum(PresetDecision.Rejection, row.code.slice()) != null
-    else
-        false;
-    const digest = if (preset) |decision|
-        if (decision.rejection != null or saved_preset_refusal) decision.request_digest else command.semanticDigest()
-    else
-        command.semanticDigest();
+    const digest = configureDigest(command, preset, &saved);
     if (saved != null) try a.abandon(.{});
     switch (try command_domain.classify(protocol.ConfigurationRejection, &saved, .configure, command.session.slice(), &digest)) {
         .fresh => {},
@@ -395,6 +386,25 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return .{ .accepted = .{ .replayed = false, .revision = applied.revision, .created = creating, .session = applied.session } };
+}
+
+// A saved preset refusal keeps its original request identity, even when
+// this Host can now resolve it. All other answers bind the resolved spec.
+// noinline: preset resolution and hashing finish before applyConfiguration,
+// keeping their scratch off the engine thread's deepest chain.
+noinline fn configureDigest(
+    command: *const protocol.ConfigureCommand,
+    preset: ?*const PresetDecision,
+    saved: *const command_domain.saved_command.Result,
+) [32]u8 {
+    if (preset) |decision| {
+        const saved_preset_refusal = if (saved.*) |*row|
+            !row.accepted and std.meta.stringToEnum(PresetDecision.Rejection, row.code.slice()) != null
+        else
+            false;
+        if (decision.rejection != null or saved_preset_refusal) return decision.request_digest;
+    }
+    return command.semanticDigest();
 }
 
 /// Settings `applyConfiguration` wrote to a Session, whose revision row
