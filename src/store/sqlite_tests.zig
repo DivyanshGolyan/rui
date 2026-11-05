@@ -139,7 +139,7 @@ const touchForTesting = tests.touchForTesting;
 
 /// A catalog with one tool beyond the built-ins, between them by name.
 const testing_record: tool_catalog.Record = .{ .name = "test_tool", .owner = .rui, .description = "A tool only tests offer.", .input_schema = "{\"type\":\"object\"}" };
-const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, testing_record, tool_catalog.web_search_record };
+const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, tool_catalog.message_agent_record, testing_record, tool_catalog.web_search_record };
 const testing_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [testing_records.len][32]u8 = undefined;
@@ -1126,11 +1126,12 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
     command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-    // The Store saved the catalog's three texts when it opened: Bash's two
-    // and web search's empty one. The configure adds its two values.
-    try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
-    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    // The Store saved the catalog's five texts when it opened: Bash's two,
+    // message_agent's two and web search's empty one. The configure adds
+    // its two values.
     try std.testing.expectEqual(@as(u64, 5), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 7), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
 }
 
 test "a Session's tools are saved once and read back as saved, not as today's built-ins" {
@@ -1155,17 +1156,19 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
             };
         }
     };
-    // The Host's catalog: one set of both built-ins, saved at open.
-    try std.testing.expectEqual([3]u64{ 1, 2, 2 }, try Tools.counts(&storage));
+    // The Host's catalog: one set of the three built-ins, saved at open.
+    try std.testing.expectEqual([3]u64{ 1, 3, 3 }, try Tools.counts(&storage));
     // Two Sessions offering Bash share one set, of the catalog's record.
     const first = try configureTestSessionAsk(&storage, "saved-tools-first");
     const second = try configureTestSessionAsk(&storage, "saved-tools-second");
-    try std.testing.expectEqual([3]u64{ 2, 2, 3 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 2, 3, 4 }, try Tools.counts(&storage));
     // A set with the catalog's members is the catalog's set.
+    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "message_agent", "web_search" });
+    try std.testing.expectEqual([3]u64{ 2, 3, 4 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-both", second, &.{ "bash", "web_search" });
-    try std.testing.expectEqual([3]u64{ 2, 2, 3 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 3, 3, 6 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-none", first, &.{});
-    try std.testing.expectEqual([3]u64{ 3, 2, 3 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 4, 3, 6 }, try Tools.counts(&storage));
     // Each revision keeps the set it was saved with.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
         "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')", .{}));
@@ -8762,16 +8765,17 @@ test "a Session with message_agent keeps it through its list row and report, as 
 test "a catalog at its bound saves and opens again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const count = tool_catalog.max_catalog_records - 2;
+    const count = tool_catalog.max_catalog_records - 3;
     var names: [count][8]u8 = undefined;
-    var records: [count + 2]tool_catalog.Record = undefined;
-    var digests: [count + 2][32]u8 = undefined;
+    var records: [count + 3]tool_catalog.Record = undefined;
+    var digests: [count + 3][32]u8 = undefined;
     records[0] = tool_catalog.bash_record;
-    for (&names, records[1 .. count + 1], 0..) |*name, *record, index| {
+    records[1] = tool_catalog.message_agent_record;
+    for (&names, records[2 .. count + 2], 0..) |*name, *record, index| {
         _ = try std.fmt.bufPrint(name, "tool_{d:0>3}", .{index});
         record.* = .{ .name = name, .owner = .rui, .description = "A tool among many.", .input_schema = "{\"type\":\"object\"}" };
     }
-    records[count + 1] = tool_catalog.web_search_record;
+    records[count + 2] = tool_catalog.web_search_record;
     for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
     const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
     var storage: Store = undefined;
@@ -8779,5 +8783,5 @@ test "a catalog at its bound saves and opens again" {
     try storage.close();
     try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, count + 2), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
+    try std.testing.expectEqual(@as(u64, count + 3), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
 }
