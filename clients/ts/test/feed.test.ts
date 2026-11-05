@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { setImmediate as turn } from "node:timers/promises";
 import { test } from "node:test";
 
+import { RuiUnavailableError } from "../src/errors.ts";
 import { listActivity, type FeedEntry } from "../src/feed.ts";
 import { SessionNotifications } from "../src/notifications.ts";
 import { Session, type Link } from "../src/sessions.ts";
@@ -277,5 +279,47 @@ test("a failed write does not wake an idle follower", async () => {
 	} finally {
 		controller.abort();
 		assert.equal((await pending).done, true);
+	}
+});
+
+test("a lifecycle failure rejects and releases all parked watches and their abort listeners", async () => {
+	const notifications = new SessionNotifications();
+	const controller = new AbortController();
+	const watches = [notifications.watch("s"), notifications.watch("s"), notifications.watch("other")];
+	const failure = new RuiUnavailableError("the Rui Host cannot restart");
+	const pending = watches.map((watch) => assert.rejects(watch.wait(watch.revision, controller.signal), (error: unknown) => error === failure));
+	assert.equal(getEventListeners(controller.signal, "abort").length, watches.length);
+	notifications.fail(failure);
+	await Promise.all(pending);
+	assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+	for (const session of ["s", "other"]) notifications.notify(session);
+	assert.deepEqual(watches.map((watch) => watch.revision), [0, 0, 0]);
+});
+
+test("failure during a page read is remembered even after a write races it", async () => {
+	const notifications = new SessionNotifications();
+	const watch = notifications.watch("s");
+	const revision = watch.revision;
+	notifications.notify("s");
+	const failure = new RuiUnavailableError("the Rui client is closed");
+	notifications.fail(failure);
+	await assert.rejects(watch.wait(revision, undefined), (error: unknown) => error === failure);
+});
+
+test("releasing a failed watch again does not unregister a new follower after restart", async () => {
+	const notifications = new SessionNotifications();
+	const old = notifications.watch("s");
+	notifications.fail(new RuiUnavailableError("the Rui Host could not restart"));
+	const fresh = notifications.watch("s");
+	old.close(); // The failed iterator's finally may run after a new follower starts.
+	const controller = new AbortController();
+	const pending = fresh.wait(fresh.revision, controller.signal);
+	try {
+		notifications.notify("s");
+		assert.equal(fresh.revision, 1);
+		await pending;
+	} finally {
+		controller.abort();
+		fresh.close();
 	}
 });

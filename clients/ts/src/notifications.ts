@@ -6,11 +6,17 @@ export class SessionNotifications {
 		let watches = this.#sessions.get(session);
 		if (!watches) this.#sessions.set(session, (watches = new Set()));
 		const watch = new WriteWatch(() => {
-			watches.delete(watch);
-			if (watches.size === 0) this.#sessions.delete(session);
+			if (watches.delete(watch) && watches.size === 0) this.#sessions.delete(session);
 		});
 		watches.add(watch);
 		return watch;
+	}
+
+	/** Rejects and releases every active follower, including one still reading its page. */
+	fail(error: Error): void {
+		for (const watches of this.#sessions.values()) {
+			for (const watch of watches) watch.fail(error);
+		}
 	}
 
 	notify(session: string): void {
@@ -21,7 +27,8 @@ export class SessionNotifications {
 class WriteWatch {
 	revision = 0;
 	readonly #release: () => void;
-	#wake: (() => void) | undefined;
+	#wake: ((error?: Error) => void) | undefined;
+	#error: Error | undefined;
 
 	constructor(release: () => void) {
 		this.#release = release;
@@ -33,16 +40,26 @@ class WriteWatch {
 	}
 
 	wait(revision: number, signal: AbortSignal | undefined): Promise<void> {
-		return new Promise((resolve) => {
-			if (this.revision !== revision || signal?.aborted) return resolve();
-			const done = () => {
-				signal?.removeEventListener("abort", done);
+		return new Promise((resolve, reject) => {
+			if (signal?.aborted) return resolve();
+			if (this.#error) return reject(this.#error);
+			if (this.revision !== revision) return resolve();
+			const done = (error?: Error) => {
+				signal?.removeEventListener("abort", abort);
 				this.#wake = undefined;
-				resolve();
+				if (error) reject(error);
+				else resolve();
 			};
+			const abort = () => done();
 			this.#wake = done;
-			signal?.addEventListener("abort", done, { once: true });
+			signal?.addEventListener("abort", abort, { once: true });
 		});
+	}
+
+	fail(error: Error): void {
+		this.#error = error;
+		this.#wake?.(error);
+		this.close();
 	}
 
 	close(): void {

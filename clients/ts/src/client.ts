@@ -264,6 +264,7 @@ export class Rui extends EventEmitter<{ exit: [ExitEvent] }> {
 	}
 
 	#fail(error: Error): void {
+		this.activity.fail(error);
 		for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
 	}
 
