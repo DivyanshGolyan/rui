@@ -242,7 +242,7 @@ def help_case():
             [str(fixture.RUI), "--not-an-option"], env={**os.environ, "HOME": str(home)},
             capture_output=True, text=True, timeout=10,
         )
-        assert result.returncode != 0 and "InvalidArguments" in result.stderr, result
+        assert result.returncode != 0 and "unknown option --not-an-option" in result.stderr, result
         assert list(home.iterdir()) == [], "invalid arguments created runtime state"
         send_help = run(home, "session", "send", "--help")
         assert "\nRequires: --to ID.\n" in send_help and "stdin" in send_help, send_help
@@ -306,7 +306,7 @@ def help_case():
         # Bare entry has no inline Message operand, even after --.
         literal = subprocess.run([str(fixture.RUI), "--", "setup"], env={**os.environ, "HOME": str(home)},
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
-        assert literal.returncode == 1 and "InvalidArguments" in literal.stderr, literal
+        assert literal.returncode == 1 and 'unexpected argument "setup"' in literal.stderr, literal
         assert "is now" not in literal.stderr, literal.stderr
         assert list(home.iterdir()) == [], "literal prompt without a terminal created runtime state"
 
@@ -1849,7 +1849,7 @@ def command_entry_cases():
                 os.write(input_write, unrelated)
                 sent = subprocess.run([str(fixture.RUI), "session", "send", "--to", literal, "--", prompt],
                     cwd=workspace, env=env, stdin=input_read, capture_output=True, timeout=5)
-                assert sent.returncode == 1 and b"InvalidArguments" in sent.stderr, sent
+                assert sent.returncode == 1 and b"must come from stdin" in sent.stderr, sent
                 assert sent.stdout == b"" and select.select([input_read], [], [], 0)[0], sent
                 assert os.read(input_read, len(unrelated)) == unrelated
                 sent = subprocess.run([str(fixture.RUI), "session", "send", "--to", literal],
