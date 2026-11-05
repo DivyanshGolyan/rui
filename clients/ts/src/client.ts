@@ -18,6 +18,8 @@ import { models, Session, Sessions, setPaused, type ModelSummary } from "./sessi
 import { ConnectionError, post, WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
+type Schemas = components["schemas"];
+
 export interface ConnectOptions {
 	/** The Store: a SQLite Store directory today. The MySQL URL arrives with the Store's MySQL support. */
 	database: string;
@@ -370,7 +372,11 @@ async function probe(launch: Launch): Promise<HostInfo | undefined> {
 			return undefined;
 		}
 	}
-	const body = `{"version":${JSON.stringify(WIRE_VERSION)},"kind":"host_info","store":${JSON.stringify(store)}}`;
+	const body = JSON.stringify({
+		version: WIRE_VERSION,
+		kind: "host_info",
+		store,
+	} satisfies Schemas["HostInfoRequest"]);
 	const reply = await post({ socketPath: launch.socketPath, path: "/v1/host-info", body });
 	return JSON.parse(reply.toString("utf8")) as HostInfo;
 }

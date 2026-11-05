@@ -3548,7 +3548,7 @@ fn showStatus(held: *HeldFrontend, open: bool, label: []const u8) !void {
     const self = &held.self;
     const session = &self.inspection.sessions[if (self.inspection.status) |shown| ~shown else 0];
     status_page.sample(session);
-    session.web_search = false;
+    session.tools.remove(.web_search);
     try session.model.set("gpt-5.5");
     try session.label.set(label);
     self.job.status_taken = session;

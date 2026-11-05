@@ -5,6 +5,7 @@ const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
+const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
@@ -14,6 +15,7 @@ const store_schema = @import("../schema.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const sqlite = @import("../sqlite.zig");
+const tool_set = @import("tool_set.zig");
 const turn_domain = @import("turn.zig");
 const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
 const AttemptBinding = store_core.AttemptBinding;
@@ -336,7 +338,8 @@ pub fn submitMessage(
 /// Round 1 reads the saved answer, the sender's Action, the Session and
 /// the text's content row. The decision is plain; the write round imports
 /// the text and saves the command and the admission, then commits.
-fn submitTo(
+/// noinline: its reads stay out of the frame a creation's chain runs under.
+noinline fn submitTo(
     a: anytype,
     io: std.Io,
     served: anytype,
@@ -412,6 +415,236 @@ noinline fn submitCreating(
         },
     };
     return rejectMessage(a, command, &reads, command.sender != null and sender_valid, rejection.?, faults);
+}
+
+/// What running a `message_agent` call did.
+pub const AgentDelivery = enum {
+    /// The Message was admitted to its Session and the call succeeded.
+    delivered,
+    /// Nothing was sent, and the call failed with a result saying why.
+    failed,
+    /// A stop selected the call's Turn, and the stop resolves the call.
+    stopped,
+};
+
+/// The command key a `message_agent` call's Message is saved under. Keys a
+/// person or script sends are theirs; a taken key fails the call.
+fn agentMessageKey(buffer: *[protocol.max_key_bytes]u8, action_id: u64) []const u8 {
+    return std.fmt.bufPrint(buffer, "rui.core/message_agent/{d}", .{action_id}) catch unreachable;
+}
+
+/// Runs a `message_agent` call as one core command (D24, D41): admits
+/// `text` to the Session `target` names, from the call's own Session, and
+/// resolves the call with what happened, in one transaction. A Message it
+/// sends carries no client environment (D169).
+pub fn deliverAgentMessage(
+    a: anytype,
+    binding: action_domain.ActionAttemptBinding,
+    target: []const u8,
+    text: []const u8,
+    faults: Faults,
+) !AgentDelivery {
+    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    const key = agentMessageKey(&key_buffer, binding.action_id);
+    var facts: action_domain.core_facts.Result = undefined;
+    const names: action_domain.CoreNames = .of();
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &facts);
+    var saved: saved_command.Result = undefined;
+    lookupCommand(a, key, &saved);
+    var receiver: target_session.Result = null;
+    readTarget(a, target, &receiver);
+    var message: content_domain.Import = .ofBytes(text, false);
+    content_domain.lookup(a, &message);
+    try a.run();
+    const found = facts orelse return error.StaleActionAttemptBinding;
+    if (found.stopped) {
+        try a.abandon(.{});
+        return .stopped;
+    }
+    var result_buffer: [160]u8 = undefined;
+    const delivered = receiver != null and saved == null;
+    const result = if (receiver == null)
+        std.fmt.bufPrint(&result_buffer, "No Session {s} in this Store; nothing was sent.", .{target}) catch unreachable
+    else if (saved != null)
+        "Rui could not send this Message: its command key is already taken. Nothing was sent."
+    else
+        std.fmt.bufPrint(&result_buffer, "Delivered to {s}.", .{target}) catch unreachable;
+    var outcome: content_domain.Import = .ofBytes(result, false);
+    content_domain.lookup(a, &outcome);
+    try a.run();
+
+    if (faults.content_import) return error.InjectedContentImportFailure;
+    if (delivered) {
+        const head = receiver.?.session;
+        const text_id = try content_domain.importBytes(a, &message, text);
+        var digest = std.crypto.hash.sha2.Sha256.init(.{});
+        digest.update("rui/core/message_agent/v1");
+        digest.update(&protocol.contentDigest(text));
+        try queueCommand(a, key, .message, target, &digest.finalResult(), text_id, null, &.{ .accepted = true });
+        a.write(admit_sent_message, .{
+            .admission_id = try a.identity(.admission_id),
+            .session = head,
+            .key = key,
+            .content_id = text_id,
+            .position = try (try a.positions(head)).take(1),
+            .sender = found.session,
+            .sender_position = try (try a.positions(found.session)).take(1),
+        });
+    }
+    const outcome_id = try content_domain.importBytes(a, &outcome, result);
+    try action_domain.queueCoreResolution(a, binding, found.session, if (delivered) .succeeded else .failed, outcome_id);
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    return if (delivered) .delivered else .failed;
+}
+
+/// What running a `start_agent` call did.
+pub const AgentStart = enum {
+    /// The agent's Session was created with the task as its first Message,
+    /// and the call succeeded.
+    started,
+    /// Nothing was started, and the call failed with a result saying why.
+    failed,
+    /// A stop selected the call's Turn, and the stop resolves the call.
+    stopped,
+};
+
+/// The calling Session's settings a `start_agent` call inherits or may
+/// only narrow. Its Workspace fills the creating Configuration in place.
+const parent_settings = rsql.Read(.{
+    .sql = "SELECT workspace,provider," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,permission_mode FROM session WHERE session_ref=?1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { workspace: *protocol.Bounded(protocol.max_workspace_bytes), provider: protocol.Provider, tools_mask: c_int, permission_mode: u8 },
+    .cardinality = .optional,
+});
+
+/// Runs a `start_agent` call as one core command (D24, D122): creates a
+/// Session with `configuration` in the caller's Workspace and with its
+/// provider, as its child when `attached`, admits `task` to it from the
+/// caller, and resolves the call with what happened, in one transaction.
+/// The spec may only narrow the caller's tools and permission mode.
+/// `configuration` is the caller's; its Workspace and provider are filled
+/// here. `committed` runs once the task's admission commits.
+pub fn startAgent(
+    a: anytype,
+    io: std.Io,
+    binding: action_domain.ActionAttemptBinding,
+    caller: []const u8,
+    task: []const u8,
+    attached: bool,
+    configuration: *protocol.Configuration,
+    committed: ?MessageCommitted,
+    faults: Faults,
+) !AgentStart {
+    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    const key = std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
+    var facts: action_domain.core_facts.Result = undefined;
+    const names: action_domain.CoreNames = .of();
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &facts);
+    var saved: saved_command.Result = undefined;
+    lookupCommand(a, key, &saved);
+    configuration.workspace = .{ .state = .value, .value = .{ .len = 0 } };
+    var parent: parent_settings.Row = .{ .workspace = &configuration.workspace.value, .provider = undefined, .tools_mask = undefined, .permission_mode = undefined };
+    var parent_found: store_access.Found = .missing;
+    a.readInto(parent_settings, .{ .session = caller }, &parent, &parent_found);
+    // Over 4.6 KB, so held where the Store owns it, as a configure does.
+    const creation = a.store.configurationReads();
+    creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+    configuration_domain.prepareConfiguration(a, "", configuration, creation);
+    try a.run();
+    const found = facts orelse return error.StaleActionAttemptBinding;
+    if (!parent_found.get() or !std.mem.eql(u8, &found.session.ref, caller)) return error.CorruptStore;
+    if (found.stopped) {
+        try a.abandon(.{});
+        return .stopped;
+    }
+    var result_buffer: [192]u8 = undefined;
+    const refusal: ?[]const u8 = refusal: {
+        if (saved != null) break :refusal "Rui could not start the agent: its command key is already taken. Nothing was started.";
+        const allowed = try configuration_domain.toolSet(parent.tools_mask);
+        const requested = configuration_domain.requestedTools(configuration) orelse
+            break :refusal "spec.tools: only Rui's own tools can be narrowed to. Nothing was started.";
+        var wider = requested.differenceWith(allowed).iterator();
+        if (wider.next()) |tool| break :refusal std.fmt.bufPrint(&result_buffer, "spec.tools: {s} is not one of your tools. Nothing was started.", .{@tagName(tool)}) catch unreachable;
+        if (try configuration_domain.permissionMode(parent.permission_mode) == .ask and !configuration.permission_mode.value.eql("ask"))
+            break :refusal "spec.permissionMode: you ask before running commands, so your agents ask too. Nothing was started.";
+        break :refusal null;
+    };
+    configuration.provider = .{ .state = .value, .value = .{ .len = 0 } };
+    configuration.provider.value.set(@tagName(parent.provider)) catch unreachable;
+    if (attached) creation.parent = found.session.ref;
+    const application: ?configuration_domain.Application = if (refusal == null)
+        try configuration_domain.applyConfiguration(a, io, "", configuration, faults, creation)
+    else
+        null;
+    const applied: ?*const configuration_domain.Applied = if (application) |*decided| switch (decided.*) {
+        .accepted => |*value| value,
+        .rejected => null,
+    } else null;
+    const result = if (refusal) |text|
+        text
+    else if (applied) |value|
+        std.fmt.bufPrint(&result_buffer, "Started {s}.", .{value.session.slice()}) catch unreachable
+    else
+        std.fmt.bufPrint(&result_buffer, "Rui could not start the agent ({s}). Nothing was started.", .{@tagName(application.?.rejected)}) catch unreachable;
+
+    var message: content_domain.Import = .ofBytes(task, false);
+    var outcome: content_domain.Import = .ofBytes(result, false);
+    var rows: content_domain.Pair = .{ .first = null, .second = null };
+    if (applied != null) content_domain.lookupPair(a, &message, &outcome, &rows) else content_domain.lookup(a, &outcome);
+    try a.run();
+    if (applied != null) content_domain.foundPair(&rows, &message, &outcome);
+
+    if (faults.content_import) return error.InjectedContentImportFailure;
+    var admission_id: u64 = 0;
+    if (applied) |value| {
+        const text_id = try content_domain.importBytes(a, &message, task);
+        var digest = std.crypto.hash.sha2.Sha256.init(.{});
+        digest.update("rui/core/start_agent/v1");
+        digest.update(&protocol.contentDigest(task));
+        const answer: StoredAnswer = .{ .accepted = true, .revision = value.revision, .created = true };
+        try configuration_domain.queueConfiguredCommand(a, value, key, .message, &digest.finalResult(), text_id, null, &answer);
+        admission_id = try a.identity(.admission_id);
+        a.write(admit_sent_message, .{
+            .admission_id = admission_id,
+            .session = value.head,
+            .key = key,
+            .content_id = text_id,
+            .position = try (try a.positions(value.head)).take(1),
+            .sender = found.session,
+            .sender_position = try (try a.positions(found.session)).take(1),
+        });
+    }
+    const outcome_id = try content_domain.importBytes(a, &outcome, result);
+    try action_domain.queueCoreResolution(a, binding, found.session, if (applied != null) .succeeded else .failed, outcome_id);
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    const value = applied orelse return .failed;
+    if (committed) |callback| callback.call(callback.context, .{ .session = value.session.slice(), .admission_id = admission_id, .from_peer = true });
+    return .started;
+}
+
+/// Fails the core tool call `binding` names with `result`, which says why
+/// nothing was done, and lets its Turn continue, in one transaction. A
+/// call whose Turn a stop selected is left to the stop.
+pub fn failCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
+    var facts: action_domain.core_facts.Result = undefined;
+    const names: action_domain.CoreNames = .of();
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &facts);
+    var outcome: content_domain.Import = .ofBytes(result, false);
+    content_domain.lookup(a, &outcome);
+    try a.run();
+    const found = facts orelse return error.StaleActionAttemptBinding;
+    if (found.stopped) {
+        try a.abandon(.{});
+        return false;
+    }
+    if (faults.content_import) return error.InjectedContentImportFailure;
+    const outcome_id = try content_domain.importBytes(a, &outcome, result);
+    try action_domain.queueCoreResolution(a, binding, found.session, .failed, outcome_id);
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    return true;
 }
 
 /// The Session a stop names, and the last Message admitted to it: the

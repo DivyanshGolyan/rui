@@ -19,10 +19,8 @@ const content_domain = @import("content.zig");
 const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_admission_domain = @import("model_admission.zig");
-const sqlite = @import("../sqlite.zig");
 const store_access = @import("../access.zig");
 const turn_domain = @import("turn.zig");
-const c = sqlite.c;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptBinding = store_core.AttemptBinding;
 const Faults = store_core.Faults;
@@ -754,7 +752,8 @@ const insert_call = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// An accepted call's Action, decided now when the revision bypasses asks.
+/// An accepted call's Action, decided now when the revision bypasses asks
+/// or the core runs it.
 /// Under an `ask` revision it keeps its call's position as the feed's
 /// approval request.
 const insert_action = rsql.Write(.{
@@ -1166,7 +1165,7 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
     a.read(pending_messages, .{ .operation_id = binding.operation_id }, &pending);
     // BEGIN IMMEDIATE ran when the first read was queued.
     if (a.failure == null) if (faults.settlement_trace) |trace| {
-        std.debug.assert(c.sqlite3_txn_state(a.store.database, "main") == c.SQLITE_TXN_WRITE);
+        std.debug.assert(a.store.engine.inWriteTransaction());
         trace.mark(.transaction_active);
     };
     collectItems(batch, output, io, 0);
@@ -1315,7 +1314,7 @@ fn Settlement(comptime A: type) type {
         /// A sink for a fresh row with bytes, else null.
         fn sinkFor(s: *Self, row: ContentRow, length: u64) !?store_access.ContentSink {
             if (!row.fresh or length == 0) return null;
-            return try s.a.contentSink(row.id);
+            return try s.a.contentSink(row.id, length);
         }
 
         /// Walks the batch's records in main's order: each item's ordinal,
@@ -1595,9 +1594,10 @@ fn Settlement(comptime A: type) type {
                 std.mem.writeInt(u64, field_metadata[at * 40 ..][0..8], field.decoded_length, .little);
                 @memcpy(field_metadata[at * 40 + 8 ..][0..32], &field.content_digest);
             }
-            // A Bash call has its description whether or not it was offered;
-            // one whose arguments the parser rejected has none.
-            const description: ?tool_catalog.Description = if (call_facts.bashArguments()) |arguments| tool_catalog.describe(.{ .bash = arguments }) else null;
+            // A call has its description whether or not it was offered; one
+            // whose arguments the parser rejected has none.
+            const description = call_facts.description();
+
             s.a.write(insert_call, .{
                 .operation_id = s.binding.operation_id,
                 .call_ordinal = s.imported_calls,
@@ -1614,15 +1614,17 @@ fn Settlement(comptime A: type) type {
                 .session = s.session,
             });
             if (rejection_code != null) return;
+            // A core tool acts only on the Store, so no person decides it.
+            const authorized = tool_catalog.Runner.of(call_facts.tool.?) == .core or s.settling.permission_mode;
             s.a.write(insert_action, .{
                 .action_id = try s.a.identity(.action_id),
                 .operation_id = s.binding.operation_id,
                 .call_ordinal = s.imported_calls,
                 .session = s.session,
                 .revision = s.settling.revision.get(),
-                .authorized = s.settling.permission_mode,
-                .timeout_ms = call_facts.bashArguments().?.timeout_ms,
-                .approval_position = if (s.settling.permission_mode) null else s.first_item_position + record.ordinal,
+                .authorized = authorized,
+                .timeout_ms = if (call_facts.bashArguments()) |arguments| arguments.timeout_ms else null,
+                .approval_position = if (authorized) null else s.first_item_position + record.ordinal,
             });
         }
     };

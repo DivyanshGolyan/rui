@@ -10,6 +10,10 @@ port: u16 = 0,
 thread: ?std.Thread = null,
 reply: []const u8,
 more: []const []const u8 = &.{},
+/// Wait for client cancellation instead of replying; observations publish before exit.
+hold_reply: bool = false,
+request_received: std.atomic.Value(bool) = .init(false),
+connection_closed: std.atomic.Value(bool) = .init(false),
 seen: [4096]u8 = undefined,
 seen_len: usize = 0,
 
@@ -42,6 +46,13 @@ fn serve(self: *Script, reply: []const u8) void {
         const read = std.c.recv(fd_, self.seen[self.seen_len..].ptr, self.seen.len - self.seen_len, 0);
         if (read <= 0) return;
         self.seen_len += @intCast(read);
+    }
+    self.request_received.store(true, .release);
+    if (self.hold_reply) {
+        var byte: [1]u8 = undefined;
+        const received = std.c.recv(fd_, &byte, byte.len, 0);
+        self.connection_closed.store(received == 0, .release);
+        return;
     }
     var written: usize = 0;
     while (written < reply.len) {

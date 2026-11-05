@@ -228,18 +228,36 @@ pub const SessionReportCapture = struct {
         try self.appendFmt("\",\"owner\":{{\"revision\":\"{d}\",\"field\":\"{s}\"}}}}", .{ owner_revision, @tagName(owner_field) });
     }
 
-    fn appendTools(self: *SessionReportCapture, tools_mask: u8) !void {
-        const tools = try configuration_domain.toolSet(tools_mask);
+    /// A set's names as `tool_set.namesSql` joins them, as a JSON array in
+    /// name order, the order configure gave its members.
+    fn appendTools(self: *SessionReportCapture, names: ?[]const u8) !void {
+        var sorted: [tool_catalog.max_tools][]const u8 = undefined;
+        var count: usize = 0;
+        if (names) |joined| {
+            var each = std.mem.splitScalar(u8, joined, ',');
+            while (each.next()) |name| : (count += 1) {
+                if (count == sorted.len or !protocol.validToolName(name)) return error.CorruptStore;
+                sorted[count] = name;
+            }
+        }
+        // Not `sort`, whose block merge keeps a cache on the stack.
+        std.mem.sortUnstable([]const u8, sorted[0..count], {}, lessThan);
         try self.append("[");
-        var first = true;
-        for (std.enums.values(tool_catalog.Tool)) |tool| if (tools.contains(tool)) {
-            if (!first) try self.append(",");
-            first = false;
+        for (sorted[0..count], 0..) |name, index| {
+            if (index != 0) {
+                // A set names each tool once.
+                if (std.mem.eql(u8, sorted[index - 1], name)) return error.CorruptStore;
+                try self.append(",");
+            }
             try self.append("\"");
-            try self.append(@tagName(tool));
+            try self.append(name);
             try self.append("\"");
-        };
+        }
         try self.append("]");
+    }
+
+    fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+        return std.mem.lessThan(u8, a, b);
     }
 
     fn appendPermissionMode(self: *SessionReportCapture, permission_mode: u8) !void {
@@ -673,8 +691,7 @@ fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: 
         .workspace = row.workspace.slice(),
         .provider = row.provider,
         .model = row.model.slice(),
-        .bash = tools.contains(.bash),
-        .web_search = tools.contains(.web_search),
+        .tools = tools,
         .permission_mode = try configuration_domain.permissionMode(row.permission_mode),
         .label = if (row.label) |*label| label.slice() else null,
         .created_at = row.created_at.get(),
@@ -875,12 +892,13 @@ const recent_messages = rsql.Read(.{
 const unresolved_actions = rsql.Read(.{
     .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.permission_revision,a.authorized,revision.permission_mode," ++
         "call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest,arguments.byte_length AS arguments_length,arguments.digest AS arguments_digest," ++
-        "tool_call.description FROM turn active @index(turn_one_active_per_session) " ++
+        "call_name.digest AS name_digest,tool_call.description FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN action_operation a ON a.parent_operation_id=active.operation_id " ++
         "CROSS JOIN session_revision revision ON revision.session_ref=a.session_ref AND revision.revision=a.permission_revision " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
         "CROSS JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
         "CROSS JOIN content arguments ON arguments.content_id=tool_call.arguments_content_id " ++
+        "CROSS JOIN content call_name ON call_name.content_id=tool_call.name_content_id " ++
         "WHERE active.session_ref=?1 AND active.outcome_code IS NULL AND a.resolution_code IS NULL ORDER BY a.action_id",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -894,6 +912,7 @@ const unresolved_actions = rsql.Read(.{
         call_id_digest: [32]u8,
         arguments_length: u64,
         arguments_digest: [32]u8,
+        name_digest: [32]u8,
         description: ?Description,
     },
     .cardinality = .each,
@@ -1030,7 +1049,18 @@ const CurrentFacts = struct {
     active: reads_domain.First(SelectedRow) = .{},
     queued: reads_domain.First(SelectedRow) = .{},
     outcome: content_domain.content_metadata.Row = undefined,
+    /// In the Store's scratch (`Store.reportScratch`): over 4 KiB.
+    tools: *set_names.Row,
+    tools_found: store_access.Found = undefined,
 };
+
+/// The names of the tool set ?1, joined (`tool_set.namesSql`).
+const set_names = rsql.Read(.{
+    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names FROM tool_set s WHERE s.tool_set_id=?1",
+    .Args = struct { set: u64 },
+    .Row = struct { names: ?protocol.Bounded(tool_set.max_names_bytes) },
+    .cardinality = .optional,
+});
 
 /// The Current report after its saved Session, in the rounds its reads'
 /// dependencies take. Round 2: the instructions' and output schema's
@@ -1050,6 +1080,7 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
         .counts = .{ .session = session_ref },
         .compaction = .init(session_ref, current.next_position, current.provider, current.model.slice(), policy),
         .work = .{ .session = session_ref },
+        .tools = a.store.reportScratch(set_names.Row),
     };
     // `checkSaved` refused a missing or zero instructions id and a zero
     // output schema id. A negative id is `CorruptStore` without a read,
@@ -1063,6 +1094,7 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
     _ = facts.compaction.queue(a);
     _ = facts.work.queue(a);
     a.read(person_message, .{ .session = session_ref }, &facts.person);
+    a.readInto(set_names, .{ .set = current.tool_set_id }, facts.tools, &facts.tools_found);
     facts.first.queue(a, session_ref);
     a.readEach(selected_active, .{ .session = session_ref }, 1, &facts.active);
     try runCurrent(a);
@@ -1110,7 +1142,8 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
     try capture.append(",\"reasoning_effort_override\":");
     try appendNullableEffort(current.reasoning_effort, capture);
     try capture.appendFmt(",\"revision\":\"{d}\",\"tools\":", .{current.revision});
-    try capture.appendTools(current.tools_mask);
+    if (!facts.tools_found.get()) return error.CorruptStore;
+    try capture.appendTools(if (facts.tools.names) |*names| names.slice() else null);
     try capture.append(",\"permission_mode\":");
     try capture.appendPermissionMode(current.permission_mode);
     try capture.append(",\"instructions\":");
@@ -1206,12 +1239,17 @@ fn renderRecent(capture: *SessionReportCapture, row: *const recent_messages.Row)
 fn renderUnresolved(capture: *SessionReportCapture, row: *const unresolved_actions.Row) !void {
     // The insert authorizes every Action proposed under `bypass`.
     if (row.permission_mode == 1 and !row.authorized) return error.CorruptStore;
-    try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"{d}\",\"authorization\":\"{s}\",\"call_id\":", .{
+    const tool = actionTool(&row.name_digest) orelse return error.CorruptStore;
+    const core = tool_catalog.Runner.of(tool_catalog.record(tool)) == .core;
+    // Settlement authorizes a core call at once, with no decision.
+    if (core and !row.authorized) return error.CorruptStore;
+    try capture.appendFmt("{{\"action\":\"{d}\",\"parent_operation\":\"{d}\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",\"permission_revision\":\"{d}\",\"authorization\":\"{s}\",\"call_id\":", .{
         row.action_id.get(),
         row.parent_operation_id.get(),
         row.call_ordinal,
+        @tagName(tool),
         row.permission_revision.get(),
-        if (!row.authorized) "pending" else if (row.permission_mode == 1) "bypass" else "allow_once",
+        if (core) "core" else if (!row.authorized) "pending" else if (row.permission_mode == 1) "bypass" else "allow_once",
     });
     try capture.appendContentReference(.{ .length = row.call_id_length, .digest = row.call_id_digest });
     try capture.append(",\"arguments\":");
@@ -1220,6 +1258,15 @@ fn renderUnresolved(capture: *SessionReportCapture, row: *const unresolved_actio
     // has no rejection, so main's code, either one's, is none.
     try appendPresentation(capture, try reads_domain.presentationOf(row.description, null, row.authorized, null));
     try capture.append("}");
+}
+
+/// The built-in tool whose name has `digest`, among those an Action runs.
+fn actionTool(digest: *const [32]u8) ?protocol.BuiltInTool {
+    for (std.enums.values(protocol.BuiltInTool)) |tool| {
+        const owned = tool_catalog.record(tool);
+        if (owned.owner == .rui and std.mem.eql(u8, digest, &protocol.contentDigest(owned.name))) return tool;
+    }
+    return null;
 }
 
 fn renderResolved(capture: *SessionReportCapture, row: *const resolved_actions.Row) !void {
@@ -2016,7 +2063,7 @@ const RevisionRow = struct {
     output_reservation: ?u64,
     reasoning_effort: ?protocol.ReasoningEffort,
     label: ?protocol.Bounded(protocol.max_label_bytes),
-    tools_mask: u8,
+    tools: ?protocol.Bounded(tool_set.max_names_bytes),
     permission_mode: u8,
     instructions_id: rsql.Positive,
     instructions_length: u64,
@@ -2041,7 +2088,7 @@ pub const full_revisions = rsql.Page(.{
         .on = .{ .primary_key = "session_revision" },
         .alias = "r",
         .columns = "(SELECT max(revision) FROM session_revision WHERE session_ref=?1) AS newest,r.command_key,r.workspace,r.provider,r.model," ++
-            "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label," ++ tool_set.maskSql("r.tool_set_id") ++ " AS tools_mask,r.permission_mode," ++
+            "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label," ++ tool_set.namesSql("r.tool_set_id") ++ " AS tools,r.permission_mode," ++
             "r.instructions_content_id AS instructions_id,instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest," ++
             "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest," ++
             owner_column("instructions") ++ " AS instructions_owner," ++ owner_column("output_schema") ++ " AS output_schema_owner",
@@ -2201,7 +2248,7 @@ const RevisionChunk = struct {
             try capture.appendJsonString(label.slice());
         } else try capture.append("null");
         try capture.append(",\"tools\":");
-        try capture.appendTools(row.tools_mask);
+        try capture.appendTools(if (row.tools) |*names| names.slice() else null);
         try capture.append(",\"permission_mode\":");
         try capture.appendPermissionMode(row.permission_mode);
     }
@@ -2213,9 +2260,11 @@ const RevisionChunk = struct {
 noinline fn renderRevisions(a: *ReadAccess, session_ref: []const u8, capture: *SessionReportCapture) !void {
     var first = true;
     var after: full_revisions.Args = .{ .session = session_ref };
+    // Its row holds a set's names, over 4 KiB: in the Store's scratch.
+    const chunk = a.store.reportScratch(RevisionChunk);
     while (true) {
-        var chunk: RevisionChunk = .{ .a = a, .capture = capture, .first = first, .after = after };
-        a.readEach(full_revisions, after, full_revisions.limit, &chunk);
+        chunk.* = .{ .a = a, .capture = capture, .first = first, .after = after };
+        a.readEach(full_revisions, after, full_revisions.limit, chunk);
         const ran = store_access.runAs(a, error.SessionReadFailed);
         if (chunk.failure) |err| return err;
         try ran;

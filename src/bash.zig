@@ -1742,7 +1742,8 @@ test "output publication closes producer aliases before making output evictable"
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
 }
 
-const ContentSource = struct {
+/// Decoded content read a byte at a time, as the argument parsers read it.
+pub const ContentSource = struct {
     reader: store.ContentReader = undefined,
     length: u64,
     position: u64 = 0,
