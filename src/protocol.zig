@@ -7,7 +7,7 @@ const provider_name = @import("provider_name.zig");
 const named_scratch = @import("named_scratch.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
-pub const wire_version = "9";
+pub const wire_version = "8";
 /// Versions a newer and an older Host speak, for tests that refuse them.
 pub const next_wire_version = std.fmt.comptimePrint("{d}", .{wire_number + 1});
 pub const previous_wire_version = std.fmt.comptimePrint("{d}", .{wire_number - 1});

@@ -53,7 +53,7 @@ pub const Matcher = struct {
                 self.carry_len -= 1;
             }
             for (0..self.count) |i| {
-                if (!self.done[i] and self.total >= self.starts[i] + 160) self.cut(i);
+                if (!self.done[i] and self.total >= self.starts[i] + 160 + lookahead) self.cut(i);
             }
         }
     }
@@ -61,6 +61,10 @@ pub const Matcher = struct {
     pub fn finish(self: *Matcher) void {
         for (0..self.count) |i| if (!self.done[i]) self.cut(i);
     }
+
+    /// Bytes read past a snippet's end before it is cut, so a character
+    /// crossing the end is told apart from a truncated, malformed one.
+    const lookahead = 3;
 
     fn cut(self: *Matcher, index: usize) void {
         var bytes: [160]u8 = undefined;
@@ -73,9 +77,14 @@ pub const Matcher = struct {
         while (p < end) {
             const b = self.raw[p % 512];
             const size = std.unicode.utf8ByteSequenceLength(b) catch 1;
-            if (p + size > end) break;
-            for (0..size) |j| bytes[n + j] = self.raw[(p + j) % 512];
-            if (std.unicode.utf8ValidateSlice(bytes[n .. n + size])) {
+            var sequence: [4]u8 = undefined;
+            const seen = @min(size, self.total - p);
+            for (0..seen) |j| sequence[j] = self.raw[(p + j) % 512];
+            const valid = seen == size and std.unicode.utf8ValidateSlice(sequence[0..size]);
+            // A whole character crossing the snippet's end is left out.
+            if (valid and p + size > end) break;
+            if (valid) {
+                @memcpy(bytes[n .. n + size], sequence[0..size]);
                 n += size;
                 p += size;
             } else {
@@ -182,5 +191,17 @@ test "word search UTF8 windows snippet boundaries and long queries" {
     m.init("x");
     m.feed("\xffx\xc3");
     m.finish();
+    // The value ends inside a sequence: that byte is malformed too.
+    try std.testing.expectEqualStrings("?x?", m.hits[0].snippet.slice());
+}
+
+test "word search shows a truncated sequence as ? and keeps the match" {
+    var m: Matcher = undefined;
+    m.init("x");
+    m.feed("\xe2x");
+    m.finish();
+    try std.testing.expectEqual(@as(usize, 1), m.count);
     try std.testing.expectEqualStrings("?x", m.hits[0].snippet.slice());
+    try std.testing.expectEqual(@as(usize, 1), m.hits[0].offset);
+    try std.testing.expectEqual(@as(usize, 1), m.hits[0].length);
 }
