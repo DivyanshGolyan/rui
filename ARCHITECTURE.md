@@ -2141,7 +2141,7 @@ No nested conversation login owner is retained.
 
 Interactive input uses the single conversation-first frontend described under [staged persistent input](#staged-persistent-input).
 It captures each exact Message before transmission and observes Host activity without a separate per-prompt follow loop or follow reminders.
-Permission presents one exact Action's description and complete decoded Bash command above an Allow once / Deny choice that a fresh Enter confirms; queued chat, typeahead and marked paste authorize nothing.
+Permission presents one exact Action above an Allow once / Deny choice that a fresh Enter confirms: Bash keeps its description and complete decoded command; MCP shows its frozen tool name and server, its call description when present, and the original JSON arguments. Queued chat, typeahead and marked paste authorize nothing.
 The durable decision retains that exact target for Host revalidation.
 One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal; `/inspect-action` also prints executable `rui action allow`/`deny` commands.
 `/configure` changes settings for this Session (including its immutable Workspace check).
@@ -2724,14 +2724,15 @@ Generated commands use printable hex Store selectors and bare six-character Sess
 Raw export streams the exact content without presentation.
 There is no history cache or new Host route.
 
-When Current exposes an actionable permission, the frontend automatically reads one exact Action's complete arguments and displays `? <description>`, then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one.
-A whole Action ends right above the rule; a taller one pages from its top.
-The description is the model's label, never a substitute for the command.
+When Current exposes an actionable permission, the frontend reads the selected call's identity from that capture before its complete arguments replace scratch. The runner is derived from the name and owner in the Operation's frozen offer, never from argument shape or the Session's latest catalog. Current includes the frozen `server` only for unresolved MCP calls; legacy built-in rows omit it. Bash displays `? <description>`, then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one. MCP displays `? <rui_call_description>` (at most 200 decoded bytes), `Tool`, `Server` and the original `Arguments` JSON. A missing, non-string or oversized description falls back to the tool name with those arguments, not a Bash parse. The client extracts the label with bounded streaming scratch; it does not interpret the server's schema. `/inspect-action` shares this MCP presentation; raw one-shot inspection stays exact.
+A whole Action ends right above the rule; a taller one pages from its top. Bash and MCP use the same 256 KiB viewport bound: an oversized Action file is a preview and cannot be approved.
+The description is the model's label, never a substitute for the command or MCP arguments.
 Every later line of the command, and every line of stdin, starts with the content mark `│`, and every row such a line, the `?` line or the `$` line wraps onto starts with `┆`, so description, command or stdin text can never pass for the `$`, `Time limit` or `stdin:` lines and a wrapped row never reads as a new line.
+Every line of MCP arguments starts with the same content mark and uses terminal escaping, so JSON cannot impersonate the Tool or Server labels.
 The input row becomes an Allow once / Deny choice with Allow once highlighted.
 One rule decides when it acts.
-Each frame records the option Enter would decide on it: the highlighted option its choice shows, Deny when it shows the draft beside the Action as a reason and the line under the draft says `enter denies the command and sends this`, or none.
-A notice that takes that line without saying so offers nothing; the refusal of an early Enter there says it: `! Not ready; nothing denied · enter denies the command and sends this`.
+Each frame records the option Enter would decide on it: the highlighted option its choice shows, Deny when it shows the draft beside the Action as a reason and the line under the draft says `enter denies the call and sends this`, or none.
+A notice that takes that line without saying so offers nothing; the refusal of an early Enter there says it: `! Not ready; nothing denied · enter denies the call and sends this`.
 Once that frame is delivered and input is then serviced empty, with no key since it was issued, no pending decoder state, no command and nothing left to draw, that frame is offered; this is the only place an offer is made.
 The offer is the decision that frame showed: it stands while nothing has changed since and every later frame shows that same decision.
 A redraw that leaves the choice as it was, such as the clock's minute, keeps it, since the key was sent at the choice it still shows.
@@ -2743,10 +2744,10 @@ A page, resize, width change, completed reading, or a withdrawn, successor or re
 The run loop does that for every frame it draws, so a quick second Enter after a refused one may decide.
 Spending never revokes or forces a frame, so a paste costs no frame per byte.
 There are no letter shortcuts.
-Typing or pasting beside the Action moves the input row to the retained draft, and the line under it says `enter denies the command and sends this · esc back to the choice`.
-Typing a message denies the command and sends the reason to the agent: Enter there, under the same offer rule, sends the draft as a Message and then denies the Action.
+Typing or pasting beside the Action moves the input row to the retained draft, and the line under it says `enter denies the call and sends this · esc back to the choice`.
+Typing a message denies the call and sends the reason to the agent: Enter there, under the same offer rule, sends the draft as a Message and then denies the Action.
 A slash command runs as anywhere else and denies nothing.
-A draft that is exactly one of `a`, `d`, `y` or `n` in either case, ignoring surrounding whitespace, is a keystroke meant for some other prompt, not a reason: its Enter is refused with `! Use ←→ and Enter to choose; a message denies the command.` and decides nothing.
+A draft that is exactly one of `a`, `d`, `y` or `n` in either case, ignoring surrounding whitespace, is a keystroke meant for some other prompt, not a reason: its Enter is refused with `! Use ←→ and Enter to choose; a message denies the call.` and decides nothing.
 While a command runs, or while a page hides the Action, the draft is no reason and its Enter decides nothing.
 The input row belongs to the waiting Action: Esc, Ctrl-G, Ctrl-End, or End on an empty draft returns it to the choice, and a slash command, which empties the draft, keeps it at the draft.
 An Action that arrives while the draft holds text keeps the draft as its input row, so an Enter meant for that line can never approve; once a frame shows the Action and the reason line, it denies the Action and sends the line.
@@ -2756,7 +2757,7 @@ Queued chat, chords and marked paste grant no authority and do not repeat the co
 The draft retains its bytes, grapheme cursor and pending paste decoder custody.
 The request block and choice follow the front-end plan's PR 4 row (plan GdWXmymnhM6zDEcd64xPMs, mock CFWmXwCYELhK15T7LnR6ZF), which Divyansh approved on 2026-10-31, Allow once highlighted by default.
 He chose on 2026-11-01 that typing while the choice shows pauses it and the text goes to the draft.
-The same approved row says "Typing a message denies the command and sends the reason to the agent."
+The same approved row says "Typing a message denies the call and sends the reason to the agent."
 A fragmented pre-prompt paste must finish under the existing incomplete-input deadline before any offer.
 Complete framing and argument validation precede any offer; no successful partial proposal is possible.
 

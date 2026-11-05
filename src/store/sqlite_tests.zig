@@ -1238,7 +1238,9 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
     };
     try settleCallsForTesting(&storage, &tmp, binding, "check-metadata", &calls);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE call_ordinal=0 AND resolution_code IS NULL AND attempt_ordinal=0", .{}));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code IS NULL AND action_kind=1", .{}));
+    // This built-in-only Session never offered `other`; it is a rejection,
+    // not an MCP Action. Keep that witness for the rejection CHECK below.
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='unknown_tool' AND action_kind IS NULL", .{}));
 
     // Each pair changes only one field, the null-valued one where a NULL could
     // pass the CHECK. The valid witness shows the row satisfies every
@@ -9191,6 +9193,11 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=0 AND rejection_code IS NULL AND action_kind=1", .{}));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE call_ordinal=1 AND rejection_code='invalid_arguments' AND action_kind IS NULL", .{}));
         try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE tool_kind=1 AND bash_timeout_override_ms IS NULL AND attempt_ordinal=0 AND resolution_code IS NULL", .{}));
+        const pending_report = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
+        defer std.testing.allocator.free(pending_report);
+        try std.testing.expect(std.mem.indexOf(u8, pending_report, "\"tool\":\"fetch_page\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, pending_report, "\"server\":\"docs\"") != null);
+
         try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
         try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
         if (std.mem.eql(u8, mode, "ask")) {

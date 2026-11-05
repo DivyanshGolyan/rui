@@ -11,6 +11,9 @@ const failure_class = @import("failure_class.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 const unicode = @import("terminal_unicode");
+const mcp_arguments = @import("mcp/arguments.zig");
+const mcp_shape = @import("mcp/shape.zig");
+const mcp_document = @import("mcp/document.zig");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
 pub const Style = enum {
@@ -697,7 +700,8 @@ test "hanging indentation survives split windows and trusted styles" {
 
 /// What the Action's `?` row says, for keeping it beside the choice.
 pub const ActionSummary = struct {
-    description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
+    // The UI keeps the full MCP label without changing the saved 100-byte wire.
+    description: protocol.Bounded(mcp_shape.description_max_bytes) = .{},
 };
 
 /// A time limit as exactly as the model set it, in its largest whole unit.
@@ -738,7 +742,63 @@ test "a time limit shows in its largest whole unit, never rounded" {
 /// its stdin. ConversationViewport hangs wrapped rows under the text after it.
 pub const content_mark = "│ ";
 
+/// Identity from the call's frozen offer, never the Session's latest catalog.
+pub const ActionTool = struct {
+    name: protocol.Bounded(protocol.max_tool_name_bytes),
+    server: ?protocol.Bounded(64) = null,
+
+    pub fn runner(self: *const ActionTool) !tools.Runner {
+        if (!protocol.validToolName(self.name.slice())) return error.InvalidObservation;
+        if (self.server) |server| {
+            if (!protocol.validToolName(server.slice()) or protocol.builtInTool(self.name.slice()) != null) return error.InvalidObservation;
+            const record: tools.Record = .{ .name = self.name.slice(), .owner = .mcp, .server = server.slice() };
+            return record.runner();
+        }
+        const builtin = protocol.builtInTool(self.name.slice()) orelse return error.InvalidObservation;
+        return tools.record(builtin).runner();
+    }
+};
+
+fn selectedActionTool(observed: *const protocol_reply.Current, io: std.Io, scratch: std.Io.File, action: u64) !?ActionTool {
+    const Selection = struct {
+        action: u64,
+        selected: ?ActionTool = null,
+        pub fn visit(self: *@This(), attention: protocol_reply.Current.Attention) !void {
+            switch (attention) {
+                .unresolved => |row| if (row.action.value == self.action) {
+                    if (self.selected != null) return error.InvalidObservation;
+                    var tool: ActionTool = .{ .name = .{} };
+                    try tool.name.set(row.tool.slice());
+                    if (row.server.value) |server| {
+                        tool.server = .{};
+                        try tool.server.?.set(server.slice());
+                    }
+                    self.selected = tool;
+                },
+                else => {},
+            }
+        }
+    };
+    var selection: Selection = .{ .action = action };
+    try observed.traverse(io, scratch, &selection);
+    return selection.selected;
+}
+
+/// Reads unresolved call identity before the arguments reuse the capture file.
+/// A resolved or absent Action has no current approval metadata.
+pub fn actionTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File) !?ActionTool {
+    const observed = try current(requests, store, session, scratch);
+    return selectedActionTool(&observed, requests.io, scratch, action);
+}
+
 pub fn permission(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
+    const tool = try actionTool(requests, store, session, action, scratch) orelse return error.ActionReadFailed;
+    return permissionForTool(requests, store, session, action, scratch, sink, colour, &tool);
+}
+
+/// The CLI's inspection and the conversation approval share the same MCP
+/// presentation; neither guesses a runner from the arguments' shape.
+pub fn permissionForTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
     // Action reads write at the descriptor's streaming offset, not positionally.
     try requests.io.vtable.fileSeekTo(requests.io.userdata, scratch, 0);
     try scratch.setLength(requests.io, 0);
@@ -752,26 +812,88 @@ pub fn permission(requests: client.Requests, store: []const u8, session: []const
         if (failure.err() == error.CanonicalStoreFailure) return error.CanonicalStoreFailure;
         return error.ActionReadFailed;
     }
-    return request(requests.io, scratch, sink, colour);
+    return requestForTool(requests.io, scratch, sink, colour, tool);
+}
+
+const ArgumentSource = struct {
+    reader: *std.Io.Reader,
+    pub fn peek(self: *@This()) !?u8 {
+        return self.reader.peekByte() catch |err| switch (err) {
+            error.EndOfStream => null,
+            else => return err,
+        };
+    }
+    pub fn take(self: *@This()) !u8 {
+        return self.reader.takeByte();
+    }
+};
+
+fn requestForTool(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
+    return switch (try tool.runner()) {
+        .bash => request(io, scratch, sink, colour),
+        .mcp => mcpRequest(io, scratch, sink, colour, tool),
+        .core, .provider => error.InvalidObservation,
+    };
+}
+
+/// Arguments remain exact JSON, not a Bash command or a schema interpretation.
+/// Like Bash, render to the Action file in full: SessionScreen applies its
+/// viewport bound and refuses consent when that file is only a preview.
+fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
+    var buffer: [4096]u8 = undefined;
+    var reader = scratch.reader(io, &buffer);
+    var source: ArgumentSource = .{ .reader = &reader.interface };
+    const range = try mcp_arguments.descriptionRange(&source);
+    var summary: ActionSummary = .{};
+    if (range) |value| {
+        // A decoded byte needs at most six source bytes (a \uXXXX escape).
+        var encoded: [6 * mcp_shape.description_max_bytes]u8 = undefined;
+        if (value.length > encoded.len) return error.InvalidObservation;
+        const text = encoded[0..@intCast(value.length)];
+        if (try scratch.readPositionalAll(io, text, value.start) != text.len) return error.TruncatedResult;
+        var decoded = std.Io.Writer.fixed(&summary.description.bytes);
+        try mcp_document.writeDecoded(&decoded, text);
+        summary.description.len = decoded.end;
+    } else try summary.description.set(tool.name.slice());
+    try sink.feed("\n");
+    try sink.feed(Style.attention.code(colour));
+    try sink.feed("?");
+    try sink.feed(Style.normal.code(colour));
+    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
+    if (summary.description.len != 0) {
+        try indented.feed(" ");
+        var label: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .label } };
+        try label.feed(summary.description.slice());
+        try label.finish();
+    }
+    try indented.feed("\nTool: ");
+    try indented.feed(tool.name.slice());
+    try indented.feed("\nServer: ");
+    try indented.feed(tool.server.?.slice());
+    try indented.feed("\nArguments:\n");
+    var lines: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true, .line_start = true };
+    var escaped: Escaped(@TypeOf(&lines)) = .{ .sink = &lines, .text = .{ .mode = .multiline } };
+    try reader.seekTo(0);
+    while (true) {
+        const bytes = reader.interface.peekGreedy(1) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        try escaped.feed(bytes);
+        reader.interface.toss(bytes.len);
+    }
+    try escaped.finish();
+    try lines.finish();
+    try indented.feed("\n");
+    try indented.finish();
+    return summary;
 }
 
 /// The request block from an Action's arguments JSON in `scratch`.
 fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !ActionSummary {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
-    const Source = struct {
-        reader: *std.Io.Reader,
-        pub fn peek(self: *@This()) !?u8 {
-            return self.reader.peekByte() catch |err| switch (err) {
-                error.EndOfStream => null,
-                else => return err,
-            };
-        }
-        pub fn take(self: *@This()) !u8 {
-            return self.reader.takeByte();
-        }
-    };
-    var source: Source = .{ .reader = &reader.interface };
+    var source: ArgumentSource = .{ .reader = &reader.interface };
     const arguments = try tools.inspectBashArguments(&source) orelse return error.InvalidBashArguments;
     try reader.seekTo(0);
     // What it is for, then the exact command; the description is the
@@ -811,7 +933,9 @@ fn request(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool) !Actio
     }
     try indented.feed("\n");
     try indented.finish();
-    return .{ .description = arguments.description };
+    var summary: ActionSummary = .{};
+    try summary.description.set(arguments.description.slice());
+    return summary;
 }
 
 test "an Action's command and stdin lines carry the content mark, so neither can pass for a field" {
@@ -1566,4 +1690,193 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
         "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n! Find “Io” in ziglang.org/x — Failed\n\n✓ Search the web\n",
         sink.bytes[0..sink.length],
     );
+}
+
+test "MCP approval renders object arguments and adopts the same Allow once and Deny choices" {
+    const Screen = @import("SessionScreen.zig");
+    const Consent = @import("session_consent.zig");
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
+    defer scratch.close(std.testing.io);
+    const action = try tmp.dir.createFile(std.testing.io, "action", .{ .read = true });
+    defer action.close(std.testing.io);
+    const Sink = struct {
+        file: std.Io.File,
+        offset: u64 = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.file.writePositionalAll(std.testing.io, bytes, self.offset);
+            self.offset += bytes.len;
+        }
+    };
+    var tool: ActionTool = .{ .name = .{}, .server = .{} };
+    try tool.name.set("fetch_page");
+    try tool.server.?.set("docs");
+    const Case = struct { arguments: []const u8, description: []const u8 };
+    for ([_]Case{
+        .{ .arguments = "{}", .description = "fetch_page" },
+        .{ .arguments = " { \"q\" : [1, null] } ", .description = "fetch_page" },
+        .{ .arguments = "{\"rui_call_description\":\"Fetch \\u00e9\\npage\",\"url\":\"https://example.test\"}", .description = "Fetch é\npage" },
+        .{ .arguments = "{\"rui_call_description\":\"" ++ @as([200]u8, @splat('a')) ++ "\"}", .description = &@as([200]u8, @splat('a')) },
+        .{ .arguments = "{\"rui_call_description\":\"" ++ @as([201]u8, @splat('a')) ++ "\"}", .description = "fetch_page" },
+    }) |case| {
+        try scratch.setLength(std.testing.io, 0);
+        try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
+        try action.setLength(std.testing.io, 0);
+        var sink: Sink = .{ .file = action };
+        const summary = try requestForTool(std.testing.io, scratch, &sink, false, &tool);
+        try std.testing.expectEqualStrings(case.description, summary.description.slice());
+        var rendered: [2048]u8 = undefined;
+        const count = try action.readPositionalAll(std.testing.io, &rendered, 0);
+        try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], "\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ ") != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], case.arguments) != null);
+        try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], "\n  $ ") == null);
+        screen.releaseAction();
+        screen.consent = null;
+        try screen.adopt(std.testing.io, action, 7, true);
+        try std.testing.expect(screen.consent.?.presentation == .complete);
+        var pending = screen.consent.?;
+        var projection = Consent.project(pending, .{ .action_page = true, .read = true }, false);
+        try std.testing.expect(Consent.offered(pending, projection.approval).? == .allow_once);
+        pending.highlight = .deny;
+        projection = Consent.project(pending, .{ .action_page = true, .read = true }, false);
+        try std.testing.expect(Consent.offered(pending, projection.approval).? == .deny);
+    }
+}
+
+test "MCP approval marks argument lines escapes controls and refuses a viewport preview" {
+    const Screen = @import("SessionScreen.zig");
+    const Consent = @import("session_consent.zig");
+    const Viewport = @import("ConversationViewport.zig");
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
+    defer scratch.close(std.testing.io);
+    const action = try tmp.dir.createFile(std.testing.io, "action", .{ .read = true });
+    defer action.close(std.testing.io);
+    const Sink = struct {
+        file: std.Io.File,
+        offset: u64 = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.file.writePositionalAll(std.testing.io, bytes, self.offset);
+            self.offset += bytes.len;
+        }
+    };
+    var tool: ActionTool = .{ .name = .{}, .server = .{} };
+    try tool.name.set("fetch_page");
+    try tool.server.?.set("docs");
+    const prefix = "{\n\"rui_call_description\":\"Fetch \\u001b[2J\",\n\"body\":\"";
+    try scratch.writePositionalAll(std.testing.io, prefix, 0);
+    // Literal bidi content is valid JSON, but cannot direct the terminal.
+    try scratch.writePositionalAll(std.testing.io, "‮", prefix.len);
+    var at: u64 = prefix.len + "‮".len;
+    const fill: [4096]u8 = @splat('a');
+    while (at < Viewport.capacity + 4096) : (at += fill.len) try scratch.writePositionalAll(std.testing.io, &fill, at);
+    try scratch.writePositionalAll(std.testing.io, "\"\n}", at);
+    var sink: Sink = .{ .file = action };
+    _ = try requestForTool(std.testing.io, scratch, &sink, false, &tool);
+    var beginning: [512]u8 = undefined;
+    const count = try action.readPositionalAll(std.testing.io, &beginning, 0);
+    const shown = beginning[0..count];
+    try std.testing.expect(std.mem.indexOf(u8, shown, "\x1b") == null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "‮") == null);
+    try std.testing.expect(std.mem.indexOf(u8, shown, "\n  │ \"rui_call_description\"") != null);
+    try std.testing.expect(sink.offset > Viewport.capacity);
+    try screen.adopt(std.testing.io, action, 9, true);
+    try std.testing.expect(screen.consent.?.presentation == .preview);
+    const projection = Consent.project(screen.consent, .{ .action_page = true, .read = true }, false);
+    try std.testing.expect(projection.approval == .preview);
+    try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
+}
+
+test "MCP ask approval uses the frozen server after its Session offer changes" {
+    const store_module = @import("store.zig");
+    const records = comptime [_]tools.Record{ tools.record(.bash).*, .{
+        .name = "fetch_page",
+        .owner = .mcp,
+        .server = "docs",
+        .description = "Fetch a page.",
+        .input_schema = "{\"type\":\"object\"}",
+    }, tools.record(.message_agent).*, tools.record(.start_agent).*, tools.record(.web_search).* };
+    const digests = comptime blk: {
+        @setEvalBranchQuota(1_000_000);
+        var out: [records.len][32]u8 = undefined;
+        for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
+        break :blk out;
+    };
+    const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+    defer storage.close() catch unreachable;
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var command = try store_module.testingCompleteConfiguration("approval-mcp", "", try store_module.testingCanonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    command.configuration.tools = try .of(&.{"fetch_page"});
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const configured = storage.configure(&command, .{});
+    try std.testing.expect(configured == .accepted);
+    const session = configured.accepted.session;
+    try store_module.testingSubmitMessage(&storage, &tmp, "approval-input", "approval-input", session.slice(), "fetch");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try store_module.settleCallsForTesting(&storage, &tmp, model, "approval-calls", &.{
+        .{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    });
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("approval-remove");
+    update.session = session;
+    update.configuration.tools = try .of(&.{"bash"});
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    const report = try store_module.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
+    defer std.testing.allocator.free(report);
+    const scratch = try tmp.dir.createFile(std.testing.io, "approval-scratch", .{ .read = true });
+    defer scratch.close(std.testing.io);
+    try scratch.writePositionalAll(std.testing.io, report, 0);
+    const decoded = try protocol_reply.CurrentReply.decode(std.testing.io, scratch, session.slice(), .{ .report = .{ .bytes = report.len } });
+    const observed = &decoded.current;
+    const action = observed.first_action.?;
+    const tool = (try selectedActionTool(observed, std.testing.io, scratch, action)).?;
+    try std.testing.expect(try tool.runner() == .mcp);
+    try std.testing.expectEqualStrings("fetch_page", tool.name.slice());
+    try std.testing.expectEqualStrings("docs", tool.server.?.slice());
+    const reference = try storage.actionArguments(session.slice(), action);
+    var saved_arguments: store_module.ContentReader = undefined;
+    saved_arguments.open(try storage.openContent(reference));
+    defer saved_arguments.close();
+    var arguments: [16]u8 = undefined;
+    const count = try saved_arguments.read(0, &arguments);
+    try std.testing.expectEqualStrings("{}", arguments[0..count]);
+    try scratch.setLength(std.testing.io, 0);
+    try scratch.writePositionalAll(std.testing.io, arguments[0..count], 0);
+    const Sink = struct {
+        bytes: [512]u8 = undefined,
+        len: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.len..][0..bytes.len], bytes);
+            self.len += bytes.len;
+        }
+    };
+    var sink: Sink = .{};
+    const summary = try requestForTool(std.testing.io, scratch, &sink, false, &tool);
+    try std.testing.expectEqualStrings("fetch_page", summary.description.slice());
+    try std.testing.expectEqualStrings("\n? fetch_page\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ {}\n", sink.bytes[0..sink.len]);
+    try std.testing.expect((try storage.nextCoreWork()) == null);
+    var allow: protocol.PermissionDecisionCommand = .{ .action_id = action, .decision = .allow_once };
+    try allow.key.set("approval-allow");
+    allow.session = session;
+    try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
+    try std.testing.expectEqual(action, (try storage.nextCoreWork()).?.mcp.action_id);
 }

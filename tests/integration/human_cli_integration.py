@@ -47,7 +47,7 @@ ALLOW = b"\r"
 CHOICE_ROW = re.compile(r"^ *(?:› )?(?:Allow once|Allow|A) +(?:› )?(?:Deny|D) *$", re.M)
 # What the line under a draft beside an Action says once Enter there denies
 # the Action and sends the draft as the reason.
-REASON = "enter denies the command and sends this"
+REASON = "enter denies the call and sends this"
 # The refusal of an Enter there before such a frame was offered.
 REASON_NOT_READY = "! Not ready; nothing denied · " + REASON
 
@@ -118,12 +118,12 @@ def json_strings(value):
 
 
 # The bypass default is explained only where /status reports it.
-BYPASS_STATUS = "bypass · Bash runs without asking"
+BYPASS_STATUS = "bypass · Bash and MCP run without asking"
 
 
 def permission_row(frame, mode):
     """The exact /status row, unwrapped from a narrow page."""
-    value = BYPASS_STATUS if mode == "bypass" else f"{mode} · Bash asks first"
+    value = BYPASS_STATUS if mode == "bypass" else f"{mode} · Bash and MCP ask first"
     return f" Permissions {value} Tools " in " ".join(frame.split())
 
 
@@ -995,7 +995,7 @@ def terminal_wait_oracles():
     # Command results: identity, readiness and absence describe one fresh
     # committed frame, not readiness or a Session borrowed from earlier ones.
     session = 's/é"\n'
-    page = ["Browsing · Esc returns", ' Status · s/é\\"\\n', "   Permissions     bypass · Bash runs without asking", " Work", "   Finished", "", "›"]
+    page = ["Browsing · Esc returns", ' Status · s/é\\"\\n', "   Permissions     bypass · Bash and MCP run without asking", " Work", "   Finished", "", "›"]
     def frame_after(command, chunks, read, typed=None):
         reader, peer = socket.socketpair()
         with reader, peer:
@@ -1357,7 +1357,7 @@ def overview_cases():
         started = fixture.observe(store, record.stem)["target"]
         status = status_frame(master, started)
         # The Session line under the input names the label, model and ask mode.
-        assert status_row(status, "Name", "Folder") == "lane four" and "lane four · gpt-6-luna" in status and "asks before Bash" in status and permission_row(status, "ask"), status
+        assert status_row(status, "Name", "Folder") == "lane four" and "lane four · gpt-6-luna" in status and "asks before Bash/MCP" in status and permission_row(status, "ask"), status
         # Esc leaves the page, then the conversation for the overview.
         keyed_frame(master, b"\x1b", lambda screen, x, y: not screen.startswith("Browsing") and composer_ready(screen, x, y))
         listed = overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
@@ -2778,7 +2778,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         opening = read_terminal(master, "› ")
         assert all(noise not in opening for noise in ("Workspace:", "Session:", "Store:", "/help commands")), opening
         # The model shows once, on the Session line, with the ask mode.
-        assert f"{reference} · gpt-6-sol · " in opening and "asks before Bash" in opening, opening
+        assert f"{reference} · gpt-6-sol · " in opening and "asks before Bash/MCP" in opening, opening
         def hold_arguments(response):
             if not arguments_held.is_set():
                 arguments_held.set()
@@ -3984,7 +3984,7 @@ def long_input_case(home, store, workspace, endpoint, host):
         assert "Bash runs without" not in greeting, ("bypass is quiet", greeting)
         assert "Bash commands can run without asking you" not in greeting, greeting
         binding = terminal_step(master, "/status", " Status · ", composer=True)
-        assert permission_row(binding, "bypass") and "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash" not in binding, binding
+        assert permission_row(binding, "bypass") and "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" not in binding, binding
         return_to_live(master)
         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 2048, 0, 0))
         before = len(endpoint.requests)
@@ -6781,13 +6781,13 @@ def main(selected="all"):
             assert "\n› first input" in greeting and "\nfirst answer" in greeting, greeting
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
-            assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash" in binding and permission_row(binding, "ask"), binding
+            assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
             help_text = terminal_step(master, "/help", "/result KEY", composer=True)
             for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "Ctrl-R"):
                 assert command in help_text, help_text
             assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
             # This Session asks: help must not describe the bypass default as its mode.
-            assert "without approval" not in help_text and "\nThat line ends with asks before Bash when Bash asks first\n" in help_text, help_text
+            assert "without approval" not in help_text and "\nThat line ends with asks before Bash/MCP when Bash or MCP asks first\n" in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in result, result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
@@ -6798,7 +6798,7 @@ def main(selected="all"):
                 terminal_step(master, command, notice, composer=True)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
             terminal_step(master, "/setup", "gpt-6-luna", composer=True)
-            terminal_step(master, "/status", "ask · Bash asks first", composer=True)
+            terminal_step(master, "/status", "ask · Bash and MCP ask first", composer=True)
             assert not credential.exists(), "unsupported in-session login created credentials"
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
             terminal_step(master, "/setup --model gpt-5.5", "Saved defaults for future Sessions", composer=True)
@@ -6814,7 +6814,7 @@ def main(selected="all"):
                     assert "Supported model IDs:" in rejected and "See rui session configure --help." in rejected, rejected
                     assert "active Session unchanged" not in rejected, rejected
                 assert interactive_saved.read_bytes() == cleared_preferences
-            terminal_step(master, "/status", "ask · Bash asks first", composer=True)
+            terminal_step(master, "/status", "ask · Bash and MCP ask first", composer=True)
             active = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             assert active["model"] == "gpt-6-sol" and active["permission_mode"] == "ask", active
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
@@ -6830,7 +6830,7 @@ def main(selected="all"):
             terminal_step(master, '/setup --store "unfinished', "Usage: /setup", composer=True)
             assert defaults(preferences_home)["store"] == str(quoted_store.resolve())
             terminal_step(master, f'/setup --store "{store}"', "Saved defaults for future Sessions", composer=True)
-            terminal_step(master, "/status", "ask · Bash asks first", composer=True)
+            terminal_step(master, "/status", "ask · Bash and MCP ask first", composer=True)
             assert fixture.command("session", "inspect", "--store", store,
                 "--session", session)["session"]["model"] == "gpt-6-sol"
             terminal_step(master, "/configure --session human/other", "Usage: /configure", composer=True)
@@ -7190,8 +7190,8 @@ def main(selected="all"):
             inspection = settle_screen(master, quiet=0.5)
             # The JSON string wraps across page rows; rejoin as for exports.
             rows = inspection.split("\n")
-            start = next(index for index, row in enumerate(rows) if row.startswith("Bash arguments: "))
-            shown_arguments = rows[start].removeprefix("Bash arguments: ")
+            start = next(index for index, row in enumerate(rows) if row.startswith("Arguments: "))
+            shown_arguments = rows[start].removeprefix("Arguments: ")
             previous = rows[start]
             for row in rows[start + 1:]:
                 if not row or row.startswith("Approval paused"):

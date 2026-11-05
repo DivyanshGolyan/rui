@@ -49,13 +49,22 @@ pub const CoreNames = struct {
 /// never the current catalog. The call is point-seeked by parent and ordinal;
 /// accepted tool names fit the inline content payload and compare exactly.
 pub fn mcpCallSql(comptime action_alias: []const u8, comptime operation_alias: []const u8) []const u8 {
-    return "EXISTS(SELECT 1 FROM model_tool_call tool_call " ++
+    return "EXISTS(" ++ mcpCallSelectSql(action_alias, operation_alias, "1") ++ ")";
+}
+
+/// The frozen MCP server for an Action, or SQL NULL for a built-in call.
+pub fn mcpServerSql(comptime action_alias: []const u8, comptime operation_alias: []const u8) []const u8 {
+    return "(" ++ mcpCallSelectSql(action_alias, operation_alias, "tool.server") ++ ")";
+}
+
+fn mcpCallSelectSql(comptime action_alias: []const u8, comptime operation_alias: []const u8, comptime selected: []const u8) []const u8 {
+    return "SELECT " ++ selected ++ " FROM model_tool_call tool_call " ++
         "JOIN content name ON name.content_id=tool_call.name_content_id " ++
         "JOIN session_revision revision ON revision.session_ref=" ++ operation_alias ++ ".session_ref AND revision.revision=" ++ operation_alias ++ ".settings_revision " ++
         "JOIN tool_set_member member ON member.tool_set_id=revision.tool_set_id " ++
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE tool_call.operation_id=" ++ action_alias ++ ".parent_operation_id AND tool_call.call_ordinal=" ++ action_alias ++ ".call_ordinal " ++
-        "AND @bytes(tool.name)=name.payload AND tool.owner='mcp')";
+        "AND @bytes(tool.name)=name.payload AND tool.owner='mcp'";
 }
 
 /// Calls that must never enter Bash's Attempt path.

@@ -2412,7 +2412,7 @@ def visible_stream_handoff_cases(state, library):
                 else:
                     arm.unlink()
                     # Long pages open at their top; the exact Action's inspection starts there.
-                    expected = "Bash arguments: " if phase == "permission" else f" Status · {session}"
+                    expected = "Arguments: " if phase == "permission" else f" Status · {session}"
                     page = human.read_terminal(master, expected)
                     shown = human.current_screen(master)
                     assert expected in shown or expected in page, (phase, shown)

@@ -1490,7 +1490,7 @@ const reason_not_ready = "! Not ready; nothing denied · " ++ Screen.deny_words;
 /// Why Enter in the draft beside an Action sent nothing.
 fn reasonNotice(self: *const Self, letter: bool) []const u8 {
     if (self.terminal.screen.liveApproval(self.commandActive()) != .reason) return self.decisionNotice();
-    return if (letter) "! Use ←→ and Enter to choose; a message denies the command." else reason_not_ready;
+    return if (letter) "! Use ←→ and Enter to choose; a message denies the call." else reason_not_ready;
 }
 
 /// One input in the draft, with the offer this input spent. Beside an Action
@@ -2268,7 +2268,7 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
         } else {
             try std.testing.expect(self.input.queuedCommand() == null);
             try std.testing.expectEqualStrings("a", self.input.composition().bytes);
-            try std.testing.expectEqualStrings(if (change == .none) "! Use ←→ and Enter to choose; a message denies the command." else "! Action needs a decision; Esc returns to it. Draft retained.", self.notice.?);
+            try std.testing.expectEqualStrings(if (change == .none) "! Use ←→ and Enter to choose; a message denies the call." else "! Action needs a decision; Esc returns to it. Draft retained.", self.notice.?);
         }
         // Esc returns to the choice, which needs fresh input again.
         try sendKeys(&self, "\x07");
@@ -2579,7 +2579,7 @@ test "the draft beside an offered Action sends its line first and denies only th
     try std.testing.expectEqual(ConsentPolicy.Projection{ .approval = .reason }, held.screen.selected);
     try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xa, .choice = .deny }, held.screen.offered().?);
     var storage: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("enter denies the command and sends this · esc back to the choice", lastRow(held.screen, &storage));
+    try std.testing.expectEqualStrings("enter denies the call and sends this · esc back to the choice", lastRow(held.screen, &storage));
     try sendKeys(&held.self, "\r");
     // The Action is consumed and left, and the Message is the original; its
     // acceptance begins the denial.
@@ -2737,7 +2737,7 @@ test "a draft of one choice letter or a slash command beside an offered Action d
             try std.testing.expectEqualStrings("Work continues while you compose.", held.self.notice.?);
             try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
         } else {
-            try std.testing.expectEqualStrings("! Use ←→ and Enter to choose; a message denies the command.", held.self.notice.?);
+            try std.testing.expectEqualStrings("! Use ←→ and Enter to choose; a message denies the call.", held.self.notice.?);
             try std.testing.expectEqualStrings(draft, held.self.input.composition().bytes);
         }
     }
@@ -3596,7 +3596,7 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     try showStatus(held, true, "fix-safari-export");
     var storage: [512]u8 = undefined;
     try std.testing.expectEqualStrings(" › Effort          high  model default", rowWith(held.screen, "Effort ", &storage).?);
-    try std.testing.expectEqualStrings("   Permissions     bypass · Bash runs without asking", rowWith(held.screen, "Permissions", &storage).?);
+    try std.testing.expectEqualStrings("   Permissions     bypass · Bash and MCP run without asking", rowWith(held.screen, "Permissions", &storage).?);
     // Shift-Down scrolls as before; the mark stays.
     try sendKeys(&held.self, "\x1b[1;2B");
     try held.settle();

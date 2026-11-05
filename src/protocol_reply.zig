@@ -678,12 +678,17 @@ pub const Current = struct {
             parent_operation: Id,
             call_ordinal: Count,
             tool: JsonString(protocol.max_tool_name_bytes),
+            server: OmittableJson(JsonString(64)) = .{},
             permission_revision: Id,
             /// `core`: a core tool's call, which settlement authorizes at
             /// once with no permission decision.
             authorization: JsonEnum(enum { pending, bypass, allow_once, core }),
             call_id: Reference,
             arguments: Reference,
+
+            pub fn jsonStringify(self: @This(), jw: anytype) !void {
+                try Current.writeObject(self, jw);
+            }
         },
         resolved: struct {
             presentation: JsonToolPresentation,
@@ -982,6 +987,9 @@ fn AttentionRows(comptime tag: std.meta.Tag(Current.Attention)) type {
                 if ((tag == .resolved or tag == .rejected) and row.code.slice().len == 0) return error.InvalidObservation;
                 if (tag == .unresolved) {
                     if (!protocol.validToolName(row.tool.slice())) return error.InvalidObservation;
+                    if (row.server.value) |server| {
+                        if (!protocol.validToolName(server.slice()) or std.meta.stringToEnum(protocol.BuiltInTool, row.tool.slice()) != null) return error.InvalidObservation;
+                    }
                     const p = row.presentation.value;
                     if (p.publication_position != null or p.code != (if (row.authorization.value == .pending) protocol.ToolPresentation.Code.pending_permission else .unresolved)) return error.InvalidObservation;
                 }
@@ -3262,7 +3270,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
-        try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i });
+        try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",{s}\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i, if (i == 0) "fetch_page" else "bash", if (i == 0) "\"server\":\"docs\"," else "" });
         try writer.writeAll(reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":\"Run parser tests\",\"code\":\"pending_permission\",\"publication_position\":null}}");
     }
     try writer.writeAll("],\"resolved\":[");
@@ -3300,6 +3308,10 @@ test "Current facts traverse every attention row and preserve metadata with fixe
             const i = self.counts[kind];
             switch (attention) {
                 .unresolved => |row| {
+                    if (i == 0) {
+                        try std.testing.expectEqualStrings("fetch_page", row.tool.slice());
+                        try std.testing.expectEqualStrings("docs", row.server.value.?.slice());
+                    } else try std.testing.expect(row.server.value == null);
                     try std.testing.expectEqual(@as(u64, 31 + i), row.action.value);
                     try std.testing.expectEqual(@as(u64, 19), row.parent_operation.value);
                     try std.testing.expectEqual(@as(u64, i), row.call_ordinal.value);
