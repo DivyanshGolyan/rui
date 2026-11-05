@@ -32,7 +32,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
-    .{ .schema_version = 54, .digest = 0xa1d5523eb32e40d8 },
+    .{ .schema_version = 54, .digest = 0x6ed9b1d6cf75e1cb },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -123,7 +123,8 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
         },
     },
-    // Schema 54: the stops an attached child owes (D38).
+    // Schema 54: the stops an attached child owes (D38) and the endings
+    // its parent is owed (D39).
     // Then (8b): each Store gets a random store_id. On MySQL,
     // store_owner and content_chunk are new; each content's payload moves
     // into chunks of content_chunk_bytes (chunk.i reaches 9999, past the
@@ -142,6 +143,8 @@ pub const migrations = [_]Migration{
             "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_before_54",
             "DROP TABLE store_meta_before_54",
             "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
+            "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
         },
         .mysql = &.{
             "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n PRIMARY KEY(child_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -160,6 +163,8 @@ pub const migrations = [_]Migration{
             "ALTER TABLE action_operation ADD COLUMN action_operation_session_results_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN acceptance_position IS NOT NULL THEN session_ref END) STORED, ADD COLUMN action_operation_approval_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN approval_position IS NOT NULL THEN session_ref END) STORED, ADD COLUMN action_operation_executable_lead BIGINT GENERATED ALWAYS AS (CASE WHEN authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0 THEN action_id END) STORED, ADD COLUMN action_operation_unresolved_attempt_lead BIGINT GENERATED ALWAYS AS (CASE WHEN resolution_code IS NULL AND attempt_ordinal=1 THEN action_id END) STORED, DROP INDEX action_operation_session_results, ADD INDEX action_operation_session_results(action_operation_session_results_lead,parent_operation_id,acceptance_position), DROP INDEX action_operation_approval, ADD INDEX action_operation_approval(action_operation_approval_lead,approval_position), DROP INDEX action_operation_executable, ADD INDEX action_operation_executable(action_operation_executable_lead), DROP INDEX action_operation_unresolved_attempt, ADD INDEX action_operation_unresolved_attempt(action_operation_unresolved_attempt_lead)",
             "ALTER TABLE session ADD COLUMN session_parent_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN parent_ref IS NOT NULL THEN parent_ref END) STORED, ADD INDEX parent_ref(parent_ref)",
             "ALTER TABLE session DROP INDEX session_parent, ADD INDEX session_parent(session_parent_lead)",
+            "CREATE TABLE session_ending_owed(\n turn_id BIGINT NOT NULL,\n delivered BIGINT NOT NULL,\n PRIMARY KEY(turn_id),\n FOREIGN KEY(turn_id) REFERENCES turn(turn_id),\n CHECK(turn_id>0),\n CHECK(delivered BETWEEN 0 AND 1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
         },
     },
 };
@@ -688,6 +693,22 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
+        // An attached child's Turn ended, and its parent is owed a Message
+        // saying how (D39, D139); the Host delivers it, which marks the row
+        // delivered (the Store never deletes, D202). Host work, not a
+        // Session's state: no reader of a Session reads it.
+        .name = "session_ending_owed",
+        .columns = &.{
+            .{ .name = "turn_id", .type = .int, .check = "turn_id>0" },
+            .{ .name = "delivered", .type = .int, .check = "delivered BETWEEN 0 AND 1" },
+        },
+        .primary_key = &.{"turn_id"},
+        .foreign_keys = &.{
+            references("turn_id", "turn", &.{"turn_id"}),
+        },
+        .without_rowid = true,
+    },
+    .{
         .name = "model_interruption_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
@@ -978,6 +999,8 @@ pub const indexes = [_]Index{
     .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
     .{ .name = "session_stop_turn", .table = "session_stop", .columns = &.{"selected_turn_id"} },
     .{ .name = "session_parent", .table = "session", .columns = &.{"parent_ref"}, .where = "parent_ref IS NOT NULL" },
+    // The Host's next owed ending, among the delivered ones.
+    .{ .name = "session_ending_open", .table = "session_ending_owed", .columns = &.{ "delivered", "turn_id" } },
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
     .{ .name = "action_operation_sender_handle", .table = "action_operation", .columns = &.{"sender_handle"}, .unique = true, .where = "sender_handle IS NOT NULL" },
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },

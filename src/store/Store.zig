@@ -857,6 +857,20 @@ pub const Store = struct {
 
     /// The core's next work, or null: a stop an attached child owes
     /// (D38), else the next core tool call to run (D24).
+    /// Delivers the owed child ending (D39) `nextCoreWork` names, or only
+    /// settles one its parent's stop caused (D139).
+    pub fn deliverChildEnding(self: *Store, turn_id: u64, faults: Faults) !bool {
+        return self.queue().write(deliverChildEndingHeld, .{ self, turn_id, faults });
+    }
+
+    fn deliverChildEndingHeld(self: *Store, turn_id: u64, faults: Faults) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, faults)));
+    }
+
     pub fn nextCoreWork(self: *Store) !?CoreWork {
         return self.queue().run(nextCoreWorkHeld, .{self});
     }
