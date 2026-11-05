@@ -191,34 +191,6 @@ pub const max_tool_names_json_bytes = 2 + max_tool_list_name_bytes + 2 * max_too
 pub const BuiltInTool = built_in_tool.BuiltInTool;
 pub const ToolSelection = built_in_tool.Selection;
 
-/// The longest JSON list of tool names a report or row writes.
-pub const max_tool_selection_json_bytes = blk: {
-    var bytes: usize = "[]".len;
-    for (std.enums.values(BuiltInTool)) |tool| bytes += @tagName(tool).len + "\"\",".len;
-    break :blk bytes - 1;
-};
-
-/// Writes `tools` as a JSON list of names, in the catalog's order, into
-/// `buffer`, which holds `max_tool_selection_json_bytes`.
-pub fn toolSelectionJson(tools: ToolSelection, buffer: *[max_tool_selection_json_bytes]u8) []const u8 {
-    var length: usize = 0;
-    buffer[length] = '[';
-    length += 1;
-    for (std.enums.values(BuiltInTool)) |tool| if (tools.contains(tool)) {
-        if (length != 1) {
-            buffer[length] = ',';
-            length += 1;
-        }
-        buffer[length] = '"';
-        @memcpy(buffer[length + 1 ..][0..@tagName(tool).len], @tagName(tool));
-        length += 1 + @tagName(tool).len;
-        buffer[length] = '"';
-        length += 1;
-    };
-    buffer[length] = ']';
-    return buffer[0 .. length + 1];
-}
-
 /// The built-in tool `name` names, or null.
 pub fn builtInTool(name: []const u8) ?BuiltInTool {
     return std.meta.stringToEnum(BuiltInTool, name);
@@ -1037,7 +1009,7 @@ pub const SessionRow = struct {
     workspace: Bounded(max_workspace_bytes) = .{},
     provider: Provider = .codex,
     model: Bounded(max_model_bytes) = .{},
-    tools: ToolSelection = .empty,
+    tools: ToolsField = .{ .state = .value },
     permission_mode: PermissionMode = .ask,
     label: ?Bounded(max_label_bytes) = null,
     created_at: u64 = 0,
@@ -1097,13 +1069,23 @@ pub const SessionRow = struct {
     };
 
     pub fn writeJson(self: *const SessionRow, out: *std.Io.Writer) !void {
-        var tools_buffer: [max_tool_selection_json_bytes]u8 = undefined;
+        var tools_buffer: [max_tool_names_json_bytes]u8 = undefined;
+        var tools_writer = std.Io.Writer.fixed(&tools_buffer);
+        try tools_writer.writeByte('[');
+        var names = self.tools.iterator();
+        var first = true;
+        while (names.next()) |name| {
+            if (!first) try tools_writer.writeByte(',');
+            first = false;
+            try tools_writer.print("\"{s}\"", .{name});
+        }
+        try tools_writer.writeByte(']');
         const fields: Fields = .{
             .reference = self.reference.slice(),
             .workspace = self.workspace.slice(),
             .provider = self.provider,
             .model = self.model.slice(),
-            .tools = toolSelectionJson(self.tools, &tools_buffer),
+            .tools = tools_writer.buffered(),
             .permission_mode = self.permission_mode,
             .label = if (self.label) |*label| label.slice() else null,
             .created_at = self.created_at,
