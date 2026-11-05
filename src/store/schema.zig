@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 53;
+pub const schema_version: u32 = 54;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -31,7 +31,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
-    .{ .schema_version = 53, .digest = 0xf92004682e6bd268 },
+    .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
+    .{ .schema_version = 54, .digest = 0x7661116fe0eaac05 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -108,8 +109,7 @@ pub const migrations = [_]Migration{
             "CREATE TABLE host_catalog(\n slot BIGINT NOT NULL,\n tool_set_id BIGINT NOT NULL,\n PRIMARY KEY(slot),\n FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),\n CHECK(slot=1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
-    // Schema 53: a Session's parent (D27), the stops an attached child
-    // owes (D38), and the endings its parent is owed (D39).
+    // Schema 53: a Session's parent (D27).
     .{
         .from = 52,
         .sqlite = &.{
@@ -118,12 +118,21 @@ pub const migrations = [_]Migration{
             "INSERT INTO session(session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key) SELECT session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key FROM session_before_53",
             "DROP TABLE session_before_53",
             "CREATE INDEX session_workspace_list ON session(workspace_digest,created_seq)",
+        },
+        .mysql = &.{
+            "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
+        },
+    },
+    // Schema 54: the stops an attached child owes (D38) and the endings
+    // its parent is owed (D39).
+    .{
+        .from = 53,
+        .sqlite = &.{
             "CREATE TABLE session_stop_owed(\n child_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n cause_ref TEXT NOT NULL REFERENCES session(session_ref),\n cause_position INTEGER NOT NULL CHECK(cause_position>0)\n) STRICT, WITHOUT ROWID",
             "CREATE INDEX session_parent ON session(parent_ref) WHERE parent_ref IS NOT NULL",
             "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0)\n) STRICT, WITHOUT ROWID",
         },
         .mysql = &.{
-            "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
             "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n PRIMARY KEY(child_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE INDEX session_parent ON session(parent_ref)",
             "CREATE TABLE session_ending_owed(\n turn_id BIGINT NOT NULL,\n PRIMARY KEY(turn_id),\n FOREIGN KEY(turn_id) REFERENCES turn(turn_id),\n CHECK(turn_id>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
