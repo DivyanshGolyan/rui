@@ -93,7 +93,7 @@ comptime {
 
 /// The settings a live Session changes. Its model and sign-in never change,
 /// and its instructions come only from a shell.
-const live_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "output-schema", "text-output" }, false, true);
+const live_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "loaded-tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "output-schema", "text-output" }, false, true);
 
 /// Future defaults, as /setup saves them; /setup alone shows them.
 const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider", "reasoning-effort", "notifications", "clear-model", "store" }, true, false);
@@ -145,7 +145,7 @@ pub const conversation = Commands(ConversationName, .{
 
 /// What the overview's /configure holds for the next Session: a fresh
 /// Session's settings.
-const start_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "model", "provider" }, false, true);
+const start_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "loaded-tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "model", "provider" }, false, true);
 
 /// The overview's commands. /rename and /setup run as a conversation runs
 /// them; /rename names the selected Session.
