@@ -8,6 +8,7 @@ import { Rui } from "rui";
 const rui = await Rui.connect({
 	database: "/var/lib/myapp/rui-store",
 	provider: { baseUrl: "https://api.openai.com/v1", key: process.env.OPENAI_API_KEY },
+	tools: [{ name: "drift", url: "http://127.0.0.1:3000/mcp", bearerToken: process.env.MCP_TOKEN, callTimeoutMs: 30000 }],
 });
 rui.on("exit", ({ code, signal, restarting }) => console.warn("rui exited", { code, signal, restarting }));
 // ...
@@ -20,8 +21,8 @@ The `rui` package carries the client. The `rui` executable comes from the platfo
 (`rui-linux-x64`, `rui-linux-arm64` or `rui-darwin-arm64`, installed as optional dependencies), else from `rui` on `PATH`.
 Pass `binary` to `Rui.connect` to name one yourself.
 
-`Rui.connect` writes the Store, the provider key and a private runtime directory to the child's stdin.
-The key never reaches the child's argv, environment or disk.
+`Rui.connect` writes the Store, the provider key, MCP bearer tokens and a private runtime directory to the child's stdin.
+The key and tokens never reach the child's argv, environment or disk.
 The child gets only `PATH`, `HOME` and `TMPDIR` from your environment.
 Shell commands the agent runs execute as your user; Rui is not a sandbox.
 
