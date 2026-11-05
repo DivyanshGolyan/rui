@@ -1272,7 +1272,7 @@ test "an invalid-arguments result tells the model what was wrong" {
     };
     comptime std.debug.assert(cases.len == std.enums.values(BashProblem).len);
     for (cases) |case| {
-        const facts: CallFacts = .{ .tool = &bash_record, .bash = .{ .rejected = case[0] } };
+        const facts: CallFacts = .{ .tool = bash_record, .bash = .{ .rejected = case[0] } };
         try std.testing.expectEqualStrings(case[1], try rejectionResult(.invalid_arguments, &facts, &name, 4, @splat(0), &buffer));
     }
 }
