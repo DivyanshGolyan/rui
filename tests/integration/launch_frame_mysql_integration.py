@@ -148,8 +148,9 @@ def main():
         code = host.wait(timeout=20)
         assert code == 1, f"a fenced MySQL Store exited {code}, not 1: {frame_host.output(host)!r}"
         out, err = frame_host.output(host)
+        # stdout holds the readiness line, then exactly one named exit (D211).
         lines = out.decode().splitlines()
-        assert len(lines) == 1 and json.loads(lines[0])["rui_start_error"]["code"] == "store_fenced", \
+        assert len(lines) == 2 and lines[0].startswith("ready ") and json.loads(lines[1])["rui_start_error"]["code"] == "store_fenced", \
             f"missing named store_fenced exit: stdout={out!r} stderr={err[-4000:]!r}"
         print("MySQL launch frame: readiness, Session round trip, stable id, private credentials, store_locked, stdin close, store_fenced")
     finally:
