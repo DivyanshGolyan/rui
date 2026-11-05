@@ -1028,8 +1028,10 @@ test "a queued read's destination holds poison until the pass that steps it" {
             @memset(std.mem.asBytes(&second), 0);
             a.read(TestingRound.head, .{ .session_ref = session.slice() }, &first);
             try std.testing.expect(poisoned(std.mem.asBytes(&first)));
-            // Queuing it again steps the first: defined before `run`, as a network
-            // engine would not have it.
+            // Overflow the queue to force an automatic pass on every engine.
+            // SQLite may step earlier on rebind; MySQL has no cached handles.
+            var fillers: [a.queue.len - 1]TestingRound.head.Result = undefined;
+            for (&fillers) |*filler| a.read(TestingRound.head, .{ .session_ref = session.slice() }, filler);
             a.read(TestingRound.head, .{ .session_ref = session.slice() }, &second);
             try std.testing.expect(!poisoned(std.mem.asBytes(&first)));
             try std.testing.expectEqualSlices(u8, session.slice(), &first.head.ref);
@@ -1060,7 +1062,11 @@ test "a queued readInto's Found is pending until the pass that steps it" {
             var missing: store_access.Found = .found;
             configuration_domain.readSaved(&a, session.slice(), &current, &found);
             try std.testing.expectEqual(store_access.Found.pending, found);
-            // Queuing it again steps the first, which defines it before `run`.
+            // Fill with small rows in distinct stable destinations, rather
+            // than copying the 4.6 KiB configuration Row for every queue slot.
+            // Overflow forces a pass even without SQLite's rebind boundary.
+            var fillers: [a.queue.len - 1]TestingRound.head.Result = undefined;
+            for (&fillers) |*filler| a.read(TestingRound.head, .{ .session_ref = session.slice() }, filler);
             configuration_domain.readSaved(&a, "AAAAAA", &missing_current, &missing);
             try std.testing.expectEqual(store_access.Found.found, found);
             try std.testing.expectEqual(store_access.Found.pending, missing);
