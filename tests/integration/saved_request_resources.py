@@ -58,10 +58,11 @@ def capture(state, binary, label, size, repetition):
         observation = sample(process.pid)
         pathlib.Path(f"{gate}.release").touch()
         output, errors = process.communicate(timeout=20)
-        assert process.returncode != 0 and "FileNotFound" in errors, (output, errors)
         if label == "baseline":
+            assert process.returncode != 0 and "FileNotFound" in errors, (output, errors)
             handle = json.loads(output)["request"]
         else:
+            assert process.returncode == 6 and "[host_not_serving]" in errors, (output, errors)
             # The candidate announces its generated capture on stderr only.
             assert output == "", output
             announced = re.search(r"^request: (\S+) \(inspect: rui request inspect \1; "

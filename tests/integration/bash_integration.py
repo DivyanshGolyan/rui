@@ -236,7 +236,10 @@ def prove_stdin(state):
         "pathlib.Path('input.bin').write_bytes(sys.stdin.buffer.read())"
     )
     probe = "import os,stat; print('null' if stat.S_ISCHR(os.fstat(0).st_mode) else 'file'); print(len(os.read(0,1)))"
-    empty_send_error = "\nrui: failure during input_parse: EmptyMessageInput.\nStandard input was empty; provide Message text. Nothing was sent.\n"
+    empty_send_error = ("rui session send: Standard input was empty; provide Message text. "
+                        "Accepted: nonempty Message text on stdin. "
+                        "Next: Pipe or redirect a nonempty Message into this command. "
+                        "[message_empty]\n")
     retained_output_bytes = {"large": 524288, "over": 0, "null": 7, "missing": 7, "empty": 7,
                              "closed": 6, "timeout": 0, "empty-send": len(empty_send_error), "null-send": len(empty_send_error)}
     cases = [

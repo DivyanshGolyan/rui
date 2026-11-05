@@ -148,10 +148,10 @@ def expiry(fixture, row):
     tty = fixture.terminal()
     started = time.monotonic()
     chunks(tty, row["chunks"])
-    tty.finish(expected=1)
+    tty.finish(expected=2)
     assert time.monotonic() - started >= 1.8, "incomplete input expired before its two-second allowance"
     errors = (fixture.output / "stderr.bin").read_bytes()
-    assert b"IncompleteTerminalInput" in errors, ("incomplete sequence diagnostic", errors)
+    assert b"[terminal_input_incomplete]" in errors, ("incomplete sequence diagnostic", errors)
     assert fixture.endpoint.requests == [], "incomplete input submitted a Message"
     assert set((fixture.home / ".config/rui/requests").glob("*.json")) == fixture.capture_baseline, "incomplete input captured intent"
 

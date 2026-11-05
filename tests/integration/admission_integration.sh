@@ -132,8 +132,10 @@ wait_host_failure() {
         fi
         sleep 0.01
     done
-    if wait "$host_pid"; then
-        echo "effect-aware shutdown exited successfully" >&2
+    status=0
+    wait "$host_pid" || status=$?
+    if [ "$status" -ne 1 ]; then
+        echo "expected effect-aware shutdown with exit 1, got $status" >&2
         return 1
     fi
     host_pid=
@@ -191,7 +193,7 @@ try:
             raise RuntimeError('capture did not reach streamed temporary')
         time.sleep(.01)
     contender = subprocess.run(args, input=b'other', capture_output=True, timeout=5)
-    assert contender.returncode != 0 and b'RecordCaptureBusy' in contender.stderr
+    assert contender.returncode == 1 and b'[internal_unexpected]' in contender.stderr
     assert not record.exists()
 finally:
     writer.kill()
@@ -204,7 +206,7 @@ assert json.loads(record.read_text())['configuration']['instructions']['value'] 
 assert not temporary.exists()
 saved = record.read_bytes()
 duplicate = subprocess.run(args, input=b'replacement', capture_output=True, timeout=5)
-assert duplicate.returncode != 0 and b'RecordAlreadyExists' in duplicate.stderr
+assert duplicate.returncode == 1 and b'[internal_unexpected]' in duplicate.stderr
 assert record.read_bytes() == saved
 assert record.with_name('.' + record.name + '.capture.lock').exists()
 reply = json.loads(recovered.stdout)
@@ -216,11 +218,13 @@ PYCAPTURE
 )
 
 # The OS-held lock rejects a competing owner without relying on PID/socket state.
-if "$rui" host serve --store "$store" >"$state/competing.out" 2>"$state/competing.err"; then
-    echo "competing Host acquired the Store" >&2
+status=0
+"$rui" host serve --store "$store" >"$state/competing.out" 2>"$state/competing.err" || status=$?
+if [ "$status" -ne 6 ]; then
+    echo "expected competing Host failure with exit 6, got $status" >&2
     exit 1
 fi
-contains "$(cat "$state/competing.err")" "StoreAlreadyOwned"
+contains "$(cat "$state/competing.err")" "[store_locked]"
 
 # The alternate build mode needs a real artifact/recovery witness, not a
 # second copy of the complete ReleaseSafe fault matrix. Keep `full` opt-in.
@@ -338,7 +342,7 @@ host_pid=$drain_pid
 wait_host_failure
 host_pid=$extra_pid
 extra_pid=
-contains "$(cat "$drain_error")" "InjectedListenerFailure"
+contains "$(cat "$drain_error")" "[internal_unexpected]"
 PYTHONPATH="$root/tests/integration" python3 - "$rui" "$drain_store" <<'PY'
 import pathlib, sys
 import model_fixture as fixture
@@ -844,11 +848,13 @@ recovered_session=$(printf '%s' "$recovered" | session_id)
 # can acquire it after the operator-visible obstruction is removed.
 stop_host
 mkdir "$store/scratch/request-1-1.tmp"
-if "$rui" host serve --store "$store" >"$state/startup-type.out" 2>"$state/startup-type.err"; then
-    echo "Host admitted an owned temporary name with the wrong type" >&2
+status=0
+"$rui" host serve --store "$store" >"$state/startup-type.out" 2>"$state/startup-type.err" || status=$?
+if [ "$status" -ne 1 ]; then
+    echo "expected startup-type failure with exit 1, got $status" >&2
     exit 1
 fi
-contains "$(cat "$state/startup-type.err")" "UnexpectedIngressLeftover"
+contains "$(cat "$state/startup-type.err")" "[internal_unexpected]"
 require_test 'wrong-type startup refusal retains owned directory' -d "$store/scratch/request-1-1.tmp"
 rmdir "$store/scratch/request-1-1.tmp"
 start_host
@@ -872,11 +878,13 @@ require_test 'oversized Configure key creates no request record' ! -e "$records/
 # Caller-named creation is rejected before publishing a capture, not aliased.
 session128=$(python3 -c 'print("s" * 128)')
 for invalid_session in "$session128" direct/obsolete ABCDEF abcde abcdefg abcdei; do
-    if "$rui" session configure --store "$store" --record "$records/invalid-session.json" --key invalid-session --session "$invalid_session" --workspace "$root" --provider codex --model gpt-6-sol >"$state/bounds.out" 2>"$state/bounds.err"; then
-        echo "noncanonical Session was admitted: $invalid_session" >&2
+    status=0
+    "$rui" session configure --store "$store" --record "$records/invalid-session.json" --key invalid-session --session "$invalid_session" --workspace "$root" --provider codex --model gpt-6-sol >"$state/bounds.out" 2>"$state/bounds.err" || status=$?
+    if [ "$status" -ne 2 ]; then
+        echo "expected invalid Session failure with exit 2, got $status: $invalid_session" >&2
         exit 1
     fi
-    contains "$(cat "$state/bounds.err")" 'InvalidSession'
+    contains "$(cat "$state/bounds.err")" '[invalid_session_reference]'
     require_test 'invalid Session creates no request record' ! -e "$records/invalid-session.json"
 done
 
@@ -956,20 +964,26 @@ db.close()
 PY
 
 # Clients do not auto-start the Host or infer absence as a saved answer.
-if "$rui" request inspect --store "$store" --key first-key >"$state/no-host.out" 2>"$state/no-host.err"; then
-    echo "client auto-started an absent Host" >&2
+status=0
+"$rui" request inspect --store "$store" --key first-key >"$state/no-host.out" 2>"$state/no-host.err" || status=$?
+if [ "$status" -ne 6 ]; then
+    echo "expected absent Host failure with exit 6, got $status" >&2
     exit 1
 fi
+contains "$(cat "$state/no-host.err")" "[host_not_serving]"
+contains "$(cat "$state/no-host.err")" "rui host start --store \$'$store'."
 
 # Access is checked before ownership, and an incompatible Store is rejected
 # before its stale socket is reclaimed.
 insecure_store="$state/insecure-store"
 mkdir -m 755 "$insecure_store"
-if "$rui" host serve --store "$insecure_store" >"$state/insecure.out" 2>"$state/insecure.err"; then
-    echo "Host accepted an insecure Store directory" >&2
+status=0
+"$rui" host serve --store "$insecure_store" >"$state/insecure.out" 2>"$state/insecure.err" || status=$?
+if [ "$status" -ne 6 ]; then
+    echo "expected insecure Store failure with exit 6, got $status" >&2
     exit 1
 fi
-contains "$(cat "$state/insecure.err")" "InsecureDirectoryPermissions"
+contains "$(cat "$state/insecure.err")" "[store_unavailable]"
 
 wire_store="$state/wire-store"
 wire_ready="$state/wire-ready"
@@ -1001,9 +1015,11 @@ database.execute("UPDATE store_meta SET meta_value='future' WHERE meta_key='wire
 database.commit()
 database.close()
 PY
-if "$rui" host serve --store "$wire_store" >"$state/wrong-wire.out" 2>"$state/wrong-wire.err"; then
-    echo "Host accepted an incompatible wire version" >&2
+status=0
+"$rui" host serve --store "$wire_store" >"$state/wrong-wire.out" 2>"$state/wrong-wire.err" || status=$?
+if [ "$status" -ne 1 ]; then
+    echo "expected wrong-wire failure with exit 1, got $status" >&2
     exit 1
 fi
-contains "$(cat "$state/wrong-wire.err")" "WrongStoreVersion"
+contains "$(cat "$state/wrong-wire.err")" "[internal_unexpected]"
 require_test 'wrong wire version refuses before reclaiming stale socket' -S "$wire_socket"

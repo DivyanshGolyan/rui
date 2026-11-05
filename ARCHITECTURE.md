@@ -1931,14 +1931,19 @@ Reject unknown options, duplicate singleton options even when equal, conflicting
 An option value spelling `--help` remains data.
 Domain validation and saved rejection stay with the existing owners.
 
-Mutation input failures report their actual stage and cause, including stdin read, input parsing, content-file read, capture, Store resolution, endpoint construction, connect, upload and admission-response validation.
+CLI failures cross one catalog boundary and render a stable code with accepted inputs and a concrete repair when their cause is mapped.
+Unmapped legacy failures remain on an explicit shrink-only pending inventory, render `internal_unexpected` without a raw Zig name and exit 1.
+The detection owner distinguishes malformed Store paths (exit 2), unusable Store directories (exit 6) and a Store with no serving Host (`host_not_serving`, exit 6); the latter prints the exact `rui host start --store PATH` command.
+An unreachable Host is absent only when the Store lock is free; a missing or refused control socket while that lock is held is `host_stopping` (exit 5), with advice to wait for shutdown before restarting and retrying.
+Other transport failures while the lock is held, or a failed lock probe, do not establish either condition and retain their original classification.
 Missing input or endpoint paths never imply that no Host serves the selected Store.
 Failure after upload begins leaves admission unconfirmed; inspection or recovery must retain the original identity.
 
 #### Help and prerequisites
 
 Root help (`rui --help` or `rui -h`), resource help and operation help succeed with useful stdout and zero exit without a Host, credentials, preferences, TTY or state changes.
-Invalid fresh invocation exits 2 with a stderr diagnostic and relevant help path.
+Invalid fresh invocation exits 2 with a catalog stderr diagnostic naming the relevant flag or field, accepted inputs and repair.
+A positional Session ID on a command whose selector is a flag names `--to ID` or `--session ID` rather than mistaking the ID for Message text.
 
 The CLI derives exit status from admission certainty and the catalog remedy, not the rejection code alone:
 
@@ -1949,7 +1954,7 @@ The CLI derives exit status from admission certainty and the catalog remedy, not
 | 2 | Invalid fresh invocation; nothing was sent. Fix the invocation. |
 | 3 | Rui answered with a saved refusal. Correct the request; a resend needs a new key. |
 | 4 | Admission unconfirmed. Run `rui request recover HANDLE` (or the printed explicit-record recovery); never resubmit with a new key. |
-| 5 | Retry the same request unchanged later (Host busy or result not ready). |
+| 5 | Retry the same request unchanged later (Host busy, Host stopping or result not ready). |
 | 6 | Repair the environment, then retry unchanged (known stopped/unreachable Host, sign-in required or locked Store). |
 
 An error enters 2-6 only once its cause is mapped; every other failure stays exit 1 until it is.

@@ -49,17 +49,9 @@ pub fn forCode(certainty: Certainty, code: caller_error.Code) Status {
     return status(certainty, caller_error.facts(code).act);
 }
 
-/// Only errors whose cause is already known, never an OS error without context.
+/// The catalog classifies known causes; context-free OS errors stay internal.
 pub fn knownError(err: anyerror) Status {
-    return switch (err) {
-        error.InvalidInvocation, error.InvalidModel, error.InvalidLabel, error.InvalidArguments, error.EmptyMessageInput, error.InvalidSession, error.InvalidRuiAddress, error.CrossStorePeerSend, error.InteractiveTerminalRequired, error.EnvironmentTooLarge => status(.fresh_invalid, .fix),
-        error.HostStopped => forCode(.not_sent, .host_stopped),
-        error.StoreAlreadyOwned => forCode(.not_sent, .store_locked),
-        error.ApiKeyMissing => forCode(.not_sent, .sign_in_required),
-        error.HostBusy => forCode(.confirmed, .host_busy),
-        error.ResultNotReady => forCode(.confirmed, .result_not_ready),
-        else => .unclassified,
-    };
+    return forCode(.not_sent, caller_error.of(err));
 }
 
 test "an invalid label refused before capture is a fresh invocation error" {
@@ -82,6 +74,12 @@ test "CLI exits derive from certainty before remedy" {
     try std.testing.expectEqual(Status.environment, knownError(error.ApiKeyMissing));
     try std.testing.expectEqual(Status.environment, knownError(error.StoreAlreadyOwned));
     try std.testing.expectEqual(Status.later, knownError(error.ResultNotReady));
+    // A missing input/capture file is not evidence of a stopped Host.
+    try std.testing.expectEqual(Status.unclassified, knownError(error.FileNotFound));
+    try std.testing.expectEqual(Status.environment, knownError(error.HostNotServing));
+    try std.testing.expectEqual(Status.environment, knownError(error.StoreUnavailable));
+    try std.testing.expectEqual(Status.invalid, knownError(error.InvalidPreferenceModel));
+    try std.testing.expectEqual(Status.invalid, knownError(error.InvalidPreferenceStore));
 }
 
 test "CLI aggregate exits are cautious in every order" {
