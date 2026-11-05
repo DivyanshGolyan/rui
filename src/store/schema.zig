@@ -1307,6 +1307,7 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
                 parts = parts ++ .{names};
                 flags = flags ++ .{index.unique};
             };
+            var added: usize = 0;
             for (table.foreign_keys) |key| {
                 lines = lines ++ .{"f " ++ table.name ++ " " ++ list(key.columns) ++ " " ++ key.references ++ " " ++ list(key.referenced)};
                 const led = for (parts) |index_parts| {
@@ -1315,9 +1316,18 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
                 if (!led) {
                     parts = parts ++ .{key.columns};
                     flags = flags ++ .{false};
+                    added += 1;
                 }
             }
-            for (parts, flags) |index_parts, unique| lines = lines ++ .{"i " ++ table.name ++ (if (unique) " u " else " n ") ++ list(index_parts)};
+            for (parts, flags, 0..) |index_parts, unique, position| {
+                // InnoDB keeps no index it added for a foreign key when a
+                // longer one it added for another key leads with it.
+                const implicit = parts[parts.len - added ..];
+                const covered = position >= parts.len - added and for (implicit) |other| {
+                    if (other.len > index_parts.len and eqlList(other[0..index_parts.len], index_parts)) break true;
+                } else false;
+                if (!covered) lines = lines ++ .{"i " ++ table.name ++ (if (unique) " u " else " n ") ++ list(index_parts)};
+            }
         }
         return lines;
     }
