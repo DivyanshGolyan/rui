@@ -29,13 +29,16 @@ pub const permission_mode = "bypass";
 pub const provider = "codex";
 
 /// Model for a fresh Session when no explicit or saved model applies. It needs
-/// a row in `model_capability.models`, which checks this at compile time.
+/// an OpenAI entry in the shipped catalog, checked by its tests.
 pub const recommended_model = "gpt-6.1-sol";
+
+/// Effort for a fresh spec when supported; otherwise its lowest listed effort.
+pub const reasoning_effort = "low";
 
 /// D111: CLI/TUI clients choose this share of a known model's context.
 pub const compaction_trigger_percent: u64 = 90;
 
-/// Client-side context estimate for a model the table does not list. Small on
+/// Client-side context estimate for a model the catalog does not list. Small on
 /// purpose: compacting early costs a summary, compacting late costs a request
 /// the provider refuses.
 pub const unlisted_context_window: u64 = 128000;
@@ -52,6 +55,7 @@ test "approved product defaults" {
     try std.testing.expectEqualStrings("bypass", permission_mode);
     try std.testing.expectEqualStrings("codex", provider);
     try std.testing.expectEqualStrings("gpt-6.1-sol", recommended_model);
+    try std.testing.expectEqualStrings("low", reasoning_effort);
     try std.testing.expectEqual(@as(u64, 90), compaction_trigger_percent);
     try std.testing.expectEqual(@as(u64, 128000), unlisted_context_window);
     try std.testing.expectEqual(@as(u64, 0), output_reservation);

@@ -4180,8 +4180,10 @@ test "compactAt enforces only known context windows on create and update" {
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const window: u64 = @import("../model_catalog.zig").find(@import("../model_catalog.zig").shipped, "gpt-6.1-sol").?.context_window.?;
+            var buffer: [20]u8 = undefined;
             var command = try completeConfiguration("too-large-create", "", workspace, "gpt-6.1-sol");
-            try command.configuration.compaction_trigger.value.set("272001");
+            try command.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&buffer, "{d}", .{window + 1}));
             var reply = storage.configure(&command, .{});
             try std.testing.expect(reply == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.compact_at_too_large, reply.rejected.code);
@@ -4192,21 +4194,21 @@ test "compactAt enforces only known context windows on create and update" {
             try std.testing.expect(huge == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.compact_at_too_large, huge.rejected.code);
             try command.key.set("window-boundary");
-            try command.configuration.compaction_trigger.value.set("272000");
+            try command.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&buffer, "{d}", .{window}));
             reply = storage.configure(&command, .{});
             try std.testing.expect(reply == .accepted);
             var patch: protocol.ConfigureCommand = .{};
             try patch.key.set("too-large-update");
             patch.session = reply.accepted.session;
             patch.configuration.compaction_trigger.state = .value;
-            try patch.configuration.compaction_trigger.value.set("272001");
+            try patch.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&buffer, "{d}", .{window + 1}));
             const refused = storage.configure(&patch, .{});
             try std.testing.expect(refused == .rejected);
             try std.testing.expectEqual(protocol.ConfigurationRejection.compact_at_too_large, refused.rejected.code);
             try std.testing.expect(storage.configure(&patch, .{}).rejected.replayed);
             const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
             try std.testing.expectEqual(@as(u64, 1), observed.revision);
-            try std.testing.expectEqual(@as(?u64, 272000), observed.compaction_trigger);
+            try std.testing.expectEqual(@as(?u64, window), observed.compaction_trigger);
             try command.key.set("unlisted-window");
             try command.configuration.model.value.set("model-not-in-catalog");
             try command.configuration.compaction_trigger.value.set("999999999");
@@ -6835,12 +6837,9 @@ test "compaction success retains host inputs and ordered anchor suffix across re
 test "explicit compaction thresholds and frozen retry survive reopen" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            const supported_ids = comptime blk: {
-                var ids: [model_capability.models.len][]const u8 = undefined;
-                for (model_capability.models, &ids) |row, *id| id.* = row.id;
-                break :blk ids;
-            };
-            for (supported_ids ++ [_][]const u8{ "model-a", "gpt-6-luna-alias" }, 0..) |model, model_index| {
+            // Representative reasoning models, plus unlisted bindings below.
+            const supported_ids = [_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" };
+            for (supported_ids ++ [_][]const u8{ "model-a", "gpt-6-luna-alias" }) |model| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var storage: Store = undefined;
@@ -6850,7 +6849,7 @@ test "explicit compaction thresholds and frozen retry survive reopen" {
                 const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
                 var configure = try completeConfiguration("config", "", workspace, model);
                 // D111: the client supplies tokens even when it chooses 90%.
-                const expected: ?u64 = if (model_index >= supported_ids.len) 115200 else if (std.mem.eql(u8, model, "gpt-6.1-terra")) 450000 else 244800;
+                const expected: ?u64 = model_capability.contextWindow(model) * product_defaults.compaction_trigger_percent / 100;
                 var threshold: [20]u8 = undefined;
                 try configure.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&threshold, "{d}", .{expected.?}));
                 const created_session_0_reply = storage.configure(&configure, .{});
@@ -10091,7 +10090,7 @@ test "core_tools start_agent spec refusals fail calls and name the refused setti
                 .{ "\"model\":\"gpt-6.1-sol\",\"effort\":null,\"tools\":[],\"permissionMode\":\"ask\"", "compactAt" },
                 .{ "\"model\":\"gpt-6.1-sol\",\"effort\":null,\"compactAt\":1,\"permissionMode\":\"ask\"", "tools" },
                 .{ "\"model\":\"gpt-6.1-sol\",\"effort\":null,\"compactAt\":1,\"tools\":[]", "permissionMode" },
-                .{ "\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":272001,\"tools\":[],\"permissionMode\":\"ask\"", "compact_at_too_large" },
+                .{ "\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":1050001,\"tools\":[],\"permissionMode\":\"ask\"", "compact_at_too_large" },
                 .{ "\"model\":\"gpt-6.1-sol\",\"effort\":\"none\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"ask\"", "unsupported_reasoning_effort" },
             };
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

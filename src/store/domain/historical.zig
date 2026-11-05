@@ -57,7 +57,7 @@ pub const HistoricalSettings = struct {
     compaction_trigger: ?u64 = null,
     output_reservation: u64 = 0,
     /// Effective effort frozen at admission; null when the binding has no
-    /// catalog default and no override.
+    /// inferred default and no override.
     reasoning_effort: ?protocol.ReasoningEffort = null,
     /// The effort the Session's first Operation froze.
     starting_effort: ?protocol.ReasoningEffort = null,

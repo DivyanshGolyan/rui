@@ -403,19 +403,50 @@ pub const OptionalFile = struct {
 };
 
 /// Concrete client-side defaults for a fresh Session, never sparse updates.
-pub fn defaultCompactionTrigger(model: []const u8) []const u8 {
+pub fn defaultCompactionTrigger(provider: @import("provider_name.zig").Provider, model: []const u8) u64 {
     const capability = @import("model_capability.zig");
     const defaults = @import("product_defaults.zig");
-    inline for (capability.models) |row| {
-        if (std.mem.eql(u8, model, row.id)) return std.fmt.comptimePrint("{d}", .{row.context_window * defaults.compaction_trigger_percent / 100});
-    }
-    return std.fmt.comptimePrint("{d}", .{defaults.unlisted_context_window * defaults.compaction_trigger_percent / 100});
+    return provider.facts().default_compaction_trigger orelse capability.contextWindow(model) * defaults.compaction_trigger_percent / 100;
 }
 
 pub fn defaultStartEffort(model: []const u8, saved: ?@import("model_capability.zig").ReasoningEffort) OptionalPolicy {
     const capability = @import("model_capability.zig");
-    const effort = capability.startEffort(saved, model) orelse capability.defaultReasoningEffort(model);
+    const catalog = @import("model_catalog.zig");
+    const preferred = comptime std.meta.stringToEnum(catalog.ReasoningEffort, @import("product_defaults.zig").reasoning_effort).?;
+    const effort = capability.startEffort(saved, model) orelse capability.startEffort(preferred, model) orelse blk: {
+        const row = catalog.find(catalog.shipped, model) orelse break :blk null;
+        var efforts = row.efforts.iterator();
+        break :blk efforts.next();
+    };
     return .{ .present = true, .value = if (effort) |value| @tagName(value) else null };
+}
+
+test "client defaults use provider compaction facts and listed efforts" {
+    try std.testing.expectEqual(@as(u64, 244800), defaultCompactionTrigger(.codex, "gpt-6.1-sol"));
+    try std.testing.expectEqual(@as(u64, 945000), defaultCompactionTrigger(.openai, "gpt-6.1-sol"));
+    try std.testing.expectEqual(@as(u64, 115200), defaultCompactionTrigger(.openai, "unlisted-model"));
+    try std.testing.expectEqual(@as(u64, 244800), defaultCompactionTrigger(.codex, "unlisted-model"));
+    try std.testing.expectEqualStrings("max", defaultStartEffort("gpt-6.1-sol", .max).value.?);
+    try std.testing.expectEqualStrings("low", defaultStartEffort("gpt-5.5", .max).value.?);
+    try std.testing.expectEqualStrings("low", defaultStartEffort("gpt-6-luna", null).value.?);
+    try std.testing.expectEqualStrings("none", defaultStartEffort("gpt-6.1-terra", .none).value.?);
+    try std.testing.expectEqualStrings("none", defaultStartEffort("@cf/moonshotai/kimi-k2.6", null).value.?);
+    try std.testing.expectEqualStrings("high", defaultStartEffort("azure/gpt-5-pro", .low).value.?);
+    try std.testing.expect(defaultStartEffort("whisper-1", .low).value == null);
+    try std.testing.expect(defaultStartEffort("unlisted-model", .low).value == null);
+    const catalog = @import("model_catalog.zig");
+    for (catalog.shipped) |row| {
+        const actual = defaultStartEffort(row.id, null);
+        try std.testing.expect(actual.present);
+        if (actual.value) |text| {
+            const effort = std.meta.stringToEnum(catalog.ReasoningEffort, text).?;
+            try std.testing.expect(row.efforts.contains(effort));
+            if (row.efforts.contains(.low)) try std.testing.expectEqual(catalog.ReasoningEffort.low, effort) else {
+                var efforts = row.efforts.iterator();
+                try std.testing.expectEqual(efforts.next().?, effort);
+            }
+        } else try std.testing.expectEqual(@as(usize, 0), row.efforts.count());
+    }
 }
 
 pub const ConfigureInput = struct {

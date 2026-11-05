@@ -124,7 +124,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Product defaults | `src/product_defaults.zig`: values supplied for omitted settings, namely default Active and intake capacity, fresh-Session tools and permission mode, the recommended model and compaction policy. |
 | Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name a person knows it by, its sign-in name, whether its credential is a sign-in or a key, and whether its model list is Rui's table or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
-| Model capability | `src/model_capability.zig`: Codex identifier syntax, the reasoning-effort grammar and the model table, one row per release-supported ID with its default effort, `max` support and context window. |
+| Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts (listed efforts and optional context window); `src/model_capability.zig` derives capability from that catalog. |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
 | Session overview | `src/Overview.zig` owns the terminal surface and its reader; `src/overview_view.zig` is its presentation core. |
@@ -169,7 +169,7 @@ Workspace is required when tools includes Bash and is unused for execution other
 A supplied Workspace is checked like any other, and a spec without Bash that omits it saves `/`, because the Store's Workspace column is never empty.
 Enabling Bash later runs it in the saved Workspace, which a later configure cannot change.
 Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer.
-The CLI and TUI send their own explicit creation defaults: Bash and web search, `bypass`, the model's catalog effort when known or explicit null otherwise, and 90% of its known context window or a fixed 115,200 tokens when unlisted.
+The CLI and TUI send their own explicit creation defaults: Bash and web search, `bypass`, a supported saved effort or the product's effort choice, and the provider's compactAt default as described under [Supported model IDs](#supported-model-ids).
 Addressed configure preserves every omitted setting; the model, provider and Workspace binding remain immutable.
 
 Later configurations preserve omitted provider/model values and accept explicit equal values.
@@ -426,21 +426,19 @@ Codex **Reasoning Effort** is an explicitly stated, nullable persistent Session 
 Its closed grammar is `none`, `low`, `medium`, `high`, `xhigh` and `max`.
 Configuration accepts an explicit value only when the exact model's pinned catalog entry advertises it.
 Unsupported values reject the whole update.
-`none` is a literal effort, not a reset, and no currently listed model advertises it.
+`none` is a literal effort, not a reset, and is accepted wherever the catalog lists it.
 Catalog-only values such as `ultra` do not expand Rui's grammar or trigger a fallback.
 Catalog support is source metadata, not account entitlement or live backend qualification.
 
-The CLI and TUI choose the catalog default when building a new spec without a user-selected effort; the Host never fills effort from the catalog.
-The pinned Codex catalog gives `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-5.6-sol` a `low` default; the other five release-supported models default to `medium`.
-All nine advertise `low`, `medium`, `high` and `xhigh`.
-All except `gpt-5.5` also advertise `max`.
+The CLI and TUI choose a supported saved effort, otherwise `low` when supported, otherwise the model's lowest listed effort, otherwise explicit null; the Host never fills effort from the catalog.
+The catalog has no default effort.
 An unknown exact binding has no inferred default: an explicit null effort tells Rui to omit `reasoning` and leave the provider's effective effort unspecified.
 An explicit effort on that binding rejects because Rui has no support evidence.
 This preserves exact-model syntax without guessing capabilities from model families.
 
 On an existing Session, omission preserves the saved effort and an accepted explicit `null` leaves provider effort unspecified, without a catalog fallback.
 The pinned `openai-responses/2` codec cannot encode a boundary back to unspecified effort, so clearing an assigned value rejects atomically as `unsupported_reasoning_effort`; a client reset sends a concrete supported effort instead (D165).
-The CLI resolves `--reasoning-effort default` on the client to the model's catalog effort or explicit null; `--reasoning-effort VALUE` selects a value for `session configure`, initial `session start` and interactive `/configure`.
+The CLI resolves `--reasoning-effort default` on the client to the client's product effort choice or explicit null; `--reasoning-effort VALUE` selects a value for `session configure`, initial `session start` and interactive `/configure`.
 Current inspection reports the saved nullable `reasoning_effort` and `reasoning_effort_override`; non-null effort is the Session's explicit value, not a Host-inferred catalog default.
 Each model Operation, including compaction and continuation, freezes the resolved effort at admission.
 Replacement Attempts and reopened historical views emit that stored value without consulting later Session settings or catalog policy.
@@ -895,7 +893,7 @@ Under `openai-responses/1` the top-level `tools` holds the Operation's whole set
 ### Codex wire binding
 
 Every request sets `text.verbosity` to `low` and `parallel_tool_calls` to `true`, for every model.
-The Host decodes, dispatches and replays several calls from one response in call order, so it never asks a model to hold back; a codec writes the model's name and never branches on it ([provider_locality.py](tests/ci/provider_locality.py) fails CI when a codec reads or names a model), and a fact that differs by model belongs in `src/model_capability.zig`.
+The Host decodes, dispatches and replays several calls from one response in call order, so it never asks a model to hold back; a codec writes the model's name and never branches on it ([provider_locality.py](tests/ci/provider_locality.py) fails CI when a codec reads or names a model), and a fact that differs by model belongs in `src/model_catalog.zig`.
 The field sits in the settings envelope before the history span, so changing it under `openai-responses/1` leaves prefix seals and history memos valid; a Session's next request after an upgrade differs only in that field.
 Managed requests identify the client with `User-Agent: rui/<rev>`, where `<rev>` is the build's full Git revision or `unknown` for a source archive.
 These are source-parity settings, not live backend qualification.
@@ -2350,20 +2348,29 @@ Full's existing streaming consumer and inventory remain unchanged.
 
 #### Supported model IDs
 
-`model_capability.models` is the single compiled-in table of model IDs this Rui release knows, one row per ID with every per-model fact Rui uses.
-`rui session configure --help` and invalid-model errors render that same table, and the help's effort exceptions derive from it.
-Adding support requires one table-row release change.
-`product_defaults.recommended_model` must name a row; the build checks this.
+`model_catalog.shipped` is the single compiled-in catalog of model facts, generated from a models.dev snapshot.
+Each exact ID has its listed efforts, optional context window and OpenAI membership; there is no catalog default effort or per-Adapter context cap.
+For duplicate IDs, models.dev's OpenAI entry wins, otherwise the first provider's entry wins.
+`rui session configure --help`, invalid-model errors and ChatGPT's model list render the catalog's OpenAI IDs in catalog order; help's effort exceptions derive from the same entries.
+The model-list source name remains `table` on the wire.
+`product_defaults.recommended_model` must name an OpenAI entry; a catalog test checks this.
 IDs are exact and case-sensitive, without aliases, prefix matching or inferred providers.
-The list comes from pinned public Codex source metadata, not a live availability check.
 Inclusion claims neither account entitlement nor cross-model continuation qualification.
 Session binding and normal provider rejection remain unchanged.
 
-The Host does not check the saved future-Session model default at startup: any pin with valid syntax starts Sessions, and one outside the table runs with default limits.
+The Host does not check the saved future-Session model default at startup: any pin with valid syntax starts Sessions, and one outside the catalog runs with default limits.
+A missing or null catalog window uses the product's unlisted context estimate, while compactAt admission enforces only non-null known windows.
+A catalog entry accepts exactly its listed efforts, including `none` where listed; an unlisted model accepts no explicit effort.
 Missing or unreadable future defaults do not prevent a Host from serving existing saved work.
 A pin with invalid syntax rejects fresh CLI creation before capture rather than falling back to the recommendation.
 
-The only live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); there is no model-list command, other network discovery or cache across Host runs, and help and CLI configuration read the compiled table.
+CLI and TUI clients supply explicit fresh spec values: a saved effort if listed, otherwise the product effort `low` if listed, otherwise the lowest listed effort, otherwise no effort.
+ChatGPT sign-in's default compactAt is the provider fact 244,800 tokens, because ChatGPT serves 272,000 even when models.dev lists 1,050,000.
+Other providers default to 90% of the catalog window, or 115,200 tokens for a missing or null window.
+These client choices do not change existing Sessions, the Host's fixed fallback for stored null thresholds, or frozen Operations.
+
+The only fetched live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); ChatGPT uses the shipped OpenAI IDs because it has no public list.
+There is no model-list command, other network discovery or cache across Host runs, and help and CLI configuration read the shipped catalog.
 Help needs no Host or credentials.
 Clients do not read credentials for peer configuration.
 Persisted model syntax and transport encoding remain independent of the compiled list, so inspection, original-request recovery and existing Session work preserve exact saved bindings.
@@ -3017,11 +3024,11 @@ Forward catch-up captures a fresh end from the preceding end with null ordinal, 
 Later appends and group completion cannot backfill an earlier prefix.
 Query work may grow with history; item bounds do not promise traversal latency.
 
-`POST /v1/model-list` takes `kind:"model_list"` and returns `providers`: for each provider the Host serves, in Provider order, its `provider`, `source` and `models`, each an `id` with `known`, whether Rui's model table knows its facts.
-A model the table does not list runs with default limits (see compaction).
-ChatGPT has no public list, so its `source` is always `table` and its models are the table's.
+`POST /v1/model-list` takes `kind:"model_list"` and returns `providers`: for each provider the Host serves, in Provider order, its `provider`, `source` and `models`, each an `id` with `known`, whether Rui's model catalog knows its facts.
+A model the catalog does not list runs with default limits (see compaction).
+ChatGPT has no public list, so its `source` is always `table` and its models are the catalog's OpenAI IDs in catalog order.
 For an OpenAI key the execution owner's HTTP/2 Client fetches `GET BASE/models` once as the Host starts, on a stream of its own beyond Active Capacity, so it never waits for a model request or makes one wait, and keeps the IDs (at most 512, 16 KiB together) in memory until it stops; the key never changes while it runs, so the list is never fetched again.
-While that fetch runs the source is `pending` with the table's models; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `table_fallback` with the table's models when it failed, answered with something else or listed more than that bound.
+While that fetch runs the source is `pending` with the catalog's OpenAI IDs; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `table_fallback` with the catalog's OpenAI IDs when it failed, answered with something else or listed more than that bound.
 The reply reads Host memory only, never SQLite or the network.
 
 Each row has position/ordinal, `at`, and one closed tagged `value`.

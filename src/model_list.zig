@@ -1,20 +1,21 @@
 //! Each served provider's model list: the IDs its account can use, and
-//! whether Rui's table knows each one's facts. ChatGPT has no public list,
-//! so its list is the table. The OpenAI API's is fetched once at Host start
+//! whether Rui's catalog knows each one's facts. ChatGPT has no public list,
+//! so its list is the catalog's OpenAI IDs. The OpenAI API's is fetched once at Host start
 //! (`GET BASE/models`) and kept; until it arrives, or when it fails, the
-//! table stands in. A model the table does not list runs with default
+//! catalog's OpenAI IDs stand in. A model the catalog does not list runs with default
 //! limits (`product_defaults.unlisted_context_window`).
 const std = @import("std");
+const catalog = @import("model_catalog.zig");
 const model_capability = @import("model_capability.zig");
 const provider_name = @import("provider_name.zig");
 
 /// Where a provider's list came from.
 pub const Source = enum {
-    /// Rui's table: the provider has no list.
+    /// Catalog OpenAI IDs: the provider has no list.
     table,
-    /// Rui's table while the fetch is still in flight; ask again later.
+    /// Catalog OpenAI IDs while the fetch is still in flight; ask again later.
     pending,
-    /// Rui's table because the fetch failed: offline, refused or too long.
+    /// Catalog OpenAI IDs because the fetch failed: offline, refused or too long.
     table_fallback,
     /// The provider's own list for this account.
     live,
@@ -117,7 +118,7 @@ const max_provider_name_bytes = blk: {
 };
 const max_table_bytes = blk: {
     var bytes = 0;
-    for (model_capability.models) |row| bytes += model_overhead + 2 * row.id.len;
+    for (catalog.openai_ids) |id| bytes += model_overhead + 2 * id.len;
     break :blk bytes;
 };
 const provider_count = std.meta.fieldNames(provider_name.Provider).len;
@@ -125,7 +126,7 @@ const provider_count = std.meta.fieldNames(provider_name.Provider).len;
 /// The most bytes `writeProviders` writes.
 pub const max_providers_bytes = "[]".len + provider_count * (provider_overhead + @max(max_table_bytes, max_live_models * model_overhead + 2 * max_live_id_bytes));
 
-/// A provider's list: the table, or the provider's own IDs.
+/// A provider's list: catalog OpenAI IDs, or the provider's own IDs.
 pub const List = union(Source) {
     table,
     pending,
@@ -140,7 +141,7 @@ pub const Entry = struct {
 };
 
 /// `[{"provider":...,"source":...,"models":[{"id":...,"known":...},...]},...]`,
-/// where `known` says Rui's table holds the model's facts.
+/// where `known` says Rui's catalog holds the model's facts.
 pub fn writeProviders(out: *std.Io.Writer, entries: []const Entry) !void {
     try out.writeByte('[');
     for (entries, 0..) |entry, index| {
@@ -152,7 +153,7 @@ pub fn writeProviders(out: *std.Io.Writer, entries: []const Entry) !void {
                 var ids = live.iterator();
                 while (ids.next()) |id| try writeModel(out, id, &first);
             },
-            .table, .pending, .table_fallback => for (model_capability.models) |row| try writeModel(out, row.id, &first),
+            .table, .pending, .table_fallback => for (catalog.openai_ids) |id| try writeModel(out, id, &first),
         }
         try out.writeAll("]}");
     }
@@ -217,7 +218,7 @@ test "a reply lists each provider's models and whether the table knows them" {
     });
     const table = comptime blk: {
         var text: []const u8 = "";
-        for (model_capability.models, 0..) |row, index| text = text ++ (if (index == 0) "" else ",") ++ "{\"id\":\"" ++ row.id ++ "\",\"known\":true}";
+        for (catalog.openai_ids, 0..) |id, index| text = text ++ (if (index == 0) "" else ",") ++ "{\"id\":\"" ++ id ++ "\",\"known\":true}";
         break :blk text;
     };
     try std.testing.expectEqualStrings(

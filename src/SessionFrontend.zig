@@ -643,15 +643,15 @@ test "frontend answers local and unknown commands in place and keeps Host comman
 test "frontend /model shows the Session's model and sign-in within 60 columns and offers no pick" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
     self.input.init();
-    for (model_capability.models) |row| for ([_]?protocol.Provider{ .codex, .openai, null }) |provider| {
+    for ([_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" }) |id| for ([_]?protocol.Provider{ .codex, .openai, null }) |provider| {
         self.line = .{ .read = .{ .revision = 1, .end = 1 }, .provider = provider };
-        try self.line.model.set(row.id);
+        try self.line.model.set(id);
         self.notice = null;
         self.slashCommand("/model");
         const said = self.notice.?;
         // The model, then the sign-in, lead the line.
-        try std.testing.expect(std.mem.startsWith(u8, said, row.id));
-        const rest = said[row.id.len..];
+        try std.testing.expect(std.mem.startsWith(u8, said, id));
+        const rest = said[id.len..];
         if (provider) |known| {
             try std.testing.expect(std.mem.indexOf(u8, rest, known.signIn()) != null);
             try std.testing.expect(std.unicode.utf8CountCodepoints(said) catch unreachable <= 60);
@@ -659,7 +659,7 @@ test "frontend /model shows the Session's model and sign-in within 60 columns an
         // A sign-in is never dropped silently: something stands in its place.
         try std.testing.expect(!std.mem.startsWith(u8, std.mem.trimStart(u8, rest[" · ".len..], " "), "new Session"));
         try std.testing.expect(self.input.queuedCommand() == null);
-        try std.testing.expectEqualStrings(row.id, self.line.model.slice());
+        try std.testing.expectEqualStrings(id, self.line.model.slice());
     };
 }
 
@@ -672,10 +672,11 @@ test "frontend lists the efforts of the Session's model once it is read, the one
     self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .medium };
     try self.line.model.set("gpt-5.5");
     var shown = self.nextCommands(null).?;
-    try std.testing.expectEqualStrings("low", shown.list.shown()[0].word);
-    try std.testing.expectEqualStrings("current", shown.list.shown()[1].description);
+    try std.testing.expectEqualStrings("none", shown.list.shown()[0].word);
+    try std.testing.expectEqualStrings("current", shown.list.shown()[2].description);
     // Down moves the highlight, which the next frame keeps and Tab puts in
     // the draft.
+    shown.move(true);
     shown.move(true);
     shown = self.nextCommands(shown).?;
     try std.testing.expectEqualStrings("medium", shown.completion());

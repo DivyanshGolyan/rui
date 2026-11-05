@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const model_catalog = @import("../../model_catalog.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
 const tool_catalog = @import("../../tools.zig");
@@ -239,8 +240,8 @@ pub fn configurationBeforeWorkspace(
     if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider), &requested.tools)) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     // D166: an unlisted model has no known window to enforce.
-    if (compact_at) |tokens| if (model_capability.find(model)) |known| {
-        if (tokens > known.context_window) return .compact_at_too_large;
+    if (compact_at) |tokens| if (model_catalog.find(model_catalog.shipped, model)) |known| {
+        if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
     };
     if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
     // D111/D165: v2 cannot encode a boundary back to unspecified effort.

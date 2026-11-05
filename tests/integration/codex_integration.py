@@ -164,7 +164,7 @@ def run():
         action = fixture.wait_for(lambda: bash.action_for(store, session), "managed Bash proposal")
         assert fixture.read_action(store, session, action["action"], "call-id") == b"managed-call"
         assert json.loads(fixture.read_action(store, session, action["action"], "arguments"))["cmd"] == command
-        assert json.loads(endpoint.requests[0])["reasoning"] == {"effort": "medium"}
+        assert json.loads(endpoint.requests[0])["reasoning"] == {"effort": "low"}
         configured = fixture.command(
             "session", "configure", "--store", store, "--session", session,
             "--record", state / "effort-high.json", "--key", "effort-high",
@@ -187,7 +187,7 @@ def run():
         continuation = json.loads(endpoint.requests[1])
         # openai-responses/2 keeps the starting effort on top, so the prefix
         # stays cached, and writes the change into the input once.
-        assert continuation["reasoning"] == {"effort": "medium"}, continuation
+        assert continuation["reasoning"] == {"effort": "low"}, continuation
         assert [item for item in continuation["input"] if item.get("type") == "configuration_update"] == [
             {"type": "configuration_update", "reasoning": {"effort": "high"}}
         ], continuation["input"]
@@ -206,7 +206,7 @@ def run():
         assert len(endpoint.requests) == 2 and proof.read_text() == "once\n"
         settings = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
         assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == "high", settings
-        for effort in ("none", "ultra"):
+        for effort in ("minimal", "ultra"):
             rejected = fixture.command(
                 "session", "configure", "--store", store, "--session", session,
                 "--record", state / f"effort-{effort}.json", "--key", f"effort-{effort}",
@@ -215,6 +215,15 @@ def run():
             assert rejected["answer"]["status"] == "rejected", rejected
             unchanged = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             assert unchanged == settings and len(endpoint.requests) == 2, unchanged
+        # `none` is a literal listed effort on this model, not a reset.
+        configured = fixture.command(
+            "session", "configure", "--store", store, "--session", session,
+            "--record", state / "effort-none.json", "--key", "effort-none",
+            "--reasoning-effort", "none",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
+        selected = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
+        assert selected["reasoning_effort"] == selected["reasoning_effort_override"] == "none", selected
         configured = fixture.command(
             "session", "configure", "--store", store, "--session", session,
             "--record", state / "effort-default.json", "--key", "effort-default",
@@ -226,7 +235,7 @@ def run():
         assert fixture.read_result(store, "later") == b"later answer"
         assert len(endpoint.requests) == 3 and proof.read_text() == "once\n"
         later = json.loads(endpoint.requests[2])
-        assert later["reasoning"] == {"effort": "medium"}, later
+        assert later["reasoning"] == {"effort": "low"}, later
         assert any(item.get("type") == "function_call_output" and item["call_id"] == "managed-call" for item in later["input"])
         # Another owner commits a newer credential generation while this
         # Attempt is in flight: the rejected lease is not refreshed and the
@@ -342,10 +351,10 @@ def run():
         expected_agent = expected_user_agent()
         mismatches = []
         for index, (model, effort, trigger) in enumerate((
-            ("gpt-6-luna", "medium", "244800"), ("gpt-6.1-sol", "low", "244800"), ("gpt-6.1-terra", "low", "450000"),
-            ("gpt-6-sol", "medium", "244800"), ("gpt-6-astra", "low", "244800"),
-            ("gpt-5.6-sol", "low", "244800"), ("gpt-5.6-terra", "medium", "244800"),
-            ("gpt-5.6-luna", "medium", "244800"), ("gpt-5.5", "medium", "244800"),
+            ("gpt-6-luna", "low", "244800"), ("gpt-6.1-sol", "low", "244800"), ("gpt-6.1-terra", "low", "244800"),
+            ("gpt-6-sol", "low", "244800"), ("gpt-6-astra", "low", "244800"),
+            ("gpt-5.6-sol", "low", "244800"), ("gpt-5.6-terra", "low", "244800"),
+            ("gpt-5.6-luna", "low", "244800"), ("gpt-5.5", "low", "244800"),
         )):
             key = f"envelope-{index}"
             with endpoint.lock:
@@ -373,7 +382,7 @@ def run():
             assert request["model"] == model, request
             if settings["compaction_trigger"] != trigger or settings["output_reservation"] != "0":
                 mismatches.append((model, "compaction defaults", settings["compaction_trigger"], settings["output_reservation"]))
-            if settings["reasoning_effort"] != effort or settings["reasoning_effort_override"] is not None:
+            if settings["reasoning_effort"] != effort or settings["reasoning_effort_override"] != effort:
                 mismatches.append((model, "effort settings", settings["reasoning_effort"], settings["reasoning_effort_override"]))
             if request.get("reasoning") != {"effort": effort}:
                 mismatches.append((model, "reasoning", request.get("reasoning")))
@@ -385,7 +394,7 @@ def run():
                 mismatches.append((model, "User-Agent", endpoint.user_agents[4 + index], expected_agent))
         assert len(endpoint.requests) == 13, endpoint.requests
         assert not mismatches, mismatches
-        print(f"codex request envelopes passed: nine exact model IDs, catalog effort defaults, 90% compaction/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
+        print(f"codex request envelopes passed: nine exact model IDs, client low effort, ChatGPT 244800-token compaction/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
         print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
         complete = True
     finally:
@@ -700,10 +709,14 @@ def openai_journey():
             configured = fixture.command(
                 "session", "configure", "--store", store, "--record", state / f"configure-{provider}.json",
                 "--key", f"configure-{provider}", "--workspace", fixture.ROOT,
-                "--provider", provider, "--model", "gpt-6-sol", "--tools", "none",
+                "--provider", provider, "--model", "gpt-6.1-sol", "--tools", "none",
             )
             assert configured["answer"]["status"] == "accepted", configured
             sessions[provider] = configured["answer"]["session"]
+            settings = fixture.command("session", "inspect", "--store", store, "--session", sessions[provider])["session"]
+            expected_trigger = "244800" if provider == "codex" else "945000"
+            assert settings["compaction_trigger"] == settings["compaction_trigger_override"] == expected_trigger, settings
+            assert settings["reasoning_effort"] == settings["reasoning_effort_override"] == "low", settings
             fixture.message(state, store, f"same-{provider}", sessions[provider], "same turn")
             fixture.wait_for(lambda: fixture.completed_observation(store, f"same-{provider}"), f"{provider} answer")
             assert fixture.read_result(store, f"same-{provider}") == b"same answer"
