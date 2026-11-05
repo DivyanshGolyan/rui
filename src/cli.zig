@@ -111,7 +111,9 @@ fn run(init: std.process.Init) !void {
         // A stopped Host already said how to start it and resume.
         if (err == error.InvalidModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted or err == error.HostStopped) return err;
         if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
-        stderr.diagnostic("rui: {s} {s} failed; syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
+        // Until every owner reports its own cause, this line carries it, since
+        // the footer is suppressed once any diagnostic has been printed.
+        stderr.diagnostic("rui: {s} {s} failed: {s}. Syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @errorName(err), @tagName(resource), definition.name });
         return err;
     };
     try postCommandHold(init);
