@@ -346,8 +346,9 @@ test "text literals compare binary and without padding, and text that is not UTF
     try connection.sendBatch();
     const refused = try connection.next();
     try std.testing.expect(refused == .err);
-    // 1366: incorrect string value, which strict mode makes an error.
-    try std.testing.expectEqual(1366, refused.err.code);
+    // 1300: the parser refuses an _utf8mb4 literal that is not UTF-8,
+    // whatever sql_mode says.
+    try std.testing.expectEqual(1300, refused.err.code);
     try std.testing.expect(connection.isReady());
     try connection.query("SELECT count(*) FROM value_check WHERE id IN (20,21)");
     const Count = struct { count: u64 };
