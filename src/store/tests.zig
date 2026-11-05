@@ -1028,8 +1028,10 @@ test "a queued read's destination holds poison until the pass that steps it" {
             @memset(std.mem.asBytes(&second), 0);
             a.read(TestingRound.head, .{ .session_ref = session.slice() }, &first);
             try std.testing.expect(poisoned(std.mem.asBytes(&first)));
-            // Queuing it again steps the first: defined before `run`, as a network
-            // engine would not have it.
+            // Overflow the queue to force an automatic pass on every engine.
+            // SQLite may step earlier on rebind; MySQL has no cached handles.
+            var fillers: [a.queue.len - 1]TestingRound.head.Result = undefined;
+            for (&fillers) |*filler| a.read(TestingRound.head, .{ .session_ref = session.slice() }, filler);
             a.read(TestingRound.head, .{ .session_ref = session.slice() }, &second);
             try std.testing.expect(!poisoned(std.mem.asBytes(&first)));
             try std.testing.expectEqualSlices(u8, session.slice(), &first.head.ref);
@@ -1060,7 +1062,11 @@ test "a queued readInto's Found is pending until the pass that steps it" {
             var missing: store_access.Found = .found;
             configuration_domain.readSaved(&a, session.slice(), &current, &found);
             try std.testing.expectEqual(store_access.Found.pending, found);
-            // Queuing it again steps the first, which defines it before `run`.
+            // Fill with small rows in distinct stable destinations, rather
+            // than copying the 4.6 KiB configuration Row for every queue slot.
+            // Overflow forces a pass even without SQLite's rebind boundary.
+            var fillers: [a.queue.len - 1]TestingRound.head.Result = undefined;
+            for (&fillers) |*filler| a.read(TestingRound.head, .{ .session_ref = session.slice() }, filler);
             configuration_domain.readSaved(&a, "AAAAAA", &missing_current, &missing);
             try std.testing.expectEqual(store_access.Found.found, found);
             try std.testing.expectEqual(store_access.Found.pending, missing);
@@ -1199,14 +1205,14 @@ test "an Access commits its writes, positions and identities together, or none o
             const next_sql = "SELECT next_position FROM session";
             const position = try store_testing.queryU64(&storage, next_sql, .{});
             const contents = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
-            const content_id = storage.ids.next.get(.content_id);
+            const content_id = storage.identities().next.get(.content_id);
 
             // A failed guard stops the round before COMMIT: no row, position or id stays.
             try std.testing.expectError(error.TestingGuard, TestingRound.change(&storage, session.slice(), "round rolled back", 99));
             try std.testing.expect(!storage.isFenced());
             try std.testing.expectEqual(position, try store_testing.queryU64(&storage, next_sql, .{}));
             try std.testing.expectEqual(contents, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
-            try std.testing.expectEqual(content_id, storage.ids.next.get(.content_id));
+            try std.testing.expectEqual(content_id, storage.identities().next.get(.content_id));
 
             const before = @divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000);
             try std.testing.expectEqual(position, try TestingRound.change(&storage, session.slice(), "round committed", 1));
@@ -2356,6 +2362,10 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("access.zig"),
         @embedFile("engine.zig"),
         @embedFile("engine/Sqlite.zig"),
+        @embedFile("engine/Mysql.zig"),
+        @embedFile("engine/mysql_content.zig"),
+        @embedFile("engine/mysql_open.zig"),
+        @embedFile("engine/mysql_refusal.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
@@ -8047,7 +8057,7 @@ test "Full history takes a round per chunk" {
             // The Message's and the answer's content are content rounds,
             // which differ by engine: on SQLite a `readRaw` window each.
             const content_rounds: u16 = switch (case.engine) {
-                .sqlite => 2,
+                .sqlite, .mysql => 2,
             };
             try std.testing.expectEqual(content_rounds, storage.testing_content_work.content_rounds - content_before);
         }
@@ -8510,7 +8520,7 @@ test "RUI_TEST_REQUIRE_ENGINES names engines by exact token" {
 test "a required engine these tests do not build fails them" {
     const Name = store_testing.EngineName;
     try std.testing.expectEqual(null, store_testing.unbuiltEngine(.empty, .empty));
-    try std.testing.expectEqual(Name.mysql, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql }), .empty));
+    try std.testing.expectEqual(null, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql }), .empty));
     try std.testing.expectEqual(Name.postgres, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.postgres }), .initOne(Name.mysql)));
     // CI's live shards list both servers; each has a test of its own here.
     try std.testing.expectEqual(null, store_testing.unbuiltEngine(.initMany(&.{ Name.sqlite, Name.mysql, Name.postgres }), store_testing.checked_elsewhere));
@@ -8662,7 +8672,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
 fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     return switch (engine) {
         // One window holds the driven content.
-        .sqlite => switch (point) {
+        .sqlite, .mysql => switch (point) {
             .readOwnedContent, .readCatalogText => 1,
             else => 0,
         },
@@ -8681,6 +8691,10 @@ test "every function that enters the Store has a round budget" {
         @embedFile("access.zig"),
         @embedFile("engine.zig"),
         @embedFile("engine/Sqlite.zig"),
+        @embedFile("engine/Mysql.zig"),
+        @embedFile("engine/mysql_content.zig"),
+        @embedFile("engine/mysql_open.zig"),
+        @embedFile("engine/mysql_refusal.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
@@ -8752,13 +8766,52 @@ const RoundMeter = struct {
     storage: *Store,
     rounds_before: u16 = 0,
     content_before: u16 = 0,
+    shape_before: QueryShape = .{},
     measured: std.EnumArray(EntryPoint, ?Measured) = .initFill(null),
 
-    const Measured = struct { rounds: u16, content_rounds: u16 };
+    const Measured = struct { rounds: u16, content_rounds: u16, shape: QueryShape };
+
+    /// Actual protocol sends beside independently counted semantic work.
+    /// Empty Access rounds send nothing; deferred BEGIN/SAVEPOINT share the
+    /// next pass, RELEASE sends nothing, and only real controls count here.
+    const QueryShape = struct {
+        queries: u64 = 0,
+        access_passes: u64 = 0,
+        identity_passes: u64 = 0,
+        content_queries: u64 = 0,
+        controls: u64 = 0,
+        prefix_only: u64 = 0,
+
+        fn snapshot(storage: *Store) QueryShape {
+            if (storage.engine != .mysql) return .{};
+            const state = storage.engine.mysql.state;
+            const shape = state.testing_shape;
+            return .{
+                .queries = state.connection.queries,
+                .access_passes = shape.access_passes,
+                .identity_passes = shape.identity_passes,
+                .content_queries = shape.content_queries,
+                .controls = shape.controls,
+                .prefix_only = shape.prefix_only,
+            };
+        }
+
+        fn since(after: QueryShape, before: QueryShape) QueryShape {
+            var delta: QueryShape = undefined;
+            inline for (@typeInfo(QueryShape).@"struct".field_names) |name|
+                @field(delta, name) = @field(after, name) - @field(before, name);
+            return delta;
+        }
+
+        fn expected(shape: QueryShape) u64 {
+            return shape.access_passes + shape.identity_passes + shape.content_queries + shape.controls + shape.prefix_only;
+        }
+    };
 
     fn start(meter: *RoundMeter) void {
         meter.rounds_before = meter.storage.testing_content_work.rounds;
         meter.content_before = meter.storage.testing_content_work.content_rounds;
+        meter.shape_before = QueryShape.snapshot(meter.storage);
     }
 
     fn stop(meter: *RoundMeter, point: EntryPoint) void {
@@ -8766,9 +8819,24 @@ const RoundMeter = struct {
         meter.measured.set(point, .{
             .rounds = meter.storage.testing_content_work.rounds - meter.rounds_before,
             .content_rounds = meter.storage.testing_content_work.content_rounds - meter.content_before,
+            .shape = QueryShape.snapshot(meter.storage).since(meter.shape_before),
         });
     }
 };
+
+test "MySQL round shape subtracts the entry baseline from every component" {
+    const Shape = RoundMeter.QueryShape;
+    const before: Shape = .{ .queries = 100, .access_passes = 10, .identity_passes = 4, .content_queries = 7, .controls = 12, .prefix_only = 3 };
+    const after: Shape = .{ .queries = 109, .access_passes = 12, .identity_passes = 5, .content_queries = 10, .controls = 14, .prefix_only = 4 };
+    const delta = after.since(before);
+    try std.testing.expectEqual(@as(u64, 2), delta.access_passes);
+    try std.testing.expectEqual(@as(u64, 1), delta.identity_passes);
+    try std.testing.expectEqual(@as(u64, 3), delta.content_queries);
+    try std.testing.expectEqual(@as(u64, 2), delta.controls);
+    try std.testing.expectEqual(@as(u64, 1), delta.prefix_only);
+    try std.testing.expectEqual(@as(u64, 9), delta.queries);
+    try std.testing.expectEqual(delta.expected(), delta.queries);
+}
 
 /// A `start_agent` spec as the Host's check leaves it: gpt-6.1-sol at low
 /// effort, `tools`, `permission_mode` and no label.
@@ -8824,6 +8892,12 @@ test "each Store entry point takes its round budget on its common path" {
                 };
                 if (measured.rounds != round_budgets.get(point)) failed = true;
                 if (measured.content_rounds != contentRoundBudget(case.engine, point)) failed = true;
+                if (case.engine == .mysql) {
+                    std.testing.expectEqual(measured.shape.expected(), measured.shape.queries) catch {
+                        std.debug.print("{s}: COM_QUERY shape differs\n", .{@tagName(point)});
+                        failed = true;
+                    };
+                }
             }
             if (failed) {
                 for (std.enums.values(EntryPoint)) |point| {
@@ -8835,6 +8909,18 @@ test "each Store entry point takes its round budget on its common path" {
                         measured.content_rounds,
                         contentRoundBudget(case.engine, point),
                     });
+                    if (case.engine == .mysql) std.debug.print(
+                        "  COM_QUERY {d} = Access passes {d} + identity passes {d} + content queries {d} + controls {d} + prefix-only passes {d} (expected {d})\n",
+                        .{
+                            measured.shape.queries,
+                            measured.shape.access_passes,
+                            measured.shape.identity_passes,
+                            measured.shape.content_queries,
+                            measured.shape.controls,
+                            measured.shape.prefix_only,
+                            measured.shape.expected(),
+                        },
+                    );
                 }
                 return error.RoundBudgetChanged;
             }
@@ -10117,4 +10203,11 @@ test "each compaction that succeeds is one compacted row, with the entries its f
             try std.testing.expect(page.items[0].position < page.items[1].position);
         }
     }.run);
+}
+
+// Engine transcripts and content boundary tests remain part of the native suite.
+test {
+    _ = @import("engine/Mysql.zig");
+    _ = @import("engine/mysql_content.zig");
+    _ = @import("mysql_testing.zig");
 }
