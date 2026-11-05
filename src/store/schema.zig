@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 55;
+pub const schema_version: u32 = 54;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -32,8 +32,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
-    .{ .schema_version = 54, .digest = 0xd783e05e67fa928c },
-    .{ .schema_version = 55, .digest = 0x5f487d791b48f290 },
+    .{ .schema_version = 54, .digest = 0xa1d5523eb32e40d8 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -125,18 +124,7 @@ pub const migrations = [_]Migration{
         },
     },
     // Schema 54: the stops an attached child owes (D38).
-    .{
-        .from = 53,
-        .sqlite = &.{
-            "CREATE TABLE session_stop_owed(\n child_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n cause_ref TEXT NOT NULL REFERENCES session(session_ref),\n cause_position INTEGER NOT NULL CHECK(cause_position>0)\n) STRICT, WITHOUT ROWID",
-            "CREATE INDEX session_parent ON session(parent_ref) WHERE parent_ref IS NOT NULL",
-        },
-        .mysql = &.{
-            "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n PRIMARY KEY(child_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
-            "CREATE INDEX session_parent ON session(parent_ref)",
-        },
-    },
-    // Schema 55 (8b): each Store gets a random store_id. On MySQL,
+    // Then (8b): each Store gets a random store_id. On MySQL,
     // store_owner and content_chunk are new; each content's payload moves
     // into chunks of content_chunk_bytes (chunk.i reaches 9999, past the
     // 8192 chunks of the largest content) before the column goes; each
@@ -145,15 +133,19 @@ pub const migrations = [_]Migration{
     // gets its plain twin first, since parent_ref's foreign key needs an
     // index that leads with it.
     .{
-        .from = 54,
+        .from = 53,
         .sqlite = &.{
-            "ALTER TABLE store_meta RENAME TO store_meta_before_55",
+            "CREATE TABLE session_stop_owed(\n child_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n cause_ref TEXT NOT NULL REFERENCES session(session_ref),\n cause_position INTEGER NOT NULL CHECK(cause_position>0)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX session_parent ON session(parent_ref) WHERE parent_ref IS NOT NULL",
+            "ALTER TABLE store_meta RENAME TO store_meta_before_54",
             "CREATE TABLE store_meta(\n meta_key TEXT PRIMARY KEY NOT NULL CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id')),\n meta_value TEXT NOT NULL\n) STRICT",
-            "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_before_55",
-            "DROP TABLE store_meta_before_55",
+            "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_before_54",
+            "DROP TABLE store_meta_before_54",
             "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
         },
         .mysql = &.{
+            "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n PRIMARY KEY(child_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX session_parent ON session(parent_ref)",
             "ALTER TABLE store_meta DROP CHECK store_meta_chk_1, ADD CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id'))",
             "CREATE TABLE store_owner(\n owner_key BIGINT NOT NULL,\n epoch BIGINT NOT NULL,\n commit_seq BIGINT NOT NULL,\n PRIMARY KEY(owner_key),\n CHECK(owner_key=1),\n CHECK(epoch>=0),\n CHECK(commit_seq>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE TABLE content_chunk(\n content_id BIGINT NOT NULL,\n chunk_index BIGINT NOT NULL,\n bytes LONGBLOB NOT NULL,\n PRIMARY KEY(content_id,chunk_index),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n CHECK(chunk_index>=0),\n CHECK(length(bytes) BETWEEN 1 AND 131072)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -345,7 +337,7 @@ const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1,
 
 /// store_meta's keys, as bootstrap writes them: a closed set, so a key is
 /// a tag, which MySQL can key. `store_id` is the Store's own random id,
-/// drawn once when it is created and never changed (D204, format 55).
+/// drawn once when it is created and never changed (D204, format 54).
 const meta_keys = [_][]const u8{ "wire_version", "store_selector", "format", "store_id" };
 
 /// The bytes of one MySQL `content_chunk` row; the last of a content's
