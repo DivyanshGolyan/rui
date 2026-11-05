@@ -1785,6 +1785,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (parsed.get("reasoning-effort")) |text| input.reasoning_effort = policyArgument(text);
     if (parsed.get("label")) |text| input.label = try labelArgument(text);
     var binding: new_session_selection.Binding = .{};
+    var saved_effort: ?model_capability.ReasoningEffort = null;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     // Only fresh creation resolves defaults, once, into the capture, through
     // the same prospective selection as a new interactive Session. Addressed
@@ -1801,6 +1802,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
             const home = init.environ_map.get("HOME") orelse return homeRequired("fresh configuration without --provider and --model reads saved defaults");
             break :blk try preferences.load(home);
         } else .{} };
+        saved_effort = snapshot.defaults.reasoning_effort;
         binding = try snapshot.resolveUnprompted();
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
@@ -1817,7 +1819,10 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
     if (start) {
-        try message(init, parsed, input);
+        try message(init, parsed, .{
+            .input = input,
+            .receipt = StartConfiguration.resolve(input, parsed.has("reasoning-effort"), saved_effort),
+        });
         return false;
     }
     var step: ?client.Step = .store;
@@ -1873,7 +1878,12 @@ fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) v
     stderr.diagnostic("rui: Configuration {s} ({s}). Use rui request inspect {s} to inspect the same saved request.\n", .{ status, @errorName(err), key });
 }
 
-fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?client.ConfigureInput) !void {
+const StartMessage = struct {
+    input: client.ConfigureInput,
+    receipt: StartConfiguration,
+};
+
+fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?StartMessage) !void {
     var step: ?client.Step = .input_parse;
     return messageWithStep(init, parsed, configuration, &step) catch |err| {
         reportFailureStep(step, err);
@@ -1881,14 +1891,14 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     };
 }
 
-fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?client.ConfigureInput, step: *?client.Step) !void {
+fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?StartMessage, step: *?client.Step) !void {
     const io = init.io;
     const destination = if (configuration != null) "" else parsed.get("to").?;
     if (configuration == null and !protocol.validSessionId(destination)) {
         stderr.diagnostic("rui: --to needs exactly six lowercase Crockford characters, for example k7m2qx. Nothing was sent.\n", .{});
         return error.InvalidSession;
     }
-    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration };
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = if (configuration) |value| value.input else null };
     // Peer context names a Session in its own Store, so it signs only sends
     // to that Store; an explicit --store naming another Store is a plain
     // caller's send there (#957). Incomplete or malformed context never falls
@@ -1930,7 +1940,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     // This is the first Message's admission, never execution/completion.
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
-    writeMutationJson(writer, reply, StartConfiguration.resolve(configuration.?, parsed.has("reasoning-effort"))) catch |err| return output.failure(err);
+    writeMutationJson(writer, reply, configuration.?.receipt) catch |err| return output.failure(err);
     writer.writeByte('\n') catch |err| return output.failure(err);
     try output.finish();
 }
@@ -3080,13 +3090,15 @@ const StartConfiguration = struct {
     reasoning_effort: ?[]const u8,
     effort_source: enum { flag, saved, model_default },
 
-    fn resolve(input: client.ConfigureInput, effort_flag: bool) StartConfiguration {
+    fn resolve(input: client.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
         const model = input.model.value;
         return .{
             .provider = input.provider.value,
             .model = model,
             .reasoning_effort = input.reasoning_effort.value orelse if (model_capability.defaultReasoningEffort(model)) |effort| @tagName(effort) else null,
-            .effort_source = if (effort_flag) .flag else if (input.reasoning_effort.value != null) .saved else .model_default,
+            // A client may materialize the catalog default into input. Only
+            // the saved preference snapshot establishes saved provenance.
+            .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(saved_effort, model) != null) .saved else .model_default,
         };
     }
 };
@@ -3161,13 +3173,20 @@ test "session start configuration reports resolved effort and its source" {
         override: ?[]const u8 = null,
         present: bool = false,
         flag: bool = false,
+        saved: ?model_capability.ReasoningEffort = null,
         effort: ?[]const u8 = "low",
         source: @FieldType(StartConfiguration, "effort_source") = .model_default,
     };
     for ([_]Case{
         .{},
         .{ .model = "unlisted-model", .effort = null },
-        .{ .override = "high", .present = true, .source = .saved, .effort = "high" },
+        .{ .override = "high", .present = true, .saved = .high, .source = .saved, .effort = "high" },
+        // S1 fills the outgoing override even when no preference was read.
+        .{ .override = "low", .present = true },
+        .{ .override = "low", .present = true, .saved = .low, .source = .saved },
+        .{ .model = "gpt-5.5", .override = "medium", .present = true, .saved = .max, .effort = "medium" },
+        .{ .model = "unlisted-model", .present = true, .saved = .high, .effort = null },
+        .{ .override = "low", .present = true, .flag = true, .saved = .high, .source = .flag },
         .{ .override = "xhigh", .present = true, .flag = true, .source = .flag, .effort = "xhigh" },
         .{ .present = true, .flag = true, .source = .flag },
         .{ .model = "unlisted-model", .present = true, .flag = true, .source = .flag, .effort = null },
@@ -3178,7 +3197,7 @@ test "session start configuration reports resolved effort and its source" {
             .provider = .{ .present = true, .value = "openai" },
             .model = .{ .present = true, .value = case.model },
             .reasoning_effort = .{ .present = case.present, .value = case.override },
-        }, case.flag);
+        }, case.flag, case.saved);
         try std.testing.expectEqualStrings("openai", value.provider);
         try std.testing.expectEqualStrings(case.model, value.model);
         try std.testing.expectEqual(case.source, value.effort_source);
