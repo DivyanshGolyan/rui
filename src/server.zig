@@ -3741,6 +3741,12 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try configure.configuration.provider.value.set("codex");
         configure.configuration.model.state = .value;
         try configure.configuration.model.value.set("model-a");
+        configure.configuration.tools = try .of(&.{});
+        configure.configuration.permission_mode.state = .value;
+        try configure.configuration.permission_mode.value.set("bypass");
+        configure.configuration.compaction_trigger.state = .value;
+        try configure.configuration.compaction_trigger.value.set("115200");
+        configure.configuration.reasoning_effort.state = .explicit_null;
         const configured = storage.configure(&configure, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session.slice();

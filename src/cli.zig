@@ -3463,7 +3463,7 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
 
 const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
 
-const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,message_agent,start_agent,web_search|none] [--loaded-tools a,b|none] [--permission-mode " ++ cli_args.live_configure.argumentOf("permission-mode").?.? ++ "] [--reasoning-effort " ++ cli_args.live_configure.argumentOf("reasoning-effort").?.? ++ "] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
+const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,message_agent,read_transcript,start_agent,web_search|none] [--loaded-tools a,b|none] [--permission-mode " ++ cli_args.live_configure.argumentOf("permission-mode").?.? ++ "] [--reasoning-effort " ++ cli_args.live_configure.argumentOf("reasoning-effort").?.? ++ "] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
 
 const usage_text =
     \\usage:

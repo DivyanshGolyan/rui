@@ -4227,6 +4227,72 @@ test "compactAt enforces only known context windows on create and update" {
     }.run);
 }
 
+test "loaded tools select saved records even after the Host catalog changes or removes them" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var records = [_]tool_catalog.Record{
+                tool_catalog.bash_record,
+                .{ .name = "fetch_page", .owner = .mcp, .server = "original", .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "find_tools", .owner = .rui },
+                tool_catalog.message_agent_record,
+                .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
+                tool_catalog.read_transcript_record,
+                tool_catalog.start_agent_record,
+                tool_catalog.web_search_record,
+            };
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const original: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            try storage.saveCatalog(&original);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("loaded-records-create", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{ "fetch_page", "find_tools", "other_page" });
+            create.configuration.loaded_tools = try .of(&.{"find_tools"});
+            const first = storage.configure(&create, .{}).accepted.session;
+            try create.key.set("loaded-records-second");
+            const second = storage.configure(&create, .{}).accepted.session;
+            const saved_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
+                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
+
+            var changed_records = records;
+            changed_records[1] = .{ .name = "fetch_page", .owner = .mcp, .server = "replacement", .description = "New page", .input_schema = "{\"type\":\"object\",\"additionalProperties\":false}" };
+            var changed_digests = digests;
+            changed_digests[1] = tool_catalog.recordDigest(&changed_records[1]);
+            const changed: tool_catalog.Catalog = .{ .records = &changed_records, .digests = &changed_digests };
+            try storage.saveCatalog(&changed);
+            var update: protocol.ConfigureCommand = .{};
+            try update.key.set("loaded-records-reworded");
+            update.session = first;
+            update.configuration.loaded_tools = try .of(&.{ "fetch_page", "find_tools" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            const loaded_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
+                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
+            try std.testing.expectEqual(saved_record, loaded_record);
+
+            var removed_records: [records.len - 1]tool_catalog.Record = undefined;
+            removed_records[0] = records[0];
+            @memcpy(removed_records[1..], records[2..]);
+            var removed_digests: [removed_records.len][32]u8 = undefined;
+            for (&removed_records, &removed_digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const removed: tool_catalog.Catalog = .{ .records = &removed_records, .digests = &removed_digests };
+            try storage.saveCatalog(&removed);
+            try update.key.set("loaded-records-removed");
+            update.session = second;
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            // Both configurations select the original records and intern
+            // the very same loaded set despite today's catalog contents.
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT loaded_tool_set_id) FROM session WHERE session_ref=?1 OR session_ref=?2", .{ first.slice(), second.slice() }));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
 test "configuration planning preserves sparse defaults and rejection precedence" {
     const WorkspaceRequest = enum { omitted, same, different };
     const InstructionsRequest = enum { omitted, value };
@@ -8457,6 +8523,7 @@ const EntryPoint = enum {
     openPublicConversationContent,
     activityPage,
     openActivityContent,
+    activityTool,
     captureFailedResponse,
     captureSessionReport,
     captureSessionList,
@@ -8470,7 +8537,7 @@ const EntryPoint = enum {
     deliverChildEnding,
     startAgent,
     stopOwedSession,
-    failCoreCall,
+    resolveCoreCall,
     actionSupersededByStop,
     withActionDispatchHandoff,
     settleActionAttempt,
@@ -8516,6 +8583,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .openPublicConversationContent = 2,
     .activityPage = 7,
     .openActivityContent = 4,
+    .activityTool = 4,
     .captureFailedResponse = 1,
     .captureSessionReport = 5,
     .captureSessionList = 6,
@@ -8529,7 +8597,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .deliverChildEnding = 2,
     .startAgent = 4,
     .stopOwedSession = 2,
-    .failCoreCall = 2,
+    .resolveCoreCall = 2,
     .actionSupersededByStop = 1,
     .withActionDispatchHandoff = 1,
     .settleActionAttempt = 3,
@@ -8943,7 +9011,17 @@ test "each Store entry point takes its round budget on its common path" {
             const refused = (try storage.nextCoreWork()).?.action;
             meter.start();
             try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
-            meter.stop(.failCoreCall);
+            meter.stop(.resolveCoreCall);
+            // A Tool Result's identity comes from its original call, not the
+            // group's position. Drive the public read on the last ordinal.
+            const result_page = try store_core.activityPageForTesting(storage, .{ .session = session, .direction = .backward, .kinds = .initOne(.tool_result), .limit = 1 });
+            const result = result_page.items[0];
+            try std.testing.expectEqual(@as(u64, 3), result.ordinal);
+            meter.start();
+            const tool = try storage.activityTool(&.{ .session = session, .position = result.position, .ordinal = result.ordinal });
+            meter.stop(.activityTool);
+            try std.testing.expect(tool.presentation.code == .failed);
+            try expectContent(storage, .{ .length = tool.name.length, .digest = tool.name.digest }, "start_agent");
             // Admit the child task so stopping it closes a Turn.
             while (try storage.admitNextModelAttempt(.{})) |_| {}
             var stop = try completeSessionStop("budget-core-stop", session.slice());
@@ -10455,71 +10533,6 @@ test "loaded tools preserve and intersect a saved subset through the catalog" {
             update.configuration.loaded_tools.state = .omitted;
             try std.testing.expect(storage.configure(&update, .{}) == .accepted);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND loaded_tool_set_id IS NULL", .{session.slice()}));
-        }
-    }.run);
-}
-
-test "loaded tools select saved records even after the Host catalog changes or removes them" {
-    try store_testing.forEachEngine(struct {
-        fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            var records = [_]tool_catalog.Record{
-                tool_catalog.bash_record,
-                .{ .name = "fetch_page", .owner = .mcp, .server = "original", .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
-                .{ .name = "find_tools", .owner = .rui },
-                tool_catalog.message_agent_record,
-                .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
-                tool_catalog.start_agent_record,
-                tool_catalog.web_search_record,
-            };
-            var digests: [records.len][32]u8 = undefined;
-            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-            const original: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
-            try storage.saveCatalog(&original);
-            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            var create = try completeConfiguration("loaded-records-create", "", workspace, "model-a");
-            create.configuration.tools = try .of(&.{ "fetch_page", "find_tools", "other_page" });
-            create.configuration.loaded_tools = try .of(&.{"find_tools"});
-            const first = storage.configure(&create, .{}).accepted.session;
-            try create.key.set("loaded-records-second");
-            const second = storage.configure(&create, .{}).accepted.session;
-            const saved_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
-                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
-
-            var changed_records = records;
-            changed_records[1] = .{ .name = "fetch_page", .owner = .mcp, .server = "replacement", .description = "New page", .input_schema = "{\"type\":\"object\",\"additionalProperties\":false}" };
-            var changed_digests = digests;
-            changed_digests[1] = tool_catalog.recordDigest(&changed_records[1]);
-            const changed: tool_catalog.Catalog = .{ .records = &changed_records, .digests = &changed_digests };
-            try storage.saveCatalog(&changed);
-            var update: protocol.ConfigureCommand = .{};
-            try update.key.set("loaded-records-reworded");
-            update.session = first;
-            update.configuration.loaded_tools = try .of(&.{ "fetch_page", "find_tools" });
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-            const loaded_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
-                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
-            try std.testing.expectEqual(saved_record, loaded_record);
-
-            var removed_records: [records.len - 1]tool_catalog.Record = undefined;
-            removed_records[0] = records[0];
-            @memcpy(removed_records[1..], records[2..]);
-            var removed_digests: [removed_records.len][32]u8 = undefined;
-            for (&removed_records, &removed_digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-            const removed: tool_catalog.Catalog = .{ .records = &removed_records, .digests = &removed_digests };
-            try storage.saveCatalog(&removed);
-            try update.key.set("loaded-records-removed");
-            update.session = second;
-            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
-            // Both configurations select the original records and intern
-            // the very same loaded set despite today's catalog contents.
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT loaded_tool_set_id) FROM session WHERE session_ref=?1 OR session_ref=?2", .{ first.slice(), second.slice() }));
-            try std.testing.expect(!storage.isFenced());
         }
     }.run);
 }

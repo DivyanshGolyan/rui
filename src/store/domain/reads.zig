@@ -1925,6 +1925,35 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
     return .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } };
 }
 
+/// The public identity and saved line of a call or Tool Result. This uses
+/// the same Proposal and presentation provenance checks as activity pages;
+/// the result's group position is not the original call's position.
+pub const ActivityTool = struct {
+    name: protocol.ProposalFieldReference,
+    presentation: protocol.ToolPresentation,
+};
+
+pub fn activityTool(a: *ReadAccess, request: *const protocol.ReadActivityContent) !ActivityTool {
+    var metadata: protocol.ProposalMetadata = undefined;
+    var presentation: protocol.ToolPresentation = undefined;
+    const operation, const ordinal = if (request.ordinal == 0) call: {
+        metadata = try proposal(a, request.session.slice(), request.position);
+        break :call .{ metadata.operation, metadata.call_ordinal };
+    } else result: {
+        const content = try publicConversationContent(a, request.session.slice(), request.position, request.ordinal);
+        break :result .{ content.tool_operation orelse return error.ContentNotFound, request.ordinal - 1 };
+    };
+    var read: PresentationRead = .init(operation, ordinal, null, &presentation);
+    read.queue(a);
+    try runRows(a);
+    try read.checkCall();
+    read.proposal.metadata = &metadata;
+    read.queueProposal(a);
+    try runRows(a);
+    try read.finish();
+    return .{ .name = metadata.fields[@backingInt(protocol.ProposalField.name)], .presentation = presentation };
+}
+
 /// The content columns of a Proposal's three fields, in ProposalField order.
 const proposal_fields = [3][]const u8{ "name_content_id", "call_id_content_id", "arguments_content_id" };
 

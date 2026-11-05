@@ -449,7 +449,7 @@ pub fn deliverAgentMessage(
     const key = agentMessageKey(&key_buffer, binding.action_id);
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent }, &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var receiver: target_session.Result = null;
@@ -632,7 +632,7 @@ pub fn startAgent(
     const key = std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent }, &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var parent: parent_settings.Row = undefined;
@@ -713,13 +713,12 @@ pub fn startAgent(
     return .started;
 }
 
-/// Fails the core tool call `binding` names with `result`, which says why
-/// nothing was done, and lets its Turn continue, in one transaction. A
-/// call whose Turn a stop selected is left to the stop.
-pub fn failCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
+/// Resolves a core tool call and lets its Turn continue in one transaction.
+/// A call whose Turn a stop selected is left to the stop.
+pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, code: action_domain.ActionResolutionCode, result: []const u8, faults: Faults) !bool {
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent }, &facts);
     var outcome: content_domain.Import = .ofBytes(result, false);
     content_domain.lookup(a, &outcome);
     try a.run();
@@ -730,7 +729,7 @@ pub fn failCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, res
     }
     if (faults.content_import) return error.InjectedContentImportFailure;
     const outcome_id = try content_domain.importBytes(a, &outcome, result);
-    try action_domain.queueCoreResolution(a, binding, found.session, .failed, outcome_id);
+    try action_domain.queueCoreResolution(a, binding, found.session, code, outcome_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return true;
