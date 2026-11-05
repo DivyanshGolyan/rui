@@ -678,20 +678,6 @@ const NativeTurn = struct {
         return slotsHaveBash(self.slots);
     }
 
-    pub fn runNextMcpAction(self: *NativeTurn) error{Fence}!bool {
-        const action = self.host.store.nextMcpAction() catch |err| {
-            fenceDispatch(self.host, "MCP selection", err);
-            self.fenced = true;
-            return error.Fence;
-        } orelse return false;
-        self.host.store.resolveMcpAction(action.action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", self.host.hooks.storeFaults(.action_result)) catch |err| {
-            fenceDispatch(self.host, "MCP resolution", err);
-            self.fenced = true;
-            return error.Fence;
-        };
-        return true;
-    }
-
     pub fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
         const active_slots = ActiveSlots{ .slots = self.slots };
         const active_actions = store_module.ActiveOperationFilter{
@@ -1153,14 +1139,45 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
 /// whole onto the heap, so its frame stays small: every Store call may run
 /// other threads' queued writes on this stack.
 noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
-    const input = (host.store.nextCoreAction() catch |err| {
+    const work = (host.store.nextCoreWork() catch |err| {
         fenceDispatch(host, "core tool selection", err);
         return .retry_later;
     }) orelse return .no_work;
-    return switch (input.tool) {
-        .message_agent => runMessageAgent(host, &input),
-        .start_agent => runStartAgent(host, &input),
+    return switch (work) {
+        .stop => |*owed| runOwedStop(host, owed),
+        .mcp => |call| runMcpAction(host, call.action_id),
+        .action => |*input| switch (input.tool) {
+            .message_agent => runMessageAgent(host, input),
+            .start_agent => runStartAgent(host, input),
+        },
     };
+}
+
+/// Until the MCP runner lands, resolve without taking execution custody.
+noinline fn runMcpAction(host: *Host, action_id: u64) execution_turn.Admission {
+    host.store.resolveMcpAction(action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", host.hooks.storeFaults(.action_result)) catch |err| {
+        fenceDispatch(host, "MCP resolution", err);
+        return .retry_later;
+    };
+    return .admitted;
+}
+
+/// Stops an attached child whose parent stopped or ran out of context
+/// (D38), as a client's stop of that child would, and tells the engine,
+/// which interrupts what the stop selected.
+noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) execution_turn.Admission {
+    var command: protocol.SessionStopCommand = .{ .key = owed.key };
+    command.session.set(owed.session.slice()) catch unreachable;
+    switch (host.store.stopOwedSession(&command, host.hooks.storeFaults(.action_result))) {
+        // A command that already held the key settled the owed stop.
+        .accepted, .rejected, .conflict => {},
+        .infrastructure_failure => {
+            fenceDispatch(host, "owed stop", error.CanonicalStoreFailure);
+            return .retry_later;
+        },
+    }
+    host.controls_changed.store(true, .release);
+    return .admitted;
 }
 
 noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
@@ -3936,8 +3953,8 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         .fenced = false,
     };
     // No execution capacity, process environment or transport is available.
-    try std.testing.expect(try native.runNextMcpAction());
-    try std.testing.expect(!try native.runNextMcpAction());
+    try std.testing.expect(native.runCoreAction() == .admitted);
+    try std.testing.expect(native.runCoreAction() == .no_work);
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     const report = try store_module.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
     defer std.testing.allocator.free(report);

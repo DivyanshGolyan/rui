@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 53;
+pub const schema_version: u32 = 54;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -32,6 +32,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
+    .{ .schema_version = 54, .digest = 0xd783e05e67fa928c },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -120,6 +121,18 @@ pub const migrations = [_]Migration{
         },
         .mysql = &.{
             "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
+        },
+    },
+    // Schema 54: the stops an attached child owes (D38).
+    .{
+        .from = 53,
+        .sqlite = &.{
+            "CREATE TABLE session_stop_owed(\n child_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n cause_ref TEXT NOT NULL REFERENCES session(session_ref),\n cause_position INTEGER NOT NULL CHECK(cause_position>0)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX session_parent ON session(parent_ref) WHERE parent_ref IS NOT NULL",
+        },
+        .mysql = &.{
+            "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n PRIMARY KEY(child_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX session_parent ON session(parent_ref)",
         },
     },
 };
@@ -578,6 +591,24 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
+        // An attached child owes a stop because its parent stopped or ran
+        // out of context (D38); the Host runs it as the child's own stop,
+        // which deletes the row. The first cause names the stop's key. Host
+        // work, not a Session's state: no reader of a Session reads it.
+        .name = "session_stop_owed",
+        .columns = &.{
+            .{ .name = "child_ref", .type = .{ .text = null } },
+            .{ .name = "cause_ref", .type = .{ .text = null } },
+            .{ .name = "cause_position", .type = .int, .check = "cause_position>0" },
+        },
+        .primary_key = &.{"child_ref"},
+        .foreign_keys = &.{
+            references("child_ref", "session", session_reference),
+            references("cause_ref", "session", session_reference),
+        },
+        .without_rowid = true,
+    },
+    .{
         .name = "model_interruption_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = null } },
@@ -867,6 +898,7 @@ pub const indexes = [_]Index{
     .{ .name = "session_stop_unpositioned", .table = "session_stop", .columns = &.{"session_ref"}, .where = "position IS NULL" },
     .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
     .{ .name = "session_stop_turn", .table = "session_stop", .columns = &.{"selected_turn_id"} },
+    .{ .name = "session_parent", .table = "session", .columns = &.{"parent_ref"}, .where = "parent_ref IS NOT NULL" },
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
     .{ .name = "action_operation_sender_handle", .table = "action_operation", .columns = &.{"sender_handle"}, .unique = true, .where = "sender_handle IS NOT NULL" },
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },

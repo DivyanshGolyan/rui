@@ -109,18 +109,63 @@ pub const CoreActionInput = struct {
 /// The next core tool call to run, or null. It writes nothing: the core
 /// command that runs it resolves it in one transaction, so a call read
 /// here and never run is simply read again.
-pub fn nextCoreAction(a: anytype) !?CoreActionInput {
+/// A stop an attached child owes (D38), as the Host runs it: the child's
+/// own Session stop under a key its cause names, so a stop read here and
+/// never run is run again under the same key.
+pub const OwedStop = struct {
+    session: protocol.Bounded(protocol.session_id_bytes),
+    key: protocol.Bounded(protocol.max_key_bytes),
+};
+
+/// The core's next piece of work: a stop a child owes comes first, so
+/// none of its calls runs after its parent stopped.
+pub const CoreWork = union(enum) {
+    stop: OwedStop,
+    action: CoreActionInput,
+    mcp: McpAction,
+};
+
+const owed_stop = rsql.Read(.{
+    .sql = "SELECT child_ref,cause_ref,cause_position FROM session_stop_owed ORDER BY child_ref LIMIT 1",
+    .Args = struct {},
+    .Row = struct { child_ref: protocol.Bounded(protocol.session_id_bytes), cause_ref: protocol.Bounded(protocol.session_id_bytes), cause_position: u64 },
+    .cardinality = .optional,
+});
+
+/// The key an owed stop runs under: the child, and the stop or context
+/// full ending of its parent that owes it, so a newer obligation of the
+/// same child has another key.
+pub fn owedStopKey(buffer: []u8, child: []const u8, cause: []const u8, position: u64) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "rui.core/stop/{s}/{s}/{d}", .{ child, cause, position });
+}
+
+pub fn nextCoreWork(a: anytype) !?CoreWork {
+    var stop: owed_stop.Result = undefined;
     var next: next_core_action.Result = undefined;
+    var mcp: next_mcp_action.Result = undefined;
     const names: CoreNames = .of();
+    a.read(owed_stop, .{}, &stop);
+    a.read(next_mcp_action, .{}, &mcp);
     a.read(next_core_action, .{ .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &next);
     try a.run();
+    if (stop) |owed| {
+        var work: OwedStop = .{ .session = owed.child_ref, .key = .{} };
+        var buffer: [protocol.max_key_bytes]u8 = undefined;
+        try work.key.set(try owedStopKey(&buffer, owed.child_ref.slice(), owed.cause_ref.slice(), owed.cause_position));
+        return .{ .stop = work };
+    }
+    // After owed stops, service both slot-free runners in Action order.
+    if (mcp) |call| {
+        if (next == null or call.action_id.get() < next.?.action_id.get())
+            return .{ .mcp = .{ .action_id = call.action_id.get() } };
+    }
     const found = next orelse return null;
-    return .{
+    return .{ .action = .{
         .binding = .{ .turn_id = found.turn_id.get(), .parent_operation_id = found.parent_operation_id.get(), .action_id = found.action_id.get() },
         .tool = if (found.starts) .start_agent else .message_agent,
         .session = found.session,
         .arguments = try actionContent(a, found.session.slice(), found.action_id.get(), .arguments),
-    };
+    } };
 }
 
 const attempt_action = rsql.Write(.{
@@ -288,10 +333,12 @@ pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *B
 }
 
 /// The core tool call `binding` names while it waits to run: its Session
-/// and whether a stop selected its Turn.
+/// and whether a stop selected its Turn, or its Session owes one (D38),
+/// which runs first and resolves the call.
 pub const core_facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position," ++
-        "EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) AS stopped " ++
+        "(EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
+        "OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref)) AS stopped " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 " ++
@@ -541,10 +588,27 @@ const mcp_facts_sql = "SELECT action.action_id,action.parent_operation_id,operat
     "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
     "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
     "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-    "AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ mcpCallSql("action", "operation");
+    "AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref) " ++
+    "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ mcpCallSql("action", "operation");
 const McpFacts = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: rsql.SessionHead };
+// Start with open Turns' frozen MCP offers, not executable Actions. Bash-only
+// offers never open their call ranges; candidate calls seek their Action by
+// parent and ordinal. CROSS JOIN keeps that bound before the Action lookup.
 const next_mcp_action = rsql.Read(.{
-    .sql = mcp_facts_sql ++ " ORDER BY action.action_id LIMIT 1",
+    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position " ++
+        "FROM turn active @index(turn_one_active_per_session) " ++
+        "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
+        "CROSS JOIN session_revision revision ON revision.session_ref=operation.session_ref AND revision.revision=operation.settings_revision " ++
+        "CROSS JOIN tool_set_member member ON member.tool_set_id=revision.tool_set_id " ++
+        "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' " ++
+        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
+        "CROSS JOIN content name ON name.content_id=tool_call.name_content_id AND name.payload=@bytes(tool.name) " ++
+        "CROSS JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+        "JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE active.outcome_code IS NULL AND action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+        "AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref) " ++
+        "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
+        "ORDER BY action.action_id LIMIT 1",
     .Args = struct {},
     .Row = McpFacts,
     .cardinality = .optional,
