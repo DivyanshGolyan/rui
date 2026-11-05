@@ -260,7 +260,7 @@ def main(network, ci):
     assert host.wait(timeout=30) == 0, output(host)
 
     # Presets are launch-only seeds; the saved Session contains resolved fields.
-    preset = {"model": "gpt-6.1-sol", "effort": None, "compactAt": 100000,
+    preset = {"model": "gpt-6.1-sol", "effort": "low", "compactAt": 100000,
               "tools": [], "permissionMode": "ask", "label": "Review"}
     host = launch(frame(dict(good, presets={"review": preset})))
     wait_for_socket(sock, host)
@@ -274,6 +274,7 @@ def main(network, ci):
     saved = post(sock, "inspect-session", {"version": WIRE, "kind": "inspect_session", "store": str(store), "session": session})["session"]
     assert saved["model"] == preset["model"] and saved["tools"] == [] and saved["label"] is None, saved
     assert saved["compaction_trigger_override"] == "100000", saved
+    assert saved["reasoning_effort"] == "low" and saved["reasoning_effort_override"] == "low", saved
     unknown = post(sock, "configure", dict(create, key="preset:unknown", preset="missing"))
     assert unknown["answer"]["code"] == "unknown_preset", unknown
     update = post(sock, "configure", dict(create, key="preset:update", session=session))

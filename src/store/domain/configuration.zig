@@ -345,7 +345,7 @@ pub fn planConfigurationUpdate(
 /// write round (`importSealed`). The
 /// decision is `applyConfiguration`; the write round saves the Session,
 /// the command and its revision, then commits.
-pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, preset: ?PresetDecision, faults: Faults) !ConfigureReply {
+pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, preset: ?*const PresetDecision, faults: Faults) !ConfigureReply {
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
     const command = request;

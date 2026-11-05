@@ -1690,7 +1690,7 @@ def command_entry_cases():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         defaults(home, "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
-        initial_session = run(home, "session", "start", "--workspace", workspace, input=prompt).strip()
+        initial_session = json.loads(run(home, "session", "start", "--workspace", workspace, input=prompt))["context"]["session"]
         assert re.fullmatch(r"[0123456789abcdefghjkmnpqrstvwxyz]{6}", initial_session), initial_session
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
@@ -4354,8 +4354,8 @@ def renderer_cases():
             if ready_write is not None:
                 env["RUI_TEST_ACTION_READY_FD"] = str(ready_write)
             if initial_text is not None:
-                session = run(home, "session", "start", "--store", store, "--workspace", workspace,
-                    "--provider", "codex", "--model", "gpt-6-sol", input=initial_text).strip()
+                session = json.loads(run(home, "session", "start", "--store", store, "--workspace", workspace,
+                    "--provider", "codex", "--model", "gpt-6-sol", input=initial_text))["context"]["session"]
                 assert re.fullmatch(r"[0123456789abcdefghjkmnpqrstvwxyz]{6}", session), session
             arguments = ["session", "resume", "--store", str(store), "--", session]
             caller = subprocess.Popen([str(fixture.RUI), *arguments],

@@ -1383,13 +1383,13 @@ noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureComma
     var decision: store_module.PresetDecision = .{ .request_digest = command.presetRequestDigest() };
     if (command.session.len != 0) {
         decision.rejection = .preset_on_update;
-        return host.store.configureWithPreset(command, decision, host.hooks.storeFaults(.command));
+        return host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
     }
     const preset = for (host.presets) |*entry| {
         if (std.mem.eql(u8, entry.name, name.slice())) break entry;
     } else {
         decision.rejection = .unknown_preset;
-        return host.store.configureWithPreset(command, decision, host.hooks.storeFaults(.command));
+        return host.store.configureWithPreset(command, &decision, host.hooks.storeFaults(.command));
     };
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
@@ -1409,7 +1409,7 @@ noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureComma
         const override = &@field(command.configuration, field);
         if (override.state != .omitted) @field(resolved.configuration, field) = override.*;
     }
-    return host.store.configureWithPreset(resolved, decision, host.hooks.storeFaults(.command));
+    return host.store.configureWithPreset(resolved, &decision, host.hooks.storeFaults(.command));
 }
 
 /// `client_environment` holds a Message's checked environment.
