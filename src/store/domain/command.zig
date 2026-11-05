@@ -423,7 +423,8 @@ pub const AgentDelivery = enum {
     delivered,
     /// Nothing was sent, and the call failed with a result saying why.
     failed,
-    /// A stop selected the call's Turn, and the stop resolves the call.
+    /// A stop selected the call's Turn, or its Session owes one, and the
+    /// stop resolves the call.
     stopped,
 };
 
@@ -505,7 +506,8 @@ pub const AgentStart = enum {
     started,
     /// Nothing was started, and the call failed with a result saying why.
     failed,
-    /// A stop selected the call's Turn, and the stop resolves the call.
+    /// A stop selected the call's Turn, or its Session owes one, and the
+    /// stop resolves the call.
     stopped,
 };
 
@@ -648,12 +650,29 @@ pub fn failCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, res
 }
 
 /// The Session a stop names, and the last Message admitted to it: the
-/// stop excludes every Message up to that one.
+/// stop excludes every Message up to that one. Also the stop it owes, if
+/// any: the cause and position its owed key names.
 const stop_target = rsql.Read(.{
-    .sql = "SELECT session_ref,workspace_key,next_position,(SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1) AS admission_cutoff " ++
+    .sql = "SELECT session_ref,workspace_key,next_position,(SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1) AS admission_cutoff," ++
+        turn_domain.unowedChildrenSql("?1") ++ " AS unowed_children," ++
+        "(SELECT cause_ref FROM session_stop_owed WHERE child_ref=?1) AS owed_cause,(SELECT cause_position FROM session_stop_owed WHERE child_ref=?1) AS owed_position " ++
         "FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { session: rsql.SessionHead, admission_cutoff: u64 },
+    .Row = struct {
+        session: rsql.SessionHead,
+        admission_cutoff: u64,
+        unowed_children: u64,
+        owed_cause: ?protocol.Bounded(protocol.session_id_bytes),
+        owed_position: ?u64,
+
+        /// Whether `key` is the key of the stop this Session owes now.
+        fn owedUnder(row: *const @This(), key: []const u8) bool {
+            const cause = row.owed_cause orelse return false;
+            var buffer: [protocol.max_key_bytes]u8 = undefined;
+            const owed = action_domain.owedStopKey(&buffer, row.session.ref[0..], cause.slice(), row.owed_position.?) catch return false;
+            return std.mem.eql(u8, owed, key);
+        }
+    },
     .cardinality = .optional,
 });
 
@@ -685,6 +704,12 @@ const insert_stop = rsql.Write(.{
     .sql = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) VALUES(?1,@session(?2),?3,?4,?5,@now)",
     .Args = struct { key: []const u8, session: rsql.SessionHead, selected_turn_id: ?u64, admission_cutoff: u64, position: u64 },
     // A replay was classified first, so the key is free.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+const settle_owed_stop = rsql.Write(.{
+    .sql = "DELETE FROM session_stop_owed WHERE child_ref=?1",
+    .Args = struct { session: []const u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -783,7 +808,19 @@ fn stopObservation(row: *const stop_selection.Row) SessionStopObservation {
 /// A stop's own interruption finding the Operation changed is the stop's
 /// selection changing, as on main.
 pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
-    return stopRounds(a, command, faults) catch |err| switch (err) {
+    return stopRounds(a, command, false, faults) catch |err| switch (err) {
+        error.InterruptionTargetChanged => error.StopSelectionChanged,
+        else => err,
+    };
+}
+
+/// The stop an attached child owes (D38), under its owed key. Clients
+/// cannot use `rui.core/` keys (`protocol.reserved_key_prefix`), so the
+/// key is free while the obligation stands. Any stop settles what the
+/// Session owes, and a newer obligation has another key: an owed stop
+/// whose key is not the one owed now runs nothing and answers conflict.
+pub fn stopOwedSession(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
+    return stopRounds(a, command, true, faults) catch |err| switch (err) {
         error.InterruptionTargetChanged => error.StopSelectionChanged,
         else => err,
     };
@@ -804,7 +841,7 @@ pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faul
 /// the text is new). The last page's write and the Turn's close run in the
 /// final round, at commit, with the position advance. With no Actions to
 /// cancel, every write runs at commit.
-fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
+fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: bool, faults: Faults) !SessionStopReply {
     const digest = command.semanticDigest();
     const key = command.key.slice();
     const session = command.session.slice();
@@ -817,6 +854,12 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, faults: F
         a.read(stop_turn, .{ .session = session }, &turn);
     }
     try a.run();
+    // An owed stop runs only while its obligation stands: a stop under
+    // another key, or a newer obligation, settled or replaced it.
+    if (owed and !(target != null and target.?.owedUnder(key) and saved == null)) {
+        try a.abandon(.{});
+        return .conflict;
+    }
     switch (try classify(protocol.SessionStopRejection, &saved, .session_stop, session, &digest)) {
         .fresh => {},
         .conflict => {
@@ -860,7 +903,12 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, faults: F
     const answer: StoredAnswer = .{ .accepted = true };
     try queueCommand(a, key, .session_stop, session, &digest, null, null, &answer);
     const selection = SessionStopSelection{ .selected_turn_id = if (turn) |open| open.turn_id.get() else null, .admission_cutoff = found.admission_cutoff };
-    a.write(insert_stop, .{ .key = key, .session = head, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = try positions.take(1) });
+    const stop_position = try positions.take(1);
+    a.write(insert_stop, .{ .key = key, .session = head, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position });
+    // A stop settles any stop this Session owed, and its attached children
+    // now owe theirs (D38).
+    if (found.owed_cause != null) a.write(settle_owed_stop, .{ .session = &head.ref });
+    turn_domain.queueOwedStops(a, &head.ref, stop_position, found.unowed_children);
     var completion: protocol.SessionStopCompletion = .completed;
     var interrupted_operation_id: ?u64 = null;
     // The cancellation text's identity: its queued row reads the digest in
