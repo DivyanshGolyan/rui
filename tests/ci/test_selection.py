@@ -66,6 +66,14 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_catalog_sources_select_the_portable_catalog_tests(self):
+        for path in ("src/models_dev.zig", "src/model_catalog.zig",
+                     "src/model_catalog_main.zig", "src/model_catalog_snapshot.zig"):
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    expected = ["test-logic"] if phase == "development" else ["stack-frames", "test-logic"]
+                    self.assertEqual(select([path], phase, AVAILABLE)["targets"], expected)
+
     def test_development_does_not_claim_native_acceptance(self):
         # The Store keeps `test` for the live MySQL check (LIVE_RULES); nothing else widens.
         result = select(["src/bash_platform.c", "src/store.zig"], "development", AVAILABLE)
