@@ -121,6 +121,19 @@ pub const ContentReader = struct {
         return count;
     }
 
+    /// Streams inside an existing read access, without re-entering the Store
+    /// queue. No read-ahead: the caller's content-byte budget is exact.
+    pub fn readWithAccess(self: *ContentReader, a: anytype, start: u64, destination: []u8) !usize {
+        std.debug.assert(self.active and a.store == self.store);
+        if (destination.len > content_window_bytes) return error.WindowTooLarge;
+        if (start > self.reference.length) return error.RangeOutOfBounds;
+        const wanted: usize = @intCast(@min(destination.len, self.reference.length - start));
+        try readWindow(a, self, start, destination[0..wanted]);
+        if (!self.absorb(start, destination[0..wanted])) return error.CorruptStore;
+        if (@import("builtin").is_test) _ = self.store.testing_content_work.read.fetchAdd(wanted, .monotonic);
+        return wanted;
+    }
+
     /// `DigestCheck.absorb` against this reader's reference.
     pub fn absorb(self: *ContentReader, start: u64, bytes: []const u8) bool {
         return self.check.absorb(self.reference, start, bytes);
