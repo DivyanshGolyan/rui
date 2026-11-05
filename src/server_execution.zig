@@ -1288,7 +1288,7 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
             fenceDispatch(host, "core tool input", err);
             return .retry_later;
         };
-        break :check tools.core_tools.checkStartAgent(arena, bytes, start) catch return .retry_later;
+        break :check tools.core_tools.checkStartAgentWithPresets(arena, bytes, host.presets, start) catch return .retry_later;
     };
     switch (check) {
         .accepted => {},

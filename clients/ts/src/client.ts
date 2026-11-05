@@ -15,7 +15,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { SessionNotifications } from "./notifications.ts";
 import { resolveBinary } from "./binary.ts";
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
-import { models, Session, Sessions, setPaused, type ModelSummary } from "./sessions.ts";
+import { models, Session, Sessions, setPaused, type AgentSpec, type ModelSummary } from "./sessions.ts";
 import { ConnectionError, post, WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -37,6 +37,8 @@ export interface ConnectOptions {
 	provider: { baseUrl: string; key: string };
 	/** How many Turns may run at once. Left out, the Host picks its default. */
 	activeCapacity?: number;
+	/** Named creation specs, held only by this Host. No default preset is selected. */
+	presets?: Record<string, AgentSpec>;
 	/** How long connect keeps retrying while another Host holds the Store (D183, D198). Default 120 000. */
 	lockWaitMs?: number;
 	/** Opens the Host with Turns held, as if `rui.pause()` had just run (D196); `rui.resume()` lifts it. A restarted Host opens paused again. */
@@ -311,6 +313,12 @@ export function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 		runtimeDir,
 		...(options.activeCapacity === undefined ? {} : { activeCapacity: options.activeCapacity }),
 		...(options.paused ? { paused: true } : {}),
+		...(options.presets === undefined ? {} : {
+			presets: Object.fromEntries(Object.entries(options.presets).map(([name, spec]) => [name, {
+				...spec,
+				...(typeof spec.outputSchema === "string" ? { outputSchema: JSON.parse(spec.outputSchema) as unknown } : {}),
+			}])),
+		}),
 		provider: { kind: "openai_key", baseUrl: options.provider.baseUrl, key: options.provider.key },
 		// Only the Host's fields are copied: it refuses unknown ones.
 		mcpServers: (options.tools ?? []).map(({ name, url, bearerToken, callTimeoutMs }) => ({ name, url, bearerToken, callTimeoutMs })),

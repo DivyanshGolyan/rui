@@ -102,6 +102,8 @@ pub const routes = [_]Route{
         .variants = &.{
             variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.tail, .{}),
             variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.require_model_tail, .{}),
+            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.preset_tail, .{}),
+            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.preset_require_model_tail, .{}),
         },
         .reply = jsonReply(.{ protocol.configuration_reply.accepted, protocol.configuration_reply.rejected }),
         .conflict = jsonReply(.{protocol.configuration_reply.conflict}),

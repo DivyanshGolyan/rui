@@ -68,7 +68,7 @@ The real-Host feed test uses a local HTTPS provider and the `openssl` command to
 
 ## Session settings
 
-`create` needs `model`, `effort`, `compactAt`, `tools` and `permissionMode`, and `workspace` when `tools` includes `bash`.
+`create` needs `model`, `effort`, `compactAt`, `tools` and `permissionMode`, and `workspace` when `tools` includes `bash`, or a `preset` name with optional overrides.
 `provider` may be left out when the Host serves one provider.
 `effort: null` sends no effort, so the provider uses its own; it is accepted only for a model Rui does not list.
 An update may leave out any setting, and an omitted setting stays as it is.
@@ -83,4 +83,19 @@ const session = await rui.sessions.create({
 	workspace: "/work/project",
 }, { idempotencyKey: "project:1" });
 await session.update({ compactAt: 200000 });
+```
+
+Presets are complete agent specs passed at connect and kept only in Host memory.
+Creation copies the preset, with every supplied field (including `null`) overriding it.
+
+```ts
+const rui = await Rui.connect({
+	database: "/var/lib/myapp/rui-store",
+	provider: { baseUrl: "https://api.openai.com/v1", key: process.env.OPENAI_API_KEY! },
+	presets: {
+		review: { model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: [], permissionMode: "ask" },
+	},
+});
+const review = await rui.sessions.create({ preset: "review", instructions: "Review this patch" }, { idempotencyKey: "review:1" });
+await rui.close();
 ```

@@ -3023,6 +3023,8 @@
                       "loaded_tools_unreachable",
                       "invalid_label",
                       "incomplete_initial_configuration",
+                      "unknown_preset",
+                      "preset_on_update",
                       "invalid_workspace",
                       "workspace_is_immutable",
                       "provider_is_immutable",
@@ -3144,6 +3146,98 @@
               "key",
               "session",
               "configuration",
+              "require_model"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "8"
+              },
+              "kind": {
+                "const": "configure"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "configuration": {
+                "$ref": "#/components/schemas/Configuration"
+              },
+              "preset": {
+                "type": "string",
+                "maxLength": 64,
+                "x-rui-max-bytes": 64
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "configuration",
+              "preset"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "8"
+              },
+              "kind": {
+                "const": "configure"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "configuration": {
+                "$ref": "#/components/schemas/Configuration"
+              },
+              "preset": {
+                "type": "string",
+                "maxLength": 64,
+                "x-rui-max-bytes": 64
+              },
+              "require_model": {
+                "const": true
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "configuration",
+              "preset",
               "require_model"
             ],
             "additionalProperties": false
@@ -5214,6 +5308,8 @@
                       "loaded_tools_unreachable",
                       "invalid_label",
                       "incomplete_initial_configuration",
+                      "unknown_preset",
+                      "preset_on_update",
                       "invalid_workspace",
                       "workspace_is_immutable",
                       "provider_is_immutable",
