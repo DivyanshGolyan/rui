@@ -4071,6 +4071,49 @@ test "existing Store rejects a format that store_meta does not hold" {
     try storage.close();
 }
 
+/// The Store id store_meta holds in the database at `path`.
+fn storeId(path: []const u8) ![2 * store_schema.store_id_bytes]u8 {
+    const raw = try openRaw(path);
+    defer _ = c.sqlite3_close(raw);
+    const statement = try sqlite.prepare(raw, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
+    defer _ = c.sqlite3_finalize(statement);
+    if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.NoStoreId;
+    const text = c.sqlite3_column_text(statement, 0) orelse return error.NoStoreId;
+    const id = text[0..@intCast(c.sqlite3_column_bytes(statement, 0))];
+    if (!store_schema.isStoreId(id)) return error.NoStoreId;
+    return id[0 .. 2 * store_schema.store_id_bytes].*;
+}
+
+test "a new Store draws its own Store id, keeps it, and is refused without it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var first_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const first = try std.fmt.bufPrint(&first_buffer, "{s}/first.sqlite3", .{root});
+    var second_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const second = try std.fmt.bufPrint(&second_buffer, "{s}/second.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, first, root);
+    try storage.close();
+    try storage.open(std.testing.io, second, root);
+    try storage.close();
+    const id = try storeId(first);
+    try std.testing.expect(!std.mem.eql(u8, &id, &try storeId(second)));
+    try storage.open(std.testing.io, first, root);
+    try storage.close();
+    try std.testing.expectEqualStrings(&id, &try storeId(first));
+    for ([_][:0]const u8{ "UPDATE store_meta SET meta_value=upper(meta_value) WHERE meta_key='store_id'", "DELETE FROM store_meta WHERE meta_key='store_id'" }) |damage| {
+        {
+            const raw = try openRaw(first);
+            defer _ = c.sqlite3_close(raw);
+            try sqlite.exec(raw, damage);
+        }
+        var refused: Store = undefined;
+        try std.testing.expectError(error.WrongStoreIdentity, refused.open(std.testing.io, first, root));
+    }
+}
+
 test "existing Store rejects a table rebuilt without one of its CHECKs, and stays unmodified" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8178,11 +8221,11 @@ fn openRaw(path: []const u8) !*c.sqlite3 {
     return raw.?;
 }
 
-/// Every table's rows but store_meta's, in key order: a line per row, and
-/// each value as its type and its bytes.
+/// Every SQLite table's rows but store_meta's, in key order: a line per
+/// row, and each value as its type and its bytes.
 fn writeRows(database: *c.sqlite3, out: *std.Io.Writer) !void {
     inline for (store_schema.tables) |table| {
-        if (comptime std.mem.eql(u8, table.name, "store_meta")) continue;
+        if (comptime std.mem.eql(u8, table.name, "store_meta") or !table.engines.on(.sqlite)) continue;
         const order = comptime blk: {
             var text: []const u8 = "";
             for (table.primary_key, 0..) |column, position| text = text ++ (if (position == 0) "" else ",") ++ column;
@@ -8281,6 +8324,8 @@ test "a Store at the migration baseline with its rows takes every migration at o
         try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try writeRows(raw, &migrated_rows.writer);
     }
+    // Format 52 draws each migrated Store its own id.
+    try std.testing.expect(!std.mem.eql(u8, &try storeId(migrated), &try storeId(fresh)));
     {
         const raw = try openRaw(fresh);
         defer _ = c.sqlite3_close(raw);
@@ -8669,7 +8714,7 @@ test "a saved catalog whose text no longer matches its digest fences the Store" 
     try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
     defer storage.close() catch unreachable;
     try storage.saveCatalog(&mcp_catalog);
-    try sqlite.exec(storage.database, "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
+    try sqlite.exec(storage.sqliteDatabase(), "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
     try std.testing.expectError(error.CorruptStore, storage.readCatalog(std.testing.allocator));
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.readCatalog(std.testing.allocator));

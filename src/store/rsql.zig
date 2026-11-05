@@ -276,6 +276,9 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 ///   @max_where(x,c)      the greatest x of those rows: `max(x) FILTER (WHERE c)`
 ///   @served(x)           the opening serves provider x: `rui_served(x)`,
 ///                        the function each opening registers
+///   @payload(t)          the bytes of content row t, which its text keeps
+///                        to one MySQL chunk (`schema.content_chunk_bytes`)
+///                        by bounding byte_length: `payload`
 ///   @after(c1,..,ck,?a1,..,?ak)  the key (c1..ck) after (?a1..?ak), in
 ///                        key order: `c1>?a1` for one column, else
 ///                        `(c1,..,ck)>(?a1,..,?ak)`. A Page writes it on
@@ -447,6 +450,7 @@ pub fn Read(comptime spec: ReadSpec) type {
 pub fn Write(comptime spec: WriteSpec) type {
     const parsed = comptime accepted(.write, spec.sql, spec.Args, void, false);
     comptime if (expectError(parsed.statement, spec.expect)) |message| @compileError(message ++ ": " ++ spec.sql);
+    comptime if (deleteError(parsed.statement, @import("builtin").is_test)) |message| @compileError(message ++ ": " ++ spec.sql);
     return struct {
         pub const kind: StatementKind = .write;
         /// What `isStatement` checks this type was made from.
@@ -534,6 +538,13 @@ fn expectError(comptime statement: Statement, comptime expect: Expect) ?[]const 
         if (!declares_one) return "rsql: an INSERT ... SELECT of at most one row declares .exact or .at_most 1";
     } else if (expect != .counted) return "rsql: an INSERT ... SELECT of more than one row declares .counted, so its caller states the count";
     return null;
+}
+
+/// Why `statement` may not run in a build, or null: the MySQL login has
+/// no DELETE (D202), so only test builds delete.
+fn deleteError(comptime statement: Statement, comptime is_test: bool) ?[]const u8 {
+    if (statement != .delete or is_test) return null;
+    return "rsql: the Store's MySQL login may not DELETE (D202); only tests delete";
 }
 
 const values_message = "rsql: an INSERT ... VALUES writes one row; it declares .at_most, or .exact of at most 1, never .counted";
@@ -1914,6 +1925,12 @@ const expression_markers = [_]ExpressionMarker{
     .{ .name = "count_where", .arity = 1, .sqlite = "count(*) FILTER (WHERE " ++ arg_a ++ ")", .mysql = "count(CASE WHEN " ++ arg_a ++ " THEN 1 END)" },
     .{ .name = "max_where", .arity = 2, .sqlite = "max(" ++ arg_a ++ ") FILTER (WHERE " ++ arg_b ++ ")", .mysql = "max(CASE WHEN " ++ arg_b ++ " THEN " ++ arg_a ++ " END)" },
     .{ .name = "served", .arity = 1, .sqlite = "rui_served(" ++ arg_a ++ ")", .mysql = "(" ++ arg_a ++ " IN (" ++ served_slots ++ "))" },
+    .{
+        .name = "payload",
+        .arity = 1,
+        .sqlite = "payload",
+        .mysql = "coalesce((SELECT bytes FROM content_chunk WHERE content_chunk.content_id=" ++ arg_a ++ ".content_id AND content_chunk.chunk_index=0),X'')",
+    },
 };
 
 fn expressionMarker(comptime name: []const u8) ?ExpressionMarker {
@@ -1993,6 +2010,7 @@ fn mysqlTemplate(comptime text: []const u8) Template {
 ///   @now                 a slot for the Access's second
 ///   @index(name)         nothing: MySQL plans alone until PR 8 reads EXPLAIN
 ///   @served(x)           `(x IN (?,...))`, a slot per `provider_name.Provider`
+///   @payload(t)          t's first `content_chunk`, or X'' when it has none
 ///   @octets(x)           `OCTET_LENGTH(x)`
 ///   @charset(c,'set')    `(NOT REGEXP_LIKE(c,'[^set]','c'))`: no character
 ///                        outside the set; `'c'` compares case-sensitively
@@ -2019,7 +2037,11 @@ pub fn mysqlRendering(comptime text: []const u8) MysqlRendering {
         @setEvalBranchQuota(200 * text.len + 10_000);
         if (portabilityError(text, reserved_names_checked)) |message| return .{ .refused = message };
         const tokens = tokenize(text);
-        var renderer: MysqlRenderer = .{ .text = text, .tokens = tokens };
+        const skips = switch (lackedByMysql(tokens)) {
+            .refused => |message| return .{ .refused = message },
+            .skips => |found| found,
+        };
+        var renderer: MysqlRenderer = .{ .text = text, .tokens = tokens, .skips = skips };
         renderer.range(0, tokens.len) catch return .{ .refused = renderer.message };
         return .{ .rendered = .{ .parts = renderer.parts ++ .{renderer.current}, .slots = renderer.slots } };
     }
@@ -2082,9 +2104,41 @@ pub fn expressionError(comptime text: []const u8, comptime bytes_columns: []cons
     }
 }
 
+/// The token ranges MySQL's text leaves out of an INSERT ... VALUES of a
+/// row: each column the schema has only on other engines
+/// (`schema.Engines`), with its value and a comma. An INSERT ... SELECT
+/// that names one is refused: its SELECT would need the same cut.
+fn lackedByMysql(comptime tokens: []const Token) union(enum) { refused: []const u8, skips: []const [2]usize } {
+    comptime {
+        if (tokens.len < 4 or !tokens[0].is("INSERT") or !tokens[1].is("INTO") or !tokens[3].isSymbol("(")) return .{ .skips = &.{} };
+        const close = closingToken(tokens, 3, tokens.len) orelse return .{ .skips = &.{} };
+        const columns = argumentRanges(tokens, 3, close);
+        var lacked: []const usize = &.{};
+        for (columns, 0..) |column, position| {
+            if (column[1] == column[0] + 1 and schema.lacks(.mysql, tokens[2].text, tokens[column[0]].text)) lacked = lacked ++ .{position};
+        }
+        if (lacked.len == 0) return .{ .skips = &.{} };
+        const refused = "rsql: an INSERT names a column MySQL's schema lacks, so it writes one row of VALUES";
+        if (close + 2 >= tokens.len or !tokens[close + 1].is("VALUES") or !tokens[close + 2].isSymbol("(")) return .{ .refused = refused };
+        const values_close = closingToken(tokens, close + 2, tokens.len) orelse return .{ .refused = refused };
+        if (values_close != tokens.len - 1) return .{ .refused = refused };
+        const values = argumentRanges(tokens, close + 2, values_close);
+        if (values.len != columns.len) return .{ .refused = refused };
+        if (lacked[0] == 0) return .{ .refused = "rsql: an INSERT's first column is on every engine" };
+        var skips: []const [2]usize = &.{};
+        // Each with the comma before it.
+        for ([_][]const [2]usize{ columns, values }) |ranges| for (lacked) |position| {
+            skips = skips ++ .{[2]usize{ ranges[position][0] - 1, ranges[position][1] }};
+        };
+        return .{ .skips = skips };
+    }
+}
+
 const MysqlRenderer = struct {
     text: []const u8,
     tokens: []const Token,
+    /// Token ranges left out (`lackedByMysql`).
+    skips: []const [2]usize = &.{},
     parts: []const []const u8 = &.{},
     current: []const u8 = "",
     slots: []const Slot = &.{},
@@ -2105,10 +2159,20 @@ const MysqlRenderer = struct {
         return error.Refused;
     }
 
+    /// The end of the skip that starts at token `at`, or null.
+    fn skipped(r: *const MysqlRenderer, at: usize) ?usize {
+        for (r.skips) |skip| if (skip[0] == at) return skip[1];
+        return null;
+    }
+
     /// Renders `tokens[from..to]`, with the text between them copied.
     fn range(r: *MysqlRenderer, from: usize, to: usize) Refused!void {
         var at = from;
         while (at < to) {
+            if (r.skipped(at)) |end| {
+                at = end;
+                continue;
+            }
             if (at > from) {
                 const previous = r.tokens[at - 1];
                 r.emit(r.text[previous.start + previous.text.len .. r.tokens[at].start]);
@@ -2813,6 +2877,47 @@ test "@served is the opening's function on SQLite and a slot per provider on MyS
     }
     try std.testing.expectEqualStrings("SELECT created_seq FROM session WHERE (provider IN (" ++ list ++ ")) AND created_seq>?", comptime S.mysql.prepared());
     try std.testing.expectEqualDeep(slots ++ &[_]Slot{.{ .argument = 0 }}, S.mysql.slots);
+}
+
+test "@payload is content's payload on SQLite and its one chunk on MySQL" {
+    const S = Read(.{
+        .sql = "SELECT (SELECT @payload(content) FROM content WHERE content_id=t.outcome_content_id AND byte_length<=512) AS bytes FROM turn t WHERE t.turn_id=?1",
+        .Args = struct { turn_id: u64 },
+        .Row = struct { bytes: ?Blob(512) },
+        .cardinality = .optional,
+    });
+    try std.testing.expectEqualStrings("SELECT (SELECT payload FROM content WHERE content_id=t.outcome_content_id AND byte_length<=512) AS bytes FROM turn t WHERE t.turn_id=?1", S.sql);
+    try std.testing.expectEqualStrings(
+        "SELECT (SELECT coalesce((SELECT bytes FROM content_chunk WHERE content_chunk.content_id=content.content_id AND content_chunk.chunk_index=0),X'') " ++
+            "FROM content WHERE content_id=t.outcome_content_id AND byte_length<=512) AS bytes FROM turn t WHERE t.turn_id=?",
+        comptime S.mysql.prepared(),
+    );
+}
+
+test "MySQL's INSERT leaves out the columns only other engines have, with their values" {
+    const W = Write(.{
+        .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),?4)",
+        .Args = struct { content_id: u64, digest: [32]u8, length: u64, private: bool },
+        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+    });
+    try std.testing.expectEqualStrings("INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),?4)", W.sql);
+    try std.testing.expectEqualStrings("INSERT INTO content(content_id,digest,byte_length,private) VALUES(?,?,?,?)", comptime W.mysql.prepared());
+    try std.testing.expectEqualDeep(@as([]const Slot, &.{ .{ .argument = 0 }, .{ .argument = 1 }, .{ .argument = 2 }, .{ .argument = 3 } }), W.mysql.slots);
+    try std.testing.expectEqualStrings("INSERT INTO content(content_id,private) VALUES(1,0)", comptime mysqlRendering("INSERT INTO content(content_id,payload,private) VALUES(1,X'00',0)").rendered.parts[0]);
+    try std.testing.expectEqualStrings("INSERT INTO content(content_id) VALUES(1)", comptime mysqlRendering("INSERT INTO content(content_id,payload) VALUES(1,X'')").rendered.parts[0]);
+    try std.testing.expectEqualStrings(
+        "rsql: an INSERT names a column MySQL's schema lacks, so it writes one row of VALUES",
+        comptime mysqlRendering("INSERT INTO content(content_id,payload) SELECT content_id,X'' FROM content").refused,
+    );
+    try std.testing.expectEqualStrings("rsql: an INSERT's first column is on every engine", comptime mysqlRendering("INSERT INTO content(payload,content_id) VALUES(X'',1)").refused);
+}
+
+test "a typed DELETE builds only into tests (D202)" {
+    const parsed = comptime accepted(.write, "DELETE FROM content WHERE content_id=?1", struct { content_id: u64 }, void, false);
+    try std.testing.expectEqualStrings("rsql: the Store's MySQL login may not DELETE (D202); only tests delete", comptime deleteError(parsed.statement, false).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime deleteError(parsed.statement, true));
+    const update = comptime accepted(.write, "UPDATE content SET private=1 WHERE content_id=?1", struct { content_id: u64 }, void, false);
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime deleteError(update.statement, false));
 }
 
 test "a statement calls only the functions every engine spells, by argument count, and no CAST" {
