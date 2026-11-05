@@ -425,8 +425,8 @@ Catalog-only values such as `ultra` do not expand Rui's grammar or trigger a fal
 Catalog support is source metadata, not account entitlement or live backend qualification.
 
 With no override, a new Session uses the catalog default.
-The pinned Codex catalog gives `gpt-6-astra`, `gpt-6.1-sol` and `gpt-5.6-sol` a `low` default; the other five release-supported models default to `medium`.
-All eight advertise `low`, `medium`, `high` and `xhigh`.
+The pinned Codex catalog gives `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra` and `gpt-5.6-sol` a `low` default; the other five release-supported models default to `medium`.
+All nine advertise `low`, `medium`, `high` and `xhigh`.
 All except `gpt-5.5` also advertise `max`.
 An unknown exact binding has no inferred default: without an override, Rui omits `reasoning` and leaves the provider's effective effort unknown.
 An explicit effort on that binding rejects because Rui has no support evidence.
@@ -635,8 +635,9 @@ The Responses provider maps uniquely named top-level `input_tokens` and `output_
 A provider total is not a count.
 A missing, invalid or duplicate count, or a cache read above the input, leaves usage absent, and pressure falls back to retained-context estimates; a missing counter is not zero.
 
-Codex's eight exact [release-supported model IDs](#supported-model-ids) default to a 244,800-token trigger and zero extra output reservation.
-Each has a 272,000-token window in the [pinned Codex catalog](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json); its client derives the trigger at 90% of that window.
+Codex's nine exact [release-supported model IDs](#supported-model-ids) default to a trigger at 90% of their window and zero extra output reservation, as Codex's client derives it.
+Eight have a 272,000-token window in the [pinned Codex catalog](https://github.com/openai/codex/blob/970111f6cb62cc02fe36a82ea7d71b37a2889c97/codex-rs/models-manager/models.json), so a 244,800-token trigger.
+`gpt-6.1-terra` has a 500,000-token window in a [later Codex catalog](https://github.com/openai/codex/blob/5c0b1ac71f2f04016abdfcf43bee7e0c96867f0e/codex-rs/models-manager/models.json), so a 450,000-token trigger.
 A model Rui does not list is assumed to have a 128,000-token window (`product_defaults.unlisted_context_window`), so it compacts at 115,200 tokens: small on purpose, because an early compaction costs a summary and a late one a refused request.
 An explicit override replaces it without claiming a model capacity or entitlement.
 Pressure uses valid usage from the latest accepted same-binding output plus estimates for appended input and extra reservation; without valid usage it estimates retained context.
