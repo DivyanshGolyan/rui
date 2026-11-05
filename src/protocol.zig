@@ -41,6 +41,8 @@ pub const max_tool_name_bytes = 64;
 /// The most names one `tools` list holds, and their bytes together (D214).
 pub const max_tools = 128;
 pub const max_tool_list_name_bytes = 4096;
+/// A preset name passed at connect or named at Session creation.
+pub const max_preset_name_bytes = 64;
 /// A Session Label obeys the saved Bash description rule.
 pub const max_label_bytes = max_tool_description_bytes;
 
@@ -91,14 +93,10 @@ pub const session_list_page_size: usize = 8;
 
 pub const Bounded = @import("bounded.zig").Bounded;
 
-pub const session_id_bytes = 6;
-pub const session_alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
-
-pub fn validSessionId(value: []const u8) bool {
-    if (value.len != session_id_bytes) return false;
-    for (value) |byte| if (std.mem.indexOfScalar(u8, session_alphabet, byte) == null) return false;
-    return true;
-}
+const session_id = @import("session_id.zig");
+pub const session_id_bytes = session_id.bytes;
+pub const session_alphabet = session_id.alphabet;
+pub const validSessionId = session_id.valid;
 
 /// Exact peer address. The issuing Host authenticates the sender separately.
 pub const Address = struct {
@@ -279,6 +277,8 @@ pub const ConfigureCommand = struct {
     key: Bounded(max_key_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
     configuration: Configuration = .{},
+    /// Host-memory creation seed; its resolution or refusal is supplied to the Store.
+    preset: ?Bounded(max_preset_name_bytes) = null,
     require_model: bool = false,
 
     pub fn removeTemporaryContent(self: *ConfigureCommand, io: std.Io) !void {
@@ -287,6 +287,17 @@ pub const ConfigureCommand = struct {
 
     pub fn semanticDigest(self: *const ConfigureCommand) [32]u8 {
         return configureDigest(self.session.slice(), &self.configuration, self.require_model);
+    }
+
+    /// A preset refusal binds the unresolved request, including its name;
+    /// unlike an accepted creation, it has no resolved spec to identify.
+    pub fn presetRequestDigest(self: *const ConfigureCommand) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, "rui/core/configure-preset-request/v1");
+        hash.update(&self.semanticDigest());
+        hash.update(&.{@intFromBool(self.preset != null)});
+        if (self.preset) |name| hashField(&hash, name.slice());
+        return hash.finalResult();
     }
 };
 
@@ -412,6 +423,8 @@ pub const ConfigurationRejection = enum {
     loaded_tools_unreachable,
     invalid_label,
     incomplete_initial_configuration,
+    unknown_preset,
+    preset_on_update,
     invalid_workspace,
     workspace_is_immutable,
     provider_is_immutable,
@@ -437,6 +450,8 @@ pub const MessageRejection = enum {
     loaded_tools_unreachable,
     invalid_label,
     incomplete_initial_configuration,
+    unknown_preset,
+    preset_on_update,
     invalid_workspace,
     workspace_is_immutable,
     provider_is_immutable,
@@ -1842,16 +1857,20 @@ const Parser = struct {
     /// Each parser fills its command `out`, whose Store is already set.
     fn parseConfigure(self: *Parser, out: *ConfigureCommand, members: *Members) !void {
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        const Field = enum { key, session, configuration, require_model };
+        const Field = enum { key, session, configuration, preset, require_model };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
             .key => try self.readCommandKey(&out.key),
             .session => try self.readSmallString(&out.session),
             .configuration => try self.parseConfiguration(true, &out.configuration),
+            .preset => {
+                out.preset = .{};
+                try self.readSmallString(&out.preset.?);
+            },
             .require_model => out.require_model = try self.readBoolean(),
         };
         try require(Field, seen, &.{ .key, .session, .configuration });
-        if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration);
+        if (out.session.len == 0 and out.preset == null) try validateCreatingConfiguration(&out.configuration);
     }
 
     /// Fills `out`, which holds its defaults.
@@ -2858,6 +2877,8 @@ pub const configure_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"configuration\":" };
     pub const tail = .{"}"};
     pub const require_model_tail = .{",\"require_model\":true}"};
+    pub const preset_tail = .{ ",\"preset\":", Hole{ .string = max_preset_name_bytes }, "}" };
+    pub const preset_require_model_tail = .{ ",\"preset\":", Hole{ .string = max_preset_name_bytes }, ",\"require_model\":true}" };
 };
 pub const message_request = struct {
     /// Holes: Store, key, Session, sender handle.
@@ -4339,4 +4360,27 @@ test "activity search reply bounds preserve snippets and nullable continuation" 
     out = std.Io.Writer.fixed(&buffer);
     try facts.writeJson(&out);
     try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_search\",\"items\":[],\"next\":null}", out.buffered());
+}
+
+test "presets allow partial creating configure in either field order" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",";
+    for ([_][]const u8{
+        head ++ "\"configuration\":{},\"preset\":\"review\"}",
+        head ++ "\"preset\":\"review\",\"configuration\":{\"reasoning_effort\":{\"state\":\"null\"}}}",
+        head ++ "\"preset\":\"review\",\"configuration\":{},\"require_model\":true}",
+    }, 0..) |json, index| {
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser: Parser = .{ .source = &source, .options = .{
+            .io = std.testing.io,
+            .content_length = json.len,
+            .scratch_path = "unused",
+            .request_number = 0,
+            .retained_scratch = &retained,
+        } };
+        const request = try parseForTest(&parser);
+        try std.testing.expectEqualStrings("review", request.configure.preset.?.slice());
+        try std.testing.expectEqual(index == 2, request.configure.require_model);
+        try std.testing.expectEqual(if (index == 1) FieldState.explicit_null else FieldState.omitted, request.configure.configuration.reasoning_effort.state);
+    }
 }
