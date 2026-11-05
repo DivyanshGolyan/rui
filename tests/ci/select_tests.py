@@ -27,7 +27,7 @@ RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integr
 # selects check rather than silently declaring that no tests apply.
 RULES = (
     (("src/logic_tests.zig", "src/core_boundary.zig", "src/word_search.zig", "src/execution_turn.zig", "src/request_encoding.zig",
-      "src/AnswerRenderer.zig"),
+      "src/AnswerRenderer.zig", "src/store/engine/mysql_refusal.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
     (("src/ResponseTiming.zig",), ("test-logic",), ("test-logic",),
      "Response policy values alongside native timeout consumers"),
