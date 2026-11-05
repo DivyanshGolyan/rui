@@ -8,8 +8,6 @@ const Store = store_core.Store;
 const store_access = @import("../access.zig");
 const rsql = @import("../rsql.zig");
 const model_admission_domain = @import("model_admission.zig");
-const sqlite = @import("../sqlite.zig");
-const c = sqlite.c;
 const continues_without_input_sql = model_admission_domain.continues_without_input_sql;
 const failure_class = @import("../../failure_class.zig");
 

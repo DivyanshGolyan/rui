@@ -1,13 +1,11 @@
 // Sessions: create, list, send, update, stop, interrupt and decide, plus the
 // model list and Host pause (D7, D8, D14 to D17, D121, D123, D128, D167,
-// D171). Every call is one request to a Host route that exists today. The
-// Host reads request fields in the order it lists them, so each body below is
-// written out in that order (openapi.json says so).
+// D171). Every call is one request to a Host route that exists today.
 import { randomUUID } from "node:crypto";
 
 import { RuiRequestError } from "./errors.ts";
-import { listActivity, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
-import type { ReplyLimits } from "./transport.ts";
+import { FEED_KINDS, listActivity, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
 /** What a Session handle needs from the client. */
@@ -66,49 +64,46 @@ export interface ModelSummary {
 	known: boolean;
 }
 
-/** Every row kind: the Host refuses an empty set. */
-const ALL_KINDS = JSON.stringify(["admission", "user", "assistant", "call", "tool_result", "hosted_call", "turn_ended", "stop", "sent", "send_failed", "received"]);
+type Omitted = { state: "omitted" };
+const OMITTED: Omitted = { state: "omitted" };
+const NULL = { state: "null" } as const;
 
-type Omitted = '{"state":"omitted"}';
-const OMITTED: Omitted = '{"state":"omitted"}';
-const NULL = '{"state":"null"}';
-
-function value(text: string): string {
-	return `{"state":"value","value":${text}}`;
+function optional<T>(field: T | undefined): Omitted | { state: "value"; value: T } {
+	return field === undefined ? OMITTED : { state: "value", value: field };
 }
 
-function optional<T>(field: T | undefined, encode: (field: T) => string): string {
-	return field === undefined ? OMITTED : value(encode(field));
-}
-
-function clearable<T>(field: T | null | undefined, encode: (field: T) => string): string {
+function clearable<T>(field: T | null | undefined): Omitted | typeof NULL | { state: "value"; value: T } {
 	if (field === undefined) return OMITTED;
-	return field === null ? NULL : value(encode(field));
+	return field === null ? NULL : { state: "value", value: field };
 }
 
-/** The configuration object, its fields in the Host's order. */
-function configuration(spec: SessionSpec): string {
-	const text = (field: string) => JSON.stringify(field);
-	const fields = [
-		optional(spec.workspace, text),
-		optional(spec.provider, text),
-		optional(spec.model, text),
-		optional(spec.instructions, text),
+function configuration(spec: SessionSpec): Schemas["Configuration"] {
+	return {
+		workspace: optional(spec.workspace),
+		provider: optional(spec.provider),
+		model: optional(spec.model),
+		instructions: optional(spec.instructions),
 		// The Host takes the names sorted by bytes, each once. Tool names are
 		// ASCII, so code-unit order is byte order.
-		optional(spec.tools, (tools) => JSON.stringify([...new Set(tools)].sort())),
-		optional(spec.permissionMode, text),
-		OMITTED, // output_schema
-		clearable(spec.compactAt, (tokens) => JSON.stringify(String(tokens))),
-		OMITTED, // output_reservation
-		clearable(spec.effort, text),
-		clearable(spec.label, text),
-	];
-	return `{"workspace":${fields[0]},"provider":${fields[1]},"model":${fields[2]},"instructions":${fields[3]},"tools":${fields[4]},"permission_mode":${fields[5]},"output_schema":${fields[6]},"compaction_trigger":${fields[7]},"output_reservation":${fields[8]},"reasoning_effort":${fields[9]},"label":${fields[10]}}`;
+		tools: optional(spec.tools === undefined ? undefined : [...new Set(spec.tools)].sort()),
+		permission_mode: optional(spec.permissionMode),
+		output_schema: OMITTED,
+		compaction_trigger: clearable(spec.compactAt == null ? spec.compactAt : String(spec.compactAt)),
+		output_reservation: OMITTED,
+		reasoning_effort: clearable(spec.effort),
+		label: clearable(spec.label),
+	};
 }
 
 function configureBody(store: string, key: string, session: string, spec: SessionSpec): string {
-	return `{"version":"8","kind":"configure","store":${JSON.stringify(store)},"key":${JSON.stringify(key)},"session":${JSON.stringify(session)},"configuration":${configuration(spec)}}`;
+	return JSON.stringify({
+		version: WIRE_VERSION,
+		kind: "configure",
+		store,
+		key,
+		session,
+		configuration: configuration(spec),
+	} satisfies Schemas["ConfigureRequest"]);
 }
 
 function key(options: WriteOptions | undefined): string {
@@ -163,7 +158,16 @@ export class Session {
 	/** Sends a Message. The receipt is its admission number; the answer arrives in the feed (D8). */
 	async send(text: string, options: SendOptions): Promise<{ messageId: string }> {
 		const body = (store: string) =>
-			`{"version":"8","kind":"message","store":${JSON.stringify(store)},"key":${JSON.stringify(options.idempotencyKey)},"session":${JSON.stringify(this.id)},"sender":null,"sender_handle":null,"text":{"state":"value","value":${JSON.stringify(text)}}}`;
+			JSON.stringify({
+				version: WIRE_VERSION,
+				kind: "message",
+				store,
+				key: options.idempotencyKey,
+				session: this.id,
+				sender: null,
+				sender_handle: null,
+				text: { state: "value", value: text },
+			} satisfies Schemas["MessageRequest"]);
 		const reply = parse<Schemas["MessageReply"]>(await this.#link.exchange("/v1/message", body, environmentBytes(options.env)));
 		return { messageId: accepted(reply.answer).admission };
 	}
@@ -181,7 +185,13 @@ export class Session {
 	async stop(options?: WriteOptions): Promise<void> {
 		const idempotencyKey = key(options);
 		const body = (store: string) =>
-			`{"version":"8","kind":"session_stop","store":${JSON.stringify(store)},"key":${JSON.stringify(idempotencyKey)},"session":${JSON.stringify(this.id)}}`;
+			JSON.stringify({
+				version: WIRE_VERSION,
+				kind: "session_stop",
+				store,
+				key: idempotencyKey,
+				session: this.id,
+			} satisfies Schemas["SessionStopRequest"]);
 		accepted(parse<Schemas["SessionStopReply"]>(await this.#link.exchange("/v1/control/session-stop", body)).answer);
 	}
 
@@ -196,14 +206,31 @@ export class Session {
 			await this.#link.exchange(
 				"/v1/activity-page",
 				(store) =>
-					`{"version":"8","kind":"activity_page","store":${JSON.stringify(store)},"session":${JSON.stringify(this.id)},"end":null,"position":"0","ordinal":null,"direction":"backward","kinds":${ALL_KINDS},"limit":"1"}`,
+					JSON.stringify({
+						version: WIRE_VERSION,
+						kind: "activity_page",
+						store,
+						session: this.id,
+						end: null,
+						position: "0",
+						ordinal: null,
+						direction: "backward",
+						kinds: [...FEED_KINDS],
+						limit: "1",
+					} satisfies Schemas["ActivityPageRequest"]),
 			),
 		);
 		const { turn, operation } = page.work;
 		if (turn === null || operation === null || !modelCallCurrent(page.work.state.kind)) return;
 		const idempotencyKey = randomUUID();
 		const body = (store: string) =>
-			`{"version":"8","kind":"model_interruption","store":${JSON.stringify(store)},"key":${JSON.stringify(idempotencyKey)},"target":{"session":${JSON.stringify(this.id)},"turn":${JSON.stringify(turn)},"operation":${JSON.stringify(operation)}}}`;
+			JSON.stringify({
+				version: WIRE_VERSION,
+				kind: "model_interruption",
+				store,
+				key: idempotencyKey,
+				target: { session: this.id, turn, operation },
+			} satisfies Schemas["ModelInterruptionRequest"]);
 		try {
 			accepted(parse<Schemas["ModelInterruptionReply"]>(await this.#link.exchange("/v1/control/model-interruption", body)).answer);
 		} catch (error) {
@@ -218,7 +245,15 @@ export class Session {
 		const idempotencyKey = key(options);
 		const wire = decision === "allow" ? "allow_once" : "deny";
 		const body = (store: string) =>
-			`{"version":"8","kind":"permission_decision","store":${JSON.stringify(store)},"key":${JSON.stringify(idempotencyKey)},"session":${JSON.stringify(this.id)},"action":${JSON.stringify(requestId)},"decision":"${wire}"}`;
+			JSON.stringify({
+				version: WIRE_VERSION,
+				kind: "permission_decision",
+				store,
+				key: idempotencyKey,
+				session: this.id,
+				action: requestId,
+				decision: wire,
+			} satisfies Schemas["PermissionDecisionRequest"]);
 		accepted(parse<Schemas["PermissionDecisionReply"]>(await this.#link.exchange("/v1/control/permission-decision", body)).answer);
 	}
 }
@@ -254,7 +289,14 @@ export class Sessions {
 			const page = parse<Schemas["ListSessionsReply"]>(
 				await this.#link.exchange(
 					"/v1/list-sessions",
-					(store) => `{"version":"8","kind":"list_sessions","store":${JSON.stringify(store)},"workspace":null,"after":"${wireAfter}","ceiling":"${wireCeiling}"}`,
+					(store) => JSON.stringify({
+						version: WIRE_VERSION,
+						kind: "list_sessions",
+						store,
+						workspace: null,
+						after: wireAfter,
+						ceiling: wireCeiling,
+					} satisfies Schemas["ListSessionsRequest"]),
 				),
 			);
 			for (const row of page.sessions) {
@@ -270,7 +312,11 @@ export class Sessions {
 /** The models each provider offers (D128). */
 export async function models(link: Link): Promise<ModelSummary[]> {
 	const reply = parse<Schemas["ModelListReply"]>(
-		await link.exchange("/v1/model-list", (store) => `{"version":"8","kind":"model_list","store":${JSON.stringify(store)}}`, undefined, {
+		await link.exchange("/v1/model-list", (store) => JSON.stringify({
+			version: WIRE_VERSION,
+			kind: "model_list",
+			store,
+		} satisfies Schemas["ModelListRequest"]), undefined, {
 			// A live provider list can take longer than the default response wait.
 			responseMs: 30_000,
 		}),
@@ -280,5 +326,10 @@ export async function models(link: Link): Promise<ModelSummary[]> {
 
 /** Holds every new Turn while paused; running work continues (D199). */
 export async function setPaused(link: Link, paused: boolean): Promise<void> {
-	await link.exchange("/v1/control/host-pause", (store) => `{"version":"8","kind":"host_pause","store":${JSON.stringify(store)},"paused":${paused}}`);
+	await link.exchange("/v1/control/host-pause", (store) => JSON.stringify({
+		version: WIRE_VERSION,
+		kind: "host_pause",
+		store,
+		paused,
+	} satisfies Schemas["HostPauseRequest"]));
 }

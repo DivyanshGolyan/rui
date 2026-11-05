@@ -289,7 +289,7 @@ fn insertSessionForTesting(storage: *Store, current: *const configuration_domain
     defer a.deinit();
     const head: rsql.SessionHead = .{ .ref = ref.*, .workspace_key = .of(current.workspace_key), .next_position = .of(1) };
     const digest = store_core.workspaceDigest(current.workspace.slice());
-    configuration_domain.insertSession(&a, head, current, &digest, 1_000_000);
+    configuration_domain.insertSession(&a, head, current, &digest, 1_000_000, null);
     const ran = a.run();
     try a.abandon(.{});
     return ran;
@@ -983,21 +983,21 @@ test "a content sink opens only a content id its Access itself took, stepping it
             // this Access's first, one other code took between its own, and one
             // past its last. A check of the range from its first id to its last
             // accepted `between`.
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(0));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(before));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(between));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(0, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(before, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(between, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1, 4));
             // The old rule took only the last id, with nothing queued: here the
             // first id opens while inserts are queued, and the pass steps them.
-            const sink = try a.contentSink(first);
+            const sink = try a.contentSink(first, 4);
             try sink.write("sink", 0);
             sink.close();
             try std.testing.expectEqual(0, a.queued);
-            const again = try a.contentSink(last);
+            const again = try a.contentSink(last, 4);
             again.close();
             // Taken but never inserted: there is no row to open.
-            try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never));
+            try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never, 4));
             try a.abandon(.{});
         }
     }.run);
@@ -2319,7 +2319,7 @@ test "the Store prepares only typed statements, its transaction control and test
     // Open text cannot reach SQLite beside `rsql`: the one prepare is
     // `cachedStatic`, called only by these three, and `cachedTyped` takes
     // only a type `rsql.Read` or `rsql.Write` made (`rsql.isStatement`).
-    const source = @embedFile("Store.zig");
+    const source = @embedFile("engine/Sqlite.zig");
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "sqlite3_" ++ "prepare"));
     const callers = [_][]const u8{ "controlStatement", "cachedTyped", "fixtureStatement" };
     var calls = std.mem.splitSequence(u8, source, "cachedStatic" ++ "(self, ");
@@ -2353,6 +2353,8 @@ test "Store entry points queue and fence only through canonical access" {
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
+        @embedFile("engine.zig"),
+        @embedFile("engine/Sqlite.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
@@ -2705,6 +2707,9 @@ test "production turn preserves skipped continuation preference through actual S
                 }
                 pub fn recoverExhaustedRetry(_: *@This()) error{Fence}!bool {
                     return false;
+                }
+                pub fn runCoreAction(_: *@This()) turn.Admission {
+                    return .no_work;
                 }
                 pub fn admitBash(self: *@This()) turn.Admission {
                     var admission = (self.storage.admitNextActionAttempt(1000, self.faults) catch |err| {
@@ -8327,6 +8332,10 @@ const EntryPoint = enum {
     admitNextActionAttempt,
     readBashExecutionInput,
     revokeActionSender,
+    nextCoreAction,
+    deliverAgentMessage,
+    startAgent,
+    failCoreCall,
     actionSupersededByStop,
     withActionDispatchHandoff,
     settleActionAttempt,
@@ -8380,6 +8389,10 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .admitNextActionAttempt = 2,
     .readBashExecutionInput = 2,
     .revokeActionSender = 2,
+    .nextCoreAction = 3,
+    .deliverAgentMessage = 3,
+    .startAgent = 4,
+    .failCoreCall = 2,
     .actionSupersededByStop = 1,
     .withActionDispatchHandoff = 1,
     .settleActionAttempt = 3,
@@ -8438,6 +8451,8 @@ test "every function that enters the Store has a round budget" {
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
+        @embedFile("engine.zig"),
+        @embedFile("engine/Sqlite.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
@@ -8525,6 +8540,23 @@ const RoundMeter = struct {
     }
 };
 
+/// A `start_agent` spec as the Host's check leaves it: gpt-6.1-sol at low
+/// effort, `tools`, `permission_mode` and no label.
+pub fn testingAgentSpec(tools: []const []const u8, permission_mode: []const u8) !protocol.Configuration {
+    var spec: protocol.Configuration = .{};
+    spec.model.state = .value;
+    try spec.model.value.set("gpt-6.1-sol");
+    spec.reasoning_effort.state = .value;
+    try spec.reasoning_effort.value.set("low");
+    spec.compaction_trigger.state = .value;
+    try spec.compaction_trigger.value.set("100000");
+    spec.tools.state = .value;
+    spec.tools = try .of(tools);
+    spec.permission_mode.state = .value;
+    try spec.permission_mode.value.set(permission_mode);
+    return spec;
+}
+
 test "each Store entry point takes its round budget on its common path" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -8552,6 +8584,7 @@ test "each Store entry point takes its round budget on its common path" {
             try plainTurn(&storage, &tmp, &meter);
             try toolTurn(&storage, &tmp, &meter);
             try compactedTurn(&storage, &tmp, &meter);
+            try coreTurn(&storage, &tmp, &meter);
             var failed = false;
             for (std.enums.values(EntryPoint)) |point| {
                 const measured = meter.measured.get(point) orelse {
@@ -8651,6 +8684,45 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
             meter.stop(.stopSession);
+        }
+
+        /// Three core calls: a Message delivered, an agent started, and a
+        /// start whose arguments the Host refused.
+        fn coreTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var command = try completeConfiguration("budget-core", "", workspace, "model-a");
+            command.configuration.tools.state = .value;
+            command.configuration.tools = try .of(&.{ "message_agent", "start_agent" });
+            const session = storage.configure(&command, .{}).accepted.session;
+            try submitTestMessage(storage, tmp, "budget-core-input", "budget-core-key", session.slice(), "message yourself");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var arguments_buffer: [64]u8 = undefined;
+            const decoded = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hi\"}}", .{session.slice()});
+            var encoded_buffer: [96]u8 = undefined;
+            const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hi\\\"}}", .{session.slice()});
+            const calls = [_]TestingCall{
+                .{ .item_id = "core-item", .name = "message_agent", .encoded_call_id = "core-call", .decoded_call_id = "core-call", .encoded_arguments = encoded, .decoded_arguments = decoded },
+                .{ .item_id = "start-item", .name = "start_agent", .encoded_call_id = "start-call", .decoded_call_id = "start-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "refused-item", .name = "start_agent", .encoded_call_id = "refused-call", .decoded_call_id = "refused-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            };
+            try settleCallsForTesting(storage, tmp, model, "budget-core-calls", &calls);
+            meter.start();
+            const core = (try storage.nextCoreAction()).?;
+            meter.stop(.nextCoreAction);
+            meter.start();
+            try std.testing.expect(try storage.deliverAgentMessage(core.binding, session.slice(), "hi", .{}) == .delivered);
+            meter.stop(.deliverAgentMessage);
+            const start = (try storage.nextCoreAction()).?;
+            try std.testing.expect(start.tool == .start_agent);
+            var spec = try testingAgentSpec(&.{"message_agent"}, "ask");
+            meter.start();
+            try std.testing.expect(try storage.startAgent(start.binding, session.slice(), "look around", true, &spec, null, .{}) == .started);
+            meter.stop(.startAgent);
+            const refused = (try storage.nextCoreAction()).?;
+            meter.start();
+            try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
+            meter.stop(.failCoreCall);
         }
 
         /// Two Bash calls under ask: one allowed, run and settled, one

@@ -43,6 +43,8 @@ pub const State = struct {
     /// moves the key. Retry admission is due by time instead and keeps its
     /// own poll.
     idle_admission: ?AdmissionKey = null,
+    /// The commit generation of the last core tool scan that found nothing.
+    idle_core_generation: ?u64 = null,
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
     capacity_was_full: bool = false,
 };
@@ -102,6 +104,17 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
     };
     const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
     var found_nothing = true;
+    // A core tool call takes no slot: it runs as one Store command (D24),
+    // so its scan reruns only once a commit moves the generation.
+    if (state.idle_core_generation != admission_key.generation) switch (context.runCoreAction()) {
+        .admitted => {
+            state.idle_core_generation = null;
+            state.idle_admission = null;
+            return true;
+        },
+        .retry_later => state.idle_core_generation = null,
+        .no_work => state.idle_core_generation = admission_key.generation,
+    };
     for (state.preference, 0..) |kind, index| {
         if (context.dispatchFenced() or context.freeSlots() == 0) {
             found_nothing = false;
@@ -160,6 +173,7 @@ pub fn run(state: *State, context: anytype) Outcome {
 const Phase = enum {
     lifecycle,
     recover_action,
+    run_core,
     admit_bash,
     recover_retry,
     admit_retry,
@@ -206,6 +220,7 @@ const Recording = struct {
     recover_retry_fence: bool = false,
     drive_fence: bool = false,
     bash_admission: Admission = .no_work,
+    core_admission: Admission = .no_work,
     retry_admission: Admission = .no_work,
     new_admission: Admission = .no_work,
     continuation_admission: Admission = .no_work,
@@ -335,6 +350,11 @@ const Recording = struct {
         self.record(.recover_retry);
         if (self.recover_retry_fence) return error.Fence;
         return self.recover_retry;
+    }
+
+    fn runCoreAction(self: *Recording) Admission {
+        self.record(.run_core);
+        return self.core_admission;
     }
 
     fn admitBash(self: *Recording) Admission {
@@ -678,6 +698,20 @@ test "Bash admission uses a free slot without sharing the model-preparation quot
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_bash));
     try std.testing.expectEqual(@as(usize, 3), context.count(.bash_preparation));
     try std.testing.expectEqual(@as(usize, 1), context.count(.model_preparation));
+}
+
+test "a core tool call runs with no free slot, and its scan waits for a commit" {
+    var context = Recording{ .free = 0, .core_admission = .admitted, .generation_advance = 0 };
+    var state: State = .{};
+    try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_bash));
+    context.core_admission = .no_work;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.run_core));
+    // Nothing committed since the scan that found nothing.
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.run_core));
 }
 
 test "a fenced recover does not launch later work in the same turn" {
