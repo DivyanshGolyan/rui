@@ -129,7 +129,12 @@ fn run(script: *Script, call: *Call, sent: *bool) !Outcome {
     });
     defer call.deinit();
     while (true) {
-        const outcome = try call.advance();
+        // One advance can send the request and see the close, so `sent` is
+        // read on the error path too.
+        const outcome = call.advance() catch |err| {
+            sent.* = call.requestSent();
+            return err;
+        };
         sent.* = call.requestSent();
         if (outcome != .waiting) return keep(outcome);
         var poll_fd = [_]std.c.pollfd{.{ .fd = call.fd(), .events = call.events(), .revents = 0 }};
