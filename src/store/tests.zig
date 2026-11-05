@@ -8338,9 +8338,10 @@ const EntryPoint = enum {
     admitNextActionAttempt,
     readBashExecutionInput,
     revokeActionSender,
-    nextCoreAction,
+    nextCoreWork,
     deliverAgentMessage,
     startAgent,
+    stopOwedSession,
     failCoreCall,
     actionSupersededByStop,
     withActionDispatchHandoff,
@@ -8395,9 +8396,10 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .admitNextActionAttempt = 2,
     .readBashExecutionInput = 2,
     .revokeActionSender = 2,
-    .nextCoreAction = 3,
+    .nextCoreWork = 3,
     .deliverAgentMessage = 3,
     .startAgent = 4,
+    .stopOwedSession = 2,
     .failCoreCall = 2,
     .actionSupersededByStop = 1,
     .withActionDispatchHandoff = 1,
@@ -8771,7 +8773,8 @@ test "each Store entry point takes its round budget on its common path" {
         }
 
         /// Three core calls: a Message delivered, an agent started, and a
-        /// start whose arguments the Host refused.
+        /// start whose arguments the Host refused; then the stop the started
+        /// child owes once its parent stops.
         fn coreTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -8792,21 +8795,29 @@ test "each Store entry point takes its round budget on its common path" {
             };
             try settleCallsForTesting(storage, tmp, model, "budget-core-calls", &calls);
             meter.start();
-            const core = (try storage.nextCoreAction()).?;
-            meter.stop(.nextCoreAction);
+            const core = (try storage.nextCoreWork()).?.action;
+            meter.stop(.nextCoreWork);
             meter.start();
             try std.testing.expect(try storage.deliverAgentMessage(core.binding, session.slice(), "hi", .{}) == .delivered);
             meter.stop(.deliverAgentMessage);
-            const start = (try storage.nextCoreAction()).?;
+            const start = (try storage.nextCoreWork()).?.action;
             try std.testing.expect(start.tool == .start_agent);
             var spec = try testingAgentSpec(&.{"message_agent"}, "ask");
             meter.start();
             try std.testing.expect(try storage.startAgent(start.binding, session.slice(), "look around", true, &spec, null, .{}) == .started);
             meter.stop(.startAgent);
-            const refused = (try storage.nextCoreAction()).?;
+            const refused = (try storage.nextCoreWork()).?.action;
             meter.start();
             try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
             meter.stop(.failCoreCall);
+            var stop = try completeSessionStop("budget-core-stop", session.slice());
+            try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+            const owed = (try storage.nextCoreWork()).?.stop;
+            var owed_stop: protocol.SessionStopCommand = .{ .key = owed.key };
+            try owed_stop.session.set(owed.session.slice());
+            meter.start();
+            try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
+            meter.stop(.stopOwedSession);
         }
 
         /// Two Bash calls under ask: one allowed, run and settled, one

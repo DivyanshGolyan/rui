@@ -550,6 +550,11 @@ Sending a report requires an explicit Message admission.
 The receiving Session uses the existing input boundaries, pending-prefix selection, stop exclusions and original-result guarantees.
 There is no separate inbox, callback or resident waiter for a future reply.
 A Session an attached `start_agent` call created records its creator as its **parent** (`session.parent_ref`, never itself); a standalone agent and every other Session has none.
+When a parent stops, or a Turn of it ends out of context, each of its attached children owes a stop (`session_stop_owed`, written in the same transaction, keyed `rui.core/stop/<child>/<parent>/<position>` by the parent position that caused it).
+The Host runs each owed stop before any core tool call, as that child's own ordinary Session stop, which settles the owed row and passes the stop on to the child's own children.
+A child that owes a stop runs none of its core tool calls; the stop cancels them.
+Clients cannot use keys under `rui.core/`, which Rui keeps for its own commands, so an owed stop's key is always free.
+An owed stop whose obligation a client's stop already settled, or a newer one replaced, runs nothing.
 Dormant peers retain only saved facts.
 
 Peer composition supports one Host, which owns one Store.
@@ -1271,7 +1276,8 @@ Schema 51 is the migration baseline (Divyansh, D204): every later format change 
 A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
 Rui runs no DDL on MySQL (D203): the DB team runs `schema.mysqlMigration(from)`, which PR 8's `rui store schema --engine mysql [--from N]` will print.
 The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
-The step to 53 records a Session's parent (D27) and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
+The step to 53 records a Session's parent (D27).
+The step to 54 records the stops an attached child owes (D38), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.

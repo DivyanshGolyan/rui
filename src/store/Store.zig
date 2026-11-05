@@ -30,6 +30,7 @@ const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 const AgentDelivery = command_domain.AgentDelivery;
 const AgentStart = command_domain.AgentStart;
 const CoreActionInput = action_domain.CoreActionInput;
+const CoreWork = action_domain.CoreWork;
 const ActionResolutionCode = action_domain.ActionResolutionCode;
 const ActionSettlement = action_domain.ActionSettlement;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
@@ -548,6 +549,19 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopSession(&access, command, faults))) catch .infrastructure_failure;
     }
 
+    /// The stop an attached child owes (D38), as `nextCoreWork` names it.
+    pub fn stopOwedSession(self: *Store, command: *const protocol.SessionStopCommand, faults: Faults) SessionStopReply {
+        return self.queue().write(stopOwedSessionHeld, .{ self, command, faults });
+    }
+
+    fn stopOwedSessionHeld(self: *Store, command: *const protocol.SessionStopCommand, faults: Faults) SessionStopReply {
+        const entry = enter(self, .none) catch return .infrastructure_failure;
+        defer entry.release();
+        var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopOwedSession(&access, command, faults))) catch .infrastructure_failure;
+    }
+
     pub fn interruptModel(
         self: *Store,
         command: *const protocol.ModelInterruptionCommand,
@@ -899,17 +913,18 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttempt(&access, binding, code, result, faults)));
     }
 
-    /// The next core tool call to run (D24), or null.
-    pub fn nextCoreAction(self: *Store) !?CoreActionInput {
-        return self.queue().run(nextCoreActionHeld, .{self});
+    /// The core's next work, or null: a stop an attached child owes
+    /// (D38), else the next core tool call to run (D24).
+    pub fn nextCoreWork(self: *Store) !?CoreWork {
+        return self.queue().run(nextCoreWorkHeld, .{self});
     }
 
-    fn nextCoreActionHeld(self: *Store) !?CoreActionInput {
+    fn nextCoreWorkHeld(self: *Store) !?CoreWork {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.nextCoreAction(&access));
+        return entry.finish(Ordinary.none, action_domain.nextCoreWork(&access));
     }
 
     /// Runs the `message_agent` call `binding` names with its checked

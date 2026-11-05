@@ -1139,14 +1139,35 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
 /// whole onto the heap, so its frame stays small: every Store call may run
 /// other threads' queued writes on this stack.
 noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
-    const input = (host.store.nextCoreAction() catch |err| {
+    const work = (host.store.nextCoreWork() catch |err| {
         fenceDispatch(host, "core tool selection", err);
         return .retry_later;
     }) orelse return .no_work;
-    return switch (input.tool) {
-        .message_agent => runMessageAgent(host, &input),
-        .start_agent => runStartAgent(host, &input),
+    return switch (work) {
+        .stop => |*owed| runOwedStop(host, owed),
+        .action => |*input| switch (input.tool) {
+            .message_agent => runMessageAgent(host, input),
+            .start_agent => runStartAgent(host, input),
+        },
     };
+}
+
+/// Stops an attached child whose parent stopped or ran out of context
+/// (D38), as a client's stop of that child would, and tells the engine,
+/// which interrupts what the stop selected.
+noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) execution_turn.Admission {
+    var command: protocol.SessionStopCommand = .{ .key = owed.key };
+    command.session.set(owed.session.slice()) catch unreachable;
+    switch (host.store.stopOwedSession(&command, host.hooks.storeFaults(.action_result))) {
+        // A command that already held the key settled the owed stop.
+        .accepted, .rejected, .conflict => {},
+        .infrastructure_failure => {
+            fenceDispatch(host, "owed stop", error.CanonicalStoreFailure);
+            return .retry_later;
+        },
+    }
+    host.controls_changed.store(true, .release);
+    return .admitted;
 }
 
 noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
