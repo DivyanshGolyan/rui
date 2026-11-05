@@ -1145,6 +1145,7 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
     }) orelse return .no_work;
     return switch (work) {
         .stop => |*owed| runOwedStop(host, owed),
+        .ending => |*owed| runOwedEnding(host, owed),
         .action => |*input| switch (input.tool) {
             .message_agent => runMessageAgent(host, input),
             .start_agent => runStartAgent(host, input),
@@ -1167,6 +1168,16 @@ noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) executi
         },
     }
     host.controls_changed.store(true, .release);
+    return .admitted;
+}
+
+/// Delivers an attached child's Turn ending to its parent, or settles one
+/// its parent's stop caused (D39, D139). One Store command does it all.
+noinline fn runOwedEnding(host: *Host, owed: *const store_module.OwedEnding) execution_turn.Admission {
+    _ = host.store.deliverChildEnding(owed.turn_id, host.hooks.storeFaults(.action_result)) catch |err| {
+        fenceDispatch(host, "child ending", err);
+        return .retry_later;
+    };
     return .admitted;
 }
 

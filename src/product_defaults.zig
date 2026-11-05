@@ -14,6 +14,10 @@ pub const active_capacity: usize = 100;
 /// descriptor limit may reduce intake, never active capacity.
 pub const intake_capacity: usize = 100;
 
+/// How long a Host's shutdown may take: a launched Host is ended after this
+/// once stdin closes, and rui host pause waits this long for retirement.
+pub const host_shutdown_seconds = 10;
+
 /// Tools for a fresh Session, in `--tools` syntax.
 pub const tools = "bash,web_search";
 

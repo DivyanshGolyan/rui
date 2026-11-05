@@ -289,8 +289,8 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// the round. Nothing is poisoned: the visitor holds the read's
         /// results, and what they mean before the pass is its own. A row
         /// decodes into the pass's frame, unless the visitor has a field
-        /// named `decoded`, which it then decodes into, so its size is
-        /// the visitor's own (`eachVisitorError` states what is checked).
+        /// named `decoded`, which holds the row or points to its storage
+        /// (`eachVisitorError` states what is checked).
         /// Either way `visit` gets a pointer that the next row's decode
         /// overwrites, so a visitor copies what it keeps; a `decoded`
         /// field holds the last row stepped, and after a decode failure a
@@ -721,7 +721,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                     // At most 1 KiB, unless the visitor owns its row (`eachVisitorError`).
                     const owned = comptime @hasField(Visitor, "decoded");
                     var local: if (owned) void else S.Row = undefined;
-                    const row: *S.Row = if (owned) &visitor.decoded else &local;
+                    const row: *S.Row = if (owned) (if (@FieldType(Visitor, "decoded") == *S.Row) visitor.decoded else &visitor.decoded) else &local;
                     var stepped: u64 = 0;
                     while (stepped < each.limit and try e.nextRow(statement)) : (stepped += 1) {
                         try e.decodeRow(S.Row, statement, row);
@@ -754,11 +754,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
 /// Why `Visitor` cannot visit an `.each` read of `Row`, or null: a Row
 /// over 1 KiB needs a visitor field named `decoded`, and a visitor's
-/// `decoded` field, whatever the Row's size, is of type `Row`.
+/// `decoded` field, whatever the Row's size, is `Row` or `*Row`.
 pub fn eachVisitorError(comptime Row: type, comptime Visitor: type) ?[]const u8 {
     if (!@hasField(Visitor, "decoded"))
         return if (@sizeOf(Row) > 1024) "rsql: an .each Row over 1 KiB decodes into its visitor's own decoded field" else null;
-    if (@FieldType(Visitor, "decoded") != Row) return "rsql: a visitor's decoded field is the Row its .each read decodes, " ++ @typeName(Row);
+    if (@FieldType(Visitor, "decoded") != Row and @FieldType(Visitor, "decoded") != *Row) return "rsql: a visitor's decoded field is the Row or *Row its .each read decodes, " ++ @typeName(Row);
     return null;
 }
 

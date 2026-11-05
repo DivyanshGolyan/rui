@@ -22,6 +22,7 @@ pub const AgentStart = command_domain.AgentStart;
 pub const CoreActionInput = action_domain.CoreActionInput;
 pub const CoreWork = action_domain.CoreWork;
 pub const OwedStop = action_domain.OwedStop;
+pub const OwedEnding = action_domain.OwedEnding;
 pub const ActionDispatchPermit = action_domain.ActionDispatchPermit;
 pub const ActionResolutionCode = action_domain.ActionResolutionCode;
 pub const ActiveOperationFilter = action_domain.ActiveOperationFilter;
