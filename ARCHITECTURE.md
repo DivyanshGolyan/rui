@@ -1279,7 +1279,10 @@ The Host opens schema 51 (41 let a failed, overflowed or retry-exhausted Turn ou
 Schema 51 is the migration baseline (Divyansh, D204): every later format change ships one forward step in `schema.migrations`, for SQLite and MySQL, and the build fails when `schema_version` and the steps disagree, and `tests/ci/test_store_schema_version.py` fails when a step whose `from` is below the released schema_version differs from its text at the release.
 A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
 Rui runs no DDL on MySQL (D203): the DB team runs `schema.mysqlMigration(from)`, which PR 8's `rui store schema --engine mysql [--from N]` will print.
-No step exists yet.
+The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
+The step to 53 records a Session's parent (D27).
+The step to 54 records the stops an attached child owes (D38), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
+On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
 Sessions store a Label and creation time.
@@ -3404,8 +3407,9 @@ Matching in-flight retries may receive the same acknowledgement; a replacement r
 
 Pause affects all work in the selected Store; it records no Session stop, so a later Host resumes that work from committed facts.
 Acknowledgement means a fence was requested, not that effects retired, connections drained or the lease released.
+So after acknowledgement pause probes only the lease (never the Host) for up to `product_defaults.host_shutdown_seconds` (10): a free lease reports `"retirement":"confirmed"`; a lease still held then reports `"unconfirmed"` and stderr says a new Host can start once `rui host status` reports unavailable.
+Confirmed retirement means the old Host let go of the Store; it reports nothing about cleanup progress.
 A missing/disconnected listener or timeout leaves completion unconfirmed.
-After listener closure, lease observation reports only unavailable or owned-but-unavailable, not cleanup progress or completed shutdown.
 Host pause adds no PID signal, force escalation, Session stop or separate shutdown authority.
 
 Holding new Turns is a different control, answered from Host memory like `host_info`: `POST /v1/control/host-pause` takes `kind:"host_pause"`, `store` and `paused`, sets whether this Host holds every new Turn, and replies `host_pause_reply` with the state now in force; repeating it changes nothing (D193).

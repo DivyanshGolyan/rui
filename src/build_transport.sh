@@ -67,7 +67,6 @@ if [ "${sdk:-}" ]; then
     ln -s "$sdk/usr/lib" "$prefix/sdk/usr/lib"
 fi
 
-printf 'Building pinned OpenSSL ...\n' >&2
 (
     cd "$openssl_build"
     CC="$cc" AR="$zig ar" RANLIB="$zig ranlib" \
@@ -81,7 +80,6 @@ printf 'Building pinned OpenSSL ...\n' >&2
     exit 1
 }
 
-printf 'Building pinned nghttp2 ...\n' >&2
 (
     cd "$nghttp2_build"
     CC="$cc" AR="$zig ar" RANLIB="$zig ranlib" \

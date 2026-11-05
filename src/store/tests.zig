@@ -6295,7 +6295,7 @@ test "tool label observation trusts admission over damaged call field bytes" {
                 const before = try store_core.activityPageForTesting(&storage, request);
                 // Damage only the call fields' bytes, not the accepted references or
                 // their metadata. Lightweight observations do not read those bytes.
-                try store_testing.exec(&storage, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT arguments_content_id FROM model_tool_call)", .{});
+                try store_testing.zeroContent(&storage, "SELECT arguments_content_id FROM model_tool_call");
                 const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
                 defer std.testing.allocator.free(report);
                 try std.testing.expect(std.mem.indexOf(u8, report, "Run first command") != null);
@@ -6329,7 +6329,7 @@ test "completed tool labels trust admission while model replay authenticates pay
             var request: protocol.ConversationPage = .{};
             try request.session.set(session.slice());
             const before = try store_core.publicConversationPageForTesting(&storage, request);
-            try store_testing.exec(&storage, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT name_content_id FROM model_tool_call)", .{});
+            try store_testing.zeroContent(&storage, "SELECT name_content_id FROM model_tool_call");
             const after = try store_core.publicConversationPageForTesting(&storage, request);
             try std.testing.expectEqual(before.count, after.count);
             var results: usize = 0;
@@ -7133,7 +7133,7 @@ test "compaction selected newest base corruption fences rather than using an old
                 switch (corruption) {
                     .anchor => try store_testing.exec(&storage, "DELETE FROM model_output_item WHERE operation_id=?1 AND item_kind=4", .{newest_operation}),
                     .tail => try store_testing.exec(&storage, "DELETE FROM model_output_item WHERE operation_id=?1 AND item_kind=2", .{newest_operation}),
-                    .payload => try store_testing.exec(&storage, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (SELECT extras_content_id FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=4)", .{}),
+                    .payload => try store_testing.zeroContent(&storage, "SELECT extras_content_id FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item) AND item_kind=4"),
                 }
                 var view: HistoricalView = undefined;
                 try storage.openHistoricalView(next, &view);
@@ -7504,13 +7504,14 @@ test "a list row's failed Actions read answers main's ActionReadFailed" {
     }.run);
 }
 
-test "an .each visitor owns a big Row only through a decoded field of the Row's type" {
+test "an .each visitor supplies storage for a big Row through decoded" {
     const Big = struct { bytes: [1025]u8 };
     const Small = struct { id: u64 };
     try std.testing.expectEqual(@as(?[]const u8, null), comptime store_access.eachVisitorError(Small, struct { count: u8 }));
     try std.testing.expectEqual(@as(?[]const u8, null), comptime store_access.eachVisitorError(Big, struct { decoded: Big }));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime store_access.eachVisitorError(Big, struct { decoded: *Big }));
     try std.testing.expectEqualStrings("rsql: an .each Row over 1 KiB decodes into its visitor's own decoded field", comptime store_access.eachVisitorError(Big, struct { count: u8 }).?);
-    try std.testing.expectEqualStrings("rsql: a visitor's decoded field is the Row its .each read decodes, " ++ @typeName(Small), comptime store_access.eachVisitorError(Small, struct { decoded: Big }).?);
+    try std.testing.expectEqualStrings("rsql: a visitor's decoded field is the Row or *Row its .each read decodes, " ++ @typeName(Small), comptime store_access.eachVisitorError(Small, struct { decoded: Big }).?);
 }
 
 /// The rendered text of the one statement the failure table `named`
@@ -7793,7 +7794,7 @@ test "Full history refuses content whose bytes no longer match their digest" {
                 const text: [2100]u8 = @splat('d');
                 try submitTestMessage(&storage, &tmp, "digest-message", "digest-message", session.slice(), &text);
                 if (fault) {
-                    try store_testing.exec(&storage, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='digest-message')", .{});
+                    try store_testing.zeroContent(&storage, "SELECT content_id FROM message_admission WHERE command_key='digest-message'");
                     try std.testing.expectError(error.CorruptStore, testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
                 } else std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
             }

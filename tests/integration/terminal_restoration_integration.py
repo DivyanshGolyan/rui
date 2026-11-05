@@ -26,6 +26,7 @@ import human_cli_integration as human
 import host_process
 from host_process import HostDiagnostics, HostStartError, canonical_fixture_root, cleanup_failure, copy_failure_diagnostics, dispose_all, preserve_failure_metadata, retain_failure_state, start_ready_process, stop_process
 import os_semantics
+from product_defaults import DEFAULTS
 
 
 def assert_file_flags(actual, expected):
@@ -2836,8 +2837,10 @@ def host_diagnostic_cases(state, library):
                     # file before provider launch, so its correct charge is 0.
                     assert int(resources["scratch_used_bytes"]) == leftovers[0].stat().st_size == 0, resources
                     assert not endpoint.requests, endpoint.requests
+                    # Retained cleanup keeps the lease, so pause waits out its
+                    # whole retirement bound and reports it unconfirmed.
                     stopped = subprocess.run([str(fixture.RUI), "host", "pause", "--store", str(store), "--instance", instance],
-                        capture_output=True, text=True, timeout=8)
+                        capture_output=True, text=True, timeout=30)
                     (root / "host-stop.stdout").write_text(stopped.stdout)
                     (root / "host-stop.stderr").write_text(stopped.stderr)
                     assert stopped.returncode == 0, stopped
@@ -2845,6 +2848,7 @@ def host_diagnostic_cases(state, library):
                     assert {key: stop_reply[key] for key in ("type", "status", "instance", "retirement")} == {
                         "type": "host_pause", "status": "acknowledged", "instance": instance, "retirement": "unconfirmed"}, stopped
                     assert "pause interrupts all work in this Store" in stopped.stderr, stopped
+                    assert f"still holds this Store after {DEFAULTS.host_shutdown_seconds} seconds" in stopped.stderr, stopped
                     print(f"Host diagnostics: retained response file, charge=0, custody=1; stop reply={stopped.stdout!r}", flush=True)
                     # A stop acknowledgement is not cleanup completion: the
                     # injected unlink refusal remains active during shutdown.

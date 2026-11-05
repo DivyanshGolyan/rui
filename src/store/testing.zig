@@ -197,9 +197,19 @@ pub const baseline_rows: [:0]const u8 = @embedFile("migration_baseline_rows.sql"
 /// read back from a migrated Store; each format change edits it, and its
 /// diff against `baseline_rows` shows every row the chain changes.
 pub const expected_rows: [:0]const u8 = @embedFile("migration_expected_rows.sql");
+/// `expected_rows` on MySQL, whose content rows hold no payload: its
+/// first statement, the content rows, gives way to
+/// migration_expected_content.mysql.sql's content and content_chunk rows.
+pub const expected_mysql_rows: [:0]const u8 = blk: {
+    @setEvalBranchQuota(4 * expected_rows.len);
+    const first = std.mem.indexOf(u8, expected_rows, ";\n").? + 2;
+    if (!std.mem.startsWith(u8, expected_rows, "INSERT INTO content(")) @compileError("migration_expected_rows.sql starts with the content rows");
+    break :blk @embedFile("migration_expected_content.mysql.sql") ++ expected_rows[first..];
+};
 comptime {
     if (fixtureTextError(baseline_rows)) |message| @compileError("migration_baseline_rows.sql: " ++ message);
     if (fixtureTextError(expected_rows)) |message| @compileError("migration_expected_rows.sql: " ++ message);
+    if (fixtureTextError(expected_mysql_rows)) |message| @compileError("migration_expected_content.mysql.sql: " ++ message);
 }
 
 fn isWordByte(byte: u8) bool {
@@ -276,6 +286,16 @@ pub fn sqliteQueryU64(database: *sqlite.c.sqlite3, sql: [:0]const u8, args: anyt
     const value = sqlite.c.sqlite3_column_int64(statement, 0);
     if (value < 0) return error.CorruptStore;
     return @intCast(value);
+}
+
+/// Zeroes the bytes of each content row whose id `ids`, a SELECT,
+/// returns, keeping their lengths: SQLite's payload, and in the MySQL
+/// check's spelling the rows' chunks (`schema` content_chunk).
+pub fn zeroContent(storage: *Store, comptime ids: [:0]const u8) !void {
+    _ = fixtureText("UPDATE content_chunk SET bytes=zeroblob(length(bytes)) WHERE content_id IN (" ++ ids ++ ")");
+    const sql = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id IN (" ++ ids ++ ")";
+    if (comptime fixtureTextError(sql)) |message| @compileError(message ++ ": " ++ sql);
+    return sqliteExec(storage.sqliteDatabase(), sql, .{});
 }
 
 /// `exec` with foreign keys unchecked for `sql` alone: on SQLite, the only
