@@ -264,6 +264,16 @@ pub fn exec(storage: *Store, comptime sql: [:0]const u8, args: anytype) !void {
     return sqliteExec(storage.sqliteDatabase(), sql, args);
 }
 
+/// Seeds a loaded subset for visibility tests before find_tools exists.
+/// `source` supplies its configured set; `session` and all its revisions
+/// load that set. Only fixtures bypass configure's reachability check.
+pub fn setLoadedToolsForTesting(storage: *Store, session: []const u8, source: []const u8) !void {
+    // MySQL refuses an UPDATE that reads its own target table, so read first.
+    const set = try queryU64(storage, "SELECT tool_set_id FROM session WHERE session_ref=?1", .{source});
+    try exec(storage, "UPDATE session SET loaded_tool_set_id=?1 WHERE session_ref=?2", .{ set, session });
+    try exec(storage, "UPDATE session_revision SET loaded_tool_set_id=(SELECT loaded_tool_set_id FROM session WHERE session_ref=?1) WHERE session_ref=?1", .{session});
+}
+
 /// The first column of `sql`'s first row: `QueryFailed` with no row, and
 /// `CorruptStore` when it is negative. `args` binds as in `exec`.
 pub fn queryU64(storage: *Store, comptime sql: [:0]const u8, args: anytype) !u64 {

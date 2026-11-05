@@ -109,6 +109,22 @@ pub fn build(b: *std.Build) void {
     update_openapi.addCopyFileToSource(emit_openapi.addOutputFileArg("openapi.json"), "openapi.json");
     b.step("openapi", "Write openapi.json from the wire types; a unit test fails while it is stale").dependOn(&update_openapi.step);
 
+    const catalog_emitter = b.addExecutable(.{
+        .name = "model-catalog",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/model_catalog_main.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const emit_catalog = b.addRunArtifact(catalog_emitter);
+    const snapshot = emit_catalog.addOutputFileArg("model_catalog_snapshot.zig");
+    // Passthrough arguments disable caching: reread even an unchanged path.
+    emit_catalog.addPassthruArgs();
+    const update_catalog = b.addUpdateSourceFiles();
+    update_catalog.addCopyFileToSource(snapshot, "src/model_catalog_snapshot.zig");
+    b.step("model-catalog", "Write the shipped catalog from a models.dev api.json snapshot").dependOn(&update_catalog.step);
+
     const h2_test_step = b.step("test-h2", "Run the HTTP/2 client's own tests");
     const pg_test_step = b.step("test-pg", "Run the Postgres wire client's tests (live ones against RUI_TEST_PG_PORT)");
     if (addH2(b, target, .ReleaseSafe, pinned_transport, addTestPoll(b))) |h2| {
