@@ -22,6 +22,7 @@ const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
 const launch_frame = @import("launch_frame.zig");
+const core_tools = @import("core_tools.zig");
 const tools = @import("tools.zig");
 const mcp_offered = @import("mcp/offered.zig");
 const stderr = @import("stderr.zig");
@@ -856,6 +857,7 @@ pub const Launch = struct {
     paused: bool = false,
     /// The MCP servers whose tools the Host offers (M3a).
     mcp_servers: []const launch_frame.Frame.McpServer = &.{},
+    presets: []const core_tools.Preset = &.{},
 };
 
 /// Lists each MCP server and saves the Host's catalog: the built-ins and
@@ -1055,6 +1057,7 @@ pub fn serve(
         .hooks = hooks,
         .limits = limits,
         .providers = served,
+        .presets = if (launch) |value| value.presets else &.{},
         .bash_path = bash_path,
         .bash_facts = bash_facts,
         .environments = environments,
@@ -1370,6 +1373,35 @@ noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, 
     return host.store.submitMessageWithModel(command, .{ .context = &install, .call = Install.call }, faults);
 }
 
+/// Resolve a creation seed before the Store hashes or saves the command.
+/// Only the resolved fields cross the Store boundary; preset names never do.
+noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureCommand) store_module.ConfigureReply {
+    const name = command.preset orelse return host.store.configure(command, host.hooks.storeFaults(.command));
+    if (command.session.len != 0) return .{ .rejected = .{ .replayed = false, .code = .preset_on_update } };
+    const preset = for (host.presets) |*entry| {
+        if (std.mem.eql(u8, entry.name, name.slice())) break entry;
+    } else return .{ .rejected = .{ .replayed = false, .code = .unknown_preset } };
+    var memory: std.heap.ArenaAllocator = .init(host.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    // Configuration is kilobytes, owned by this request rather than the stack.
+    const resolved = arena.create(protocol.ConfigureCommand) catch return .infrastructure_failure;
+    resolved.* = .{
+        .store = command.store,
+        .key = command.key,
+        .session = command.session,
+        .require_model = command.require_model,
+    };
+    const checked = core_tools.parseAgentSpec(arena, preset.spec, &resolved.configuration) catch return .infrastructure_failure;
+    // The immutable launch frame checked this same spec with this parser.
+    std.debug.assert(checked == .accepted);
+    inline for (@typeInfo(protocol.Configuration).@"struct".field_names) |field| {
+        const override = &@field(command.configuration, field);
+        if (override.state != .omitted) @field(resolved.configuration, field) = override.*;
+    }
+    return host.store.configure(resolved, host.hooks.storeFaults(.command));
+}
+
 /// `client_environment` holds a Message's checked environment.
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, client_environment: ?*SessionEnvironments.Offer) !void {
     if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
@@ -1405,7 +1437,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
-            const result = host.store.configure(command, host.hooks.storeFaults(.command));
+            const result = submitConfigure(host, command);
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
             }
@@ -4182,4 +4214,110 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(retained_fd, std.c.F.GETFL));
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "request-7-1.tmp", .{}));
     }
+}
+
+test "presets seed configure before Store validation and idempotency" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite", .{root});
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
+        \\{"model":"gpt-6.1-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
+    , .{})).object;
+    const presets = [_]core_tools.Preset{.{ .name = "review", .spec = spec }};
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .presets = &presets };
+    const create = try arena.create(protocol.ConfigureCommand);
+    create.* = .{ .preset = .{} };
+    try create.preset.?.set("review");
+    try create.key.set("preset-create");
+    const first = submitConfigure(&host, create);
+    try std.testing.expect(first == .accepted);
+    try std.testing.expect(!first.accepted.replayed);
+    const session = first.accepted.session;
+    var observed = try storage.inspectSessionForTesting(session.slice());
+    try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
+    try std.testing.expectEqual(@as(?u64, 10000), observed.compaction_trigger_override);
+    try std.testing.expectEqual(protocol.ReasoningEffort.low, observed.reasoning_effort_override.?);
+    try std.testing.expectEqualStrings("ask", observed.permission_mode.slice());
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Preset instructions"), &observed.instructions.digest);
+    try std.testing.expect(observed.output_schema != null);
+    const replay = submitConfigure(&host, create);
+    try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+    try std.testing.expectEqualStrings(session.slice(), replay.accepted.session.slice());
+    try std.testing.expectEqual(first.accepted.revision, replay.accepted.revision);
+
+    const override = try arena.create(protocol.ConfigureCommand);
+    override.* = .{ .preset = create.preset };
+    try override.key.set("preset-overrides");
+    override.configuration.model.state = .value;
+    try override.configuration.model.value.set("gpt-6.1-terra");
+    override.configuration.provider.state = .value;
+    try override.configuration.provider.value.set("codex");
+    override.configuration.workspace.state = .value;
+    try override.configuration.workspace.value.set(root);
+    override.configuration.reasoning_effort.state = .explicit_null;
+    override.configuration.compaction_trigger.state = .value;
+    try override.configuration.compaction_trigger.value.set("12000");
+    override.configuration.tools = try .of(&.{"start_agent"});
+    override.configuration.permission_mode.state = .value;
+    try override.configuration.permission_mode.value.set("bypass");
+    override.configuration.label.state = .explicit_null;
+    override.configuration.output_schema.state = .explicit_null;
+    override.configuration.instructions = .{
+        .state = .value,
+        .borrowed_bytes = "Overridden instructions",
+        .length = "Overridden instructions".len,
+        .digest = protocol.contentDigest("Overridden instructions"),
+    };
+    const overridden = submitConfigure(&host, override);
+    try std.testing.expect(overridden == .accepted);
+    try storage.inspectSession(overridden.accepted.session.slice(), &observed);
+    try std.testing.expectEqualStrings("gpt-6.1-terra", observed.model.slice());
+    try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
+    try std.testing.expectEqualStrings(root, observed.workspace.slice());
+    try std.testing.expectEqual(@as(?u64, 12000), observed.compaction_trigger_override);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort_override);
+    try std.testing.expectEqualStrings("bypass", observed.permission_mode.slice());
+    try std.testing.expectEqual(@as(u8, 8), observed.tools_mask);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Overridden instructions"), &observed.instructions.digest);
+    try std.testing.expect(observed.output_schema == null);
+
+    // An edited preset is not saved or looked up by name in the Store. A
+    // request overriding its edited field still has the same resolved digest.
+    const edited_spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
+        \\{"model":"gpt-6-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
+    , .{})).object;
+    const edited_presets = [_]core_tools.Preset{.{ .name = "review", .spec = edited_spec }};
+    host.presets = &edited_presets;
+    const same = submitConfigure(&host, override);
+    try std.testing.expect(same == .accepted and same.accepted.replayed);
+    try std.testing.expectEqualStrings(overridden.accepted.session.slice(), same.accepted.session.slice());
+    try std.testing.expect(submitConfigure(&host, create) == .conflict);
+    // Changing the catalog does not change the already created Session.
+    try storage.inspectSession(session.slice(), &observed);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", observed.model.slice());
+
+    const invalid = try arena.create(protocol.ConfigureCommand);
+    invalid.* = .{ .preset = create.preset };
+    try invalid.key.set("preset-invalid-resolved");
+    invalid.configuration.compaction_trigger.state = .explicit_null;
+    const refused = submitConfigure(&host, invalid);
+    try std.testing.expect(refused == .rejected);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused.rejected.code);
+    host.presets = &.{};
+    const unknown = submitConfigure(&host, create);
+    try std.testing.expect(unknown == .rejected);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, unknown.rejected.code);
+    invalid.session = session;
+    const update = submitConfigure(&host, invalid);
+    try std.testing.expect(update == .rejected);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update.rejected.code);
 }

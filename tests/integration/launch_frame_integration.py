@@ -259,6 +259,38 @@ def main(network, ci):
     host.stdin.close()
     assert host.wait(timeout=30) == 0, output(host)
 
+    # Presets are launch-only seeds; the saved Session contains resolved fields.
+    preset = {"model": "gpt-6.1-sol", "effort": None, "compactAt": 100000,
+              "tools": [], "permissionMode": "ask", "label": "Review"}
+    host = launch(frame(dict(good, presets={"review": preset})))
+    wait_for_socket(sock, host)
+    create = {"version": WIRE, "kind": "configure", "store": str(store), "key": "preset:create",
+              "session": "", "preset": "review", "configuration": {"label": {"state": "null"}}}
+    created = post(sock, "configure", create)
+    assert created["answer"]["status"] == "accepted", created
+    session = created["answer"]["session"]
+    replayed = post(sock, "configure", create)
+    assert replayed["answer"]["replayed"] is True and replayed["answer"]["session"] == session, replayed
+    saved = post(sock, "inspect-session", {"version": WIRE, "kind": "inspect_session", "store": str(store), "session": session})["session"]
+    assert saved["model"] == preset["model"] and saved["tools"] == [] and saved["label"] is None, saved
+    assert saved["compaction_trigger_override"] == "100000", saved
+    unknown = post(sock, "configure", dict(create, key="preset:unknown", preset="missing"))
+    assert unknown["answer"]["code"] == "unknown_preset", unknown
+    update = post(sock, "configure", dict(create, key="preset:update", session=session))
+    assert update["answer"]["code"] == "preset_on_update", update
+    host.stdin.close()
+    assert host.wait(timeout=30) == 0, output(host)
+
+    for presets, field in [
+        ({"Bad": preset}, "name"),
+        ({"a" * 64: dict(preset, **{"\x01" * 64: None})}, "\x01"),
+        ({"review": {"model": "m"}}, "effort"),
+        ({"review": dict(preset, tools=["bash"])}, "workspace"),
+    ]:
+        refused = refusal(launch(frame(dict(good, presets=presets))))
+        assert refused["code"] == "invalid_preset", refused
+        assert next(iter(presets)) in refused["message"] and field in refused["message"], refused
+
     for raw, message in [
         (frame(dict(good, v=2)), "v must be 1"),
         (frame(dict(good, runtimeDir="relative")), "runtimeDir must be an absolute path"),
@@ -317,7 +349,7 @@ def main(network, ci):
     held.close()
     silent.close()
     sdk_catalog(root, good, network, ci)
-    print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, four refusals, MCP tools listed, a collision refused, a server down tolerated")
+    print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, preset creation and four preset refusals, four frame refusals, MCP tools listed, a collision refused, a server down tolerated")
 
 
 if __name__ == "__main__":

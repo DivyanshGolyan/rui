@@ -88,3 +88,32 @@ function sessionTypeContract(spec: SessionSpec): void {
 	void [missingEffort, nullCompaction, immutable, sparse];
 }
 void sessionTypeContract;
+
+test("creation can name a preset without inventing missing fields", async () => {
+	const link: Link = {
+		async exchange(_path, build) {
+			const request = JSON.parse(build("store"));
+			assert.equal(request.preset, "review");
+			assert.deepEqual(request.configuration.model, { state: "omitted" });
+			assert.deepEqual(request.configuration.tools, { state: "omitted" });
+			assert.deepEqual(request.configuration.reasoning_effort, { state: "null" });
+			assert.deepEqual(request.configuration.output_schema, { state: "null" });
+			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
+		},
+	};
+	await new Sessions(link).create({ preset: "review", effort: null, outputSchema: null }, { idempotencyKey: "preset" });
+});
+
+function presetTypeContract(sessions: Sessions): void {
+	void sessions.create({ preset: "review" }, { idempotencyKey: "preset" });
+	// @ts-expect-error neither a full spec nor a preset
+	void sessions.create({}, { idempotencyKey: "empty" });
+	// @ts-expect-error a partial spec needs a preset
+	void sessions.create({ instructions: "Do this" }, { idempotencyKey: "partial" });
+	// @ts-expect-error a preset name is never null
+	void sessions.create({ preset: null }, { idempotencyKey: "null" });
+	// @ts-expect-error presets only seed creation
+	const update: SessionUpdate = { preset: "review" };
+	void update;
+}
+void presetTypeContract;

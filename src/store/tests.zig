@@ -10218,3 +10218,60 @@ test "effort reset admission respects the saved codec" {
     current.codec = .@"openai-responses/1";
     try std.testing.expect(configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex) == null);
 }
+
+test "core_tools presets retain caller narrowing after overrides resolve" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("preset-agent-parent", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{"start_agent"});
+            try create.configuration.permission_mode.value.set("ask");
+            const parent = storage.configure(&create, .{}).accepted.session;
+            try submitTestMessage(&storage, &tmp, "preset-agent-message", "preset-agent-key", parent.slice(), "start children");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer memory.deinit();
+            const arena = memory.allocator();
+            const core_tools = @import("../core_tools.zig");
+            const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
+                \\{"model":"gpt-6.1-sol","effort":null,"compactAt":1000,"tools":["bash"],"workspace":"/","permissionMode":"bypass"}
+            , .{})).object;
+            const presets = [_]core_tools.Preset{.{ .name = "worker", .spec = spec }};
+            const arguments = [_][]const u8{
+                "{\"task\":\"read\",\"attached\":false,\"preset\":\"worker\",\"spec\":{\"tools\":[],\"permissionMode\":\"ask\"}}",
+                "{\"task\":\"read\",\"attached\":false,\"preset\":\"worker\"}",
+                "{\"task\":\"read\",\"attached\":false,\"preset\":\"worker\",\"spec\":{\"tools\":[]}}",
+            };
+            var calls: [arguments.len]TestingCall = undefined;
+            for (arguments, &calls, 0..) |bytes, *call, at| {
+                const id = try std.fmt.allocPrint(arena, "preset-{d}", .{at});
+                const encoded = try std.json.Stringify.valueAlloc(arena, bytes, .{});
+                call.* = .{ .item_id = id, .name = "start_agent", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = bytes };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "preset-agent-calls", &calls);
+            const start = try arena.create(core_tools.StartAgent);
+            for (arguments, 0..) |bytes, at| {
+                const action = (try storage.nextCoreWork()).?.action;
+                try std.testing.expect(try core_tools.checkStartAgentWithPresets(arena, bytes, &presets, start) == .accepted);
+                const result = try storage.startAgent(action.binding, parent.slice(), start.task, start.attached, &start.configuration, null, .{});
+                if (at == 0) {
+                    try std.testing.expect(result == .started);
+                } else {
+                    try std.testing.expect(result == .failed);
+                    const reason = if (at == 1)
+                        "spec.tools: bash is not one of your tools. Nothing was started."
+                    else
+                        "spec.permissionMode: you ask before running commands, so your agents ask too. Nothing was started.";
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ action.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(reason) } }));
+                }
+            }
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+        }
+    }.run);
+}

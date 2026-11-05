@@ -4,6 +4,8 @@ export { RuiRequestError, RuiStartError, RuiUnavailableError } from "./errors.ts
 export {
 	Session,
 	Sessions,
+	type AgentSpec,
+	type SessionCreate,
 	type ModelSummary,
 	type SendOptions,
 	type SessionSpec,

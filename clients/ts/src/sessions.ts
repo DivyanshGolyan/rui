@@ -16,7 +16,7 @@ export interface Link {
 type Schemas = components["schemas"];
 
 /** The Session settings the Host takes today. */
-export interface SessionSpec {
+export interface AgentSpec {
 	/** The working directory for Bash. Required with `bash`, fixed for the Session's life. */
 	workspace?: string;
 	/** `openai` or `codex`. Fixed for the Session's life. */
@@ -24,8 +24,8 @@ export interface SessionSpec {
 	/** Fixed for the Session's life. */
 	model: string;
 	instructions?: string;
-	/** JSON output schema as JSON text; `null` clears it. */
-	outputSchema?: string | null;
+	/** JSON output schema, or its JSON text; `null` clears it. */
+	outputSchema?: Record<string, unknown> | string | null;
 	/** Tool names the Host offers, such as `bash` and `web_search`. */
 	tools: readonly string[];
 	permissionMode: "ask" | "bypass";
@@ -36,6 +36,12 @@ export interface SessionSpec {
 	/** A name shown in lists. `null` clears it. */
 	label?: string | null;
 }
+
+/** The same agent spec accepted by creation and connect-time presets. */
+export type SessionSpec = AgentSpec;
+
+/** Creation needs a complete spec, or a named preset with explicit overrides. */
+export type SessionCreate = (AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>);
 
 /** The settings `update` may change: everything but the ones fixed at creation. */
 export type SessionUpdate = Partial<Pick<SessionSpec, "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label">>;
@@ -89,7 +95,7 @@ function configuration(spec: Partial<SessionSpec>): Schemas["Configuration"] {
 		// ASCII, so code-unit order is byte order.
 		tools: optional(spec.tools === undefined ? undefined : [...new Set(spec.tools)].sort()),
 		permission_mode: optional(spec.permissionMode),
-		output_schema: clearable(spec.outputSchema),
+		output_schema: clearable(typeof spec.outputSchema === "object" && spec.outputSchema !== null ? JSON.stringify(spec.outputSchema) : spec.outputSchema),
 		compaction_trigger: optional(spec.compactAt === undefined ? undefined : String(spec.compactAt)),
 		output_reservation: OMITTED,
 		reasoning_effort: clearable(spec.effort),
@@ -97,7 +103,7 @@ function configuration(spec: Partial<SessionSpec>): Schemas["Configuration"] {
 	};
 }
 
-function configureBody(store: string, key: string, session: string, spec: Partial<SessionSpec>): string {
+function configureBody(store: string, key: string, session: string, spec: Partial<AgentSpec> & { preset?: string }): string {
 	return JSON.stringify({
 		version: WIRE_VERSION,
 		kind: "configure",
@@ -105,6 +111,7 @@ function configureBody(store: string, key: string, session: string, spec: Partia
 		key,
 		session,
 		configuration: configuration(spec),
+		...(spec.preset === undefined ? {} : { preset: spec.preset }),
 	} satisfies Schemas["ConfigureRequest"]);
 }
 
@@ -273,7 +280,7 @@ export class Sessions {
 	}
 
 	/** Creates a Session. The key is required: a repeat returns the same Session (D7, D17). */
-	async create(spec: SessionSpec, options: { idempotencyKey: string }): Promise<Session> {
+	async create(spec: SessionCreate, options: { idempotencyKey: string }): Promise<Session> {
 		const reply = parse<Schemas["ConfigureReply"]>(
 			await this.#link.exchange("/v1/configure", (store) => configureBody(store, options.idempotencyKey, "", spec)),
 		);
