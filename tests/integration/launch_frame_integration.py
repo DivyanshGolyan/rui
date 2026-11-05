@@ -209,7 +209,12 @@ def main():
     wait_for_socket(mcp_root / "rui.sock", host)
     host.stdin.close()
     assert host.wait(timeout=30) == 0, output(host)
-    refused = refusal(launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs), mcp_entry("clash", clash)]))))
+    # The launcher stays connected until the refusal arrives: a closed stdin
+    # while listing is a launcher that went away, and stops the Host quietly.
+    colliding = launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs), mcp_entry("clash", clash)])))
+    line = colliding.stdout.readline()
+    refused = json.loads(line)["rui_start_error"]
+    assert colliding.wait(timeout=20) != 0
     assert refused["code"] == "tool_name_collision", refused
     assert "bash" in refused["message"] and "clash" in refused["message"], refused
     docs.shutdown()
