@@ -3819,9 +3819,9 @@ fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []co
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
     // D111: test clients supply an explicit effort using the client product choice.
-    if (if (@import("model_capability.zig").supportsModel(model)) @import("client.zig").defaultStartEffort(model, null).value else null) |effort| {
+    if (if (@import("model_capability.zig").supportsModel(model)) @import("client_defaults.zig").startEffort(model, null) else null) |effort| {
         command.configuration.reasoning_effort.state = .value;
-        try command.configuration.reasoning_effort.value.set(effort);
+        try command.configuration.reasoning_effort.value.set(@tagName(effort));
     } else command.configuration.reasoning_effort.state = .explicit_null;
     command.configuration.compaction_trigger.state = .value;
     try command.configuration.compaction_trigger.value.set("115200");

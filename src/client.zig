@@ -2,6 +2,7 @@ const std = @import("std");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const client_defaults = @import("client_defaults.zig");
 const environment_rule = @import("environment.zig");
 const TerminalText = @import("TerminalText.zig");
 const ResponseTiming = @import("ResponseTiming.zig");
@@ -403,60 +404,22 @@ pub const OptionalFile = struct {
 };
 
 /// Concrete client-side defaults for a fresh Session, never sparse updates.
-pub fn defaultCompactionTrigger(provider: @import("provider_name.zig").Provider, model: []const u8) u64 {
-    const capability = @import("model_capability.zig");
-    const defaults = @import("product_defaults.zig");
-    const model_trigger = capability.contextWindow(model) * defaults.compaction_trigger_percent / 100;
-    const provider_trigger = for (defaults.provider_compaction_triggers) |entry| {
-        if (std.mem.eql(u8, entry.provider, @tagName(provider))) break entry.tokens;
-    } else model_trigger;
-    return @min(provider_trigger, model_trigger);
-}
+pub const defaultCompactionTrigger = client_defaults.compactionTrigger;
 
 pub fn defaultStartEffort(model: []const u8, saved: ?@import("model_capability.zig").ReasoningEffort) OptionalPolicy {
-    const capability = @import("model_capability.zig");
-    const catalog = @import("model_catalog.zig");
-    const preferred = comptime std.meta.stringToEnum(catalog.ReasoningEffort, @import("product_defaults.zig").reasoning_effort).?;
-    const effort = capability.startEffort(saved, model) orelse capability.startEffort(preferred, model) orelse blk: {
-        const row = catalog.find(catalog.shipped, model) orelse break :blk null;
-        var efforts = row.efforts.iterator();
-        break :blk efforts.next();
-    };
+    const effort = client_defaults.startEffort(model, saved);
     return .{ .present = true, .value = if (effort) |value| @tagName(value) else null };
 }
 
-test "client compaction defaults fit small ChatGPT model windows" {
-    try std.testing.expectEqual(@as(u64, 115200), defaultCompactionTrigger(.codex, "gpt-5.3-codex-spark"));
-    try std.testing.expectEqual(@as(u64, 115200), defaultCompactionTrigger(.openai, "gpt-5.3-codex-spark"));
-}
-
-test "client defaults use product compaction defaults and catalog effort admission" {
-    try std.testing.expectEqual(@as(u64, 244800), defaultCompactionTrigger(.codex, "gpt-6.1-sol"));
-    try std.testing.expectEqual(@as(u64, 945000), defaultCompactionTrigger(.openai, "gpt-6.1-sol"));
-    try std.testing.expectEqual(@as(u64, 115200), defaultCompactionTrigger(.openai, "unlisted-model"));
-    try std.testing.expectEqual(@as(u64, 115200), defaultCompactionTrigger(.codex, "unlisted-model"));
-    try std.testing.expectEqualStrings("max", defaultStartEffort("gpt-6.1-sol", .max).value.?);
-    try std.testing.expectEqualStrings("low", defaultStartEffort("gpt-5.5", .max).value.?);
-    try std.testing.expectEqualStrings("low", defaultStartEffort("gpt-6-luna", null).value.?);
-    try std.testing.expectEqualStrings("none", defaultStartEffort("gpt-6.1-terra", .none).value.?);
-    try std.testing.expectEqualStrings("none", defaultStartEffort("@cf/moonshotai/kimi-k2.6", null).value.?);
-    try std.testing.expectEqualStrings("high", defaultStartEffort("azure/gpt-5-pro", .low).value.?);
-    try std.testing.expect(defaultStartEffort("openai/whisper-1", .low).value == null);
-    try std.testing.expectEqualStrings("low", defaultStartEffort("whisper-1", .low).value.?);
-    try std.testing.expectEqualStrings("low", defaultStartEffort("unlisted-model", null).value.?);
-    try std.testing.expectEqualStrings("max", defaultStartEffort("unlisted-model", .max).value.?);
-    const catalog = @import("model_catalog.zig");
-    for (catalog.shipped) |row| {
-        const actual = defaultStartEffort(row.id, null);
+test "client default effort policy is explicit including null" {
+    for ([_]struct { model: []const u8, effort: ?[]const u8 }{
+        .{ .model = "gpt-6.1-sol", .effort = "low" },
+        .{ .model = "openai/whisper-1", .effort = null },
+        .{ .model = "unlisted-model", .effort = "low" },
+    }) |case| {
+        const actual = defaultStartEffort(case.model, null);
         try std.testing.expect(actual.present);
-        if (actual.value) |text| {
-            const effort = std.meta.stringToEnum(catalog.ReasoningEffort, text).?;
-            try std.testing.expect(row.efforts.contains(effort));
-            if (row.efforts.contains(.low)) try std.testing.expectEqual(catalog.ReasoningEffort.low, effort) else {
-                var efforts = row.efforts.iterator();
-                try std.testing.expectEqual(efforts.next().?, effort);
-            }
-        } else try std.testing.expectEqual(@as(usize, 0), row.efforts.count());
+        if (case.effort) |effort| try std.testing.expectEqualStrings(effort, actual.value.?) else try std.testing.expect(actual.value == null);
     }
 }
 

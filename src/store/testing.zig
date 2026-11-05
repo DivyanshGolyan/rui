@@ -387,10 +387,10 @@ pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace
         try command.configuration.permission_mode.value.set("bypass");
         command.configuration.compaction_trigger.state = .value;
         try command.configuration.compaction_trigger.value.set("115200");
-        // Test clients use the same effort choice as the CLI.
-        if (if (@import("../model_capability.zig").supportsModel(model)) @import("../client.zig").defaultStartEffort(model, null).value else null) |effort| {
+        // Listed test bindings use the client choice; unlisted ones state null.
+        if (if (@import("../model_capability.zig").supportsModel(model)) @import("../client_defaults.zig").startEffort(model, null) else null) |effort| {
             command.configuration.reasoning_effort.state = .value;
-            try command.configuration.reasoning_effort.value.set(effort);
+            try command.configuration.reasoning_effort.value.set(@tagName(effort));
         } else command.configuration.reasoning_effort.state = .explicit_null;
     }
     return command;

@@ -5,7 +5,7 @@ const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
 const built_in_tool = @import("built_in_tool.zig");
 const command_value = @import("command_value.zig");
-const client = @import("client.zig");
+const client_defaults = @import("client_defaults.zig");
 const model_capability = @import("model_capability.zig");
 const product_defaults = @import("product_defaults.zig");
 const Provider = @import("provider_name.zig").Provider;
@@ -286,8 +286,8 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
             };
             try out.writeAll(@tagName(effort));
             // D111/D209: compare with the client product choice, not a catalog default.
-            const default = client.defaultStartEffort(session.model.slice(), null).value;
-            return if (default != null and std.mem.eql(u8, @tagName(effort), default.?)) "model default" else "Session override";
+            const default = client_defaults.startEffort(session.model.slice(), null);
+            return if (effort == default) "model default" else "Session override";
         },
         // The bypass default is stated where it is inspected, without alert weight.
         .permissions => try out.writeAll(switch (session.permission) {
@@ -309,7 +309,7 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
                 try writeGrouped(out, estimate);
             }
             // D111/D207: compare against the provider-aware client default.
-            const client_default = client.defaultCompactionTrigger(session.provider, session.model.slice());
+            const client_default = client_defaults.compactionTrigger(session.provider, session.model.slice());
             return if (session.compaction_override and tokens != client_default) "Session override" else if (model_capability.supportsModel(session.model.slice())) "model default" else "assumed for an unlisted model";
         },
         .headroom => {
