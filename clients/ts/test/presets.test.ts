@@ -90,3 +90,13 @@ test("an invalid connect preset is a RuiStartError naming the preset and field",
 		presets: { review: { model: "m", tools: [], compactAt: 1000, permissionMode: "ask" } },
 	}), (error: unknown) => error instanceof RuiStartError && error.code === "invalid_preset" && /review.*effort/.test(error.message));
 });
+
+test("a connect preset without tools is refused by the Host", { skip }, async () => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "rui-ts-")));
+	await assert.rejects(Rui.connect({
+		database: join(root, "store"), binary: binary ?? "rui",
+		provider: { baseUrl: "https://api.openai.com/v1", key: "sk-ts-presets" },
+		// @ts-expect-error Deliberately omit tools to exercise Host refusal.
+		presets: { review: { model: "m", effort: "low", compactAt: 1000, permissionMode: "ask" } },
+	}), (error: unknown) => error instanceof RuiStartError && error.code === "invalid_preset" && /review.*tools/.test(error.message));
+});

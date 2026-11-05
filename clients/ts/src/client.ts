@@ -333,7 +333,7 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Convert the public JSON-text convenience and readonly tools to the wire spec. */
+/** Convert the public JSON-text convenience to the wire spec. */
 function presetFor(spec: AgentSpec): Schemas["AgentSpec"] {
 	const { outputSchema, ...settings } = spec;
 	let schema = outputSchema;
@@ -344,7 +344,7 @@ function presetFor(spec: AgentSpec): Schemas["AgentSpec"] {
 		}
 		schema = parsed;
 	}
-	return { ...settings, tools: [...settings.tools], ...(schema === undefined ? {} : { outputSchema: schema }) };
+	return { ...settings, ...(schema === undefined ? {} : { outputSchema: schema }) };
 }
 
 /** Starts one child and resolves once it answers host-info, or throws AttemptFailed. */
