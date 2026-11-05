@@ -18,6 +18,7 @@ pub const Store = store_core.Store;
 pub const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
 pub const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 pub const AgentDelivery = command_domain.AgentDelivery;
+pub const AgentStart = command_domain.AgentStart;
 pub const CoreActionInput = action_domain.CoreActionInput;
 pub const ActionDispatchPermit = action_domain.ActionDispatchPermit;
 pub const ActionResolutionCode = action_domain.ActionResolutionCode;

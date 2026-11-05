@@ -2196,7 +2196,7 @@ export interface components {
             provider: "codex" | "openai";
             model: string;
             /** @description Each at most once, in the order the enum lists them. */
-            tools: ("bash" | "message_agent" | "web_search")[];
+            tools: ("bash" | "message_agent" | "start_agent" | "web_search")[];
             /** @enum {string} */
             permission_mode: "ask" | "bypass";
             label: string | null;

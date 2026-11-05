@@ -15,6 +15,176 @@ pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     std.fmt.comptimePrint("\"text\":{{\"type\":\"string\",\"description\":\"The Message: nonempty UTF-8, at most {d} bytes.\"}}", .{message_agent_max_text_bytes}) ++
     "},\"required\":[\"id\",\"text\"],\"additionalProperties\":false}";
 
+/// The most bytes a `start_agent` call's arguments take: its task, at most
+/// `message_agent_max_text_bytes` once decoded and six times that escaped
+/// (`\u0001` for each byte), and its spec.
+pub const start_agent_max_argument_bytes = 6 * message_agent_max_text_bytes + 16 * 1024;
+
+// Prompt text: written here, and given no tests (D141).
+pub const start_agent_description = "Start another Rui agent on a task. It creates the agent's Session, gives it the task as its first Message and returns the agent's ID at once, before any answer. " ++
+    "An attached agent is your child: it works in your Workspace with your provider and Bash environment. A standalone agent has its own lifetime. " ++
+    "The spec may only narrow your own tools and permission mode.";
+pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
+    std.fmt.comptimePrint("\"task\":{{\"type\":\"string\",\"description\":\"The agent's first Message: nonempty UTF-8, at most {d} bytes.\"}},", .{message_agent_max_text_bytes}) ++
+    "\"attached\":{\"type\":\"boolean\",\"description\":\"true starts your child; false starts a standalone agent.\"}," ++
+    "\"spec\":{\"type\":\"object\",\"properties\":{" ++
+    "\"model\":{\"type\":\"string\"}," ++
+    "\"effort\":{\"type\":\"string\",\"enum\":[\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}," ++
+    "\"compactAt\":{\"type\":\"integer\",\"description\":\"Tokens of context at which the agent compacts.\"}," ++
+    "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Tool names, each one of yours.\"}," ++
+    "\"permissionMode\":{\"type\":\"string\",\"enum\":[\"ask\",\"bypass\"]}," ++
+    "\"label\":{\"type\":[\"string\",\"null\"],\"description\":\"A few words naming the agent's task.\"}" ++
+    "},\"required\":[\"model\",\"effort\",\"compactAt\",\"tools\",\"permissionMode\",\"label\"],\"additionalProperties\":false}" ++
+    "},\"required\":[\"task\",\"attached\",\"spec\"],\"additionalProperties\":false}";
+
+/// A `start_agent` call's checked arguments: the task, whether the agent
+/// is attached, and its spec as a creating Configuration without the
+/// Workspace and provider, which come from the calling Session (D122).
+pub const StartAgent = struct {
+    task: []const u8,
+    attached: bool,
+    configuration: protocol.Configuration,
+};
+
+pub const StartAgentCheck = union(enum) {
+    /// The call's `out` holds its checked arguments.
+    accepted,
+    /// Why the call's arguments were refused, naming the field (D140).
+    rejected: []const u8,
+};
+
+/// Checks a `start_agent` call's decoded arguments. Parsed values live in
+/// `arena`; `task` points into it.
+/// An accepted call fills `out`, whose Configuration, kilobytes, is
+/// written in place and never held in a frame.
+pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartAgent) error{OutOfMemory}!StartAgentCheck {
+    if (bytes.len > start_agent_max_argument_bytes) return refused(std.fmt.comptimePrint("the arguments take more than {d} bytes", .{start_agent_max_argument_bytes}));
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.DuplicateField => return refused("a field appears more than once"),
+        else => return refused("the arguments are not one well-formed JSON object"),
+    };
+    const top = switch (root) {
+        .object => |object| object,
+        else => return refused("the arguments are not one JSON object"),
+    };
+    if (unknownField(top, &.{ "task", "attached", "spec" })) |name| return refusedField(arena, name, "is not a start_agent field");
+    const task = switch (top.get("task") orelse return refused("task is required")) {
+        .string => |text| text,
+        else => return refused("task must be a string"),
+    };
+    if (task.len == 0 or task.len > message_agent_max_text_bytes or !std.unicode.utf8ValidateSlice(task))
+        return refused(std.fmt.comptimePrint("task must be nonempty UTF-8 text, at most {d} bytes", .{message_agent_max_text_bytes}));
+    const attached = switch (top.get("attached") orelse return refused("attached is required")) {
+        .bool => |value| value,
+        else => return refused("attached must be true or false"),
+    };
+    const spec = switch (top.get("spec") orelse return refused("spec is required")) {
+        .object => |object| object,
+        else => return refused("spec must be an object"),
+    };
+    // An agent works where its parent does, with its provider (D140).
+    if (spec.get("workspace") != null) return refused("spec.workspace: an agent always works in your Workspace");
+    if (spec.get("provider") != null) return refused("spec.provider: an agent always uses your provider");
+    if (unknownField(spec, &.{ "model", "effort", "compactAt", "tools", "permissionMode", "label" })) |name|
+        return refusedField(arena, name, "is not a spec field");
+    out.configuration = .{};
+    const configuration = &out.configuration;
+    configuration.model = stringField(spec, "model", @TypeOf(configuration.model)) orelse return refused("spec.model must be a model name");
+    configuration.reasoning_effort = stringField(spec, "effort", @TypeOf(configuration.reasoning_effort)) orelse
+        return refused("spec.effort must be none, low, medium, high, xhigh or max");
+    if (std.meta.stringToEnum(protocol.ReasoningEffort, configuration.reasoning_effort.value.slice()) == null)
+        return refused("spec.effort must be none, low, medium, high, xhigh or max");
+    switch (spec.get("compactAt") orelse return refused("spec.compactAt is required")) {
+        .integer => |tokens| {
+            if (tokens <= 0) return refused("spec.compactAt must be a positive number of tokens");
+            configuration.compaction_trigger.state = .value;
+            configuration.compaction_trigger.value.set(std.fmt.allocPrint(arena, "{d}", .{tokens}) catch return error.OutOfMemory) catch unreachable;
+        },
+        else => return refused("spec.compactAt must be a positive number of tokens"),
+    }
+    var unknown: []const u8 = "";
+    configuration.tools = toolsField(arena, spec.get("tools") orelse return refused("spec.tools is required"), &unknown) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Refused => return refused("spec.tools must be a list of distinct tool names"),
+        error.UnknownTool => return refusedField(arena, unknown, "is not a Rui tool (spec.tools)"),
+    };
+    configuration.permission_mode = stringField(spec, "permissionMode", @TypeOf(configuration.permission_mode)) orelse
+        return refused("spec.permissionMode must be ask or bypass");
+    if (!configuration.permission_mode.value.eql("ask") and !configuration.permission_mode.value.eql("bypass"))
+        return refused("spec.permissionMode must be ask or bypass");
+    switch (spec.get("label") orelse .null) {
+        .null => {},
+        .string => |label| {
+            configuration.label.state = .value;
+            configuration.label.value.set(label) catch return refused(std.fmt.comptimePrint("spec.label takes at most {d} bytes", .{protocol.max_label_bytes}));
+        },
+        else => return refused("spec.label must be a string or null"),
+    }
+    out.task = task;
+    out.attached = attached;
+    return .accepted;
+}
+
+fn refused(comptime text: []const u8) StartAgentCheck {
+    return .{ .rejected = text };
+}
+
+fn refusedField(arena: std.mem.Allocator, name: []const u8, comptime what: []const u8) error{OutOfMemory}!StartAgentCheck {
+    const shown = name[0..@min(name.len, 64)];
+    return .{ .rejected = try std.fmt.allocPrint(arena, "{s} " ++ what, .{shown}) };
+}
+
+fn unknownField(object: std.json.ObjectMap, comptime known: []const []const u8) ?[]const u8 {
+    var keys = object.iterator();
+    next: while (keys.next()) |entry| {
+        inline for (known) |name| if (std.mem.eql(u8, entry.key_ptr.*, name)) continue :next;
+        return entry.key_ptr.*;
+    }
+    return null;
+}
+
+/// A nonempty string field as the Configuration field type `T`, or null
+/// when it is absent, not a string, or too long.
+fn stringField(object: std.json.ObjectMap, comptime name: []const u8, comptime T: type) ?T {
+    const text = switch (object.get(name) orelse return null) {
+        .string => |value| value,
+        else => return null,
+    };
+    if (text.len == 0) return null;
+    var field: T = .{ .state = .value };
+    field.value.set(text) catch return null;
+    return field;
+}
+
+/// The tool list `value` names, sorted; `unknown` is set to a name no
+/// built-in tool has.
+fn toolsField(arena: std.mem.Allocator, value: std.json.Value, unknown: *[]const u8) error{ OutOfMemory, Refused, UnknownTool }!protocol.ToolsField {
+    const items = switch (value) {
+        .array => |array| array.items,
+        else => return error.Refused,
+    };
+    const names = try arena.alloc([]const u8, items.len);
+    for (items, names) |item, *name| {
+        name.* = switch (item) {
+            .string => |text| text,
+            else => return error.Refused,
+        };
+        if (protocol.builtInTool(name.*) == null) {
+            unknown.* = name.*;
+            return error.UnknownTool;
+        }
+    }
+    std.sort.insertion([]const u8, names, {}, struct {
+        fn less(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.less);
+    var tools: protocol.ToolsField = .{ .state = .value };
+    for (names) |name| tools.append(name) catch return error.Refused;
+    return tools;
+}
+
 /// A `message_agent` call's checked arguments, without its text.
 pub const MessageAgentArguments = struct {
     id: protocol.Bounded(protocol.session_id_bytes) = .{},
@@ -261,5 +431,65 @@ test "a message_agent text over its bound is rejected, across chunk boundaries" 
             try std.testing.expectEqual(@as(u64, length), check.accepted.text_bytes)
         else
             try std.testing.expectEqual(MessageAgentCheck{ .rejected = .text_invalid }, check);
+    }
+}
+
+test "a start_agent call's arguments carry a task and a whole spec, never a Workspace or provider" {
+    const spec = "\"spec\":{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[\"start_agent\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}";
+    const Case = struct { arguments: []const u8, refusal: ?[]const u8 = null };
+    for ([_]Case{
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true," ++ spec ++ "}" },
+        .{ .arguments = "{\"task\":\"\",\"attached\":true," ++ spec ++ "}", .refusal = "task must be nonempty UTF-8 text, at most 65536 bytes" },
+        .{ .arguments = "{\"attached\":true," ++ spec ++ "}", .refusal = "task is required" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":1," ++ spec ++ "}", .refusal = "attached must be true or false" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true}", .refusal = "spec is required" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"workspace\":\"/\"}}", .refusal = "spec.workspace: an agent always works in your Workspace" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"provider\":\"codex\"}}", .refusal = "spec.provider: an agent always uses your provider" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"edit\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "edit is not a Rui tool (spec.tools)" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"bash\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.tools must be a list of distinct tool names" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":0,\"tools\":[],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.compactAt must be a positive number of tokens" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"never\",\"label\":null}}", .refusal = "spec.permissionMode must be ask or bypass" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"note\":1," ++ spec ++ "}", .refusal = "note is not a start_agent field" },
+        .{ .arguments = "{\"task\":\"read\",\"task\":\"again\",\"attached\":true," ++ spec ++ "}", .refusal = "a field appears more than once" },
+        .{ .arguments = "[]", .refusal = "the arguments are not one JSON object" },
+        .{ .arguments = "{", .refusal = "the arguments are not one well-formed JSON object" },
+    }) |case| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const start = try arena.allocator().create(StartAgent);
+        const check = try checkStartAgent(arena.allocator(), case.arguments, start);
+        if (case.refusal) |expected| {
+            try std.testing.expectEqualStrings(expected, check.rejected);
+        } else {
+            try std.testing.expect(check == .accepted);
+            try std.testing.expectEqualStrings("read", start.task);
+            try std.testing.expect(start.attached);
+            try std.testing.expectEqualStrings("gpt-6.1-sol", start.configuration.model.value.slice());
+            try std.testing.expectEqualStrings("100000", start.configuration.compaction_trigger.value.slice());
+            // Sorted, as the Store's tool list requires.
+            try std.testing.expectEqualStrings("bash start_agent", start.configuration.tools.names.slice());
+            try std.testing.expect(start.configuration.workspace.state != .value and start.configuration.provider.state != .value and start.configuration.label.state != .value);
+        }
+    }
+}
+
+test "a start_agent task at its bound is accepted however it is escaped, and one byte more is the task's refusal" {
+    const spec = ",\"attached\":false,\"spec\":{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\",\"label\":null}}";
+    for ([_]usize{ message_agent_max_text_bytes, message_agent_max_text_bytes + 1 }) |length| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var arguments: std.ArrayList(u8) = .empty;
+        try arguments.appendSlice(arena.allocator(), "{\"task\":\"");
+        // Every byte takes the longest escape.
+        for (0..length) |_| try arguments.appendSlice(arena.allocator(), "\\u0001");
+        try arguments.appendSlice(arena.allocator(), "\"" ++ spec);
+        try std.testing.expect(arguments.items.len <= start_agent_max_argument_bytes);
+        const start = try arena.allocator().create(StartAgent);
+        const check = try checkStartAgent(arena.allocator(), arguments.items, start);
+        if (length == message_agent_max_text_bytes) {
+            try std.testing.expect(check == .accepted);
+            try std.testing.expectEqual(length, start.task.len);
+            for (start.task) |byte| try std.testing.expectEqual(@as(u8, 1), byte);
+        } else try std.testing.expectEqualStrings("task must be nonempty UTF-8 text, at most 65536 bytes", check.rejected);
     }
 }
