@@ -23,19 +23,15 @@ test("a launch frame is a big-endian length and the JSON", () => {
 	assert.equal(frame.subarray(4).toString("utf8"), json);
 });
 
-test("launch frame includes MCP servers only when provided and nonempty", () => {
+test("launch frame carries the MCP servers, an empty list when none are given", () => {
 	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" } };
 	const tools = [
 		{ name: "drift", url: "http://127.0.0.1:3000/mcp", bearerToken: "secret", callTimeoutMs: 42 },
 		{ name: "other", url: "http://127.0.0.1:3001/mcp", bearerToken: "secret2", callTimeoutMs: 99 },
 	];
-	const json = (frame: object) => encodeFrame(frame).subarray(4).toString("utf8");
-	const absent = json(launchFor(options, "/r").frame);
-	assert.equal(json(launchFor({ ...options, tools: [] }, "/r").frame), absent);
-	assert.ok(!Object.hasOwn(JSON.parse(absent), "mcpServers"));
-	const present = json(launchFor({ ...options, tools }, "/r").frame);
-	assert.deepEqual(JSON.parse(present).mcpServers, tools);
-	assert.ok(present.includes(`"mcpServers":${JSON.stringify(tools)}`));
+	const frame = (extra: object) => launchFor({ ...options, ...extra }, "/r").frame as { mcpServers: unknown };
+	assert.deepEqual(frame({}).mcpServers, []);
+	assert.deepEqual(frame({ tools: [{ ...tools[0], extra: true }, tools[1]] }).mcpServers, tools);
 });
 
 test("the refusal line becomes a RuiStartError", () => {
