@@ -6474,9 +6474,9 @@
           "source": {
             "type": "string",
             "enum": [
-              "table",
+              "catalog",
               "pending",
-              "table_fallback",
+              "catalog_fallback",
               "live"
             ]
           },

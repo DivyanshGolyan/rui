@@ -1889,6 +1889,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     var binding: new_session_selection.Binding = .{};
     var saved_effort: ?model_capability.ReasoningEffort = null;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var compaction_buffer: [20]u8 = undefined;
     // Only fresh creation resolves defaults, once, into the capture, through
     // the same prospective selection as a new interactive Session. Addressed
     // input remains sparse for updates. Unknown IDs never create Sessions.
@@ -1910,7 +1911,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         input.model = .{ .present = true, .value = binding.model.slice() };
         if (!input.reasoning_effort.present) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), snapshot.defaults.reasoning_effort);
         if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), null);
-        if (!input.compaction_trigger.present or input.compaction_trigger.value == null) input.compaction_trigger = .{ .present = true, .value = client.defaultCompactionTrigger(binding.model.slice()) };
+        if (!input.compaction_trigger.present or input.compaction_trigger.value == null) input.compaction_trigger = .{ .present = true, .value = try std.fmt.bufPrint(&compaction_buffer, "{d}", .{client.defaultCompactionTrigger(std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?, binding.model.slice())}) };
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -1939,17 +1940,18 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     var input = configuration;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
+    var compaction_buffer: [20]u8 = undefined;
     if (input.session == .named and ((input.compaction_trigger.present and input.compaction_trigger.value == null) or (input.reasoning_effort.present and input.reasoning_effort.value == null))) {
         var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
-        if (input.model.present) {
-            try current_model.set(input.model.value);
-        } else {
+        var current_provider: protocol.Provider = undefined;
+        {
             var discard: std.Io.Writer.Discarding = .init(&.{});
             const observed = try inspectWorkTo(init, requester, input.store, input.session.named, &discard.writer);
             defer observed.file.close(io);
-            try current_model.set(observed.current.settings.model.slice());
+            try current_model.set(if (input.model.present) input.model.value else observed.current.settings.model.slice());
+            current_provider = observed.current.settings.provider.value;
         }
-        if (input.compaction_trigger.present and input.compaction_trigger.value == null) input.compaction_trigger.value = client.defaultCompactionTrigger(current_model.slice());
+        if (input.compaction_trigger.present and input.compaction_trigger.value == null) input.compaction_trigger.value = try std.fmt.bufPrint(&compaction_buffer, "{d}", .{client.defaultCompactionTrigger(current_provider, current_model.slice())});
         if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(current_model.slice(), null);
     }
 
@@ -3196,8 +3198,8 @@ const StartConfiguration = struct {
         return .{
             .provider = input.provider.value,
             .model = model,
-            .reasoning_effort = input.reasoning_effort.value orelse if (model_capability.defaultReasoningEffort(model)) |effort| @tagName(effort) else null,
-            // A client may materialize the catalog default into input. Only
+            .reasoning_effort = input.reasoning_effort.value,
+            // A client may materialize its product default into input. Only
             // the saved preference snapshot establishes saved provenance.
             .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(saved_effort, model) != null) .saved else .model_default,
         };
@@ -3271,8 +3273,8 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
 test "session start configuration reports resolved effort and its source" {
     const Case = struct {
         model: []const u8 = "gpt-6.1-sol",
-        override: ?[]const u8 = null,
-        present: bool = false,
+        override: ?[]const u8 = "low",
+        present: bool = true,
         flag: bool = false,
         saved: ?model_capability.ReasoningEffort = null,
         effort: ?[]const u8 = "low",
@@ -3280,17 +3282,18 @@ test "session start configuration reports resolved effort and its source" {
     };
     for ([_]Case{
         .{},
-        .{ .model = "unlisted-model", .effort = null },
+        .{ .model = "unlisted-model" },
+        .{ .model = "openai/whisper-1", .override = null, .effort = null },
         .{ .override = "high", .present = true, .saved = .high, .source = .saved, .effort = "high" },
         // S1 fills the outgoing override even when no preference was read.
         .{ .override = "low", .present = true },
         .{ .override = "low", .present = true, .saved = .low, .source = .saved },
         .{ .model = "gpt-5.5", .override = "medium", .present = true, .saved = .max, .effort = "medium" },
-        .{ .model = "unlisted-model", .present = true, .saved = .high, .effort = null },
+        .{ .model = "unlisted-model", .override = "high", .saved = .high, .source = .saved, .effort = "high" },
         .{ .override = "low", .present = true, .flag = true, .saved = .high, .source = .flag },
         .{ .override = "xhigh", .present = true, .flag = true, .source = .flag, .effort = "xhigh" },
-        .{ .present = true, .flag = true, .source = .flag },
-        .{ .model = "unlisted-model", .present = true, .flag = true, .source = .flag, .effort = null },
+        .{ .model = "openai/whisper-1", .override = null, .flag = true, .source = .flag, .effort = null },
+        .{ .model = "unlisted-model", .flag = true, .source = .flag },
     }) |case| {
         const value = StartConfiguration.resolve(.{
             .store = "/store",
@@ -3862,11 +3865,12 @@ fn closeDescriptor(fd: std.posix.fd_t) void {
 test "cli fresh defaults are explicit for known and unknown models" {
     const known = client.defaultStartEffort("gpt-6.1-sol", null);
     try std.testing.expect(known.present);
-    try std.testing.expectEqualStrings(@tagName(model_capability.defaultReasoningEffort("gpt-6.1-sol").?), known.value.?);
+    try std.testing.expectEqualStrings(product_defaults.reasoning_effort, known.value.?);
     const unknown = client.defaultStartEffort("unlisted-model", null);
-    try std.testing.expect(unknown.present and unknown.value == null);
-    try std.testing.expectEqualStrings("115200", client.defaultCompactionTrigger("unlisted-model"));
-    try std.testing.expectEqual(model_capability.contextWindow("gpt-6.1-sol") * 90 / 100, try std.fmt.parseInt(u64, client.defaultCompactionTrigger("gpt-6.1-sol"), 10));
+    try std.testing.expect(unknown.present);
+    try std.testing.expectEqualStrings(product_defaults.reasoning_effort, unknown.value.?);
+    try std.testing.expectEqual(@as(u64, 115200), client.defaultCompactionTrigger(.openai, "unlisted-model"));
+    try std.testing.expectEqual(model_capability.contextWindow("gpt-6.1-sol") * 90 / 100, client.defaultCompactionTrigger(.openai, "gpt-6.1-sol"));
 }
 
 test "existing explicit captures bypass fresh option choices while new captures refuse" {

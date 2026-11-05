@@ -1,8 +1,9 @@
 //! The model picker's list: each model a served sign-in offers, once, with
 //! the sign-ins that offer it. The models the Host knows come first, in Rui's
-//! table's order, then the others by name; the picker shows the default
+//! catalog's order, then the others by name; the picker shows the default
 //! ahead of them all.
 const std = @import("std");
+const catalog = @import("model_catalog.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
@@ -10,21 +11,19 @@ const provider_name = @import("provider_name.zig");
 pub const Provider = provider_name.Provider;
 pub const Providers = std.enums.EnumSet(Provider);
 
-/// The rank of a model the table does not list: after every row.
-const unlisted: u16 = model_capability.models.len;
-
 pub const Entry = struct {
     id: []const u8,
     /// The Host knows its limits; otherwise it runs with default limits.
     known: bool,
-    /// Its row in Rui's table, or `unlisted`; it only orders the list.
-    rank: u16,
+    /// Local catalog membership only orders ties within the Host's groups.
+    catalogued: bool,
     /// The served sign-ins whose list holds it; never empty.
     providers: Providers,
 
     fn lessThan(_: void, a: Entry, b: Entry) bool {
         if (a.known != b.known) return a.known;
-        if (a.rank != b.rank) return a.rank < b.rank;
+        // The catalog is bytewise sorted. Its entries precede unlisted IDs.
+        if (a.catalogued != b.catalogued) return a.catalogued;
         return std.mem.order(u8, a.id, b.id) == .lt;
     }
 
@@ -149,7 +148,7 @@ pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, I
                     const model = id orelse return error.InvalidModelList;
                     if (!model_capability.validModelSyntax(model)) return error.InvalidModelList;
                     if (count == offered.len) return error.InvalidModelList;
-                    offered[count] = .{ .id = model, .known = known orelse return error.InvalidModelList, .rank = rankOf(model), .providers = .empty };
+                    offered[count] = .{ .id = model, .known = known orelse return error.InvalidModelList, .catalogued = model_capability.supportsModel(model), .providers = .empty };
                     count += 1;
                 }
                 models = .{ start, count };
@@ -194,11 +193,6 @@ pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, I
     return menu;
 }
 
-fn rankOf(id: []const u8) u16 {
-    for (model_capability.models, 0..) |row, rank| if (std.mem.eql(u8, row.id, id)) return @intCast(rank);
-    return unlisted;
-}
-
 fn nextToken(scanner: *std.json.Scanner, scratch: std.mem.Allocator) error{ OutOfMemory, InvalidModelList }!std.json.Token {
     return scanner.nextAlloc(scratch, .alloc_if_needed) catch |err| switch (err) {
         error.OutOfMemory => error.OutOfMemory,
@@ -239,49 +233,55 @@ fn expectOrder(shown: Shown, ids: []const []const u8) !void {
     }
 }
 
-test "the default leads, known models follow in table order, then the others by name, each once with every sign-in that offers it" {
+test "the default leads, known models follow in catalog order, then the others by name, each once with every sign-in that offers it" {
     var menu = try testMenu(&.{
-        .{ .provider = .codex, .list = .table },
-        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "whisper-1\ngpt-6-luna\ndall-e-3\ngpt-5.5\n" } } },
+        .{ .provider = .codex, .list = .catalog },
+        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "zz-unlisted\ngpt-6-luna\naa-unlisted\ngpt-5.5\n" } } },
     });
     defer menu.deinit(std.testing.allocator);
-    var expected: [model_capability.models.len + 2][]const u8 = undefined;
+    var expected: [catalog.openai_ids.len + 2][]const u8 = undefined;
     expected[0] = "gpt-6-sol";
     var at: usize = 1;
-    for (model_capability.models) |row| if (!std.mem.eql(u8, row.id, "gpt-6-sol")) {
-        expected[at] = row.id;
+    for (catalog.openai_ids) |id| if (!std.mem.eql(u8, id, "gpt-6-sol")) {
+        expected[at] = id;
         at += 1;
     };
-    expected[at..][0..2].* = .{ "dall-e-3", "whisper-1" };
+    expected[at..][0..2].* = .{ "aa-unlisted", "zz-unlisted" };
     try expectOrder(menu.shown("gpt-6-sol"), &expected);
     for (menu.entries) |entry| {
         const both = std.mem.eql(u8, entry.id, "gpt-6-luna") or std.mem.eql(u8, entry.id, "gpt-5.5");
-        const live_only = std.mem.eql(u8, entry.id, "dall-e-3") or std.mem.eql(u8, entry.id, "whisper-1");
+        const live_only = std.mem.eql(u8, entry.id, "aa-unlisted") or std.mem.eql(u8, entry.id, "zz-unlisted");
         try std.testing.expectEqual(!live_only, entry.providers.contains(.codex));
         try std.testing.expectEqual(both or live_only, entry.providers.contains(.openai));
         try std.testing.expectEqual(!live_only, entry.known);
     }
-    try std.testing.expectEqual(model_capability.models.len, menu.shown("gpt-6-sol").others());
-    try std.testing.expectEqual("gpt-5.6-terra".len, menu.widest);
+    try std.testing.expectEqual(catalog.openai_ids.len, menu.shown("gpt-6-sol").others());
+    var widest: usize = "zz-unlisted".len;
+    for (catalog.openai_ids) |id| widest = @max(widest, id.len);
+    try std.testing.expectEqual(widest, menu.widest);
     try std.testing.expectEqual(@as(?model_list.Source, .live), menu.sources.get(.openai));
     try std.testing.expect(!menu.loading());
     // Another default leads, and the first one is back in its row.
     expected[0] = "gpt-5.5";
-    for (model_capability.models[0 .. model_capability.models.len - 1], 1..) |row, place| expected[place] = row.id;
+    at = 1;
+    for (catalog.openai_ids) |id| if (!std.mem.eql(u8, id, "gpt-5.5")) {
+        expected[at] = id;
+        at += 1;
+    };
     try expectOrder(menu.shown("gpt-5.5"), &expected);
     // An unlisted default leads, and "Other models" starts at the rest.
-    const unlisted_first = menu.shown("whisper-1");
-    try std.testing.expectEqualStrings("whisper-1", unlisted_first.entry(0).id);
-    try std.testing.expectEqual(model_capability.models.len + 1, unlisted_first.others());
-    try std.testing.expectEqualStrings("dall-e-3", unlisted_first.entry(unlisted_first.others()).id);
+    const unlisted_first = menu.shown("zz-unlisted");
+    try std.testing.expectEqualStrings("zz-unlisted", unlisted_first.entry(0).id);
+    try std.testing.expectEqual(catalog.openai_ids.len + 1, unlisted_first.others());
+    try std.testing.expectEqualStrings("aa-unlisted", unlisted_first.entry(unlisted_first.others()).id);
     for ([_]?[]const u8{ null, "o9" }) |absent| {
         const plain = menu.shown(absent);
-        try std.testing.expectEqualStrings("gpt-6-luna", plain.entry(0).id);
-        try std.testing.expectEqualStrings("whisper-1", plain.entry(menu.entries.len - 1).id);
+        try std.testing.expectEqualStrings(catalog.openai_ids[0], plain.entry(0).id);
+        try std.testing.expectEqualStrings("zz-unlisted", plain.entry(menu.entries.len - 1).id);
     }
 }
 
-test "the Host's word decides which models are known; Rui's table only orders them" {
+test "the Host's word decides which models are known; Rui's catalog only orders them" {
     var menu = try read(std.testing.allocator, "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[" ++
         "{\"id\":\"o9\",\"known\":false},{\"id\":\"gpt-6-luna\",\"known\":false},{\"id\":\"zz-next\",\"known\":true},{\"id\":\"gpt-5.5\",\"known\":true}]}]");
     defer menu.deinit(std.testing.allocator);
@@ -295,8 +295,8 @@ test "a sign-in the Host does not serve has no source, and a pending list asks a
     defer menu.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(?model_list.Source, null), menu.sources.get(.codex));
     try std.testing.expect(menu.loading());
-    try std.testing.expectEqualStrings("gpt-6-luna", menu.entries[0].id);
-    try std.testing.expectEqual(@as(?usize, 1), menu.find("gpt-6.1-sol"));
+    try std.testing.expectEqualStrings(catalog.openai_ids[0], menu.entries[0].id);
+    try std.testing.expect(menu.find("gpt-6.1-sol") != null);
     try std.testing.expectEqual(menu.entries.len, menu.others);
     var nothing = try testMenu(&.{});
     defer nothing.deinit(std.testing.allocator);
@@ -307,11 +307,13 @@ test "a reply Rui cannot read is refused whole" {
     for ([_][]const u8{
         "",
         "{}",
-        "[{\"provider\":\"claude\",\"source\":\"table\",\"models\":[]}]",
+        "[{\"provider\":\"codex\",\"source\":\"table\",\"models\":[]}]",
+        "[{\"provider\":\"openai\",\"source\":\"table_fallback\",\"models\":[]}]",
+        "[{\"provider\":\"claude\",\"source\":\"catalog\",\"models\":[]}]",
         "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"a b\",\"known\":false}]}]",
         "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-luna\"}]}]",
         "[{\"provider\":\"openai\",\"source\":\"live\"}]",
-        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[]},{\"provider\":\"openai\",\"source\":\"table\",\"models\":[]}]",
+        "[{\"provider\":\"openai\",\"source\":\"live\",\"models\":[]},{\"provider\":\"openai\",\"source\":\"catalog\",\"models\":[]}]",
         "[] []",
     }) |reply| try std.testing.expectError(error.InvalidModelList, read(std.testing.allocator, reply));
 }

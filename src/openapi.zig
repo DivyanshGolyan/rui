@@ -1259,7 +1259,7 @@ test "replies the Host renders conform to their schemas" {
     const ids = "gpt-6.1-sol\nmy\"model\n";
     try out.writer.writeAll(protocol.model_list_reply.head);
     try model_list.writeProviders(&out.writer, &.{
-        .{ .provider = .codex, .list = .table },
+        .{ .provider = .codex, .list = .catalog },
         .{ .provider = .openai, .list = .{ .live = .{ .bytes = ids } } },
     });
     try out.writer.writeAll(protocol.model_list_reply.tail);

@@ -1658,7 +1658,7 @@ export interface components {
             /** @enum {string} */
             provider: "codex" | "openai";
             /** @enum {string} */
-            source: "table" | "pending" | "table_fallback" | "live";
+            source: "catalog" | "pending" | "catalog_fallback" | "live";
             models: {
                 id: string;
                 known: boolean;

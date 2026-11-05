@@ -3439,8 +3439,8 @@ fn pickerNote(state: *const State, provider: Provider) ?enum { pending, fallback
     const source = menu.sources.get(provider) orelse return .login;
     return switch (source) {
         .pending => .pending,
-        .table_fallback => .fallback,
-        .table, .live => null,
+        .catalog_fallback => .fallback,
+        .catalog, .live => null,
     };
 }
 
@@ -3474,7 +3474,7 @@ fn pickerLines(painter: *Painter, state: *const State, picker: *const Picker, li
     const row = if (state.highlighted()) |at| shown_menu.row(at) else 0;
     const highlighted = row + @intFromBool(row >= others);
     const first = @min((highlighted + 1) -| fit.shown, items - fit.shown);
-    const tag_column = 4 + @min(menu.widest, 24) + 4;
+    const tag_column = 8 + @as(usize, @min(menu.widest, 24));
     var listed: usize = 0;
     for (first..first + fit.shown) |item| {
         if (item == others) {
@@ -4760,9 +4760,9 @@ test "/configure holds start settings for the Session the next Enter starts" {
     draft = try typeText(&state, "/configure");
     try expectEffects(&.{.{ .append = " " }}, try submit(&state, draft));
     // A model Rui does not list is held, with a quiet word on its limits.
-    draft = try typeText(&state, "/configure --model gpt-5");
+    draft = try typeText(&state, "/configure --model unlisted-model");
     try expectEffects(&.{.clear_draft}, try submit(&state, draft));
-    try std.testing.expectEqualStrings("gpt-5", state.settings.get(startOption("model").?).?);
+    try std.testing.expectEqualStrings("unlisted-model", state.settings.get(startOption("model").?).?);
     try std.testing.expectEqual(Colour.quiet, state.notice.?.colour);
 }
 
@@ -6687,6 +6687,15 @@ fn shownRow(state: *const State, row: usize) []const u8 {
     return state.shownMenu().entry(row).id;
 }
 
+fn highlightModel(state: *State, draft: Draft, model: []const u8) !void {
+    try expectEffects(&.{}, try press(state, draft, .first));
+    for (0..state.menu.entries.len) |_| {
+        if (state.picker.?.highlight.eql(model)) return;
+        try expectEffects(&.{}, try press(state, draft, .next));
+    }
+    return error.TestModelNotOffered;
+}
+
 fn pickerScreen(state: *State) ![]u8 {
     return screenText(state, 60, 24, .{ .unicode = true });
 }
@@ -6707,8 +6716,9 @@ fn pickerMore(screen: []const u8) bool {
     return false;
 }
 
-const chatgpt: model_list.Entry = .{ .provider = .codex, .list = .table };
-const both = [_]model_list.Entry{ chatgpt, .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\ngpt-5.5\ndall-e-3\nwhisper-1\n" } } } };
+// A bounded menu for navigation tests; catalog-list coverage belongs to model_list.
+const chatgpt: model_list.Entry = .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6-luna\ngpt-6.1-sol\ngpt-6.1-terra\ngpt-6-sol\ngpt-6-astra\ngpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\n" } } };
+const both = [_]model_list.Entry{ chatgpt, .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\ngpt-5.5\nunlisted-a\nunlisted-z\n" } } } };
 
 test "/model lists the models, default first, and a model one sign-in offers is the whole pick" {
     var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
@@ -6719,9 +6729,9 @@ test "/model lists the models, default first, and a model one sign-in offers is 
     try std.testing.expect(try onScreen(&state, "› gpt-6.1-sol"));
     try std.testing.expect(try onScreen(&state, Provider.openai.login()));
     try std.testing.expect(!try onScreen(&state, Provider.codex.login()));
-    // Down then Enter saves gpt-6-luna with ChatGPT, the only sign-in.
+    // Select gpt-6-luna with ChatGPT, the only sign-in.
     var draft = try typeText(&state, "");
-    try expectEffects(&.{}, try press(&state, draft, .next));
+    try highlightModel(&state, draft, "gpt-6-luna");
     try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6-luna").? }}, try submit(&state, draft));
     // Closing the picker frees its menu.
     try std.testing.expect(state.picker == null and state.menu.entries.len == 0);
@@ -6735,7 +6745,7 @@ test "/model lists the models, default first, and a model one sign-in offers is 
     for ([_]struct { Saved, []const u8, Colour }{ .{ .unconfirmed, "gpt-5.5", .attention }, .{ .{ .failed = "disk full" }, "gpt-5.6-luna", .quiet } }) |case| {
         try openPicker(&state, &.{chatgpt});
         draft = try typeText(&state, "");
-        try expectEffects(&.{}, try press(&state, draft, .last));
+        try highlightModel(&state, draft, case[1]);
         try expectEffects(&.{.{ .save_default = Default.of("codex", case[1]).? }}, try submit(&state, draft));
         try expectEffects(&.{}, try step(&state, saveEnded("codex", case[1], case[0])));
         try std.testing.expectEqualStrings(case[1], state.default.?.model.slice());
@@ -6773,7 +6783,7 @@ test "with both sign-ins, Enter turns the input row into the sign-in choice at t
     try std.testing.expect(state.picker == null and state.menu.entries.len == 0);
     // gpt-6.1-sol only ChatGPT offers: Enter saves it without a choice.
     try openPicker(&state, &both);
-    try expectEffects(&.{}, try press(&state, draft, .next));
+    try highlightModel(&state, draft, "gpt-6.1-sol");
     try std.testing.expectEqualStrings("gpt-6.1-sol", state.picker.?.highlight.slice());
     try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6.1-sol").? }}, try submit(&state, draft));
     // Typing leaves the picker for the draft.
@@ -6789,14 +6799,14 @@ test "a model Rui does not list shows under Other models and is picked like any 
     const draft = try typeText(&state, "");
     try expectEffects(&.{}, try press(&state, draft, .last));
     try std.testing.expect(try onScreen(&state, "Other models"));
-    try std.testing.expectEqualStrings("whisper-1", state.picker.?.highlight.slice());
-    try expectEffects(&.{.{ .save_default = Default.of("openai", "whisper-1").? }}, try submit(&state, draft));
-    try expectEffects(&.{}, try step(&state, saveEnded("openai", "whisper-1", .done)));
+    try std.testing.expectEqualStrings("unlisted-z", state.picker.?.highlight.slice());
+    try expectEffects(&.{.{ .save_default = Default.of("openai", "unlisted-z").? }}, try submit(&state, draft));
+    try expectEffects(&.{}, try step(&state, saveEnded("openai", "unlisted-z", .done)));
     // Saved, it leads the next menu, highlighted, and "Other models" holds the rest.
     try openPicker(&state, &both);
-    try std.testing.expectEqualStrings("whisper-1", shownRow(&state, 0));
-    try std.testing.expectEqualStrings("dall-e-3", shownRow(&state, state.shownMenu().others()));
-    try std.testing.expect(try onScreen(&state, "› whisper-1"));
+    try std.testing.expectEqualStrings("unlisted-z", shownRow(&state, 0));
+    try std.testing.expectEqualStrings("unlisted-a", shownRow(&state, state.shownMenu().others()));
+    try std.testing.expect(try onScreen(&state, "› unlisted-z"));
 }
 
 test "a pick leads the next menu before its save ends, and a re-read that reorders the list keeps the highlight on its model" {
@@ -6804,24 +6814,23 @@ test "a pick leads the next menu before its save ends, and a re-read that reorde
     defer state.deinit();
     try openPicker(&state, &.{chatgpt});
     const draft = try typeText(&state, "");
-    try expectEffects(&.{}, try press(&state, draft, .last));
+    try highlightModel(&state, draft, "gpt-5.5");
     try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-5.5").? }}, try submit(&state, draft));
     try openPicker(&state, &.{chatgpt});
     try std.testing.expectEqualStrings("gpt-5.5", shownRow(&state, 0));
-    try std.testing.expectEqualStrings("gpt-6-luna", shownRow(&state, 1));
+    try std.testing.expectEqualStrings("gpt-5.6-luna", shownRow(&state, 1));
     try std.testing.expect(try onScreen(&state, "› gpt-5.5"));
-    // Down to gpt-6.1-sol, the third row; its save ending moves nothing.
-    try expectEffects(&.{}, try press(&state, draft, .next));
-    try expectEffects(&.{}, try press(&state, draft, .next));
+    // Select gpt-6.1-sol; its save ending moves nothing.
+    try highlightModel(&state, draft, "gpt-6.1-sol");
     try expectEffects(&.{}, try step(&state, saveEnded("codex", "gpt-5.5", .done)));
-    try std.testing.expectEqualStrings("gpt-6.1-sol", shownRow(&state, 2));
+    try std.testing.expectEqualStrings("gpt-6.1-sol", state.picker.?.highlight.slice());
     try std.testing.expect(try onScreen(&state, "› gpt-6.1-sol"));
-    // A re-read without gpt-5.5 or gpt-6-luna puts gpt-6.1-sol first; the
+    // A re-read without gpt-5.5 or gpt-6-luna reorders the rows; the
     // highlight goes with it.
     try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-sol\ngpt-6.1-sol\n" } } }});
-    try std.testing.expectEqualStrings("gpt-6.1-sol", shownRow(&state, 0));
+    try std.testing.expectEqualStrings("gpt-6-sol", shownRow(&state, 0));
     try std.testing.expect(try onScreen(&state, "› gpt-6.1-sol"));
-    try expectEffects(&.{}, try press(&state, draft, .next));
+    try expectEffects(&.{}, try press(&state, draft, .first));
     try std.testing.expect(try onScreen(&state, "› gpt-6-sol"));
     // A re-read without the highlighted model highlights the first row.
     try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6.1-sol\n" } } }});
@@ -6834,7 +6843,7 @@ test "a start submitted before the pick's save ends runs on the pick" {
     defer state.deinit();
     try openPicker(&state, &.{chatgpt});
     var draft = try typeText(&state, "");
-    try expectEffects(&.{}, try press(&state, draft, .next));
+    try highlightModel(&state, draft, "gpt-6-luna");
     try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6-luna").? }}, try submit(&state, draft));
     // The save is left unanswered.
     draft = try typeText(&state, "Try");
@@ -6850,7 +6859,7 @@ test "picks made during one save are saved after it, only the newest" {
     defer state.deinit();
     const draft = try typeText(&state, "");
     try openPicker(&state, &.{chatgpt});
-    try expectEffects(&.{}, try press(&state, draft, .last));
+    try highlightModel(&state, draft, "gpt-5.5");
     try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-5.5").? }}, try submit(&state, draft));
     // Two more picks while it runs: neither is refused, and neither saves yet.
     for ([_][]const u8{ "gpt-6-luna", "gpt-6.1-sol" }) |model| {
@@ -6885,7 +6894,7 @@ test "a failed save is not retried, but picking the same model again saves it" {
     defer state.deinit();
     const draft = try typeText(&state, "");
     try openPicker(&state, &.{chatgpt});
-    try expectEffects(&.{}, try press(&state, draft, .last));
+    try highlightModel(&state, draft, "gpt-5.5");
     try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-5.5").? }}, try submit(&state, draft));
     try expectEffects(&.{}, try step(&state, saveEnded("codex", "gpt-5.5", .{ .failed = null })));
     try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "not saved") != null);
@@ -6943,7 +6952,7 @@ test "a loading list is read again with the next listing, and a failed read keep
     // The next listing asks for the lists again, once.
     const asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
     try expectEffects(&.{ .{ .list = testToken(1) }, .list_models }, asked);
-    try answerModels(&state, &.{.{ .provider = .openai, .list = .table_fallback }});
+    try answerModels(&state, &.{.{ .provider = .openai, .list = .catalog_fallback }});
     try std.testing.expect(!try onScreen(&state, "loading"));
     const fallback = try pickerScreen(&state);
     defer std.testing.allocator.free(fallback);
@@ -6976,6 +6985,21 @@ test "a loading list is read again with the next listing, and a failed read keep
     try std.testing.expect(std.mem.indexOf(u8, unanswered, "gpt-") == null);
 }
 
+test "picker tag columns admit ids at and beyond the 24-column cap" {
+    for ([_]usize{ 24, model_capability.max_model_bytes }) |length| {
+        var state = try pickerState(null);
+        defer state.deinit();
+        const id: [model_capability.max_model_bytes]u8 = @splat('m');
+        var bytes: [model_capability.max_model_bytes + 1]u8 = undefined;
+        @memcpy(bytes[0..length], id[0..length]);
+        bytes[length] = '\n';
+        try openPicker(&state, &.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = bytes[0 .. length + 1] } } }});
+        try std.testing.expectEqual(length, state.menu.widest);
+        try std.testing.expect(try onScreen(&state, "› mmmm"));
+        try std.testing.expectEqualStrings(id[0..length], state.picker.?.highlight.slice());
+    }
+}
+
 test "a long list shows a window around the highlight and counts the rest" {
     var state = try pickerState(null);
     defer state.deinit();
@@ -6983,7 +7007,7 @@ test "a long list shows a window around the highlight and counts the rest" {
     const draft = try typeText(&state, "");
     try expectEffects(&.{}, try press(&state, draft, .last));
     try std.testing.expect(try onScreen(&state, "› o4"));
-    try std.testing.expect(!try onScreen(&state, model_capability.models[0].id));
+    try std.testing.expect(!try onScreen(&state, "gpt-5.5"));
     const screen = try pickerScreen(&state);
     defer std.testing.allocator.free(screen);
     try std.testing.expect(pickerMore(screen));
@@ -7001,9 +7025,9 @@ test "on a short screen the highlighted model always shows, and \"N more\" takes
         defer std.testing.allocator.free(screen);
         var rows: usize = 0;
         var lines = std.mem.splitScalar(u8, screen, '\n');
-        while (lines.next()) |line| rows += @intFromBool(std.mem.indexOf(u8, line, "gpt-") != null or std.mem.indexOf(u8, line, "dall-e-3") != null or std.mem.indexOf(u8, line, "whisper-1") != null or std.mem.indexOf(u8, line, "Other models") != null);
+        while (lines.next()) |line| rows += @intFromBool(std.mem.indexOf(u8, line, "gpt-") != null or std.mem.indexOf(u8, line, "unlisted-a") != null or std.mem.indexOf(u8, line, "unlisted-z") != null or std.mem.indexOf(u8, line, "Other models") != null);
         if (rows == 0) continue;
-        try std.testing.expect(std.mem.indexOf(u8, screen, "› whisper-1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, screen, "› unlisted-z") != null);
         // "N more" shows only once the rows hold all the models they may.
         if (pickerMore(screen)) {
             try std.testing.expectEqual(@as(usize, max_picker_rows), rows);
@@ -7073,6 +7097,7 @@ test "a save that ends after the person left is told on the way out" {
         defer state.deinit();
         try openPicker(&state, &.{chatgpt});
         const draft = try typeText(&state, "");
+        try highlightModel(&state, draft, "gpt-6-luna");
         _ = try submit(&state, draft);
         try expectEffects(&.{}, try step(&state, .leave));
         try expectEffects(&.{}, try step(&state, saveEnded("codex", "gpt-6-luna", saved)));

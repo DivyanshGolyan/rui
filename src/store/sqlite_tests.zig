@@ -6760,7 +6760,7 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
 
-    var create = try completeConfiguration("effort-create", "", workspace, "gpt-6-luna");
+    var create = try completeConfiguration("effort-create", "", workspace, "gpt-6.1-sol");
     create.configuration.reasoning_effort.state = .value;
     try create.configuration.reasoning_effort.value.set("high");
     const created = storage.configure(&create, .{});
@@ -6779,10 +6779,10 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, clear.rejected.code);
     try std.testing.expectEqual(observed.revision, (try storage.inspectSessionForTesting(session.slice())).revision);
     // A client resolves its default to a concrete value before sending it.
-    try std.testing.expect(try configureTestEffort(&storage, "effort-client-default", session.slice(), .value, "medium") == .accepted);
+    try std.testing.expect(try configureTestEffort(&storage, "effort-client-default", session.slice(), .value, "low") == .accepted);
     observed = try storage.inspectSessionForTesting(session.slice());
-    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), observed.reasoning_effort);
-    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), observed.reasoning_effort_override);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort_override);
 
     // A replacement Attempt keeps its Operation's frozen effort.
     try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
@@ -6805,22 +6805,34 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
         try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, rejected.rejected.code);
         try std.testing.expectEqual(revision, (try storage.inspectSessionForTesting(session.slice())).revision);
     }
-    // An omitted field preserves the saved override.
-    try std.testing.expect(try configureTestEffort(&storage, "effort-low", session.slice(), .value, "low") == .accepted);
+    // An omitted field preserves an override distinct from the client default.
+    try std.testing.expect(try configureTestEffort(&storage, "effort-medium", session.slice(), .value, "medium") == .accepted);
     try std.testing.expect(try configureTestEffort(&storage, "effort-omitted", session.slice(), .omitted, "") == .accepted);
     observed = try storage.inspectSessionForTesting(session.slice());
-    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort_override);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), observed.reasoning_effort_override);
     var revisions: [8]?protocol.ReasoningEffort = undefined;
     const revision_count = try testingRevisionEfforts(&storage, session.slice(), &revisions);
-    try std.testing.expectEqualSlices(?protocol.ReasoningEffort, &.{ .high, .medium, .low, .low }, revisions[0..revision_count]);
+    try std.testing.expectEqualSlices(?protocol.ReasoningEffort, &.{ .high, .low, .medium, .medium }, revisions[0..revision_count]);
 
-    // A binding without a catalog default has no effective effort and
-    // rejects every explicit value.
+    // D229: an unlisted model accepts the entire effort grammar, not arbitrary text.
     const unknown = try configureTestSession(&storage, "effort-unknown");
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), (try storage.inspectSessionForTesting(unknown.slice())).reasoning_effort);
-    const unknown_rejected = try configureTestEffort(&storage, "effort-unknown-low", unknown.slice(), .value, "low");
-    try std.testing.expect(unknown_rejected == .rejected);
-    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, unknown_rejected.rejected.code);
+    for (std.enums.values(protocol.ReasoningEffort)) |effort| {
+        var key: [64]u8 = undefined;
+        const accepted = try configureTestEffort(&storage, try std.fmt.bufPrint(&key, "effort-unknown-{s}", .{@tagName(effort)}), unknown.slice(), .value, @tagName(effort));
+        try std.testing.expect(accepted == .accepted);
+        const settings = try storage.inspectSessionForTesting(unknown.slice());
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, effort), settings.reasoning_effort);
+        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, effort), settings.reasoning_effort_override);
+    }
+    const unknown_revision = (try storage.inspectSessionForTesting(unknown.slice())).revision;
+    for ([_][]const u8{ "ultra", "HIGH", "" }, 0..) |invalid, index| {
+        var key: [64]u8 = undefined;
+        const rejected = try configureTestEffort(&storage, try std.fmt.bufPrint(&key, "effort-unknown-invalid-{d}", .{index}), unknown.slice(), .value, invalid);
+        try std.testing.expect(rejected == .rejected);
+        try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, rejected.rejected.code);
+        try std.testing.expectEqual(unknown_revision, (try storage.inspectSessionForTesting(unknown.slice())).revision);
+    }
 
     // A new Operation freezes the effective effort current at its admission,
     // and the frozen value survives reopening.
@@ -6836,7 +6848,7 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     var view: HistoricalView = undefined;
     try reopened.openHistoricalView(second, &view);
     defer view.close();
-    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), (try testSettings(&view)).reasoning_effort);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), (try testSettings(&view)).reasoning_effort);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .xhigh), (try reopened.inspectSessionForTesting(session.slice())).reasoning_effort);
 }
 

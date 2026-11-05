@@ -1,7 +1,6 @@
 //! Slim a models.dev response without retaining its unread model metadata.
 const std = @import("std");
 const catalog = @import("model_catalog.zig");
-const model_capability = @import("model_capability.zig");
 
 const Error = error{ InvalidCatalog, OutOfMemory };
 
@@ -33,7 +32,7 @@ pub fn parse(scratch: std.mem.Allocator, body: []const u8) Error![]catalog.Entry
             while (try parser.key()) |id_token| {
                 defer parser.release(id_token);
                 const id = text(id_token);
-                if (!model_capability.validModelSyntax(id)) {
+                if (!catalog.validModelSyntax(id)) {
                     try parser.skip();
                     continue;
                 }
@@ -213,7 +212,7 @@ const Parser = struct {
             switch (token) {
                 .array_end => return efforts,
                 .string, .allocated_string => {
-                    const effort = std.meta.stringToEnum(model_capability.ReasoningEffort, text(token)) orelse continue;
+                    const effort = std.meta.stringToEnum(catalog.ReasoningEffort, text(token)) orelse continue;
                     efforts.insert(effort);
                 },
                 else => unreachable,

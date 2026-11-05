@@ -2,6 +2,7 @@ const std = @import("std");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
+const client_defaults = @import("client_defaults.zig");
 const environment_rule = @import("environment.zig");
 const TerminalText = @import("TerminalText.zig");
 const ResponseTiming = @import("ResponseTiming.zig");
@@ -403,19 +404,23 @@ pub const OptionalFile = struct {
 };
 
 /// Concrete client-side defaults for a fresh Session, never sparse updates.
-pub fn defaultCompactionTrigger(model: []const u8) []const u8 {
-    const capability = @import("model_capability.zig");
-    const defaults = @import("product_defaults.zig");
-    inline for (capability.models) |row| {
-        if (std.mem.eql(u8, model, row.id)) return std.fmt.comptimePrint("{d}", .{row.context_window * defaults.compaction_trigger_percent / 100});
-    }
-    return std.fmt.comptimePrint("{d}", .{defaults.unlisted_context_window * defaults.compaction_trigger_percent / 100});
-}
+pub const defaultCompactionTrigger = client_defaults.compactionTrigger;
 
 pub fn defaultStartEffort(model: []const u8, saved: ?@import("model_capability.zig").ReasoningEffort) OptionalPolicy {
-    const capability = @import("model_capability.zig");
-    const effort = capability.startEffort(saved, model) orelse capability.defaultReasoningEffort(model);
+    const effort = client_defaults.startEffort(model, saved);
     return .{ .present = true, .value = if (effort) |value| @tagName(value) else null };
+}
+
+test "client default effort policy is explicit including null" {
+    for ([_]struct { model: []const u8, effort: ?[]const u8 }{
+        .{ .model = "gpt-6.1-sol", .effort = "low" },
+        .{ .model = "openai/whisper-1", .effort = null },
+        .{ .model = "unlisted-model", .effort = "low" },
+    }) |case| {
+        const actual = defaultStartEffort(case.model, null);
+        try std.testing.expect(actual.present);
+        if (case.effort) |effort| try std.testing.expectEqualStrings(effort, actual.value.?) else try std.testing.expect(actual.value == null);
+    }
 }
 
 pub const ConfigureInput = struct {

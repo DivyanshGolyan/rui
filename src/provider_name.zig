@@ -41,7 +41,7 @@ pub const Provider = enum {
     /// The table: the one switch on which provider it is.
     pub fn facts(self: Provider) Facts {
         return switch (self) {
-            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .model_list = .table, .runs_tools = &.{"web_search"} },
+            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .model_list = .catalog, .runs_tools = &.{"web_search"} },
             .openai => .{ .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .model_list = .live, .runs_tools = &.{"web_search"} },
         };
     }
@@ -83,9 +83,9 @@ pub const Facts = struct {
     /// What a person gives Rui to use this provider: a sign-in the Host
     /// renews, or a key that only a new key replaces.
     pub const Credential = enum { sign_in, api_key };
-    /// Where the model picker's list comes from: Rui's table, or the
+    /// Where the model picker's list comes from: Rui's catalog, or the
     /// provider's own list, fetched once as the Host starts.
-    pub const ModelList = enum { table, live };
+    pub const ModelList = enum { catalog, live };
 };
 
 /// A provider grammar and its version, as a Session pins it. A version's

@@ -3,7 +3,6 @@
 //! client.zig owns transport and request capture.
 const std = @import("std");
 const protocol = @import("protocol.zig");
-const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
 const transport_policy = @import("transport_policy.zig");
@@ -373,16 +372,16 @@ test "a model list reply reads as what the Host writes" {
     var out = std.Io.Writer.fixed(&bytes);
     try out.writeAll(protocol.model_list_reply.head);
     try model_list.writeProviders(&out, &.{
-        .{ .provider = .codex, .list = .table },
-        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nwhisper-1\n" } } },
+        .{ .provider = .codex, .list = .catalog },
+        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nunlisted-model\n" } } },
     });
     try out.writeAll(protocol.model_list_reply.tail);
     var menu = try model_picker.read(std.testing.allocator, try modelListProviders(out.buffered()));
     defer menu.deinit(std.testing.allocator);
-    try std.testing.expectEqual(model_capability.models.len + 1, menu.entries.len);
-    try std.testing.expectEqual(@as(?model_list.Source, .table), menu.sources.get(.codex));
+    try std.testing.expectEqual(@import("model_catalog.zig").openai_ids.len + 1, menu.entries.len);
+    try std.testing.expectEqual(@as(?model_list.Source, .catalog), menu.sources.get(.codex));
     try std.testing.expectEqual(@as(?model_list.Source, .live), menu.sources.get(.openai));
-    try std.testing.expectEqualStrings("whisper-1", menu.entries[menu.others].id);
+    try std.testing.expectEqualStrings("unlisted-model", menu.entries[menu.others].id);
     for ([_][]const u8{ "", protocol.model_list_reply.head, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"providers\":[]}" }) |body|
         try std.testing.expectError(error.InvalidModelList, modelListProviders(body));
 }

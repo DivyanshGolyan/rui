@@ -38,7 +38,12 @@ def main():
     runtime = root / "run"
     runtime.mkdir(mode=0o700)
     sock = runtime / "rui.sock"
+    # Use the SQLite launch fixture's preset creation shape: the preset supplies
+    # the required model, compaction trigger, tools, permission mode and effort.
+    preset = {"model": "gpt-6.1-sol", "effort": "low", "compactAt": 100000,
+              "tools": [], "permissionMode": "ask", "label": "Review"}
     good = {"v": 1, "store": url, "runtimeDir": str(runtime), "activeCapacity": 2,
+            "presets": {"review": preset},
             "provider": {"kind": "openai_key", "baseUrl": "https://api.openai.com/v1", "key": "sk-mysql-launch-test"}}
     children = []
 
@@ -110,13 +115,9 @@ def main():
         other.mkdir(mode=0o700)
         locked = launch(dict(good, runtimeDir=str(other)))
         assert frame_host.refusal(locked)["code"] == "store_locked"
-        fields = {name: {"state": "omitted"} for name in
-                  ("workspace", "provider", "model", "instructions", "tools", "permission_mode", "output_schema")}
-        for name, value in (("workspace", str(root)), ("provider", "openai"), ("model", "gpt-6-luna"),
-                            ("instructions", ""), ("tools", []), ("permission_mode", "bypass")):
-            fields[name] = {"state": "value", "value": value}
-        configured = frame_host.post(sock, "configure", {"version": frame_host.WIRE, "kind": "configure", "store": store_id,
-                                                        "key": "mysql-launch-create", "session": "", "configuration": fields})
+        create = {"version": frame_host.WIRE, "kind": "configure", "store": store_id, "key": "mysql-launch-create",
+                  "session": "", "preset": "review", "configuration": {"label": {"state": "null"}}}
+        configured = frame_host.post(sock, "configure", create)
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]
         request = {"version": frame_host.WIRE, "kind": "inspect_session", "store": store_id, "session": session}
@@ -126,6 +127,10 @@ def main():
         assert empty["code"] == "wrong_store_identity", empty
         observed = frame_host.post(sock, "inspect-session", request)
         assert observed["session"]["reference"] == session, observed
+        saved = observed["session"]
+        assert saved["model"] == preset["model"] and saved["tools"] == [] and saved["label"] is None, saved
+        assert saved["compaction_trigger_override"] == "100000", saved
+        assert saved["reasoning_effort"] == "low" and saved["reasoning_effort_override"] == "low", saved
         # CLI/Bash peers route by the non-secret runtime hint, never the URL.
         env = dict(os.environ, RUI_RUNTIME_DIR=str(runtime))
         status = subprocess.run([rui, "host", "status", "--store", store_id], env=env, text=True, capture_output=True, check=True)

@@ -348,8 +348,12 @@ def help_case():
 def compiled_model_cases():
     """One release list owns help; any ID with valid syntax is admitted, an unlisted one with default limits."""
     import host_launch_integration as launch
-    models = ("gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra",
-              "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5")
+    # The generated shipped snapshot is the source, not a second hand list.
+    snapshot = (fixture.ROOT / "src/model_catalog_snapshot.zig").read_text()
+    facts = re.findall(r'\.id = "([^"\n]+)"[^\n]*\.context_window = (null|\d+)[^\n]*\.openai = true', snapshot)
+    models = tuple(model for model, _ in facts)
+    windows = {model: None if window == "null" else int(window) for model, window in facts}
+    assert models and "gpt-6.1-sol" in models
     listing = "Supported model IDs: " + ", ".join(models) + "\n"
     unlisted_note = "it uses default limits"
     root = canonical_fixture_root(pathlib.Path(tempfile.mkdtemp(prefix="rui-compiled-models.")))
@@ -419,7 +423,12 @@ def compiled_model_cases():
         sessions = []
         for index, model in enumerate(models + ("retired-model",)):
             admitted = subprocess.run([str(fixture.RUI), "session", "configure", "--store", str(store),
-                "--workspace", str(root), "--provider", "codex", "--model", model], env=env, capture_output=True, text=True, timeout=10)
+                "--workspace", str(root), "--provider", "codex", "--model", model,
+                "--compaction-trigger", "1"], env=env, capture_output=True, text=True, timeout=10)
+            if windows.get(model) == 0:
+                assert admitted.returncode == 3, admitted
+                assert json.loads(admitted.stdout)["answer"]["code"] == "compact_at_too_large", admitted
+                continue
             assert admitted.returncode == 0, admitted
             assert (unlisted_note in admitted.stderr) == (model not in models), admitted.stderr
             answer = json.loads(admitted.stdout)["answer"]
@@ -454,6 +463,21 @@ def compiled_model_cases():
 def compaction_settings_case(home, store, workspace, socket_path):
     from control_integration import raw_request
 
+    # Fresh defaults and named resets must both fit the smaller catalog window.
+    small = create_session(home, "--store", store, "--workspace", workspace,
+        "--provider", "codex", "--model", "gpt-5.3-codex-spark")
+    for flags, expected in (((), "115200"),
+                            (("--compaction-trigger", "12345"), "12345"),
+                            (("--compaction-trigger", "default"), "115200")):
+        if flags:
+            reply = json.loads(run(home, "session", "configure", "--store", store,
+                "--session", small, *flags))
+            assert reply["answer"]["status"] == "accepted", reply
+        settings = json.loads(run(home, "session", "inspect", "--store", store,
+            "--session", small))["session"]
+        assert settings["model"] == "gpt-5.3-codex-spark", settings
+        assert settings["compaction_trigger"] == settings["compaction_trigger_override"] == expected, settings
+
     # Pages word-wrap; phrases are checked across their soft breaks.
     flat = lambda text: " ".join(text.split())
     session = create_session(home, "--store", store,
@@ -465,7 +489,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         compact = status_row(status, "Compact at", "Headroom")
         assert compact.startswith("244,800 tokens") and compact.endswith(" model default"), status
         assert status_row(status, "Headroom", "Model") == "0 tokens model default", status
-        assert status_row(status, "Effort", "Permissions") == "medium model default", status
+        assert status_row(status, "Effort", "Permissions") == "low model default", status
         usage = flat(terminal_step(master, "/configure --bogus", "Omission preserves", composer=True))
         assert "A model Rui does not list is assumed to have a 128000-token context." in usage, usage
         assert "Changes apply to new model requests." in usage, usage
@@ -473,7 +497,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         for flags, trigger, origin, headroom, effort in (
             ("--compaction-trigger 12345 --output-reservation 234 --reasoning-effort high", "12,345 tokens", "Session override", "234 tokens Session override", "high Session override"),
             ("--permission-mode ask", "12,345 tokens", "Session override", "234 tokens Session override", "high Session override"),
-            ("--compaction-trigger default --output-reservation default --reasoning-effort default", "244,800 tokens", "model default", "0 tokens model default", "medium model default"),
+            ("--compaction-trigger default --output-reservation default --reasoning-effort default", "244,800 tokens", "model default", "0 tokens model default", "low model default"),
         ):
             configured = configured_frame(master, "/configure " + flags)
             assert "revision:" not in configured and "request:" not in configured, configured
@@ -487,15 +511,15 @@ def compaction_settings_case(home, store, workspace, socket_path):
         # "/effort " lists the model's levels, the one in force marked.
         efforts = command_frame(master, "/effort ", lambda frame: "current" in frame, end="")
         levels = [row.split()[0] for row in efforts.split("\n") if row.split() and row.split()[0] in ("none", "low", "medium", "high", "xhigh", "max")]
-        assert levels == ["low", "medium", "high", "xhigh", "max"], efforts
-        assert any(row.split() == ["medium", "current"] for row in efforts.split("\n")), efforts
+        assert levels == ["none", "low", "medium", "high", "xhigh", "max"], efforts
+        assert any(row.split() == ["low", "current"] for row in efforts.split("\n")), efforts
         command_frame(master, "\x15", lambda frame: "current" not in frame, end="")
         configured_frame(master, "/effort high")
         configured_frame(master, "/rename lane five")
         status = status_frame(master, session)
         assert status_row(status, "Effort", "Permissions") == "high Session override" and status_row(status, "Name", "Folder") == "lane five", status
         configured_frame(master, "/effort default")
-        assert status_row(status_frame(master, session), "Effort", "Permissions") == "medium model default"
+        assert status_row(status_frame(master, session), "Effort", "Permissions") == "low model default"
         configured_frame(master, '/rename "lane four"')
         assert status_row(status_frame(master, session), "Name", "Folder") == "lane four"
         terminal_step(master, '/effort "high', "Usage: /effort LEVEL", composer=True)
@@ -527,8 +551,8 @@ def compaction_settings_case(home, store, workspace, socket_path):
         assert set((home / ".config/rui/requests").glob("*.json")) == records
     report = json.loads(run(home, "session", "inspect", "--store", store, "--session", session))
     assert report["session"]["model"] == "gpt-6-luna", report
-    # CLI creation accepts only release-supported models; the Host preserves
-    # exact bindings outside that list and gives them the unlisted window.
+    # An unlisted binding still admits a complete spec, with no inferred effort.
+    # Supply the fixed legacy threshold explicitly (D111).
     body = {"version": host_process.WIRE_VERSION, "kind": "configure", "store": str(store),
             "key": "unknown-compaction-policy", "session": "", "configuration": {
                 **{name: {"state": "value", "value": value} for name, value in
@@ -550,6 +574,14 @@ def compaction_settings_case(home, store, workspace, socket_path):
         assert compact.startswith("115,200 tokens") and compact.endswith(" assumed for an unlisted model"), status
         assert status_row(status, "Effort", "Permissions") == "unknown no catalog value; reasoning omitted", status
         assert "overflow recovery" not in status, status
+        efforts = command_frame(master, "/effort ", lambda frame: "xhigh" in frame and "default" in frame, end="")
+        levels = [row.split()[0] for row in efforts.split("\n") if row.split() and row.split()[0] in ("none", "low", "medium", "high", "xhigh", "max", "default")]
+        assert levels == ["none", "low", "medium", "high", "xhigh", "max", "default"], efforts
+        command_frame(master, "\x15", lambda frame: "xhigh" not in frame, end="")
+        configured_frame(master, "/effort max")
+        assert status_row(status_frame(master, unknown), "Effort", "Permissions") == "max Session override"
+        configured_frame(master, "/effort default")
+        assert status_row(status_frame(master, unknown), "Effort", "Permissions") == "low model default"
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
 
