@@ -45,6 +45,7 @@ pub const Code = enum {
     rejection_unrecognized,
     model_id_malformed,
     terminal_required,
+    terminal_input_incomplete,
     message_empty,
     environment_too_large,
     internal_unexpected,
@@ -271,6 +272,7 @@ fn mapped(err: anyerror) ?Code {
         error.InvalidSession => .invalid_session_reference,
         error.InvalidModel => .model_id_malformed,
         error.InteractiveTerminalRequired => .terminal_required,
+        error.IncompleteTerminalInput => .terminal_input_incomplete,
         error.EmptyMessageInput => .message_empty,
         error.InvalidArguments => .invalid_arguments,
         error.InvalidInvocation => .invalid_arguments,
@@ -384,6 +386,7 @@ pub fn facts(code: Code) Facts {
     return switch (code) {
         .model_id_malformed => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a model ID of 1-256 printable non-space ASCII bytes" }, .says = "The model ID has invalid syntax.", .next = "Supply --model MODEL using a supported ID or a valid unlisted ID with default limits." },
         .terminal_required => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "terminal input and output with cursor addressing" }, .says = "This interactive command needs a terminal.", .next = "Run in a terminal, or use rui session start or rui session send --to ID with Message text on stdin." },
+        .terminal_input_incomplete => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "complete key, UTF-8 and bracketed-paste sequences within two seconds" }, .says = "The terminal sent an incomplete key, character or paste sequence, and it expired; nothing was sent.", .next = "Type the Message again; if this repeats, check the terminal's keyboard and paste settings." },
         .message_empty => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "nonempty Message text on stdin" }, .says = "Standard input was empty; provide Message text.", .next = "Pipe or redirect a nonempty Message into this command." },
         .environment_too_large => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "an inherited environment within the Message byte limit" }, .says = "The inherited environment is too large for a Message.", .next = "Unset or shorten the largest variables, then recover the saved request with rui request recover HANDLE." },
         .internal_unexpected => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui could not complete this operation because of an internal fault.", .next = "Keep the saved request, if any, and report this code with the command to the Rui maintainer." },

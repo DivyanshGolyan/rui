@@ -154,7 +154,11 @@ fn run(init: std.process.Init) !void {
             else => return err,
         }
     };
-    try dispatch(init, command, &parsed, args);
+    dispatch(init, command, &parsed, args) catch |err| {
+        // The catalog line gives the code; this names the largest variables.
+        if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
+        return err;
+    };
     try postCommandHold(init);
 }
 
