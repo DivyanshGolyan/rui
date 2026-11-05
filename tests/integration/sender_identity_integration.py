@@ -144,10 +144,13 @@ def main():
                 {"RUI_STORE": "", "RUI_ADDRESS": session, "RUI_SENDER_HANDLE": handle},
                 {"RUI_STORE": str(store), "RUI_ADDRESS": "peer/old", "RUI_SENDER_HANDLE": handle},
                 {"RUI_STORE": str(store), "RUI_ADDRESS": "ABC123", "RUI_SENDER_HANDLE": handle},
+                {"RUI_STORE": str(store), "RUI_ADDRESS": session, "RUI_SENDER_HANDLE": "h" * 33},
             )):
-                # Explicit Store selection is not authority to downgrade a
-                # malformed peer into an anonymous human/script send.
-                for selection, options in (("default", ()), ("explicit", ("--store", str(store)))):
+                # Explicit Store selection, even of another Store, is not
+                # authority to downgrade a malformed peer into an anonymous
+                # human/script send.
+                for selection, options in (("default", ()), ("explicit", ("--store", str(store))),
+                                           ("foreign", ("--store", str(state / "foreign-store")))):
                     key = f"partial-{ending}-{index}-{selection}"
                     record = state / f"{key}.json"
                     refused = subprocess.run([str(installed), "session", "send", *options, "--to", endpoint.receiver,

@@ -522,7 +522,9 @@ No identity tool, peer tool, alternate CLI-path variable or bundled skill is req
 Agents compose ordinary Session configuration and Message admission through the CLI, and the Host records who sent each Message.
 `rui session send --to k7m2qx` takes one exact canonical ID, without JSON.
 Anonymous human and script sends may select `--store PATH` or use their ordinary Store defaults.
-A peer destination is always in the trusted sender's Store, before HOME preferences; an explicit Store override must canonicalize to that same Store or reject before capture.
+A peer destination is in the trusted sender's Store, before HOME preferences; an explicit Store override that canonicalizes to that same Store keeps the peer identity.
+An explicit Store override naming another Store is a plain caller's send there, unsigned, because a peer identity belongs to one Store and never crosses to another (#957); a harness that starts its own Host inside a Session relies on this.
+The invalid-peer-context refusal names the three variables and the plain-caller form, `env -u RUI_ADDRESS -u RUI_STORE -u RUI_SENDER_HANDLE rui ...`.
 Incomplete or malformed peer environment rejects without anonymous or default-Store fallback, including with an explicit Store selector.
 Store selection is canonicalized without changing Session bytes.
 A Session may send to itself.

@@ -511,6 +511,10 @@ fn homeRequired(comptime need: []const u8) error{HomeUnavailable} {
     return error.HomeUnavailable;
 }
 
+/// How a command started under a Session's Bash drops the peer context the
+/// Host gave it, for diagnostics that refuse that context.
+const plain_caller = "env -u RUI_ADDRESS -u RUI_STORE -u RUI_SENDER_HANDLE rui ...";
+
 fn selectedStore(init: std.process.Init, explicit: ?[]const u8, buffer: []u8) ![]const u8 {
     if (explicit) |path| {
         if (path.len == 0) return error.InvalidStore;
@@ -1884,33 +1888,34 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
         return error.InvalidSession;
     }
     var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = configuration };
-    // Never let incomplete or malformed peer context fall back to HOME or
-    // become an anonymous send. The Host still authenticates the live handle.
+    // Peer context names a Session in its own Store, so it signs only sends
+    // to that Store; an explicit --store naming another Store is a plain
+    // caller's send there (#957). Incomplete or malformed context never falls
+    // back to HOME or becomes an anonymous send. The Host still
+    // authenticates the live handle.
     const address = init.environ_map.get("RUI_ADDRESS");
     const sender_store = init.environ_map.get("RUI_STORE");
-    input.sender_handle = init.environ_map.get("RUI_SENDER_HANDLE");
-    if (address != null or sender_store != null or input.sender_handle != null) {
-        if (address == null or sender_store == null or input.sender_handle == null or
-            !protocol.validSessionId(address.?) or sender_store.?.len == 0 or input.sender_handle.?.len == 0)
+    const handle = init.environ_map.get("RUI_SENDER_HANDLE");
+    if (address != null or sender_store != null or handle != null) {
+        if (address == null or sender_store == null or handle == null or
+            !protocol.validSessionId(address.?) or sender_store.?.len == 0 or handle.?.len == 0 or
+            std.meta.isError(client.validatePeer(sender_store.?, address.?, handle.?)))
         {
-            stderr.diagnostic("rui: invalid peer context; nothing was sent.\n", .{});
+            stderr.diagnostic("rui: invalid peer context; nothing was sent. RUI_ADDRESS, RUI_STORE and RUI_SENDER_HANDLE come as a set from a Session's Bash. To send as a plain caller, run without them: " ++ plain_caller ++ "\n", .{});
             return error.InvalidRuiAddress;
         }
-        input.sender = .{ .store = sender_store.?, .session = address.? };
+        const elsewhere = if (parsed.get("store")) |override|
+            !(try platform.resolveClientPaths(io, override)).store.eql((try platform.resolveClientPaths(io, sender_store.?)).store.slice())
+        else
+            false;
+        if (!elsewhere) {
+            input.sender = .{ .store = sender_store.?, .session = address.? };
+            input.sender_handle = handle;
+        }
     }
     step.* = .store;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    if (sender_store) |trusted| {
-        const sender_paths = try platform.resolveClientPaths(io, trusted);
-        if (parsed.get("store")) |override| {
-            const override_paths = try platform.resolveClientPaths(io, override);
-            if (!override_paths.store.eql(sender_paths.store.slice())) {
-                stderr.diagnostic("rui: peer sends must use the sender's Store; nothing was sent.\n", .{});
-                return error.CrossStorePeerSend;
-            }
-        }
-        input.store = trusted;
-    } else input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    input.store = if (input.sender != null) sender_store.? else try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try takeCapture(step, client.captureMessage(io, input, target));
