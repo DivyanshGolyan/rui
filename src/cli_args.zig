@@ -283,21 +283,26 @@ const option_names = blk: {
     @setEvalBranchQuota(100_000);
     var grammars: []const Definition = &.{ fresh_session, live_configure, live_setup };
     for (std.enums.values(Command)) |command| grammars = grammars ++ .{command.definition()};
-    var names: []const struct { []const u8 } = &.{};
+    var names: []const []const u8 = &.{};
     for (grammars) |grammar| {
         for (grammar.options) |option| {
             for (names) |name| {
-                if (std.mem.eql(u8, name[0], option.name)) break;
+                if (std.mem.eql(u8, name, option.name)) break;
             } else {
-                names = names ++ .{.{option.name}};
+                names = names ++ .{option.name};
             }
         }
     }
-    break :blk std.StaticStringMap(void).initComptime(names);
+    break :blk names;
 };
 
+fn hasOptionName(name: []const u8) bool {
+    for (option_names) |candidate| if (std.mem.eql(u8, candidate, name)) return true;
+    return false;
+}
+
 fn checkOptionName(comptime name: []const u8) void {
-    if (name.len != 0 and !option_names.has(name)) @compileError("no CLI option is named --" ++ name);
+    if (name.len != 0 and !hasOptionName(name)) @compileError("no CLI option is named --" ++ name);
 }
 
 pub const Definition = struct {
@@ -679,12 +684,12 @@ fn expectMissing(command: Command, args: []const []const u8) !?[]const u8 {
 
 test "option name set covers every grammar and rejects unknown names" {
     for (std.enums.values(Command)) |command| {
-        for (command.definition().options) |option| try std.testing.expect(option_names.has(option.name));
+        for (command.definition().options) |option| try std.testing.expect(hasOptionName(option.name));
     }
     for ([_]Definition{ fresh_session, live_configure, live_setup }) |grammar| {
-        for (grammar.options) |option| try std.testing.expect(option_names.has(option.name));
+        for (grammar.options) |option| try std.testing.expect(hasOptionName(option.name));
     }
-    try std.testing.expect(!option_names.has("made-up-option-name"));
+    try std.testing.expect(!hasOptionName("made-up-option-name"));
 }
 
 test "grammar rejects ambiguous invocations before any effect" {
