@@ -17,6 +17,7 @@ test {
     _ = @import("http1/Exchange.zig");
     _ = @import("mcp/Call.zig");
     _ = @import("mcp/Listing.zig");
+    _ = @import("mcp/offered.zig");
     _ = @import("mcp/Request.zig");
     _ = @import("protocol.zig");
     _ = @import("protocol_reply.zig");

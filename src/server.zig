@@ -21,6 +21,9 @@ const provider = @import("provider.zig");
 const providers = @import("providers.zig");
 const protocol = @import("protocol.zig");
 const store_module = @import("store.zig");
+const launch_frame = @import("launch_frame.zig");
+const tools = @import("tools.zig");
+const mcp_offered = @import("mcp/offered.zig");
 const stderr = @import("stderr.zig");
 const server_execution = @import("server_execution.zig");
 const server_host = @import("server_host.zig");
@@ -851,10 +854,41 @@ pub const Launch = struct {
     /// Open with Turns paused (D196): set before execution starts, so a Turn
     /// recovered from the Store waits too.
     paused: bool = false,
+    /// The MCP servers whose tools the Host offers (M3a).
+    mcp_servers: []const launch_frame.Frame.McpServer = &.{},
 };
 
 /// How long a launched Host's shutdown may take after stdin closes.
 pub const launch_shutdown_seconds = 10;
+
+/// Lists each MCP server and saves the Host's catalog: the built-ins and
+/// the servers' tools, with an unreachable server's last saved tools kept
+/// (D147). A name two sources share refuses the start (D142).
+noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer, stop: ?std.posix.fd_t) !void {
+    var saved = try storage.readCatalog(arena);
+    const kept: ?tools.Catalog = if (saved) |*found| found.catalog() else null;
+    var collision: mcp_offered.Collision = .{};
+    const catalog = mcp_offered.collect(io, arena, scratch, servers, if (kept) |*value| value else null, &collision, stop) catch |err| switch (err) {
+        // The launcher closed stdin: stop as a closed stdin does later.
+        error.Stopped => return error.EffectAwareShutdown,
+        error.ToolNameCollision => {
+            var message: [256]u8 = undefined;
+            launch_frame.writeRefusal(io, .{
+                .code = .tool_name_collision,
+                .message = std.fmt.bufPrint(&message, "tool name {s} is offered by {s} and by {s}", .{ collision.name, collision.first, collision.second }) catch "a tool name is offered twice",
+            });
+            return err;
+        },
+        error.TooManyTools => {
+            launch_frame.writeRefusal(io, .{ .code = .launch_frame_invalid, .message = "the MCP servers list more tools than a Host offers" });
+            return err;
+        },
+        else => |other| return other,
+    };
+    const owned = try arena.create(tools.Catalog);
+    owned.* = catalog;
+    try storage.saveCatalog(owned);
+}
 
 pub fn serve(
     io: std.Io,
@@ -954,12 +988,24 @@ pub fn serve(
     }
     errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");
     var found_schema_version: u32 = store_module.schema_version;
+    // The catalog's records point into this arena, and the Store keeps the
+    // catalog for its life, so it outlives the Store.
+    var catalog_memory = std.heap.ArenaAllocator.init(allocator);
+    defer catalog_memory.deinit();
+    const mcp_servers: []const launch_frame.Frame.McpServer = if (launch) |value| value.mcp_servers else &.{};
     var storage: store_module.Store = undefined;
     storage.openWithOptions(
         io,
         lease.paths.database.slice(),
         lease.paths.store.slice(),
-        .{ .served = served.routes(), .cache_spill = limits.sqlite_cache_spill, .cache_kib = limits.sqlite_cache_kib, .found_schema_version = &found_schema_version },
+        .{
+            .served = served.routes(),
+            .cache_spill = limits.sqlite_cache_spill,
+            .cache_kib = limits.sqlite_cache_kib,
+            .found_schema_version = &found_schema_version,
+            // With MCP servers the catalog is saved below, once they are listed.
+            .catalog = if (mcp_servers.len == 0) &tools.built_in else null,
+        },
     ) catch |err| {
         if (err == error.WrongStoreVersion) {
             try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
@@ -968,6 +1014,7 @@ pub fn serve(
         return err;
     };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
+    if (mcp_servers.len != 0) try offerMcpTools(io, catalog_memory.allocator(), allocator, &storage, mcp_servers, if (launch) |value| value.stdin else null);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
