@@ -1,7 +1,7 @@
-//! TLS for a Postgres connection over the vendored OpenSSL, between caller
-//! buffers: OpenSSL reads ciphertext from `Wire.in` and writes it to
-//! `Wire.out`, and the connection's owner moves both to and from the
-//! socket. Nothing here touches a descriptor.
+//! TLS for a Store connection, Postgres or MySQL, over the vendored
+//! OpenSSL, between caller buffers: OpenSSL reads ciphertext from
+//! `Wire.in` and writes it to `Wire.out`, and the connection's owner moves
+//! both to and from the socket. Nothing here touches a descriptor.
 //!
 //! Verification is never off: the chain against the trust and the host
 //! name or IP literal against the leaf. The context settings, host naming
@@ -14,6 +14,8 @@ const shared = h2.openssl_client;
 const c = shared.c;
 
 pub const Trust = h2.Trust;
+/// Why `Context.init` failed: memory, or trust that would not load.
+pub const ContextError = h2.EndpointError;
 pub const HostKind = shared.HostKind;
 
 /// Room for one TLS record of a full plaintext fragment (2^14 bytes plus
@@ -37,11 +39,11 @@ pub const Context = struct {
     ctx: *c.SSL_CTX,
     bio_method: *c.BIO_METHOD,
 
-    pub fn init(trust: Trust) h2.EndpointError!Context {
+    pub fn init(trust: Trust) ContextError!Context {
         const ctx = shared.newContext() orelse return error.OutOfMemory;
         errdefer c.SSL_CTX_free(ctx);
         try shared.loadTrust(ctx, trust);
-        const method = c.BIO_meth_new(c.BIO_get_new_index() | c.BIO_TYPE_SOURCE_SINK, "pg wire") orelse return error.OutOfMemory;
+        const method = c.BIO_meth_new(c.BIO_get_new_index() | c.BIO_TYPE_SOURCE_SINK, "store wire") orelse return error.OutOfMemory;
         if (c.BIO_meth_set_write(method, bioWrite) != 1 or
             c.BIO_meth_set_read(method, bioRead) != 1 or
             c.BIO_meth_set_ctrl(method, bioCtrl) != 1 or
