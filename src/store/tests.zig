@@ -4,6 +4,7 @@ const std = @import("std");
 const named_scratch = @import("../named_scratch.zig");
 const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
+const tool_catalog = @import("../tools.zig");
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
 const output_format = @import("../output_format.zig");
@@ -216,7 +217,7 @@ test "Store distinguishes noncanonical Session references from canonical unknown
                 try std.testing.expect(!storage.isFenced());
             }
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
-            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)", .{}));
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
         }
     }.run);
@@ -3936,11 +3937,34 @@ test "configuration pre-Workspace decisions preserve completeness and immutable 
         const current: ?*const CurrentConfiguration = if (case.has_current) &existing else null;
         std.testing.expectEqual(
             case.expected,
-            configuration_domain.configurationBeforeWorkspace(current, &requested),
+            configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, current, &requested),
         ) catch |err| {
             std.debug.print("configuration pre-Workspace case failed: {s}\n", .{case.name});
             return err;
         };
+    }
+}
+
+test "configure refuses a tool name the catalog lacks and a provider tool its provider does not run" {
+    const hosted: tool_catalog.Record = .{ .name = "code_interpreter", .owner = .provider };
+    const records = [_]tool_catalog.Record{ tool_catalog.bash_record, hosted, tool_catalog.web_search_record };
+    const digests = [_][32]u8{ tool_catalog.recordDigest(&records[0]), tool_catalog.recordDigest(&records[1]), tool_catalog.recordDigest(&records[2]) };
+    const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+    try std.testing.expect(catalog.valid());
+    var existing: CurrentConfiguration = .{};
+    existing.provider = .codex;
+    try existing.model.set("model-a");
+    const Case = struct { names: []const []const u8, expected: ?protocol.ConfigurationRejection };
+    for ([_]Case{
+        .{ .names = &.{ "bash", "web_search" }, .expected = null },
+        .{ .names = &.{}, .expected = null },
+        .{ .names = &.{"edit"}, .expected = .unknown_tool },
+        .{ .names = &.{ "bash", "edit" }, .expected = .unknown_tool },
+        .{ .names = &.{"code_interpreter"}, .expected = .provider_tool_missing },
+    }) |case| {
+        var requested: protocol.Configuration = .{};
+        requested.tools = try .of(case.names);
+        try std.testing.expectEqual(case.expected, configuration_domain.configurationBeforeWorkspace(&catalog, &existing, &requested));
     }
 }
 
@@ -4097,7 +4121,6 @@ test "configuration planning preserves sparse defaults and rejection precedence"
         expected_rejection: ?protocol.ConfigurationRejection = null,
         expected_actions: ?Actions = null,
         expected_model: []const u8 = "model-a",
-        expected_tools: u8 = 1,
         expected_permission: u8 = 0,
         expected_revision: u64 = 8,
     };
@@ -4108,7 +4131,6 @@ test "configuration planning preserves sparse defaults and rejection precedence"
             .workspace = .same,
             .model = "model-a",
             .expected_actions = .{ .instructions = .default_empty, .output_schema = .clear },
-            .expected_tools = configuration_domain.default_tools_mask,
             .expected_permission = 1,
             .expected_revision = 1,
         },
@@ -4129,7 +4151,6 @@ test "configuration planning preserves sparse defaults and rejection precedence"
             .schema = .clear,
             .expected_actions = .{ .instructions = .import_requested, .output_schema = .clear },
             .expected_model = "model-a",
-            .expected_tools = 0,
             .expected_permission = 1,
         },
         .{
@@ -4217,7 +4238,6 @@ test "configuration planning preserves sparse defaults and rejection precedence"
             try std.testing.expectEqual(expected.output_schema, plan.update.output_schema);
         }
         try std.testing.expectEqualStrings(case.expected_model, next.model.slice());
-        try std.testing.expectEqual(case.expected_tools, next.tools_mask);
         try std.testing.expectEqual(case.expected_permission, next.permission_mode);
         try std.testing.expectEqual(case.expected_revision, next.revision);
         try std.testing.expectEqual(@as(?i64, if (case.created) null else 11), next.instructions_id);
@@ -5285,7 +5305,7 @@ test "content import reads once and rolls back sources that change during readin
                 } else {
                     try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
                     try std.testing.expectError(error.StoreFenced, storage.observeCommand("read-probe"));
-                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)", .{}));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{}));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
                 }
@@ -8285,6 +8305,7 @@ test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
 /// separate transition while the Store is held, by the name the source
 /// gives it (less the `Held` of a body an entry point queues).
 const EntryPoint = enum {
+    saveCatalog,
     configure,
     submitMessageWithModel,
     stopSession,
@@ -8388,6 +8409,8 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readDeclaredTool = 1,
     .readProviderTool = 1,
     .checkAttempt = 1,
+    // A Host's catalog is saved once; each later open finds it.
+    .saveCatalog = 1,
 });
 
 /// Each entry point's content rounds (`readRaw` windows, counted in
@@ -8511,6 +8534,9 @@ test "each Store entry point takes its round budget on its common path" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             var meter: RoundMeter = .{ .storage = &storage };
+            meter.start();
+            try storage.saveCatalog(&tool_catalog.built_in);
+            meter.stop(.saveCatalog);
             try plainTurn(&storage, &tmp, &meter);
             try toolTurn(&storage, &tmp, &meter);
             try compactedTurn(&storage, &tmp, &meter);

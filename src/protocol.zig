@@ -412,6 +412,7 @@ pub const ConfigurationRejection = enum {
     invalid_compaction_trigger,
     invalid_output_reservation,
     unsupported_reasoning_effort,
+    unknown_tool,
     provider_tool_missing,
     invalid_label,
     incomplete_initial_configuration,
@@ -433,6 +434,7 @@ pub const MessageRejection = enum {
     invalid_compaction_trigger,
     invalid_output_reservation,
     unsupported_reasoning_effort,
+    unknown_tool,
     provider_tool_missing,
     invalid_label,
     incomplete_initial_configuration,
@@ -2129,7 +2131,6 @@ const Parser = struct {
                     self.readSmallString(&name) catch |err| return if (err == error.ValueTooLong) error.InvalidToolName else err;
                     if (!validToolName(name.slice())) return error.InvalidToolName;
                     // The Host offers the built-ins; MCP servers' tools join them later.
-                    if (builtInTool(name.slice()) == null) return error.UnknownTool;
                     try tools.append(name.slice());
                     if (try self.consumeIf(']')) break;
                     try self.expectByte(',');
@@ -3530,16 +3531,17 @@ test "configuration provider envelope preserves exact spelling and omission" {
     try std.testing.expect(!std.mem.eql(u8, &omitted_digest, &codex_digest));
 }
 
-test "configuration tools are names the Host offers, sorted, each once" {
+test "configuration tools are tool names, sorted, each once" {
     const cases = [_]struct { value: []const u8, names: []const u8 = "", count: u8 = 0, failure: ?anyerror = null }{
         .{ .value = "[]" },
         .{ .value = "[\"bash\"]", .names = "bash", .count = 1 },
         .{ .value = "[\"web_search\"]", .names = "web_search", .count = 1 },
         .{ .value = "[\"bash\",\"web_search\"]", .names = "bash web_search", .count = 2 },
         .{ .value = "[\"b\\u0061sh\"]", .names = "bash", .count = 1 },
-        .{ .value = "[\"edit\"]", .failure = error.UnknownTool },
-        .{ .value = "[\"Bash\"]", .failure = error.UnknownTool },
-        .{ .value = "[\"bash\",\"edit\"]", .failure = error.UnknownTool },
+        // Whether the Host offers a name is configure's to say.
+        .{ .value = "[\"edit\"]", .names = "edit", .count = 1 },
+        .{ .value = "[\"Bash\",\"bash\"]", .names = "Bash bash", .count = 2 },
+        .{ .value = "[\"bash\",\"edit\"]", .names = "bash edit", .count = 2 },
         .{ .value = "[\"\"]", .failure = error.InvalidToolName },
         .{ .value = "[\"web search\"]", .failure = error.InvalidToolName },
         .{ .value = "[\"bash.v2\"]", .failure = error.InvalidToolName },
