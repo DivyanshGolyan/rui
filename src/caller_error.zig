@@ -75,6 +75,7 @@ pub const Code = enum {
     model_capability_unavailable,
     invalid_output_schema,
     invalid_compaction_trigger,
+    compact_at_too_large,
     invalid_output_reservation,
     unsupported_reasoning_effort,
     unknown_tool,
@@ -452,6 +453,7 @@ pub fn facts(code: Code) Facts {
         .model_capability_unavailable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "a provider served by this Host; see rui host status" }, .says = "This Host does not serve the Session's required provider.", .next = "Use a Host serving --provider, or create a Session with a provider listed by rui host status." },
         .invalid_output_schema => .{ .act = .fix, .input = .output_schema, .accepted = .{ .grammar = "a file containing valid JSON for the provider's output schema" }, .says = "The output schema is not valid JSON.", .next = "Fix the JSON in --output-schema FILE, or omit the schema." },
         .invalid_compaction_trigger => .{ .act = .fix, .input = .compaction_trigger, .accepted = .{ .grammar = "default or a decimal from 1 to " ++ std.fmt.comptimePrint("{d}", .{std.math.maxInt(i64)}) }, .says = "The compaction trigger is not a positive token count.", .next = "Use --compaction-trigger default or a positive decimal in the accepted range." },
+        .compact_at_too_large => .{ .act = .fix, .input = .compaction_trigger, .accepted = .{ .grammar = "a token count no larger than the model's context window" }, .says = "The compaction trigger is larger than the model's context window.", .next = "Use --compaction-trigger default, or a smaller token count." },
         .invalid_output_reservation => .{ .act = .fix, .input = .output_reservation, .accepted = .{ .grammar = "default or a decimal from 0 to " ++ std.fmt.comptimePrint("{d}", .{std.math.maxInt(i64)}) }, .says = "The output reservation is not a nonnegative token count.", .next = "Use --output-reservation default or a nonnegative decimal in the accepted range." },
         .unsupported_reasoning_effort => .{ .act = .fix, .input = .reasoning_effort, .accepted = .{ .closed = names(cli_value.ReasoningChoice) }, .says = "The reasoning effort is unknown or unsupported by this model.", .next = "Use --reasoning-effort default, or select a listed effort supported by the saved model." },
         .unknown_tool => .{ .act = .fix, .input = .tools, .accepted = .{ .grammar = "built-in tools listed by rui session configure --help, or tools offered by this Host" }, .says = "A requested tool is not offered by this Host.", .next = "Check --tools against the Host's offered tools, or use --tools none." },
@@ -459,7 +461,7 @@ pub fn facts(code: Code) Facts {
         .loaded_tools_not_in_tools => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "a subset of the Session's --tools, or none" }, .says = "A loaded tool is not one of the Session's tools.", .next = "Remove it from --loaded-tools, or add it to --tools first." },
         .loaded_tools_unreachable => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "every tool in --tools, or a subset when find_tools is loaded" }, .says = "Some tools would never be reachable: --loaded-tools leaves tools out without loading find_tools.", .next = "Add find_tools to --loaded-tools, or load every tool in --tools." },
         .invalid_label => .{ .act = .fix, .input = .label, .accepted = .{ .grammar = "one line of at most 100 UTF-8 bytes, or an empty string to clear it" }, .says = "The Label is too long or contains a line break or control character.", .next = "Shorten --label and remove line breaks and control characters." },
-        .incomplete_initial_configuration => .{ .act = .fix, .input = .initial_configuration, .accepted = .{ .grammar = "--workspace ABSOLUTE_DIRECTORY --provider PROVIDER --model MODEL" }, .says = "An initial configuration needs workspace, provider and model; one or more are missing.", .next = "Supply all three required flags: --workspace, --provider and --model." },
+        .incomplete_initial_configuration => .{ .act = .fix, .input = .initial_configuration, .accepted = .{ .grammar = "model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several" }, .says = "A new Session's spec is missing a required setting.", .next = "State every required setting; rui session start fills them for you." },
         .invalid_workspace => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "an absolute path to an existing directory" }, .says = "The workspace is not a usable absolute directory.", .next = "Set --workspace to an existing absolute directory accessible to the Host." },
         .workspace_is_immutable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "the workspace already saved for this Session" }, .says = "An existing Session cannot change its workspace.", .next = "Omit --workspace, or create a new Session for the other directory." },
         .provider_is_immutable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "the provider already saved for this Session" }, .says = "An existing Session cannot change its provider.", .next = "Omit --provider, or create a new Session with the other provider." },
@@ -701,8 +703,8 @@ test "saved rejection facts ignore current rendering overrides" {
 
 test "saved ambiguous causes do not invent missing flags or model restrictions" {
     const initial = facts(.incomplete_initial_configuration);
-    try std.testing.expectEqualStrings("--workspace ABSOLUTE_DIRECTORY --provider PROVIDER --model MODEL", initial.accepted.grammar);
-    try std.testing.expectEqualStrings("An initial configuration needs workspace, provider and model; one or more are missing.", initial.says);
+    try std.testing.expectEqualStrings("model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several", initial.accepted.grammar);
+    try std.testing.expectEqualStrings("A new Session's spec is missing a required setting.", initial.says);
     try std.testing.expectEqualStrings("The model ID is empty.", facts(.invalid_model).says);
     try std.testing.expectEqual(Input.provider, facts(.model_capability_unavailable).input.?);
     try std.testing.expectEqualStrings("default or a decimal from 1 to 9223372036854775807", facts(.invalid_compaction_trigger).accepted.grammar);

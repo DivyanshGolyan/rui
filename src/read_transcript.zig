@@ -47,7 +47,29 @@ fn render(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, 
     const page = try arena.create(protocol.ActivityFacts);
     var output: std.Io.Writer.Allocating = .init(arena);
     const out = &output.writer;
-    if (arguments.full) |address| {
+    if (arguments.query) |query| {
+        const search = try arena.create(protocol.ActivitySearch);
+        search.* = .{ .query = query, .kinds = arguments.kinds, .limit = arguments.limit };
+        try search.session.set(session);
+        if (arguments.before) |before| {
+            search.before_position = before.position;
+            search.before_ordinal = before.ordinal;
+        }
+        const facts = try arena.create(protocol.ActivitySearchFacts);
+        try store.searchActivity(search, facts);
+        try out.print("Session {s}, newest first: search matches.\n", .{session});
+        for (facts.items[0..facts.count]) |*match| {
+            const item = try findEntry(store, page, request, .{ .position = match.position, .ordinal = match.ordinal });
+            try outline(store, arena, session, item, out);
+            for (match.hits[0..match.count]) |*hit| {
+                try std.json.Stringify.value(hit.snippet.slice(), .{}, out);
+                try out.writeByte('\n');
+            }
+        }
+        if (facts.next) |next| {
+            try continuation(out, session, arguments, next.position, next.ordinal);
+        } else try out.writeAll("Start of the Session.\n");
+    } else if (arguments.full) |address| {
         const item = try findEntry(store, page, request, address);
         try full(store, arena, session, item, arguments.offset, out);
     } else {
@@ -62,19 +84,7 @@ fn render(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, 
         }
         if (page.more) {
             const last = &page.items[page.count - 1];
-            try out.print("More: call read_transcript with {{\"id\":\"{s}\"", .{session});
-            if (!arguments.kinds.eql(.full)) {
-                try out.writeAll(",\"kinds\":[");
-                var kinds = arguments.kinds.iterator();
-                var first_kind = true;
-                while (kinds.next()) |kind| {
-                    try out.print("{s}\"{s}\"", .{ if (first_kind) "" else ",", @tagName(kind) });
-                    first_kind = false;
-                }
-                try out.writeAll("]");
-            }
-            if (arguments.limit != protocol.ActivityPage.items) try out.print(",\"limit\":{d}", .{arguments.limit});
-            try out.print(",\"before\":\"{d}.{d}\"}}.\n", .{ last.position, last.ordinal });
+            try continuation(out, session, arguments, last.position, last.ordinal);
         } else try out.writeAll("Start of the Session.\n");
     }
     return output.written();
@@ -82,6 +92,28 @@ fn render(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, 
 
 /// A full address need not be a valid page cursor. Start at the preceding
 /// position boundary and page forward, stopping as soon as it is passed.
+/// The exact arguments of the next read of the same selection, so a model
+/// that follows the line reads the same Session, kinds, query and limit.
+fn continuation(out: *std.Io.Writer, session: []const u8, arguments: *const core.ReadTranscript, position: u64, ordinal: u64) !void {
+    try out.print("More: call read_transcript with {{\"id\":\"{s}\"", .{session});
+    if (arguments.query) |query| {
+        try out.writeAll(",\"query\":");
+        try std.json.Stringify.value(query.slice(), .{}, out);
+    }
+    if (!arguments.kinds.eql(.full)) {
+        try out.writeAll(",\"kinds\":[");
+        var kinds = arguments.kinds.iterator();
+        var first = true;
+        while (kinds.next()) |kind| {
+            try out.print("{s}\"{s}\"", .{ if (first) "" else ",", @tagName(kind) });
+            first = false;
+        }
+        try out.writeAll("]");
+    }
+    if (arguments.limit != protocol.ActivityPage.items) try out.print(",\"limit\":{d}", .{arguments.limit});
+    try out.print(",\"before\":\"{d}.{d}\"}}.\n", .{ position, ordinal });
+}
+
 fn findEntry(store: *storage.Store, page: *protocol.ActivityFacts, request: *protocol.ActivityPage, address: core.TranscriptAddress) !*const protocol.ActivityItem {
     request.direction = .forward;
     request.position = address.position - 1;
@@ -179,7 +211,12 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
             try out.writeAll(" web_search");
             note = presentation.description;
         },
-        .turn_ended => |ended| try out.print(" {s}", .{@tagName(ended.ending)}),
+        .turn_ended => |ended| {
+            try out.print(" {s}", .{@tagName(ended.ending)});
+            // A descendant's ending: name the agent whose Turn it was.
+            if (!std.mem.eql(u8, ended.session.slice(), session)) try out.print(" agent {s}", .{ended.session.slice()});
+        },
+        .approval_requested => |requested| if (!std.mem.eql(u8, requested.session.slice(), session)) try out.print(" agent {s}", .{requested.session.slice()}),
         else => {},
     }
     if (contentOf(item)) |content| {

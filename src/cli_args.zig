@@ -46,7 +46,7 @@ pub const Command = enum {
 
     fn definitionValue(self: Command) Definition {
         return switch (self) {
-            .session_start => .{ .resource = .session, .name = "start", .description = "Read the first Message from stdin, atomically create a Session and admit that Message. Print its new six-character ID, not a completed answer. Settings use fresh-Session defaults; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help, .options = destination ++ capture ++ binding ++ start_settings, .mutation = true },
+            .session_start => .{ .resource = .session, .name = "start", .description = "Read the first Message from stdin, atomically create a Session and admit that Message. Print a JSON mutation receipt with the new ID in .context.session, the request handle in .context.key and the resolved configuration, not a completed answer. Settings use fresh-Session defaults; set instructions separately with session configure --instructions -. Recover the original request as kind message after lost output.", .details = label_help, .options = destination ++ capture ++ binding ++ start_settings, .mutation = true },
             .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, including the Session's Label (its name or title), then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults; addressed changes preserve omitted settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ binding ++ settings, .conflicts = settings_conflicts, .mutation = true },
             .session_send => .{ .resource = .session, .name = "send", .description = "Read exact Message text from stdin and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Empty stdin sends nothing.", .options = destination ++ capture ++ &[_]Option{value("to", "ID")}, .mutation = true, .requires = &.{&.{"to"}} },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ choice("profile", cli_value.ReportProfile), choice("failed-response", cli_value.FailedResponsePart), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ .code = .profile_excludes_failed_response, .a = "profile", .b = "failed-response" }}, .requires = need_session },
@@ -209,8 +209,8 @@ const saved_identity = &[_]PositionalConflict{
 };
 /// Session settings shared by `session configure` and the live /configure.
 const settings = &[_]Option{
-    value("workspace", "PATH"),       value("instructions", "-"), value("tools", "bash,message_agent,read_transcript,start_agent,web_search|none"), value("loaded-tools", "a,b|none"),             choice("permission-mode", cli_value.PermissionMode),
-    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"),                                    value("output-reservation", "TOKENS|default"), choice("reasoning-effort", cli_value.ReasoningChoice),
+    value("workspace", "PATH"),       value("instructions", "-"), value("tools", "bash,find_tools,message_agent,read_transcript,start_agent,web_search|none"), value("loaded-tools", "a,b|none"),             choice("permission-mode", cli_value.PermissionMode),
+    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"),                                               value("output-reservation", "TOKENS|default"), choice("reasoning-effort", cli_value.ReasoningChoice),
     value("label", "TEXT"),
 };
 const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[4], settings[7], settings[8], settings[9], settings[10] };
@@ -279,6 +279,33 @@ pub const live_configure: Definition = .{ .resource = .session, .name = "/config
 /// The live Session's /setup: the defaults grammar, where none means inspect.
 pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1], flag("clear-model"), notifications, settings[9] }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }} };
 
+/// Every grammar contributes its options, including hex spellings and hidden flags.
+const option_names = blk: {
+    @setEvalBranchQuota(100_000);
+    var grammars: []const Definition = &.{ fresh_session, live_configure, live_setup };
+    for (std.enums.values(Command)) |command| grammars = grammars ++ .{command.definition()};
+    var names: []const []const u8 = &.{};
+    for (grammars) |grammar| {
+        for (grammar.options) |option| {
+            for (names) |name| {
+                if (std.mem.eql(u8, name, option.name)) break;
+            } else {
+                names = names ++ .{option.name};
+            }
+        }
+    }
+    break :blk names;
+};
+
+fn hasOptionName(name: []const u8) bool {
+    for (option_names) |candidate| if (std.mem.eql(u8, candidate, name)) return true;
+    return false;
+}
+
+fn checkOptionName(comptime name: []const u8) void {
+    if (name.len != 0 and !hasOptionName(name)) @compileError("no CLI option is named --" ++ name);
+}
+
 pub const Definition = struct {
     resource: Resource,
     name: []const u8,
@@ -315,7 +342,7 @@ pub const Definition = struct {
         if (self.mutation and self.optionNamed("record") != null and self.optionNamed("kind") == null)
             try writer.writeAll("Explicit capture uses --record FILE with --key KEY or --key-hex HEX; omit both for a generated handle.\n");
         try writer.writeAll(self.details);
-        try writer.writeAll("--help or -h prints this help without accessing runtime state. Metadata is JSON except session start, which prints its new ID; explicit content reads stream bytes.\n");
+        try writer.writeAll("--help or -h prints this help without accessing runtime state. Mutation receipts and metadata are JSON; explicit content reads stream bytes.\n");
         if (self.mutation and self.optionNamed("kind") == null) try writer.writeAll("Keep the pre-send recovery identity printed on stderr. Recover with rui request recover HANDLE, or --store PATH --record FILE --kind KIND. Nonzero exit can follow acceptance: inspect the original with rui request inspect; never infer permission to resubmit with a fresh key.\n");
     }
 
@@ -450,7 +477,7 @@ pub const Definition = struct {
             const slot = if (option.hex_of) |named| self.indexOf(named).? else n;
             if (parsed.values[slot] != null) {
                 for (self.options) |other| {
-                    if (parsed.has(other.name) and !std.mem.eql(u8, other.name, option.name) and std.mem.eql(u8, other.hex_of orelse other.name, self.options[slot].name)) {
+                    if (parsed.hasNamed(other.name) and !std.mem.eql(u8, other.name, option.name) and std.mem.eql(u8, other.hex_of orelse other.name, self.options[slot].name)) {
                         problem.* = .{ .code = .identity_spelling_repeated, .token = other.name, .other = arg };
                         break;
                     }
@@ -460,11 +487,11 @@ pub const Definition = struct {
             parsed.values[slot] = args[index];
             if (option.hex_of != null) hexed |= @as(u64, 1) << @as(u6, @intCast(slot));
         }
-        for (self.conflicts) |pair| if (parsed.has(pair.a) and parsed.has(pair.b)) {
+        for (self.conflicts) |pair| if (parsed.hasNamed(pair.a) and parsed.hasNamed(pair.b)) {
             problem.* = .{ .code = pair.code, .token = pair.a, .other = pair.b };
             return error.ConflictingArguments;
         };
-        if (parsed.positional != null) for (self.positional_conflicts) |conflict| if (parsed.has(conflict.option)) {
+        if (parsed.positional != null) for (self.positional_conflicts) |conflict| if (parsed.hasNamed(conflict.option)) {
             problem.* = .{ .code = conflict.code, .token = conflict.option, .other = self.positional.? };
             return error.ConflictingArguments;
         };
@@ -526,19 +553,37 @@ pub const Parsed = struct {
 
     /// The value of `name` in either spelling; null when not given or not
     /// part of this grammar.
-    pub fn get(self: *const Parsed, name: []const u8) ?[]const u8 {
+    pub fn get(self: *const Parsed, comptime name: []const u8) ?[]const u8 {
+        comptime checkOptionName(name);
+        return self.getNamed(name);
+    }
+
+    /// Runtime lookup for names from a table; prefer `get` for known names.
+    pub fn getNamed(self: *const Parsed, name: []const u8) ?[]const u8 {
         return self.values[self.definition.indexOf(name) orelse return null];
     }
 
     /// Whether the invocation spelled `name` ("" is the positional).
-    pub fn has(self: *const Parsed, name: []const u8) bool {
+    pub fn has(self: *const Parsed, comptime name: []const u8) bool {
+        comptime checkOptionName(name);
+        return self.hasNamed(name);
+    }
+
+    /// Runtime lookup for names from a table; "" still names the positional.
+    pub fn hasNamed(self: *const Parsed, name: []const u8) bool {
         if (name.len == 0) return self.positional != null;
         const n = self.definition.indexOf(name) orelse return false;
         return self.seen & (@as(u64, 1) << @as(u6, @intCast(n))) != 0;
     }
 
     /// Every value of the repeatable option, in order.
-    pub fn all(self: *const Parsed, name: []const u8) []const []const u8 {
+    pub fn all(self: *const Parsed, comptime name: []const u8) []const []const u8 {
+        comptime checkOptionName(name);
+        return self.allNamed(name);
+    }
+
+    /// Runtime lookup for names from a table; prefer `all` for known names.
+    pub fn allNamed(self: *const Parsed, name: []const u8) []const []const u8 {
         const n = self.definition.indexOf(name) orelse return &.{};
         if (!self.definition.options[n].repeated) return &.{};
         const first = std.mem.indexOfScalar(usize, self.repeat_options[0..self.repeat_count], n) orelse return &.{};
@@ -562,18 +607,19 @@ pub const Parsed = struct {
         }
         for (self.definition.options) |option| {
             if (option.repeated) {
-                for (self.all(option.name)) |text| try validateValue(option, text, refusal);
-            } else if (self.get(option.name)) |text| try validateValue(option, text, refusal);
+                for (self.allNamed(option.name)) |text| try validateValue(option, text, refusal);
+            } else if (self.getNamed(option.name)) |text| try validateValue(option, text, refusal);
         }
     }
 
     /// A decimal value of `name`, when given.
-    pub fn number(self: *const Parsed, comptime T: type, name: []const u8) !?T {
+    pub fn number(self: *const Parsed, comptime T: type, comptime name: []const u8) !?T {
+        comptime checkOptionName(name);
         return try std.fmt.parseInt(T, self.get(name) orelse return null, 10);
     }
 
     fn any(self: *const Parsed, names: []const []const u8) bool {
-        for (names) |name| if (self.has(name)) return true;
+        for (names) |name| if (self.hasNamed(name)) return true;
         return false;
     }
 
@@ -656,6 +702,16 @@ fn expectMissing(command: Command, args: []const []const u8) !?[]const u8 {
     var storage: [1024]u8 = undefined;
     const parsed = try testParse(command.definition(), args, &storage);
     return if (parsed.missing()) |group| group[0] else null;
+}
+
+test "option name set covers every grammar and rejects unknown names" {
+    for (std.enums.values(Command)) |command| {
+        for (command.definition().options) |option| try std.testing.expect(hasOptionName(option.name));
+    }
+    for ([_]Definition{ fresh_session, live_configure, live_setup }) |grammar| {
+        for (grammar.options) |option| try std.testing.expect(hasOptionName(option.name));
+    }
+    try std.testing.expect(!hasOptionName("made-up-option-name"));
 }
 
 test "grammar rejects ambiguous invocations before any effect" {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { FEED_KINDS } from "../src/feed.ts";
-import { Session, type Link } from "../src/sessions.ts";
+import { Session, Sessions, type SessionSpec, type SessionUpdate, type Link } from "../src/sessions.ts";
 import type { components } from "../src/wire.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
 
@@ -16,7 +16,7 @@ test("configuration preserves omitted, null and value states and normalizes tool
 	};
 	const session = new Session(link, "session");
 	await session.update({ tools: ["write", "bash", "write"], compactAt: 0, effort: null, label: 'a"\nlabel' });
-	await session.update({ compactAt: null, effort: "", label: null });
+	await session.update({ compactAt: 2000, effort: "", label: null });
 	await session.update({});
 	const [first, second, third] = requests;
 	assert.ok(first && second && third);
@@ -34,7 +34,7 @@ test("configuration preserves omitted, null and value states and normalizes tool
 		reasoning_effort: { state: "null" },
 		label: { state: "value", value: 'a"\nlabel' },
 	});
-	assert.deepEqual(second.configuration.compaction_trigger, { state: "null" });
+	assert.deepEqual(second.configuration.compaction_trigger, { state: "value", value: "2000" });
 	assert.deepEqual(second.configuration.reasoning_effort, { state: "value", value: "" });
 	assert.deepEqual(second.configuration.label, { state: "null" });
 	for (const field of Object.values(third.configuration)) assert.deepEqual(field, { state: "omitted" });
@@ -53,3 +53,38 @@ test("interrupt requests every feed kind", async () => {
 	};
 	await new Session(link, "session").interrupt();
 });
+
+
+test("creation sends explicit settings without Host client defaults", async () => {
+	const spec: SessionSpec = { model: "custom-model", effort: null, compactAt: 1234, tools: [] as readonly string[], permissionMode: "ask" };
+	const link: Link = {
+		async exchange(_path, build) {
+			const request = JSON.parse(build("store"));
+			assert.equal(request.session, "");
+			assert.deepEqual(request.configuration.model, { state: "value", value: "custom-model" });
+			assert.deepEqual(request.configuration.compaction_trigger, { state: "value", value: "1234" });
+			assert.deepEqual(request.configuration.reasoning_effort, { state: "null" });
+			assert.deepEqual(request.configuration.tools, { state: "value", value: [] });
+			assert.deepEqual(request.configuration.permission_mode, { state: "value", value: "ask" });
+			assert.deepEqual(request.configuration.provider, { state: "omitted" });
+			assert.deepEqual(request.configuration.workspace, { state: "omitted" });
+			return Buffer.from(JSON.stringify({ answer: { status: "accepted", session: "abc123" } }));
+		},
+	};
+	assert.equal((await new Sessions(link).create(spec, { idempotencyKey: "create" })).id, "abc123");
+});
+
+
+// Compile-time API contract checks; these declarations never send requests.
+function sessionTypeContract(spec: SessionSpec): void {
+	const { effort: _effort, ...withoutEffort } = spec;
+	// @ts-expect-error creation must specify reasoning, even when explicitly null
+	const missingEffort: SessionSpec = withoutEffort;
+	// @ts-expect-error compaction is never nullable
+	const nullCompaction: SessionUpdate = { compactAt: null };
+	// @ts-expect-error model is immutable
+	const immutable: SessionUpdate = { model: "other" };
+	const sparse: SessionUpdate = {};
+	void [missingEffort, nullCompaction, immutable, sparse];
+}
+void sessionTypeContract;

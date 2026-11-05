@@ -276,6 +276,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/activity-search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Search public Session activity newest first with bounded snippets. */
+        post: operations["activitySearch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/activity-page": {
         parameters: {
             query?: never;
@@ -427,6 +444,7 @@ export interface components {
             at: components["schemas"]["Decimal"];
             value: {
                 turn_ended: {
+                    session: string;
                     turn: components["schemas"]["Decimal"];
                     operation: components["schemas"]["Decimal"];
                     /** @enum {string} */
@@ -493,6 +511,7 @@ export interface components {
             at: components["schemas"]["Decimal"];
             value: {
                 approval_requested: {
+                    session: string;
                     action: components["schemas"]["Decimal"];
                     operation: components["schemas"]["Decimal"];
                     call_ordinal: components["schemas"]["Decimal"];
@@ -552,6 +571,44 @@ export interface components {
             direction: "forward" | "backward";
             /** @description Each at most once, in the order the enum lists them. */
             kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
+            limit: components["schemas"]["Decimal"];
+        };
+        ActivitySearchFactsCursor: {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+        };
+        ActivitySearchFactsHit: {
+            snippet: string;
+            offset: components["schemas"]["Decimal"];
+            length: components["schemas"]["Decimal"];
+        };
+        ActivitySearchItem: {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            kind: "admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted";
+            hits: components["schemas"]["ActivitySearchFactsHit"][];
+        };
+        ActivitySearchReply: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "activity_search";
+            items: components["schemas"]["ActivitySearchItem"][];
+            next: components["schemas"]["ActivitySearchFactsCursor"] | null;
+        };
+        ActivitySearchRequest: {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            kind: "activity_search";
+            store: string;
+            session: string;
+            query: string;
+            /** @description Each at most once, in the order the enum lists them. */
+            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
+            before_position: components["schemas"]["Decimal"] | null;
+            before_ordinal: components["schemas"]["Decimal"] | null;
             limit: components["schemas"]["Decimal"];
         };
         CallActivity: {
@@ -730,7 +787,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
+                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
             };
             execution: {
                 /** @constant */
@@ -1286,7 +1343,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
+                code: "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
             };
             input: {
                 /** @constant */
@@ -3003,6 +3060,44 @@ export interface operations {
                 };
                 content: {
                     "application/octet-stream": string;
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    activitySearch: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActivitySearchRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivitySearchReply"];
                 };
             };
             /** @description A refusal or failure. */

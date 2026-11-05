@@ -1310,6 +1310,7 @@ const Route = enum {
     conversation_page,
     conversation_content,
     activity_page,
+    activity_search,
     activity_content,
     model_list,
     unsupported_control,
@@ -1600,6 +1601,18 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try fd.json(200, protocol.max_activity_page_response_bytes, renderActivityPage, .{page});
         },
+        .activity_search => |*command| {
+            const page = try createUnfilled(host.allocator, protocol.ActivitySearchFacts);
+            defer host.allocator.destroy(page);
+            host.store.searchActivity(command, page) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                else => {
+                    fenceDispatch(host, "activity search", err);
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                },
+            };
+            try fd.json(200, protocol.max_activity_search_response_bytes, renderActivitySearch, .{page});
+        },
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
@@ -1631,6 +1644,9 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
 }
 
 fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
+    page.writeJson(out.writer) catch return error.BufferTooLarge;
+}
+fn renderActivitySearch(out: protocol.JsonOut, page: *const protocol.ActivitySearchFacts) error{BufferTooLarge}!void {
     page.writeJson(out.writer) catch return error.BufferTooLarge;
 }
 
@@ -1728,6 +1744,8 @@ const HeaderReader = struct {
             .conversation_page
         else if (std.mem.eql(u8, path, "/v1/conversation-content"))
             .conversation_content
+        else if (std.mem.eql(u8, path, "/v1/activity-search"))
+            .activity_search
         else if (std.mem.eql(u8, path, "/v1/activity-page"))
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
@@ -3196,12 +3214,12 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field) } },
         .{ .tool_result = .{ .content = reference, .presentation = presentation } },
         .{ .hosted_call = presentation },
-        .{ .turn_ended = .{ .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
+        .{ .turn_ended = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
         .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
-        .{ .approval_requested = .{ .action = max, .operation = max, .call_ordinal = max } },
+        .{ .approval_requested = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .action = max, .operation = max, .call_ordinal = max } },
         .{ .session_changed = .{ .revision = max, .field = .output_reservation } },
         .{ .compacted = .{ .operation = max, .dropped = max } },
     };
@@ -3741,6 +3759,12 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try configure.configuration.provider.value.set("codex");
         configure.configuration.model.state = .value;
         try configure.configuration.model.value.set("model-a");
+        configure.configuration.tools = try .of(&.{ "bash", "web_search" });
+        configure.configuration.permission_mode.state = .value;
+        try configure.configuration.permission_mode.value.set("bypass");
+        configure.configuration.compaction_trigger.state = .value;
+        try configure.configuration.compaction_trigger.value.set("115200");
+        configure.configuration.reasoning_effort.state = .explicit_null;
         const configured = storage.configure(&configure, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session.slice();
@@ -4043,6 +4067,12 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     try configure.configuration.provider.value.set("codex");
     configure.configuration.model.state = .value;
     try configure.configuration.model.value.set("model-a");
+    configure.configuration.tools = try .of(&.{ "bash", "web_search" });
+    configure.configuration.permission_mode.state = .value;
+    try configure.configuration.permission_mode.value.set("bypass");
+    configure.configuration.compaction_trigger.state = .value;
+    try configure.configuration.compaction_trigger.value.set("115200");
+    configure.configuration.reasoning_effort.state = .explicit_null;
     const configured = storage.configure(&configure, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session.slice();

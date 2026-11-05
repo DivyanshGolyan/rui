@@ -532,9 +532,11 @@ def compaction_settings_case(home, store, workspace, socket_path):
     body = {"version": host_process.WIRE_VERSION, "kind": "configure", "store": str(store),
             "key": "unknown-compaction-policy", "session": "", "configuration": {
                 **{name: {"state": "value", "value": value} for name, value in
-                   (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"))},
+                   (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"),
+                    ("tools", ["bash"]), ("permission_mode", "bypass"), ("compaction_trigger", "115200"))},
+                "reasoning_effort": {"state": "null"},
                 **{name: {"state": "omitted"} for name in
-                   ("instructions", "tools", "permission_mode", "output_schema", "compaction_trigger", "output_reservation")}}}
+                   ("instructions", "output_schema", "output_reservation")}}}
     head, answer = raw_request(socket_path, "/v1/configure", json.dumps(body).encode())
     reply = json.loads(answer)
     assert b" 200 " in head and reply["answer"]["status"] == "accepted" and reply["answer"]["created"], (head, reply)
@@ -1696,7 +1698,7 @@ def command_entry_cases():
     try:
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         defaults(home, "--store", store, "--provider", "codex", "--model", "gpt-6-luna")
-        initial_session = run(home, "session", "start", "--workspace", workspace, input=prompt).strip()
+        initial_session = json.loads(run(home, "session", "start", "--workspace", workspace, input=prompt))["context"]["session"]
         assert re.fullmatch(r"[0123456789abcdefghjkmnpqrstvwxyz]{6}", initial_session), initial_session
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
@@ -4381,8 +4383,8 @@ def renderer_cases():
             if ready_write is not None:
                 env["RUI_TEST_ACTION_READY_FD"] = str(ready_write)
             if initial_text is not None:
-                session = run(home, "session", "start", "--store", store, "--workspace", workspace,
-                    "--provider", "codex", "--model", "gpt-6-sol", input=initial_text).strip()
+                session = json.loads(run(home, "session", "start", "--store", store, "--workspace", workspace,
+                    "--provider", "codex", "--model", "gpt-6-sol", input=initial_text))["context"]["session"]
                 assert re.fullmatch(r"[0123456789abcdefghjkmnpqrstvwxyz]{6}", session), session
             arguments = ["session", "resume", "--store", str(store), "--", session]
             caller = subprocess.Popen([str(fixture.RUI), *arguments],
