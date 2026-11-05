@@ -518,26 +518,6 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         error.FileNotFound => .unavailable,
         else => .access_failure,
     };
-    return switch (probeLease(io, &paths)) {
-        .free => .unavailable,
-        .held => readHostInfo(io, &paths, deadline),
-        .access_failure => .access_failure,
-    };
-}
-
-pub const Lease = enum { free, held, access_failure };
-
-/// Whether a Host holds the Store's lease, without contacting it. The OS
-/// drops the lease when its owner lets go of the Store or exits.
-pub fn leaseOf(io: std.Io, store_path: []const u8) Lease {
-    const paths = platform.resolveClientPaths(io, store_path) catch |err| return switch (err) {
-        error.FileNotFound => .free,
-        else => .access_failure,
-    };
-    return probeLease(io, &paths);
-}
-
-fn probeLease(io: std.Io, paths: *const platform.Paths) Lease {
     var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .access_failure;
     defer store_dir.close(io);
     // A replaced lock node may be a FIFO: open must not wait for a writer
@@ -548,7 +528,7 @@ fn probeLease(io: std.Io, paths: *const platform.Paths) Lease {
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0) catch |err| return switch (err) {
-        error.FileNotFound => .free,
+        error.FileNotFound => .unavailable,
         else => .access_failure,
     };
     const lock_file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
@@ -556,8 +536,8 @@ fn probeLease(io: std.Io, paths: *const platform.Paths) Lease {
     const stat = lock_file.stat(io) catch return .access_failure;
     if (stat.kind != .file) return .access_failure;
     return switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
-        .SUCCESS => .free,
-        .AGAIN => .held,
+        .SUCCESS => .unavailable,
+        .AGAIN => readHostInfo(io, &paths, deadline),
         else => .access_failure,
     };
 }

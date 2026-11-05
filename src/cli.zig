@@ -556,12 +556,12 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
 }
 
 /// The old Host holds the Store's lease until it lets go of the Store, so a
-/// free lease confirms retirement. Only the lease is probed: asking the Host
-/// would add exchanges to the shutdown being observed. The wait shares the
-/// launched Host's drain bound.
+/// free lease confirms retirement. Only the lease is observed: asking the
+/// Host would add exchanges to the shutdown being watched. The wait shares
+/// the launched Host's drain bound.
 fn awaitRetirement(io: std.Io, store: []const u8) !bool {
     const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + product_defaults.host_shutdown_seconds * std.time.ns_per_s;
-    while (client.leaseOf(io, store) != .free) {
+    while (platform.StoreLease.observe(io, store) != .unowned) {
         const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
         if (remaining <= 0) return false;
         try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 50 * std.time.ns_per_ms))), .awake);
