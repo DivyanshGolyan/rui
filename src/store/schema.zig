@@ -1022,12 +1022,14 @@ pub fn objects(comptime dialect: rsql.Dialect) []const Object {
 }
 
 /// What MySQL sessions on a Store set before their first statement: the
-/// collation the DDL's keys compare in, and a strict `sql_mode` with
-/// ONLY_FULL_GROUP_BY and NO_BACKSLASH_ESCAPES. Nothing in this PR runs
+/// collation the DDL's keys compare in, a strict `sql_mode` with
+/// ONLY_FULL_GROUP_BY and NO_BACKSLASH_ESCAPES, and `@list`'s length. Nothing in this PR runs
 /// it; the live dialect check and PR 8's engine do.
 pub const mysql_session = [_][:0]const u8{
     "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
+    // `@list` of a Session's tool names whole: MySQL's default cuts at 1024.
+    std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{protocol.max_tool_names_bytes}),
 };
 
 const MysqlObjects = union(enum) { refused: []const u8, objects: []const Object };

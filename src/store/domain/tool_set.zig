@@ -45,17 +45,32 @@ const insert_member = rsql.Write(.{
 });
 
 /// A Rui SQL expression for the built-in tools the set `set_column` names,
-/// as a tools_mask: each member's bit, and a bit past every tool's for a
-/// member that is no built-in, which decoding refuses. It bridges readers
-/// that still name tools by `Tool` until the wire names them.
+/// as a tools_mask: each built-in member's bit, and nothing for any other
+/// member. Settlement runs only the built-ins, so it reads a set this way:
+/// a call to another member, an MCP server's tool, is unknown until Rui
+/// runs it. A catalog holds the built-ins unchanged, so no other member
+/// shares a built-in's name.
 pub fn maskSql(comptime set_column: []const u8) []const u8 {
     comptime {
         var cases: []const u8 = "";
         for (std.enums.values(Tool)) |tool| cases = cases ++ std.fmt.comptimePrint(" WHEN '{s}' THEN {d}", .{ @tagName(tool), tool_catalog.toolBit(tool) });
-        return "(SELECT coalesce(sum(CASE tool.name" ++ cases ++ std.fmt.comptimePrint(" ELSE {d} END),0) ", .{@as(u16, tool_catalog.all_tools_mask) + 1}) ++
+        return "(SELECT coalesce(sum(CASE tool.name" ++ cases ++ " ELSE 0 END),0) " ++
             "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=" ++ set_column ++ ")";
     }
 }
+
+/// A Rui SQL expression for the names of the set `set_column`'s members,
+/// joined by commas in no set order, since ordering them would sort; NULL
+/// for an empty set. A name has no
+/// comma (`protocol.validToolName`), and a Session's names, as configure
+/// bounds them, fit `max_names_bytes`.
+pub fn namesSql(comptime set_column: []const u8) []const u8 {
+    return "(SELECT @list(tool.name) FROM tool_set_member member " ++
+        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=" ++ set_column ++ ")";
+}
+
+/// The longest `namesSql` text of a Session's set.
+pub const max_names_bytes = protocol.max_tool_names_bytes;
 
 /// SQL for the mask of every built-in in any set of `session`'s revisions
 /// up to `revision`, until the wire names tools.
