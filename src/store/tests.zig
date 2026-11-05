@@ -9017,6 +9017,7 @@ test "each Store entry point takes its round budget on its common path" {
                 tool_catalog.bash_record,
                 .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
                 tool_catalog.message_agent_record,
+                tool_catalog.read_transcript_record,
                 tool_catalog.start_agent_record,
                 tool_catalog.web_search_record,
             };

@@ -3927,7 +3927,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         .server = "docs",
         .description = "Fetch a page.",
         .input_schema = "{\"type\":\"object\"}",
-    }, tools.record(.message_agent).*, tools.record(.start_agent).*, tools.record(.web_search).* };
+    }, tools.record(.message_agent).*, tools.record(.read_transcript).*, tools.record(.start_agent).*, tools.record(.web_search).* };
     const digests = comptime blk: {
         @setEvalBranchQuota(1_000_000);
         var out: [records.len][32]u8 = undefined;
