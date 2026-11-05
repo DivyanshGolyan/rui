@@ -88,7 +88,7 @@ test("status reflects an idle Session and paused queued work", { skip }, async (
 		const idle = await session.status();
 		assert.deepEqual(idle, {
 			state: "idle", since: idle.since, turn: null, operation: null, pendingMessages: "0",
-			parent: null, label: "first", model: spec.model, effort: null, tools: ["bash"], permissionMode: "ask", latestOutcome: null,
+			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], permissionMode: "ask", latestOutcome: null,
 		});
 		assert.match(idle.since, /^[1-9][0-9]*$/);
 		await session.send("queued", { idempotencyKey: "status:message" });
