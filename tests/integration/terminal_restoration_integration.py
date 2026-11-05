@@ -1884,9 +1884,9 @@ def fatal_reporting_cases(state):
             saved = (home / ".config/rui/requests" / f"{second['key']}.json").read_bytes()
             os.write(master, b"\x1b[")
             output, errors = human.terminal_exit(caller, master, timeout=6)
-            assert caller.returncode == 1, (output, errors)
+            assert caller.returncode == 2, (output, errors)
             assert second["key"].encode() in errors and first["key"].encode() not in errors, errors
-            assert b"not confirmed" in errors and b"rui request recover" in errors and b"[internal_unexpected]" in errors, errors
+            assert b"not confirmed" in errors and b"rui request recover" in errors and b"[terminal_input_incomplete]" in errors, errors
             assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved, "fatal exit replaced original"
             assert proxy.mutations == [("/v1/message", body) for body, _ in proxy.exchanges]
             after = {path: path.read_bytes() for path in records.glob("*.json")}
@@ -1911,7 +1911,7 @@ def fatal_reporting_cases(state):
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
             human.read_terminal(master, "› ", composer=True)
             os.write(master, b"\x1b[")
-            assert caller.wait(timeout=6) == 1, "disconnected stderr bypassed acquired-terminal cleanup"
+            assert caller.wait(timeout=6) == 2, "disconnected stderr bypassed acquired-terminal cleanup"
             actual = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
             assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
@@ -1988,7 +1988,7 @@ def decision_reporting_cases(state):
                     assert "Original reserved request:" not in status, status
                     os.write(master, b"\x1b[")
                 output, errors = human.terminal_exit(caller, master, timeout=6)
-                assert caller.returncode == (0 if lost else 1), (output, errors)
+                assert caller.returncode == (0 if lost else 2), (output, errors)
                 records = [path for path in (home / ".config/rui/requests").glob("*.json")
                     if json.loads(path.read_bytes()).get("session") == session]
                 record, = [path for path in records if json.loads(path.read_bytes())["kind"] == "permission_decision"]
@@ -2008,7 +2008,7 @@ def decision_reporting_cases(state):
                 assert b"rui request read-result" not in errors, errors
                 assert (b"Decision not confirmed" if lost else b"Decision accepted; do not repeat it") in errors, errors
                 if not lost:
-                    assert b"[internal_unexpected]" in errors and b"not confirmed" not in errors, errors
+                    assert b"[terminal_input_incomplete]" in errors and b"not confirmed" not in errors, errors
                 if lost:
                     assert proxy.exchanges[0][0] == saved and not reply_release.is_set()
                     reply_release.set()

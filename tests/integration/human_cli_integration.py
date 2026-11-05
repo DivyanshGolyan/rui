@@ -3979,7 +3979,7 @@ def opaque_session_commands_case():
             assert not rejected.stdout and "[invalid_session_reference]" in rejected.stderr and "request:" not in rejected.stderr, rejected
         for label in (" ", "two\nlines", "x" * 101):
             rejected = invoke(home, "session", "configure", "--store", store, "--session", reference, "--label", label, expect=2)
-            assert not rejected.stdout and "--label must be one line" in rejected.stderr and "request:" not in rejected.stderr, rejected
+            assert not rejected.stdout and "--label must be one line" in rejected.stderr and "[invalid_label]" in rejected.stderr and "request:" not in rejected.stderr, rejected
         for route in (("session", "resume"), ("action", "allow"), ("action", "deny")):
             extra = [] if route[1] == "resume" else ["--action", "1"]
             negatives = [["--session-hex", value] for value in invalid_hex]
@@ -4176,9 +4176,9 @@ def incomplete_input_case(home, store, session, endpoint, host):
             os.write(master, incomplete)
             # Shared-Host polling is not decoder load coverage. Reap each
             # caller before collection while retaining its parent slave.
-            assert entered.wait(timeout=deadline - time.monotonic()) == 1
+            assert entered.wait(timeout=deadline - time.monotonic()) == 2
             output, errors = terminal_exit(entered, master, timeout=deadline - time.monotonic())
-            assert b"[internal_unexpected]" in errors, (output, errors)
+            assert b"[terminal_input_incomplete]" in errors, (output, errors)
             assert b"\x1b[0m\x1b[?2004l" in output, "delayed collector lost terminal cleanup"
             actual = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), (actual, original)

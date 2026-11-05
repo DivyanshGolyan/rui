@@ -1784,7 +1784,7 @@ const LiveAddress = struct { store: []const u8, session: []const u8 };
 fn labelArgument(text: []const u8) error{InvalidLabel}!client.OptionalPolicy {
     if (text.len == 0) return .{ .present = true, .value = null };
     if (protocol.validLabel(text)) return .{ .present = true, .value = text };
-    _ = @import("stderr.zig").write("\nrui: --label must be one line of 1-100 bytes that is not blank. Nothing captured or changed.\n" ++ cli_args.label_help);
+    _ = @import("stderr.zig").write("\nrui: --label must be one line of 1-100 bytes that is not blank. Nothing captured or changed. [invalid_label]\n" ++ cli_args.label_help);
     return error.InvalidLabel;
 }
 
