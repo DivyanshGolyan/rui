@@ -471,24 +471,25 @@ pub const Store = struct {
         command: *const protocol.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, @as(?configuration_domain.PresetDecision, null), faults });
+        return self.queue().write(configureHeld, .{ self, command, @as(?*const configuration_domain.PresetDecision, null), faults });
     }
 
     /// A Host-resolved preset or its refusal uses the same key lookup,
     /// rejection persistence and transaction as every other configure.
+    /// Borrows `preset` until the synchronous queued write returns.
     pub fn configureWithPreset(
         self: *Store,
         command: *const protocol.ConfigureCommand,
-        preset: configuration_domain.PresetDecision,
+        preset: *const configuration_domain.PresetDecision,
         faults: Faults,
     ) ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, @as(?configuration_domain.PresetDecision, preset), faults });
+        return self.queue().write(configureHeld, .{ self, command, @as(?*const configuration_domain.PresetDecision, preset), faults });
     }
 
     fn configureHeld(
         self: *Store,
         command: *const protocol.ConfigureCommand,
-        preset: ?configuration_domain.PresetDecision,
+        preset: ?*const configuration_domain.PresetDecision,
         faults: Faults,
     ) ConfigureReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
