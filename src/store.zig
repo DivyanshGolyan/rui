@@ -47,6 +47,7 @@ pub const ModelFailureClass = model_settlement_domain.ModelFailureClass;
 pub const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 pub const ModelInterruptionTarget = command_domain.ModelInterruptionTarget;
 pub const OpenOptions = store_core.OpenOptions;
+pub const SavedCatalog = store_core.SavedCatalog;
 pub const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 pub const PrefixSeal = historical_domain.PrefixSeal;
 pub const PublicConversationPage = reads_domain.PublicConversationPage;

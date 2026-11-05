@@ -12,8 +12,12 @@ pub const bash_max_command_bytes: usize = 120 * 1024;
 pub const bash_max_stdin_bytes: usize = bash_max_command_bytes;
 
 /// Who supplied a tool: D48's "owning server". Who runs it is derived
-/// from this (D46): Rui runs its own tools, the provider runs its own.
-pub const Owner = enum { rui, provider };
+/// from this (D46): Rui runs its own tools and an MCP server's, which it
+/// calls over HTTP; the provider runs its own.
+pub const Owner = enum { rui, provider, mcp };
+
+/// The longest MCP server name a record carries, in the tool-name grammar.
+pub const max_server_bytes = protocol.max_tool_name_bytes;
 
 /// One tool, as the model is told about it (D48). Request rendering and
 /// call checking work from a list of these. A provider-run tool's
@@ -25,6 +29,8 @@ pub const Record = struct {
     /// A JSON Schema object, as JSON text.
     input_schema: []const u8 = "",
     owner: Owner,
+    /// The MCP server that serves the tool, for an `.mcp` record only.
+    server: []const u8 = "",
 };
 
 /// The longest function name a provider accepts (OpenAI: 64 characters);
@@ -34,13 +40,15 @@ pub const max_name_bytes = protocol.max_tool_name_bytes;
 /// The most tools one set offers.
 pub const max_tools = protocol.max_tools;
 
-/// A record's identity: its name, owner and the content digests of its
-/// description and input schema.
+/// A record's identity: its name, owner, server and the content digests
+/// of its description and input schema. A tool that moves to another
+/// server is another record.
 pub fn recordDigest(member: *const Record) [32]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hash, "rui/tool-record/v1");
     hashField(&hash, member.name);
     hashField(&hash, @tagName(member.owner));
+    hashField(&hash, member.server);
     hash.update(&protocol.contentDigest(member.description));
     hash.update(&protocol.contentDigest(member.input_schema));
     return hash.finalResult();
@@ -102,7 +110,7 @@ pub const Catalog = struct {
     pub fn valid(self: *const Catalog) bool {
         if (self.records.len != self.digests.len or self.records.len > max_catalog_records) return false;
         for (self.records, self.digests, 0..) |*each, digest, index| {
-            if (!protocol.validToolName(each.name)) return false;
+            if (!protocol.validToolName(each.name) or !validServer(each)) return false;
             if (index != 0 and std.mem.order(u8, self.records[index - 1].name, each.name) != .lt) return false;
             if (!std.mem.eql(u8, &digest, &recordDigest(each))) return false;
         }
@@ -110,9 +118,14 @@ pub const Catalog = struct {
     }
 };
 
-/// The most records a Host's catalog holds: the Store saves it as a tool
-/// set, which holds at most `max_tools`.
-pub const max_catalog_records = max_tools;
+/// An MCP record names its server, in the tool-name grammar; any other
+/// record names none.
+pub fn validServer(each: *const Record) bool {
+    return if (each.owner == .mcp) protocol.validToolName(each.server) else each.server.len == 0;
+}
+
+/// The most records a Host's catalog holds; its saved set holds as many.
+pub const max_catalog_records = 1024;
 
 pub const bash_record: Record = .{
     .name = "bash",
@@ -558,7 +571,7 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
 /// function call, so a call naming one is unknown.
 fn offeredFunction(offered: []const *const Record, name: []const u8) ?*const Record {
     for (offered) |candidate| {
-        if (candidate.owner == .rui and std.mem.eql(u8, candidate.name, name)) return candidate;
+        if (candidate.owner != .provider and std.mem.eql(u8, candidate.name, name)) return candidate;
     }
     return null;
 }
