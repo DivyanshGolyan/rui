@@ -341,11 +341,11 @@ def run():
         # and public effective settings rather than capability helpers alone.
         expected_agent = expected_user_agent()
         mismatches = []
-        for index, (model, effort) in enumerate((
-            ("gpt-6-luna", "medium"), ("gpt-6.1-sol", "low"),
-            ("gpt-6-sol", "medium"), ("gpt-6-astra", "low"),
-            ("gpt-5.6-sol", "low"), ("gpt-5.6-terra", "medium"),
-            ("gpt-5.6-luna", "medium"), ("gpt-5.5", "medium"),
+        for index, (model, effort, trigger) in enumerate((
+            ("gpt-6-luna", "medium", "244800"), ("gpt-6.1-sol", "low", "244800"), ("gpt-6.1-terra", "low", "450000"),
+            ("gpt-6-sol", "medium", "244800"), ("gpt-6-astra", "low", "244800"),
+            ("gpt-5.6-sol", "low", "244800"), ("gpt-5.6-terra", "medium", "244800"),
+            ("gpt-5.6-luna", "medium", "244800"), ("gpt-5.5", "medium", "244800"),
         )):
             key = f"envelope-{index}"
             with endpoint.lock:
@@ -371,7 +371,7 @@ def run():
             assert observation["result"]["status"] == "completed" and answer == key.encode(), observation
             request = json.loads(endpoint.requests[4 + index])
             assert request["model"] == model, request
-            if settings["compaction_trigger"] != "244800" or settings["output_reservation"] != "0":
+            if settings["compaction_trigger"] != trigger or settings["output_reservation"] != "0":
                 mismatches.append((model, "compaction defaults", settings["compaction_trigger"], settings["output_reservation"]))
             if settings["reasoning_effort"] != effort or settings["reasoning_effort_override"] is not None:
                 mismatches.append((model, "effort settings", settings["reasoning_effort"], settings["reasoning_effort_override"]))
@@ -383,9 +383,9 @@ def run():
                 mismatches.append((model, "parallel_tool_calls", request.get("parallel_tool_calls")))
             if endpoint.user_agents[4 + index] != expected_agent:
                 mismatches.append((model, "User-Agent", endpoint.user_agents[4 + index], expected_agent))
-        assert len(endpoint.requests) == 12, endpoint.requests
+        assert len(endpoint.requests) == 13, endpoint.requests
         assert not mismatches, mismatches
-        print(f"codex request envelopes passed: eight exact model IDs, catalog effort defaults, 244800/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
+        print(f"codex request envelopes passed: nine exact model IDs, catalog effort defaults, 90% compaction/0 defaults, low verbosity, explicit parallel calls, User-Agent={expected_agent}")
         print("codex synthetic managed journey passed: approved effect once, private continuation, fresh Host, post-restart dispatch, no authentication resend, stopped authentication/handoff and unsupported settings never launch")
         complete = True
     finally:
