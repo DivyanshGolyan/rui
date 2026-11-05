@@ -562,7 +562,8 @@ pub fn startAgent(
     const refusal: ?[]const u8 = refusal: {
         if (saved != null) break :refusal "Rui could not start the agent: its command key is already taken. Nothing was started.";
         const allowed = try configuration_domain.toolSet(parent.tools_mask);
-        const requested = configuration_domain.requestedTools(configuration);
+        const requested = configuration_domain.requestedTools(configuration) orelse
+            break :refusal "spec.tools: only Rui's own tools can be narrowed to. Nothing was started.";
         var wider = requested.differenceWith(allowed).iterator();
         if (wider.next()) |tool| break :refusal std.fmt.bufPrint(&result_buffer, "spec.tools: {s} is not one of your tools. Nothing was started.", .{@tagName(tool)}) catch unreachable;
         if (try configuration_domain.permissionMode(parent.permission_mode) == .ask and !configuration.permission_mode.value.eql("ask"))

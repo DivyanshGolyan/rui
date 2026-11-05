@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const platform = @import("../platform.zig");
+const tool_catalog = @import("../tools.zig");
 const named_scratch = @import("../named_scratch.zig");
 const protocol = @import("../protocol.zig");
 const output_format = @import("../output_format.zig");
@@ -92,6 +93,8 @@ pub fn testingStore(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir
 
 /// How `testingStoreWith` opens a Store beyond `testingStore`'s defaults.
 pub const TestingStoreOptions = struct {
+    /// The tools the Host offers.
+    catalog: *const tool_catalog.Catalog = &tool_catalog.built_in,
     /// The canonical identity the Store is opened under, when not `tmp`'s
     /// real path.
     identity: ?[]const u8 = null,
@@ -108,7 +111,7 @@ pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.Tm
             const root = root_buffer[0..root_length];
             var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
             const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-            return storage.openWithOptions(io, database, options.identity orelse root, .{ .served = options.served }) catch |err| {
+            return storage.openWithOptions(io, database, options.identity orelse root, .{ .served = options.served, .catalog = options.catalog }) catch |err| {
                 std.debug.print("testing Store open failed: {s}\n", .{@errorName(err)});
                 return err;
             };

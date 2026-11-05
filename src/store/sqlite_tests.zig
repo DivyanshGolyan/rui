@@ -137,6 +137,26 @@ const testingSessionReport = tests.testingSessionReport;
 const testingSessionReportWithProfile = tests.testingSessionReportWithProfile;
 const touchForTesting = tests.touchForTesting;
 
+/// A catalog with one tool beyond the built-ins, between them by name.
+const testing_record: tool_catalog.Record = .{ .name = "test_tool", .owner = .rui, .description = "A tool only tests offer.", .input_schema = "{\"type\":\"object\"}" };
+const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, tool_catalog.message_agent_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
+const testing_digests = blk: {
+    @setEvalBranchQuota(1_000_000);
+    var out: [testing_records.len][32]u8 = undefined;
+    for (&testing_records, &out) |*each, *digest| digest.* = tool_catalog.recordDigest(each);
+    break :blk out;
+};
+const testing_catalog: tool_catalog.Catalog = .{ .records = &testing_records, .digests = &testing_digests };
+
+fn testingStoreCatalog(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, catalog: *const tool_catalog.Catalog) !void {
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    return storage.openWithOptions(io, database, root, .{ .catalog = catalog });
+}
+
 fn testingStore(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(io, &root_buffer);
@@ -426,18 +446,20 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     const rolled_back = try takeEveryIdentityForTesting(&storage);
     try std.testing.expectEqual(rolled_back, try takeEveryIdentityForTesting(&storage));
 
-    // Committing the given-back values in every column: none is handed out again.
+    // Committing the given-back values in every column: none is handed out
+    // again. A Host offering one more tool saves its record at open.
+    try storage.close();
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &testing_catalog);
     const second_session = try configureTestSessionAsk(&storage, "identity-later");
-    // Web search too: a new tool set, and its record, commit.
-    var tools: protocol.ConfigureCommand = .{};
-    try tools.key.set("identity-later-tools");
-    tools.session = second_session;
-    tools.configuration.tools.state = .value;
-    tools.configuration.tools = try .of(&.{ "bash", "web_search" });
-    try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
     // New text, so content commits a new row too.
     try submitTestMessage(&storage, &tmp, "identity-later-message", "identity-later-message", second_session.slice(), "propose again");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-second");
+    // A new tool set commits.
+    var tools: protocol.ConfigureCommand = .{};
+    try tools.key.set("identity-later-tools");
+    tools.session = second_session;
+    tools.configuration.tools = try .of(&.{ "bash", "test_tool" });
+    try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
     const after = try takeEveryIdentityForTesting(&storage);
     for (rolled_back, after) |given_back, next| try std.testing.expect(next > given_back);
 }
@@ -1104,10 +1126,12 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
     command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-    // Five new content rows in one transaction: both values, Bash's two
-    // texts and web search's empty text.
+    // The Store saved the catalog's seven texts when it opened: two each
+    // for Bash, message_agent and start_agent, and web search's empty one.
+    // The configure adds its two values.
+    try std.testing.expectEqual(@as(u64, 7), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
     try std.testing.expect(storage.configure(&command, .{}) == .accepted);
-    try std.testing.expectEqual(@as(u64, 5), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+    try std.testing.expectEqual(@as(u64, 9), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
 }
 
 test "a Session's tools are saved once and read back as saved, not as today's built-ins" {
@@ -1132,15 +1156,19 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
             };
         }
     };
-    // Two Sessions offering Bash share one set and one record.
+    // The Host's catalog: one set of the four built-ins, saved at open.
+    try std.testing.expectEqual([3]u64{ 1, 4, 4 }, try Tools.counts(&storage));
+    // Two Sessions offering Bash share one set, of the catalog's record.
     const first = try configureTestSessionAsk(&storage, "saved-tools-first");
     const second = try configureTestSessionAsk(&storage, "saved-tools-second");
-    try std.testing.expectEqual([3]u64{ 1, 1, 1 }, try Tools.counts(&storage));
-    // A new set reuses the records it shares with a saved one.
+    try std.testing.expectEqual([3]u64{ 2, 4, 5 }, try Tools.counts(&storage));
+    // A set with the catalog's members is the catalog's set.
+    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "message_agent", "start_agent", "web_search" });
+    try std.testing.expectEqual([3]u64{ 2, 4, 5 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-both", second, &.{ "bash", "web_search" });
-    try std.testing.expectEqual([3]u64{ 2, 2, 3 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 3, 4, 7 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-none", first, &.{});
-    try std.testing.expectEqual([3]u64{ 3, 2, 3 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 4, 4, 7 }, try Tools.counts(&storage));
     // Each revision keeps the set it was saved with.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
         "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')", .{}));
@@ -3139,7 +3167,7 @@ test "configuration rejections bypass content effects and replay committed answe
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         try std.testing.expect((try storage.observeCommand("rejected-content")).status == .absent);
-        const rolled_back_content = try sqlite.prepare(storage.database, "SELECT COUNT(*) FROM content");
+        const rolled_back_content = try sqlite.prepare(storage.database, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)");
         defer _ = c.sqlite3_finalize(rolled_back_content);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(rolled_back_content));
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(rolled_back_content, 0));
@@ -3160,7 +3188,7 @@ test "configuration rejections bypass content effects and replay committed answe
         try std.testing.expect(replay == .rejected);
         try std.testing.expect(replay.rejected.replayed);
         try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, replay.rejected.code);
-        const retained_content = try sqlite.prepare(storage.database, "SELECT COUNT(*) FROM content");
+        const retained_content = try sqlite.prepare(storage.database, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)");
         defer _ = c.sqlite3_finalize(retained_content);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(retained_content));
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(retained_content, 0));
@@ -8164,6 +8192,8 @@ fn freshStoreWithExpectedRows(path: []const u8, root: []const u8) !void {
         const raw = try openRaw(path);
         defer _ = c.sqlite3_close(raw);
         try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
+        // The rows hold the catalog the open saved, under their own ids.
+        try sqlite.exec(raw, "DELETE FROM tool_set_member; DELETE FROM tool_set; DELETE FROM tool_record; DELETE FROM content");
         try sqlite.exec(raw, store_testing.expected_rows);
         const violations = try sqlite.prepare(raw, "PRAGMA foreign_key_check");
         defer _ = c.sqlite3_finalize(violations);
@@ -8789,4 +8819,29 @@ test "a start_agent call creates its agent where its caller works, with the task
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'Started %'", .{}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'spec.tools: bash is not one of your tools.%'", .{}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'spec.permissionMode:%'", .{}));
+}
+
+test "a catalog at its bound saves and opens again" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const count = tool_catalog.max_catalog_records - 4;
+    var names: [count][8]u8 = undefined;
+    var records: [count + 4]tool_catalog.Record = undefined;
+    var digests: [count + 4][32]u8 = undefined;
+    records[0] = tool_catalog.bash_record;
+    records[1] = tool_catalog.message_agent_record;
+    records[2] = tool_catalog.start_agent_record;
+    for (&names, records[3 .. count + 3], 0..) |*name, *record, index| {
+        _ = try std.fmt.bufPrint(name, "tool_{d:0>3}", .{index});
+        record.* = .{ .name = name, .owner = .rui, .description = "A tool among many.", .input_schema = "{\"type\":\"object\"}" };
+    }
+    records[count + 3] = tool_catalog.web_search_record;
+    for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+    const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
+    try storage.close();
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(u64, count + 4), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
 }
