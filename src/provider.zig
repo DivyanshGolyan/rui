@@ -241,6 +241,7 @@ pub const Reactor = struct {
     budget: ScratchBudget,
     credentials: Credentials,
     listing_endpoints: std.EnumArray(ListingKind, ?h2.Endpoint),
+    catalog_endpoint_error: ?h2.EndpointError,
     listings: std.EnumArray(ListingKind, ?*ListingFetch),
 
     /// In final storage: h2's Client is pointer-stable. Host startup has
@@ -260,6 +261,7 @@ pub const Reactor = struct {
             .budget = options.budget,
             .credentials = .{ .allocator = allocator },
             .listing_endpoints = .initFill(null),
+            .catalog_endpoint_error = null,
             .listings = .initFill(null),
         };
         var streams = options.capacity;
@@ -277,8 +279,14 @@ pub const Reactor = struct {
         for (options.endpoints.values, &self.endpoints.values) |url, *endpoint| {
             if (url) |value| endpoint.* = try self.client.addEndpoint(value);
         }
-        for (options.listing_urls.values, &self.listing_endpoints.values) |url, *endpoint| {
-            if (url) |value| endpoint.* = try self.client.addEndpoint(value);
+        for (options.listing_urls.values, &self.listing_endpoints.values, std.enums.values(ListingKind)) |url, *endpoint, kind| {
+            if (url) |value| endpoint.* = self.client.addEndpoint(value) catch |err| {
+                if (kind != .catalog) return err;
+                // Optional discovery owns setup failures too: keep the
+                // Reactor, disable this endpoint, and let the Host report once.
+                self.catalog_endpoint_error = err;
+                continue;
+            };
         }
     }
 
@@ -842,6 +850,38 @@ test "idle reactor reports zero finished transfers and no completion" {
     try reactor.drive();
     try std.testing.expectEqual(@as(usize, 0), reactor.finishedCount());
     try std.testing.expectEqual(@as(?Completion, null), try reactor.nextCompletion(false));
+}
+
+test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
+    var used: std.atomic.Value(u64) = .init(0);
+    var reactor: Reactor = undefined;
+    const options: Options = .{
+        .endpoints = .init(.{ .codex = null, .openai = "http://127.0.0.1:1/responses" }),
+        .ca_file = "/nonexistent/rui-catalog-ca.pem",
+        .capacity = 1,
+        .inactivity_seconds = 1,
+        .scratch_path = "/nonexistent",
+        .budget = .{ .used = &used, .limit = 1 },
+        .listing_urls = .init(.{ .provider = "http://127.0.0.1:1/models", .catalog = "https://models.dev/api.json" }),
+    };
+    try reactor.init(std.testing.allocator, std.testing.io, options);
+    {
+        defer reactor.deinit();
+        try std.testing.expectEqual(error.InvalidCaFile, reactor.catalog_endpoint_error.?);
+        try std.testing.expect(reactor.endpoints.get(.openai) != null);
+        try std.testing.expect(reactor.listing_endpoints.get(.catalog) == null);
+        var fetch: ListingFetch = undefined;
+        var response: [1]u8 = undefined;
+        try reactor.startListing(.provider, &fetch, &.{}, &response);
+        defer reactor.endListing(.provider);
+        try reactor.drive();
+        try std.testing.expectEqual(@as(?Completion, null), try reactor.nextCompletion(false));
+    }
+    // A served HTTPS provider still requires working trust; only the optional
+    // catalog's endpoint setup is allowed to fail independently.
+    var required = options;
+    required.endpoints.set(.openai, "https://example.com/responses");
+    try std.testing.expectError(error.InvalidCaFile, reactor.init(std.testing.allocator, std.testing.io, required));
 }
 
 test "Transfers presenting one credential share one copy, freed with the last use" {

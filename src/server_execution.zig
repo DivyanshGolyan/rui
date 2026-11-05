@@ -511,6 +511,7 @@ pub fn executionMain(host: *Host) void {
             fenceDispatch(host, "transport reactor initialization", err);
             return;
         };
+        if (reactor_storage.catalog_endpoint_error) |err| listingFailed(host, .catalog, err);
         break :reactor &reactor_storage;
     };
     defer if (reactor) |active| active.deinit();
@@ -852,7 +853,7 @@ noinline fn startListing(host: *Host, reactor: *provider.Reactor, kind: provider
         .catalog => fields: {
             source = try host.store.readModelCatalogSource();
             if (source) |*saved| if (saved.etag) |*etag| {
-                fields[0] = .{ .name = "if-none-match", .value = etag.slice() };
+                fields[0] = @import("h2").Field{ .name = "if-none-match", .value = etag.slice() };
                 break :fields &fields;
             };
             break :fields &.{};
