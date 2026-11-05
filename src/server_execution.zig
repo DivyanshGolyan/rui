@@ -1149,6 +1149,7 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
         .ending => |*owed| runOwedEnding(host, owed),
         .action => |*input| switch (input.tool) {
             .message_agent => runMessageAgent(host, input),
+            .read_transcript => runReadTranscript(host, input),
             .start_agent => runStartAgent(host, input),
         },
     };
@@ -1230,6 +1231,23 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
         error.StaleActionAttemptBinding => return .admitted,
         else => {
             fenceDispatch(host, "core tool command", err);
+            return .retry_later;
+        },
+    };
+    return .admitted;
+}
+
+/// Rare public-feed reads own their large page and text windows in an arena,
+/// never in the engine's recurring workspace or its dispatch frame.
+noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
+    var arena: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena.deinit();
+    @import("read_transcript.zig").run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+        error.OutOfMemory => return .retry_later,
+        // A stop resolved the call while the public feed was being read.
+        error.StaleActionAttemptBinding => return .admitted,
+        else => {
+            fenceDispatch(host, "read_transcript core command", err);
             return .retry_later;
         },
     };

@@ -169,6 +169,13 @@ pub const message_agent_record: Record = .{
     .input_schema = core_tools.message_agent_schema,
 };
 
+pub const read_transcript_record: Record = .{
+    .name = "read_transcript",
+    .owner = .rui,
+    .description = core_tools.read_transcript_description,
+    .input_schema = core_tools.read_transcript_schema,
+};
+
 pub const start_agent_record: Record = .{
     .name = "start_agent",
     .owner = .rui,
@@ -190,7 +197,8 @@ pub const Runner = enum {
     pub fn of(tool: *const Record) Runner {
         if (tool.owner == .mcp) return .mcp;
         if (tool.owner == .provider) return .provider;
-        return if (std.mem.eql(u8, tool.name, message_agent_record.name) or std.mem.eql(u8, tool.name, start_agent_record.name)) .core else .bash;
+        const core = std.mem.eql(u8, tool.name, message_agent_record.name) or std.mem.eql(u8, tool.name, read_transcript_record.name) or std.mem.eql(u8, tool.name, start_agent_record.name);
+        return if (core) .core else .bash;
     }
 };
 
@@ -201,6 +209,7 @@ pub fn record(tool: Tool) *const Record {
     return switch (tool) {
         .bash => &bash_record,
         .message_agent => &message_agent_record,
+        .read_transcript => &read_transcript_record,
         .start_agent => &start_agent_record,
         .web_search => &web_search_record,
     };
@@ -290,6 +299,7 @@ pub const Call = union(Tool) {
     bash: *const BashArguments,
     message_agent: *const core_tools.MessageAgentArguments,
     /// The core checks its arguments when it runs the call.
+    read_transcript: ?protocol.Bounded(protocol.session_id_bytes),
     start_agent,
     web_search: WebSearchCall,
 };
@@ -312,6 +322,11 @@ pub fn describe(call: Call) Description {
         .message_agent => |arguments| blk: {
             var out: Description = .{};
             compose(&out, &.{ "Message ", "" }, &.{arguments.id.slice()});
+            break :blk out;
+        },
+        .read_transcript => |id| blk: {
+            var out: Description = .{};
+            if (id) |target| compose(&out, &.{ "Read ", "'s transcript" }, &.{target.slice()}) else compose(&out, &.{"Read own transcript"}, &.{});
             break :blk out;
         },
         .start_agent => blk: {
@@ -508,6 +523,7 @@ pub fn toolBit(tool: Tool) u8 {
         .web_search => 2,
         .message_agent => 4,
         .start_agent => 8,
+        .read_transcript => 16,
     };
 }
 
@@ -533,6 +549,8 @@ pub const CallFacts = struct {
     /// Whether an unknown call names a tool the Session withdrew.
     removed: bool = false,
     invalid_mcp_arguments: bool = false,
+    read_transcript: bool = false,
+    transcript_id: ?protocol.Bounded(protocol.session_id_bytes) = null,
 
     /// The arguments of a bash call the parser accepted.
     pub fn bashArguments(self: *const CallFacts) ?*const BashArguments {
@@ -558,6 +576,7 @@ pub const CallFacts = struct {
     pub fn description(self: *const CallFacts) ?Description {
         if (self.bashArguments()) |arguments| return describe(.{ .bash = arguments });
         if (self.messageAgentArguments()) |arguments| return describe(.{ .message_agent = arguments });
+        if (self.read_transcript) return describe(.{ .read_transcript = self.transcript_id });
         if (self.tool) |*selected| if (selected.runner() == .core and std.mem.eql(u8, selected.name, start_agent_record.name)) return describe(.start_agent);
         return null;
     }
@@ -603,6 +622,7 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     }
     const complete = name_length <= name.len and length == name_length and try name_source.next() == null;
     const named = complete and std.mem.eql(u8, name[0..length], bash_record.name);
+    const transcript = complete and std.mem.eql(u8, name[0..length], read_transcript_record.name);
     const messaging = complete and std.mem.eql(u8, name[0..length], message_agent_record.name);
     var tool: ?Record = if (complete) if (offeredFunction(offered.slice(), name[0..length])) |candidate| candidate.* else null else null;
     if (complete) for (offered.mcp_names, offered.mcp_offered) |*candidate, was_offered| {
@@ -622,6 +642,8 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
         .message_agent = if (messaging and (runner == null or runner == .core)) try core_tools.checkMessageAgent(arguments, &discard) else null,
         .removed = removed,
         .invalid_mcp_arguments = if (runner == .mcp) !try checkMcpArguments(arguments) else false,
+        .read_transcript = transcript and (runner == null or runner == .core),
+        .transcript_id = if (transcript and (runner == null or runner == .core)) try transcriptDescriptionId(arguments) else null,
     };
 }
 
@@ -651,6 +673,111 @@ fn checkMcpArguments(source: anytype) !bool {
         return err;
     };
     return true;
+}
+
+/// Presentation only, not settlement validation. Oversized, malformed or
+/// unusual arguments still reach the runtime checker unchanged.
+noinline fn transcriptDescriptionId(source: anytype) !?protocol.Bounded(protocol.session_id_bytes) {
+    var memory: [256]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&memory);
+    var scanner = std.json.Scanner.initStreaming(fixed.allocator());
+    defer scanner.deinit();
+    var chunk: [256]u8 = undefined;
+    var ended = false;
+    var depth: usize = 0;
+    var key = true;
+    var is_id = false;
+    var text: protocol.Bounded(protocol.session_id_bytes) = .{};
+    var fits = true;
+    var id: ?protocol.Bounded(protocol.session_id_bytes) = null;
+    while (true) {
+        var token = scanner.next() catch |err| switch (err) {
+            error.BufferUnderrun => {
+                if (ended) return null;
+                var length: usize = 0;
+                while (length < chunk.len and try source.peek() != null) : (length += 1) chunk[length] = try source.take();
+                if (length == 0) {
+                    ended = true;
+                    scanner.endInput();
+                } else scanner.feedInput(chunk[0..length]);
+                continue;
+            },
+            error.SyntaxError, error.UnexpectedEndOfInput, error.OutOfMemory => return null,
+        };
+        const piece: ?[]const u8 = switch (token) {
+            .partial_string, .string => |bytes| bytes,
+            .partial_string_escaped_1 => |*bytes| bytes,
+            .partial_string_escaped_2 => |*bytes| bytes,
+            .partial_string_escaped_3 => |*bytes| bytes,
+            .partial_string_escaped_4 => |*bytes| bytes,
+            else => null,
+        };
+        if (piece) |bytes| {
+            if (depth == 1) {
+                if (text.len + bytes.len > text.bytes.len) fits = false else {
+                    @memcpy(text.bytes[text.len..][0..bytes.len], bytes);
+                    text.len += bytes.len;
+                }
+                if (token == .string) {
+                    if (key) {
+                        is_id = fits and text.eql("id");
+                    } else if (is_id) {
+                        id = if (fits and protocol.validSessionId(text.slice())) text else null;
+                    }
+                    key = !key;
+                    text = .{};
+                    fits = true;
+                }
+            }
+            continue;
+        }
+        switch (token) {
+            .object_begin, .array_begin => {
+                if (depth == 0 and token != .object_begin) return null;
+                if (depth == 1) key = true;
+                depth += 1;
+            },
+            .object_end, .array_end => depth -= 1,
+            .end_of_document => return id,
+            else => if (depth == 1 and !key) {
+                if (is_id) id = null;
+                key = true;
+            },
+        }
+    }
+}
+
+test "read_transcript descriptions stream IDs and never reject runtime arguments at settlement" {
+    const Name = struct {
+        at: usize = 0,
+        pub fn next(self: *@This()) !?u8 {
+            const name = "read_transcript";
+            if (self.at == name.len) return null;
+            defer self.at += 1;
+            return name[self.at];
+        }
+    };
+    const spaces: [700]u8 = @splat(' ');
+    const large = "{\"kinds\":[\"assistant\"]," ++ spaces ++ "\"id\":\"k7m2qx\"}";
+    const Case = struct { arguments: []const u8, note: []const u8 };
+    for ([_]Case{
+        .{ .arguments = "{}", .note = "Read own transcript" },
+        .{ .arguments = "{\"id\":\"k7m2qx\"}", .note = "Read k7m2qx's transcript" },
+        .{ .arguments = large, .note = "Read k7m2qx's transcript" },
+        .{ .arguments = "{\"kinds\":[\"assistant\",\"call\"],\"id\":\"k7m2q\\u0078\"}", .note = "Read k7m2qx's transcript" },
+        .{ .arguments = "{\"limit\":0}", .note = "Read own transcript" },
+        .{ .arguments = "not json", .note = "Read own transcript" },
+        .{ .arguments = "{\"id\":123}", .note = "Read own transcript" },
+    }) |case| {
+        var name: Name = .{};
+        var arguments: TestSource = .{ .bytes = case.arguments };
+        const offered = Offered.of(ToolSet.initOne(.read_transcript));
+        const facts = try inspectCall(&name, "read_transcript".len, &arguments, &offered);
+        try std.testing.expectEqual(@as(?protocol.ProposalRejection, null), classifyCall(&facts));
+        const description = facts.description().?;
+        try std.testing.expectEqualStrings(case.note, description.slice());
+    }
+    try std.testing.expectEqual(Runner.core, Runner.of(&read_transcript_record));
 }
 
 /// The offered record a function call named `name` resolves to. A
