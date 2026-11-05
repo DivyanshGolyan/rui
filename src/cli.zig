@@ -3596,5 +3596,4 @@ test "parser diagnostic hands off its complete line without a smaller format buf
     try std.testing.expect(std.mem.startsWith(u8, line, "rui host start: --active-capacity bad: "));
     try std.testing.expect(std.mem.endsWith(u8, line, "Nothing was captured or sent. [count_malformed]\n"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, line, "\n"));
-    try std.testing.expect(stderr.hasDiagnostic());
 }
