@@ -1554,7 +1554,9 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         hooks.pauses.getPtr(.model_result).delay_ms = delay;
     }
     hooks.pauses.getPtr(.model_result).gate_path = parsed.get("test-model-result-gate-path");
-    hooks.models_dev_url = parsed.get("test-models-dev-url");
+    // The shared integration boundary sets an empty URL for every child,
+    // including detached Hosts. Only catalog cases explicitly opt in.
+    hooks.models_dev_url = parsed.get("test-models-dev-url") orelse init.environ_map.get("RUI_TEST_MODELS_DEV_URL");
     hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
     hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
     if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| {

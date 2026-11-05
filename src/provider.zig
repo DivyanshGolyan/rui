@@ -320,6 +320,7 @@ pub const Reactor = struct {
         self.client.cancel(&fetch.stream);
         fetch.stream.deinit();
         self.listings.set(kind, null);
+        if (kind == .catalog) self.client.retireConnections(self.listing_endpoints.get(kind).?);
     }
 
     pub fn deinit(self: *Reactor) void {

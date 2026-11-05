@@ -70,6 +70,10 @@ const update_source = rsql.Write(.{
 
 /// Access bounds each queued batch and flushes repeated statements. All
 /// batches share one transaction; only its final COMMIT publishes the source.
+/// These statements serve the infrequent bulk refresh, not a Session's
+/// hot path. The Store releases their prepared forms after the outer commit.
+pub const save_statements = .{ source, existing, insert_fact, update_fact, insert_source, update_source };
+
 pub fn save(a: anytype, entries: []const catalog.Entry, etag: ?[]const u8) !void {
     var previous: ?Source = null;
     a.read(source, .{}, &previous);

@@ -9992,3 +9992,64 @@ test "schema 54 gains empty model catalog tables at 55 without changing its rows
     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_fact", .{}));
     try std.testing.expect(try storage.readModelCatalogSource() == null);
 }
+
+test "model catalog save releases its pager working set before leaving the queue" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    _ = sqlite.c.sqlite3_db_release_memory(storage.sqliteDatabase());
+    const baseline_cache = storage.sqliteDiagnostic().cache_used_bytes.?;
+    const catalog = @import("../model_catalog.zig");
+    var ids: [1024][64]u8 = undefined;
+    var facts: [ids.len]catalog.Entry = undefined;
+    for (&facts, &ids, 0..) |*fact, *id, index| {
+        @memset(id, 'a');
+        _ = try std.fmt.bufPrint(id, "catalog-{d:0>4}", .{index});
+        fact.* = .{ .id = id, .context_window = 123, .efforts = .{}, .openai_listed = true };
+    }
+    try storage.saveModelFacts(&facts, "\"one\"");
+    // Only the preexisting pinned fixture pages and accounting remain.
+    try std.testing.expectEqual(baseline_cache, storage.sqliteDiagnostic().cache_used_bytes.?);
+    try std.testing.expectEqual(@as(?u32, 123), (try storage.modelFact(facts[999].id)).?.context_window);
+    try storage.saveModelFacts(&facts, "\"two\"");
+    try std.testing.expectEqual(baseline_cache, storage.sqliteDiagnostic().cache_used_bytes.?);
+    try std.testing.expectEqual(@as(u64, 2), (try storage.readModelCatalogSource()).?.generation);
+}
+
+test "prepared cache eviction keeps colliding probe chains reachable" {
+    var database: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &database));
+    defer _ = c.sqlite3_close(database.?);
+    var cache: sqlite.StatementCache = .{};
+    defer cache.deinit();
+    const keys = comptime keys: {
+        @setEvalBranchQuota(100_000);
+        var result: [65][:0]const u8 = undefined;
+        for (&result, 0..) |*key, index| key.* = std.fmt.comptimePrint("SELECT {d}", .{index});
+        break :keys result;
+    };
+    var buckets: [64]?[:0]const u8 = @splat(null);
+    for (keys) |key| {
+        const bucket = std.hash.int(@intFromPtr(key.ptr)) & 63;
+        if (buckets[bucket]) |first| {
+            for ([_][:0]const u8{ first, key }) |sql| {
+                var statement: ?*c.sqlite3_stmt = null;
+                try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_prepare_v3(database.?, sql, -1, 0, &statement, null));
+                try cache.insert(sql, statement.?);
+            }
+            const survivor = cache.find(key).?;
+            cache.remove(first);
+            try std.testing.expect(cache.find(first) == null);
+            try std.testing.expectEqual(survivor, cache.find(key).?);
+            cache.remove(first); // An already-evicted form is a no-op.
+            try std.testing.expectEqual(@as(usize, 1), cache.count);
+            cache.remove(key);
+            try std.testing.expectEqual(@as(usize, 0), cache.count);
+            return;
+        }
+        buckets[bucket] = key;
+    }
+    unreachable; // 65 static keys in 64 initial buckets must collide.
+}

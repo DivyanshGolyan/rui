@@ -488,9 +488,11 @@ pub fn executionMain(host: *Host) void {
     else
         null;
     defer if (model_list_url) |url| host.allocator.free(url);
+    const catalog_url = host.hooks.models_dev_url orelse "https://models.dev/api.json";
     var reactor_storage: provider.Reactor = undefined;
     // Listings have their own capacity even when no model can run.
     const reactor: ?*provider.Reactor = reactor: {
+        if (slots.len == 0 and model_list_url == null and catalog_url.len == 0) break :reactor null;
         var endpoints: std.EnumArray(protocol.Provider, ?[]const u8) = .initFill(null);
         for (host.providers.table.values, &endpoints.values) |served, *endpoint| {
             if (served) |value| endpoint.* = value.endpoint;
@@ -506,7 +508,7 @@ pub fn executionMain(host: *Host) void {
             },
             .scratch_path = host.lease.paths.scratch.slice(),
             .budget = budget,
-            .listing_urls = .init(.{ .provider = model_list_url, .catalog = host.hooks.models_dev_url orelse "https://models.dev/api.json" }),
+            .listing_urls = .init(.{ .provider = model_list_url, .catalog = if (catalog_url.len == 0) null else catalog_url }),
         }) catch |err| {
             fenceDispatch(host, "transport reactor initialization", err);
             return;
@@ -538,7 +540,7 @@ pub fn executionMain(host: *Host) void {
         switch (execution_turn.run(&turn_state, &native)) {
             .continue_immediately => heap_release.worked = true,
             .wait => |kind| {
-                if (heap_release.due(slots)) process.releaseFreeHeap();
+                if (heap_release.due(slots, if (reactor) |active| active.listingPending() else false)) process.releaseFreeHeap();
                 const wait_started = std.Io.Clock.Timestamp.now(host.io, .awake);
                 switch (kind) {
                     .transport => reactor.?.wait(transportWaitMs(slots)) catch |err| {
@@ -946,8 +948,8 @@ fn slotOfTransfer(slots: []ExecutionSlot, transfer: *provider.Transfer) ?*Execut
 const HeapRelease = struct {
     worked: bool = false,
 
-    fn due(self: *HeapRelease, slots: []const ExecutionSlot) bool {
-        if (!self.worked or countFreeSlots(slots) != slots.len) return false;
+    fn due(self: *HeapRelease, slots: []const ExecutionSlot, listing_pending: bool) bool {
+        if (listing_pending or !self.worked or countFreeSlots(slots) != slots.len) return false;
         self.worked = false;
         return true;
     }
@@ -956,19 +958,23 @@ const HeapRelease = struct {
 test "heap release is due once per return to all slots free" {
     var slots = [_]ExecutionSlot{ .free, .free };
     var release: HeapRelease = .{};
-    try std.testing.expect(!release.due(&slots));
+    try std.testing.expect(!release.due(&slots, false));
     release.worked = true;
     slots[0] = .{ .provider = .{ .owner = .{} } };
     for (0..3) |_| {
-        try std.testing.expect(!release.due(&slots));
+        try std.testing.expect(!release.due(&slots, false));
         release.worked = true;
     }
     slots[0] = .free;
-    try std.testing.expect(release.due(&slots));
-    try std.testing.expect(!release.due(&slots));
-    try std.testing.expect(!release.due(&slots));
+    try std.testing.expect(release.due(&slots, false));
+    try std.testing.expect(!release.due(&slots, false));
+    try std.testing.expect(!release.due(&slots, false));
     release.worked = true;
-    try std.testing.expect(release.due(&slots));
+    // Discovery is work even with no execution slot. Do not consume the
+    // busy-to-idle edge while its body, parser or connection is still live.
+    try std.testing.expect(!release.due(&slots, true));
+    try std.testing.expect(release.due(&slots, false));
+    try std.testing.expect(!release.due(&slots, false));
 }
 
 /// The Client's wait already ends at socket readiness and at its own

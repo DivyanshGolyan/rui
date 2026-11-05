@@ -3072,6 +3072,10 @@ A 304 leaves the saved generation untouched.
 Its page-allocated body is capped at 16 MiB and released immediately after the token-walk parser slims it in a scratch arena off the Host stack.
 Transport, status, parse and size failures print one stderr line and keep the saved catalog.
 The Host retains no in-memory fact catalog.
+After each fetch it retires the catalog origin's connection; a connection shared with other streams drains without interrupting them.
+After the queued write's outer commit, it releases refresh-only prepared statements and SQLite's unused pager cache.
+Discovery completion participates in the existing busy-to-idle heap-release edge; it adds no separate allocator trim point.
+The shared integration boundary disables catalog discovery for all descendants by default, including detached Hosts; catalog cases explicitly supply their controlled test URL.
 The Store saves `model_fact(model_id,context_window,efforts,openai_listed,generation)` and one `model_catalog_source(slot=1,etag,generation,fetched_at)` row.
 `openai_listed` only records models.dev's OpenAI-list membership for the D151 merge and D154 list, not provider availability or a core capability.
 The effort mask is format-defined: none=1, low=2, medium=4, high=8, xhigh=16 and max=32; its CHECK permits 0..63.

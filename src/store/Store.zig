@@ -103,6 +103,9 @@ pub const Store = struct {
     batch: enum(u8) { none, ready, first, open, lost } = .none,
     /// Whether the current write's savepoint is open in the batch.
     savepoint: bool = false,
+    /// Release a bulk writer's cache after the queue's outer commit, not
+    /// merely after the writer's savepoint. Fits existing Store padding.
+    release_bulk_memory: bool = false,
     // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) TestingContentWork else void = if (@import("builtin").is_test) .{} else {},
 
@@ -218,7 +221,12 @@ pub const Store = struct {
 
     fn saveModelFactsHeld(self: *Store, entries: []const model_catalog.Entry, etag: ?[]const u8) !void {
         const entry = try enter(self, .none);
-        defer entry.release();
+        defer {
+            // Access has reset its statements and committed or rolled back.
+            // Keep the maintenance hint inside this serialized queue entry.
+            if (self.batch == .none) self.engine.releaseUnusedMemory(model_facts_domain.save_statements) else self.release_bulk_memory = true;
+            entry.release();
+        }
         var access: Access(.write, error{}) = .open(&entry);
         defer access.deinit();
         return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, model_facts_domain.save(&access, entries, etag)));
@@ -1673,6 +1681,10 @@ fn finishBatch(context: *anyopaque) bool {
         self.batch = .none;
         self.identities().taken = .empty;
         self.identities().second = 0;
+        if (self.release_bulk_memory) {
+            self.release_bulk_memory = false;
+            self.engine.releaseUnusedMemory(model_facts_domain.save_statements);
+        }
     }
     commitBatch(self) catch return false;
     return true;

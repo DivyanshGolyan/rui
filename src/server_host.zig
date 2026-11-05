@@ -38,10 +38,12 @@ pub const Limits = struct {
 };
 
 /// Test hooks: injected failures, holds and observation, set only by the
-/// hidden `host serve` test options and empty in production. Work consults
+/// hidden `host serve` options and fixture catalog environment, and empty
+/// in production. Work consults
 /// them at named points, and the owner views below say which failures reach
 /// which owner, so no work site copies them field by field.
 pub const Hooks = struct {
+    /// Null uses production discovery; an empty fixture URL disables it.
     models_dev_url: ?[]const u8 = null,
     failures: std.EnumSet(Failure) = .empty,
     bash_lifecycle: bash.LifecycleFault = .none,

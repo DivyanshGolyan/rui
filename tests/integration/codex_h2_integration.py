@@ -322,10 +322,24 @@ def catalog_unusable_trust_run():
     host = None
     complete = False
     try:
+        # The shared boundary disables discovery for every descendant, not
+        # just start_ready_process callers. Bad HTTPS trust must be irrelevant
+        # to an ordinary HTTP fixture unless the catalog case opts in below.
+        host, ready = start_ready_process([
+            "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-offline", log,
+            *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
+        ], env={**os.environ, "SSL_CERT_FILE": str(root / "missing-ca.pem")})
+        for _ in range(3):
+            listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
+            assert listed and listed[0]["provider"] == "codex", listed
+        fixture.stop_host(host)
+        host = None
+        assert log.read_bytes() == b"", log.read_bytes()
         # Retain all stderr, including a diagnostic emitted before readiness.
         host, ready = start_ready_process([
             "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-trust", log,
             *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
+            "--test-models-dev-url", "https://127.0.0.1:1/api.json",
         ], env={**os.environ, "SSL_CERT_FILE": str(root / "missing-ca.pem")},
             required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
         diagnostic = b"rui: models.dev catalog unavailable (InvalidSslCertFile); the saved catalog stands\n"

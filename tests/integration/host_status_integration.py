@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Native client/Host observation without a CLI status command or SQLite access."""
 
-import contextlib
 import fcntl
 import hashlib
 import http.server
@@ -95,21 +94,12 @@ def prove_fragmented_request():
     assert read_request(FragmentedRequest()) == b'{"x":17}'
 
 
-def start(store, capacity, *options, catalog):
-    catalog.received.clear()
-    process, fields = start_ready_process(
-        [RUI, "host", "serve", "--store", store, "--active-capacity", str(capacity), *options,
-         "--test-models-dev-url", f"http://127.0.0.1:{catalog.server_port}/api.json"],
+def start(store, capacity, *options):
+    return start_ready_process(
+        [RUI, "host", "serve", "--store", store, "--active-capacity", str(capacity), *options],
         required_fields={"active_capacity": str(capacity)},
         observations="status" if "--test-phase-trace" in options else None,
     )
-    try:
-        assert catalog.received.wait(timeout=5), "Host did not start the independent catalog fetch"
-        return process, fields
-    except BaseException:
-        stop_process(process)
-        raise
-
 
 def socket_path(store):
     digest = hashlib.sha256(str(store.resolve()).encode()).hexdigest()[:32]
@@ -207,9 +197,9 @@ def discovery_released(diagnostics, began_ns):
     assert not started["trace_lost"] or released["trace_lost"], (started, released)
 
 
-def protected_saturation(root, catalog):
+def protected_saturation(root):
     store = root / "saturated"
-    host, _ = start(store, 1, "--test-phase-trace", catalog=catalog)
+    host, _ = start(store, 1, "--test-phase-trace")
     diagnostics = HostDiagnostics(host)
     held = []
     try:
@@ -293,9 +283,9 @@ def protected_saturation(root, catalog):
         stop_process(host)
 
 
-def hostile_discovery(root, catalog):
+def hostile_discovery(root):
     store = root / "hostile"
-    host, _ = start(store, 1, "--test-phase-trace", "--fault", "content-acquire", catalog=catalog)
+    host, _ = start(store, 1, "--test-phase-trace", "--fault", "content-acquire")
     diagnostics = HostDiagnostics(host)
     try:
         diagnostics.wait("lifecycle_boundary")
@@ -335,9 +325,9 @@ def hostile_discovery(root, catalog):
         stop_process(host)
 
 
-def discovery_body_deadline(root, catalog):
+def discovery_body_deadline(root):
     store = root / "deadline"
-    host, _ = start(store, 1, "--test-phase-trace", catalog=catalog)
+    host, _ = start(store, 1, "--test-phase-trace")
     diagnostics = HostDiagnostics(host)
     response = bytearray()
     try:
@@ -383,43 +373,13 @@ def discovery_body_deadline(root, catalog):
         stop_process(host)
 
 
-@contextlib.contextmanager
-def held_catalog():
-    # Status must not leak descriptors, but a public discovery peer can close
-    # or reconnect independently. Hold a controlled fetch across the exact FD
-    # comparison instead of weakening that oracle to compare only counts.
-    class Endpoint(HeldReplies, TestHTTPServer):
-        daemon_threads = True
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):
-            assert self.path == "/api.json", self.path
-            self.server.received.set()
-            self.server.closing.wait()
-
-        def log_message(self, *args):
-            pass
-
-    endpoint = Endpoint(("127.0.0.1", 0), Handler)
-    endpoint.received = threading.Event()
-    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield endpoint
-    finally:
-        def retire():
-            thread.join(timeout=5)
-            assert not thread.is_alive(), "catalog endpoint thread did not retire"
-        dispose_all(endpoint.shutdown, endpoint.server_close, retire)
-
-
 def main():
     prove_fragmented_request()
-    with tempfile.TemporaryDirectory(prefix="rui-host-info-") as root, held_catalog() as catalog:
+    with tempfile.TemporaryDirectory(prefix="rui-host-info-") as root:
         root = canonical_fixture_root(root)
-        protected_saturation(root, catalog)
-        hostile_discovery(root, catalog)
-        discovery_body_deadline(root, catalog)
+        protected_saturation(root)
+        hostile_discovery(root)
+        discovery_body_deadline(root)
         store = pathlib.Path(root) / "store"
         home = pathlib.Path(root) / "home"
         home.mkdir(mode=0o700)
@@ -623,7 +583,7 @@ def main():
         old = os.environ.get("RUI_CODEX_CREDENTIAL_FILE")
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(credential)
         try:
-            first, fields = start(store, 3, "--provider", "codex", "--test-phase-trace", catalog=catalog)
+            first, fields = start(store, 3, "--provider", "codex", "--test-phase-trace")
             assert fields["execution"] == "enabled"
             diagnostics = HostDiagnostics(first)
             if os_semantics.PROC_FS:
@@ -706,7 +666,7 @@ def main():
                     else:
                         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = old
         assert status(store) == "unavailable"
-        second, _ = start(store, 7, "--test-phase-trace", catalog=catalog)
+        second, _ = start(store, 7, "--test-phase-trace")
         diagnostics = HostDiagnostics(second)
         expected_routes = []
         completed = False
