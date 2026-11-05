@@ -399,7 +399,10 @@ pub fn readRaw(self: *Mysql, id: u64, offset: u64, destination: []u8) Failure!vo
     };
 }
 pub fn openSink(self: *Mysql, id: u64, length: u64) Failure!ContentSink {
-    return content.openSink(self, id, length, self.contentObserver());
+    return content.openSink(self, id, length, self.contentObserver()) catch |err| {
+        if (err == error.StoreConnectionLost) self.state.failure = err;
+        return err;
+    };
 }
 pub fn writePayload(self: *Mysql, id: u64, bytes: []const u8) Failure!void {
     try self.check();
