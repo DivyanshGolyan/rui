@@ -3138,7 +3138,7 @@ test "failed admission releases its reservation and fences the Store and dispatc
             try command.configuration.provider.value.set("codex");
             command.configuration.model.state = .value;
             try command.configuration.model.value.set("model-a");
-            command.configuration.tools = try .of(&.{});
+            command.configuration.tools = try .of(&.{ "bash", "web_search" });
             command.configuration.permission_mode.state = .value;
             try command.configuration.permission_mode.value.set("bypass");
             command.configuration.compaction_trigger.state = .value;
@@ -3365,6 +3365,12 @@ test "preparing slots belong to their live preparations" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
+    command.configuration.tools = try .of(&.{ "bash", "web_search" });
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("bypass");
+    command.configuration.compaction_trigger.state = .value;
+    try command.configuration.compaction_trigger.value.set("115200");
+    command.configuration.reasoning_effort.state = .explicit_null;
     const configured = storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
@@ -3686,6 +3692,12 @@ test "an encode failure settles unanswered and releases request scratch" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
+    command.configuration.tools = try .of(&.{ "bash", "web_search" });
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("bypass");
+    command.configuration.compaction_trigger.state = .value;
+    try command.configuration.compaction_trigger.value.set("115200");
+    command.configuration.reasoning_effort.state = .explicit_null;
     const configured = storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });

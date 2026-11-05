@@ -1574,6 +1574,12 @@ test "real preparation consumes the configured allowance across multiple advance
     try configuration.configuration.provider.value.set("codex");
     configuration.configuration.model.state = .value;
     try configuration.configuration.model.value.set("model-a");
+    configuration.configuration.tools = try .of(&.{ "bash", "web_search" });
+    configuration.configuration.permission_mode.state = .value;
+    try configuration.configuration.permission_mode.value.set("bypass");
+    configuration.configuration.compaction_trigger.state = .value;
+    try configuration.configuration.compaction_trigger.value.set("115200");
+    configuration.configuration.reasoning_effort.state = .explicit_null;
     const configured = storage.configure(&configuration, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session;
@@ -1711,6 +1717,12 @@ const PreparationTestSetup = struct {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         const configured = self.storage.configure(&command, .{});
         try std.testing.expect(configured == .accepted);
         try std.testing.expect(protocol.validSessionId(configured.accepted.session.slice()));
@@ -2382,6 +2394,12 @@ test "request preparation escapes instructions and user content" {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         command.configuration.instructions = .{
             .state = .value,
             .file = file,
@@ -2437,6 +2455,12 @@ test "request preparation escapes instructions and user content" {
         try command.configuration.provider.value.set("codex");
         command.configuration.model.state = .value;
         try command.configuration.model.value.set("model-a");
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
         command.configuration.instructions = .{
             .state = .value,
             .file = file,

@@ -499,7 +499,7 @@ test "the page shows the approved rows, `›` on the selected one, then the work
     try std.testing.expectEqualStrings(
         " Status · fix-safari-export · k7m2qx\n" ++
             " This Session\n" ++
-            " › Effort          high" ++ grey ++ "model default" ++ end ++
+            " › Effort          high" ++ grey ++ "Session override" ++ end ++
             "   Permissions     bypass · Bash runs without asking\n" ++
             "   Tools           bash, web search\n" ++
             "   Name            fix-safari-export\n" ++
