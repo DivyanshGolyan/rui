@@ -19,7 +19,7 @@ async function connect(): Promise<Rui> {
 	});
 }
 
-const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
+const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: null, compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
 
 test("create, list, send, update, interrupt and stop a Session", { skip }, async () => {
 	const rui = await connect();

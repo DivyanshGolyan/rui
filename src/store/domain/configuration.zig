@@ -50,10 +50,9 @@ pub fn toolSet(mask: c_int) !tool_catalog.ToolSet {
     return set;
 }
 
-/// The tool names a creation or a `tools` change saves: the requested
-/// ones, or the defaults when a creation names none.
+/// D104: the spec alone selects tools; an empty list selects none.
 fn requestedNames(requested: *const protocol.Configuration) *const protocol.ToolsField {
-    return if (requested.tools.state == .value) &requested.tools else &default_tools;
+    return &requested.tools;
 }
 
 /// The built-in tools a creation or a `tools` change saves, or null when
@@ -65,20 +64,24 @@ pub fn requestedTools(requested: *const protocol.Configuration) ?tool_catalog.To
     return set;
 }
 
-/// The tools a created Session gets when configuration omits them.
-pub const default_tools: protocol.ToolsField = blk: {
-    var names: []const []const u8 = &.{};
-    var each = std.mem.splitScalar(u8, product_defaults.tools, ',');
-    while (each.next()) |name| {
-        const index = tool_catalog.built_in.find(name) orelse @compileError("default tool " ++ name ++ " is no built-in");
-        // A creation that names no tools gets these on any provider.
-        if (tool_catalog.built_in.records[index].owner == .provider) for (std.enums.values(protocol.Provider)) |provider| {
-            if (!provider.runsTool(name)) @compileError(@tagName(provider) ++ " does not run default tool " ++ name);
-        };
-        names = names ++ .{name};
+fn requestsBash(requested: *const protocol.Configuration) bool {
+    var names = requested.tools.iterator();
+    while (names.next()) |name| if (std.mem.eql(u8, name, "bash")) return true;
+    return false;
+}
+
+/// D133: an omitted provider selects the Host's single served provider.
+/// A multi-provider or idle Host retains its product binding preference.
+fn defaultProvider(routes: protocol.Routes) protocol.Provider {
+    var selected: ?protocol.Provider = null;
+    inline for (std.enums.values(protocol.Provider)) |provider| {
+        if (protocol.routeOf(routes, provider) != .unserved) {
+            if (selected != null) return std.meta.stringToEnum(protocol.Provider, product_defaults.provider).?;
+            selected = provider;
+        }
     }
-    break :blk protocol.ToolsField.of(names) catch unreachable;
-};
+    return selected orelse std.meta.stringToEnum(protocol.Provider, product_defaults.provider).?;
+}
 
 /// Why `tools` cannot be saved for a Session of `provider`: a name the
 /// Host's catalog lacks, or a tool some provider runs that `provider`
@@ -112,27 +115,20 @@ pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
     if (!protocol.validLabel(label)) return error.CorruptStore;
 }
 
-/// The default tools as a mask, for readers that still take one.
-pub const default_tools_mask: u8 = blk: {
-    var mask: u8 = 0;
-    var names = default_tools.iterator();
-    while (names.next()) |name| mask |= tool_catalog.toolBit(tool_catalog.builtIn(name).?);
-    break :blk mask;
-};
-
 /// A Session's saved configuration. Its fields name, in order, the columns
 /// `saved_session` reads, so a read decodes into it in place.
 pub const CurrentConfiguration = struct {
     workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
     provider: protocol.Provider = undefined,
+    codec: protocol.Codec = .@"openai-responses/2",
     model: protocol.Bounded(protocol.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
     /// Read only: the tools of the set `tool_set_id` names, as a mask,
     /// until the wire names tools by name.
-    tools_mask: u8 = default_tools_mask,
+    tools_mask: u8 = 0,
     /// The saved tool set; 0 until a creation saves its first.
     tool_set_id: u64 = 0,
-    permission_mode: u8 = permissionModeCode(product_defaults.permission_mode),
+    permission_mode: u8 = 0,
     output_schema_id: ?i64 = null,
     revision: u64 = 0,
     next_position: u64 = 1,
@@ -192,9 +188,15 @@ fn configurationTokens(field: @TypeOf(@as(protocol.Configuration, .{}).compactio
     if (field.state == .omitted) return previous;
     if (field.state == .explicit_null) return null;
     if (field.state != .value) return error.InvalidTokenHeuristic;
-    const value = std.fmt.parseInt(u64, field.value.slice(), 10) catch return error.InvalidTokenHeuristic;
-    if ((!allow_zero and value == 0) or value > std.math.maxInt(i64)) return error.InvalidTokenHeuristic;
-    for (field.value.slice()) |byte| if (byte < '0' or byte > '9') return error.InvalidTokenHeuristic;
+    const value = try tokenCount(field.value.slice(), allow_zero);
+    if (value > std.math.maxInt(i64)) return error.InvalidTokenHeuristic;
+    return value;
+}
+
+fn tokenCount(text: []const u8, allow_zero: bool) !u64 {
+    const value = std.fmt.parseInt(u64, text, 10) catch return error.InvalidTokenHeuristic;
+    if (!allow_zero and value == 0) return error.InvalidTokenHeuristic;
+    for (text) |byte| if (byte < '0' or byte > '9') return error.InvalidTokenHeuristic;
     return value;
 }
 
@@ -202,15 +204,24 @@ pub fn configurationBeforeWorkspace(
     catalog: *const tool_catalog.Catalog,
     current: ?*const CurrentConfiguration,
     requested: *const protocol.Configuration,
+    default_provider: protocol.Provider,
 ) ?protocol.ConfigurationRejection {
-    _ = configurationTokens(requested.compaction_trigger, null, false) catch return .invalid_compaction_trigger;
+    if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
+    const compact_at = if (requested.compaction_trigger.state == .value)
+        tokenCount(requested.compaction_trigger.value.slice(), false) catch return .invalid_compaction_trigger
+    else
+        null;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
     const provider = if (requested.provider.state == .value)
         std.meta.stringToEnum(protocol.Provider, requested.provider.value.slice()) orelse return .unsupported_provider
     else
         null;
+    // D104/D111/D113: callers of the domain must supply the same complete
+    // creation spec that the wire parser requires.
     if (current == null and
-        (requested.workspace.state != .value or provider == null or requested.model.state != .value))
+        (requested.model.state != .value or requested.reasoning_effort.state == .omitted or
+            requested.compaction_trigger.state != .value or requested.tools.state != .value or
+            requested.permission_mode.state != .value or (requestsBash(requested) and requested.workspace.state != .value)))
     {
         return .incomplete_initial_configuration;
     }
@@ -225,9 +236,19 @@ pub fn configurationBeforeWorkspace(
         }
     }
     if (requested.label.state == .value and !protocol.validLabel(requested.label.value.slice())) return .invalid_label;
-    if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse current.?.provider, &requested.tools)) |rejection| return rejection;
+    if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider), &requested.tools)) |rejection| return rejection;
+    const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
+    // D166: an unlisted model has no known window to enforce.
+    if (compact_at) |tokens| if (model_capability.find(model)) |known| {
+        if (tokens > known.context_window) return .compact_at_too_large;
+    };
+    if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
+    // D111/D165: v2 cannot encode a boundary back to unspecified effort.
+    // Refuse before saving an unusable revision rather than inferring effort.
+    if (requested.reasoning_effort.state == .explicit_null) if (current) |existing| {
+        if (existing.codec == .@"openai-responses/2" and existing.reasoning_effort != null) return .unsupported_reasoning_effort;
+    };
     if (requested.reasoning_effort.state == .value) {
-        const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
         const effort = std.meta.stringToEnum(protocol.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
             return .unsupported_reasoning_effort;
         if (!model_capability.supportsReasoningEffort(model, effort)) return .unsupported_reasoning_effort;
@@ -235,10 +256,9 @@ pub fn configurationBeforeWorkspace(
     return null;
 }
 
-/// The effort a new Operation freezes: the Session override, otherwise the
-/// exact binding's catalog default, otherwise none.
+/// D111: Operations freeze the spec's effort, never a catalog default.
 pub fn effectiveReasoningEffort(current: anytype) ?protocol.ReasoningEffort {
-    return current.reasoning_effort orelse model_capability.defaultReasoningEffort(current.model.slice());
+    return current.reasoning_effort;
 }
 
 /// `next` holds the current configuration's values, or the defaults when
@@ -446,7 +466,7 @@ pub const ConfigurationReads = struct {
 /// A Session's saved configuration, decoded into a CurrentConfiguration in
 /// place; `checkSaved` holds it to its types.
 const saved_session = rsql.Read(.{
-    .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,permission_mode," ++
+    .sql = "SELECT workspace,provider,codec,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
         "reasoning_effort,label,created_at,workspace_key FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
@@ -642,10 +662,12 @@ pub fn applyConfiguration(
     if (configuration.model.state == .value and configuration.model.value.len == 0) {
         return .{ .rejected = .invalid_model };
     }
-    if (configuration.output_schema.state == .value and
-        !try model_settlement_domain.validateJsonFile(io, configuration.output_schema.file orelse return error.MissingContentCustody))
-    {
-        return .{ .rejected = .invalid_output_schema };
+    if (configuration.output_schema.state == .value) {
+        const valid = if (configuration.output_schema.borrowed_bytes) |bytes|
+            try model_settlement_domain.validateJsonBytes(bytes)
+        else
+            try model_settlement_domain.validateJsonFile(io, configuration.output_schema.file orelse return error.MissingContentCustody);
+        if (!valid) return .{ .rejected = .invalid_output_schema };
     }
 
     if (reads.pair) |*rows| content_domain.foundPair(rows, reads.instructionsValue(configuration), &reads.output_schema);
@@ -655,13 +677,22 @@ pub fn applyConfiguration(
     }
     if (reads.found.get()) try checkSaved(next);
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
-    if (configurationBeforeWorkspace(a.store.catalog().catalog, current_configuration, configuration)) |rejection| {
+    if (configurationBeforeWorkspace(a.store.catalog().catalog, current_configuration, configuration, defaultProvider(a.store.served))) |rejection| {
         return .{ .rejected = rejection };
     }
 
+    if (creating) next.provider = defaultProvider(a.store.served);
     // An existing Session's Workspace is only compared, in sameWorkspace's
     // own frame; a created one's was canonicalized into `next`.
-    const workspace_matches: ?bool = if (configuration.workspace.state == .value) matches: {
+    const workspace_matches: ?bool = if (creating and configuration.workspace.state != .value) unused: {
+        // D133: only a spec with Bash needs a directory, and the parser and
+        // configurationBeforeWorkspace refused one without it. The Workspace
+        // column stays nonempty, so a spec without one saves the root.
+        std.debug.assert(!requestsBash(configuration));
+        next.workspace.set("/") catch unreachable;
+        reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
+        break :unused null;
+    } else if (configuration.workspace.state == .value) matches: {
         if (reads.found.get()) {
             break :matches sameWorkspace(io, configuration.workspace.value.slice(), next.workspace.slice()) catch {
                 return .{ .rejected = .invalid_workspace };
@@ -779,7 +810,7 @@ pub fn servesProviderOf(served: anytype, configuration: ?*const protocol.Configu
     const provider = if (configuration != null and configuration.?.provider.state == .value)
         std.meta.stringToEnum(protocol.Provider, configuration.?.provider.value.slice()) orelse return true
     else
-        saved orelse return true;
+        saved orelse (if (configuration != null) defaultProvider(served) else return true);
     return protocol.routeOf(served, provider) != .unserved;
 }
 

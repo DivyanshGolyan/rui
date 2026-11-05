@@ -360,6 +360,15 @@ pub fn completeConfiguration(key: []const u8, session_ref: []const u8, workspace
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set(model);
+    if (session_ref.len == 0) {
+        // D104/D111/D113: test creations supply a complete agent spec.
+        command.configuration.tools = try .of(&.{ "bash", "web_search" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        command.configuration.compaction_trigger.state = .value;
+        try command.configuration.compaction_trigger.value.set("115200");
+        command.configuration.reasoning_effort.state = .explicit_null;
+    }
     return command;
 }
 

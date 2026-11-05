@@ -1772,6 +1772,21 @@ noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetad
 
 /// noinline: its read buffer serves the rare schema check, not every
 /// configure frame.
+/// D113: bounded start_agent schema bytes are validated without file capture.
+pub fn validateJsonBytes(bytes: []const u8) !bool {
+    var scanner = std.json.Scanner.initCompleteInput(std.heap.c_allocator, bytes);
+    defer scanner.deinit();
+    try scanner.ensureTotalStackCapacity(protocol.max_json_depth);
+    while (true) {
+        const token = scanner.next() catch |err| switch (err) {
+            error.SyntaxError, error.UnexpectedEndOfInput => return false,
+            else => return err,
+        };
+        if (scanner.stackHeight() > protocol.max_json_depth) return false;
+        if (token == .end_of_document) return true;
+    }
+}
+
 pub noinline fn validateJsonFile(io: std.Io, file: std.Io.File) !bool {
     var read_buffer: [protocol.content_window_bytes]u8 = undefined;
     var file_reader = file.reader(io, &read_buffer);

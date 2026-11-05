@@ -1208,7 +1208,7 @@ test "a Bash call the Operation did not offer is rejected and keeps its descript
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
     var command = try completeConfiguration("unoffered-config", "", workspace, "model-a");
     command.configuration.tools.state = .value;
-    command.configuration.tools.count = 0;
+    command.configuration.tools = try .of(&.{});
     const reply = storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     const session = reply.accepted.session;
@@ -4922,7 +4922,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expectEqual(protocol.Provider.codex, settings.provider);
     try std.testing.expectEqualStrings("model-a", settings.model.slice());
     // The frozen tools come back as the Store saved them, in set order.
-    const offered = tool_catalog.Offered.ofMask(configuration_domain.default_tools_mask);
+    const offered = tool_catalog.Offered.ofMask(tool_catalog.toolBit(.bash) | tool_catalog.toolBit(.web_search));
     try std.testing.expectEqual(@as(u64, offered.len), settings.tool_count);
     var tool: historical_domain.HistoricalTool = .{};
     for (offered.slice()) |expected| {
@@ -6702,11 +6702,16 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     try submitTestMessage(&storage, &tmp, "effort-one", "effort-one", session.slice(), "first");
     const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
 
-    // Clearing the override selects the catalog default for later work only.
-    try std.testing.expect(try configureTestEffort(&storage, "effort-clear", session.slice(), .explicit_null, "") == .accepted);
+    // D111/D165: the pinned codec cannot return to unspecified effort.
+    const clear = try configureTestEffort(&storage, "effort-clear", session.slice(), .explicit_null, "");
+    try std.testing.expect(clear == .rejected);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, clear.rejected.code);
+    try std.testing.expectEqual(observed.revision, (try storage.inspectSessionForTesting(session.slice())).revision);
+    // A client resolves its default to a concrete value before sending it.
+    try std.testing.expect(try configureTestEffort(&storage, "effort-client-default", session.slice(), .value, "medium") == .accepted);
     observed = try storage.inspectSessionForTesting(session.slice());
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), observed.reasoning_effort);
-    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort_override);
+    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .medium), observed.reasoning_effort_override);
 
     // A replacement Attempt keeps its Operation's frozen effort.
     try storage.settleModelAttemptFailure(first, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 1, 1, 1 } } }, .{});
@@ -6736,7 +6741,7 @@ test "reasoning effort overrides are model-checked and frozen on each admitted O
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort_override);
     var revisions: [8]?protocol.ReasoningEffort = undefined;
     const revision_count = try testingRevisionEfforts(&storage, session.slice(), &revisions);
-    try std.testing.expectEqualSlices(?protocol.ReasoningEffort, &.{ .high, null, .low, .low }, revisions[0..revision_count]);
+    try std.testing.expectEqualSlices(?protocol.ReasoningEffort, &.{ .high, .medium, .low, .low }, revisions[0..revision_count]);
 
     // A binding without a catalog default has no effective effort and
     // rejects every explicit value.
@@ -9039,7 +9044,7 @@ test "a Session with message_agent keeps it through its list row and report, as 
     try std.testing.expectEqual(@as(usize, 1), sink.core_calls);
 }
 
-test "a start_agent call creates its agent where its caller works, with the task from the caller, and may only narrow" {
+test "a start_agent call honors its spec with the caller task and may only narrow tools and permissions" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -9082,9 +9087,9 @@ test "a start_agent call creates its agent where its caller works, with the task
     try std.testing.expectEqual(command_domain.AgentStart.failed, try storage.startAgent(bypass.binding, caller.slice(), "run freely", true, &spec, null, .{}));
     try std.testing.expect(try storage.nextCoreWork() == null);
 
-    // Two agents, both in the caller's Workspace with its provider; only
-    // the attached one is its child.
-    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref<>?1 AND workspace=?2 AND provider=(SELECT provider FROM session WHERE session_ref=?1)", .{ caller.slice(), workspace }));
+    // D133: these specs omit an unused Workspace and use the Host provider;
+    // only the attached agent is the caller's child.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref<>?1 AND workspace='/' AND provider='codex'", .{caller.slice()}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{caller.slice()}));
     // Each task is its agent's first Message, from the caller, under the
     // call's own command key.

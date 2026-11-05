@@ -3785,6 +3785,9 @@ fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []co
     command.configuration.tools = try .of(&.{"bash"});
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
+    command.configuration.reasoning_effort.state = .explicit_null;
+    command.configuration.compaction_trigger.state = .value;
+    try command.configuration.compaction_trigger.value.set("115200");
     const reply = setup.storage.configure(&command, .{});
     try std.testing.expect(reply == .accepted);
     return reply.accepted.session;

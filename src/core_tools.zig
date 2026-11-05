@@ -22,26 +22,31 @@ pub const start_agent_max_argument_bytes = 6 * message_agent_max_text_bytes + 16
 
 // Prompt text: written here, and given no tests (D141).
 pub const start_agent_description = "Start another Rui agent on a task. It creates the agent's Session, gives it the task as its first Message and returns the agent's ID at once, before any answer. " ++
-    "An attached agent is your child: it works in your Workspace with your provider and Bash environment, and stops when you are stopped or run out of context. A standalone agent has its own lifetime. " ++
+    "An attached agent is your child: it inherits your Bash environment, and stops when you are stopped or run out of context. A standalone agent has its own lifetime. " ++
     "The spec may only narrow your own tools and permission mode.";
 pub const start_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     std.fmt.comptimePrint("\"task\":{{\"type\":\"string\",\"description\":\"The agent's first Message: nonempty UTF-8, at most {d} bytes.\"}},", .{message_agent_max_text_bytes}) ++
     "\"attached\":{\"type\":\"boolean\",\"description\":\"true starts your child, which stops with you; false starts a standalone agent.\"}," ++
     "\"spec\":{\"type\":\"object\",\"properties\":{" ++
+    "\"provider\":{\"type\":\"string\"}," ++
+    "\"workspace\":{\"type\":\"string\",\"description\":\"Required when Bash is enabled.\"}," ++
     "\"model\":{\"type\":\"string\"}," ++
-    "\"effort\":{\"type\":\"string\",\"enum\":[\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}," ++
+    "\"effort\":{\"type\":[\"string\",\"null\"],\"enum\":[null,\"none\",\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}," ++
     "\"compactAt\":{\"type\":\"integer\",\"description\":\"Tokens of context at which the agent compacts.\"}," ++
     "\"tools\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Tool names, each one of yours.\"}," ++
     "\"permissionMode\":{\"type\":\"string\",\"enum\":[\"ask\",\"bypass\"]}," ++
+    "\"instructions\":{\"type\":\"string\",\"description\":\"Optional agent instructions.\"}," ++
+    "\"outputSchema\":{\"type\":[\"object\",\"null\"],\"description\":\"Optional JSON output schema.\"}," ++
     "\"label\":{\"type\":[\"string\",\"null\"],\"description\":\"A few words naming the agent's task.\"}" ++
-    "},\"required\":[\"model\",\"effort\",\"compactAt\",\"tools\",\"permissionMode\",\"label\"],\"additionalProperties\":false}" ++
+    "},\"required\":[\"model\",\"effort\",\"compactAt\",\"tools\",\"permissionMode\"],\"additionalProperties\":false}" ++
     "},\"required\":[\"task\",\"attached\",\"spec\"],\"additionalProperties\":false}";
 
 /// A `start_agent` call's checked arguments: the task, whether the agent
-/// is attached, and its spec as a creating Configuration without the
-/// Workspace and provider, which come from the calling Session (D122).
+/// is attached, and its spec as a creating Configuration.
 pub const StartAgent = struct {
     task: []const u8,
+    instructions: ?[]const u8 = null,
+    output_schema: ?[]const u8 = null,
     attached: bool,
     configuration: protocol.Configuration,
 };
@@ -59,6 +64,19 @@ pub const StartAgentCheck = union(enum) {
 /// written in place and never held in a frame.
 pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartAgent) error{OutOfMemory}!StartAgentCheck {
     if (bytes.len > start_agent_max_argument_bytes) return refused(std.fmt.comptimePrint("the arguments take more than {d} bytes", .{start_agent_max_argument_bytes}));
+    // Bound nesting before the DOM and recursive outputSchema serialization.
+    var scanner = std.json.Scanner.initCompleteInput(arena, bytes);
+    defer scanner.deinit();
+    try scanner.ensureTotalStackCapacity(protocol.max_json_depth);
+    while (true) {
+        const token = scanner.next() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return refused("the arguments are not one well-formed JSON object"),
+        };
+        if (scanner.stackHeight() > protocol.max_json_depth)
+            return refused("the arguments exceed the maximum JSON nesting depth");
+        if (token == .end_of_document) break;
+    }
     const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.DuplicateField => return refused("a field appears more than once"),
@@ -83,32 +101,45 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartA
         .object => |object| object,
         else => return refused("spec must be an object"),
     };
-    // An agent works where its parent does, with its provider (D140).
-    if (spec.get("workspace") != null) return refused("spec.workspace: an agent always works in your Workspace");
-    if (spec.get("provider") != null) return refused("spec.provider: an agent always uses your provider");
-    if (unknownField(spec, &.{ "model", "effort", "compactAt", "tools", "permissionMode", "label" })) |name|
+    // D113/D133: provider defaults at the Host; workspace is required for Bash.
+    if (unknownField(spec, &.{ "model", "effort", "compactAt", "tools", "permissionMode", "label", "instructions", "outputSchema", "provider", "workspace" })) |name|
         return refusedField(arena, name, "is not a spec field");
     out.configuration = .{};
     const configuration = &out.configuration;
+    if (spec.contains("provider")) configuration.provider = stringField(spec, "provider", @TypeOf(configuration.provider)) orelse
+        return refused("spec.provider must be a provider name");
+    if (spec.contains("workspace")) configuration.workspace = stringField(spec, "workspace", @TypeOf(configuration.workspace)) orelse
+        return refused("spec.workspace must be a Workspace path");
     configuration.model = stringField(spec, "model", @TypeOf(configuration.model)) orelse return refused("spec.model must be a model name");
-    configuration.reasoning_effort = stringField(spec, "effort", @TypeOf(configuration.reasoning_effort)) orelse
-        return refused("spec.effort must be none, low, medium, high, xhigh or max");
-    if (std.meta.stringToEnum(protocol.ReasoningEffort, configuration.reasoning_effort.value.slice()) == null)
-        return refused("spec.effort must be none, low, medium, high, xhigh or max");
-    switch (spec.get("compactAt") orelse return refused("spec.compactAt is required")) {
-        .integer => |tokens| {
-            if (tokens <= 0) return refused("spec.compactAt must be a positive number of tokens");
-            configuration.compaction_trigger.state = .value;
-            configuration.compaction_trigger.value.set(std.fmt.allocPrint(arena, "{d}", .{tokens}) catch return error.OutOfMemory) catch unreachable;
+    switch (spec.get("effort") orelse return refused("spec.effort is required")) {
+        .null => configuration.reasoning_effort.state = .explicit_null,
+        .string => {
+            configuration.reasoning_effort = stringField(spec, "effort", @TypeOf(configuration.reasoning_effort)) orelse
+                return refused("spec.effort must be null, none, low, medium, high, xhigh or max");
+            if (std.meta.stringToEnum(protocol.ReasoningEffort, configuration.reasoning_effort.value.slice()) == null)
+                return refused("spec.effort must be null, none, low, medium, high, xhigh or max");
         },
-        else => return refused("spec.compactAt must be a positive number of tokens"),
+        else => return refused("spec.effort must be null, none, low, medium, high, xhigh or max"),
     }
+    const tokens: u64 = switch (spec.get("compactAt") orelse return refused("spec.compactAt is required")) {
+        .integer => |value| if (value > 0) @intCast(value) else return refused("spec.compactAt must be a positive number of tokens"),
+        .number_string => |value| std.fmt.parseInt(u64, value, 10) catch return refused("spec.compactAt must be a positive number of tokens"),
+        else => return refused("spec.compactAt must be a positive number of tokens"),
+    };
+    if (tokens == 0) return refused("spec.compactAt must be a positive number of tokens");
+    configuration.compaction_trigger.state = .value;
+    configuration.compaction_trigger.value.set(std.fmt.allocPrint(arena, "{d}", .{tokens}) catch return error.OutOfMemory) catch unreachable;
     var unknown: []const u8 = "";
     configuration.tools = toolsField(arena, spec.get("tools") orelse return refused("spec.tools is required"), &unknown) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Refused => return refused("spec.tools must be a list of distinct tool names"),
         error.UnknownTool => return refusedField(arena, unknown, "is not a Rui tool (spec.tools)"),
     };
+    var selected_tools = configuration.tools.iterator();
+    while (selected_tools.next()) |name| {
+        if (std.mem.eql(u8, name, "bash") and configuration.workspace.state != .value)
+            return refused("spec.workspace is required when spec.tools includes bash");
+    }
     configuration.permission_mode = stringField(spec, "permissionMode", @TypeOf(configuration.permission_mode)) orelse
         return refused("spec.permissionMode must be ask or bypass");
     if (!configuration.permission_mode.value.eql("ask") and !configuration.permission_mode.value.eql("bypass"))
@@ -121,6 +152,28 @@ pub fn checkStartAgent(arena: std.mem.Allocator, bytes: []const u8, out: *StartA
         },
         else => return refused("spec.label must be a string or null"),
     }
+    out.instructions = switch (spec.get("instructions") orelse .null) {
+        .null => if (spec.contains("instructions")) return refused("spec.instructions must be a string") else null,
+        .string => |text| if (std.unicode.utf8ValidateSlice(text)) text else return refused("spec.instructions must be UTF-8 text"),
+        else => return refused("spec.instructions must be a string"),
+    };
+    out.output_schema = switch (spec.get("outputSchema") orelse .null) {
+        .null => null,
+        .object => |object| std.json.Stringify.valueAlloc(arena, std.json.Value{ .object = object }, .{}) catch return error.OutOfMemory,
+        else => return refused("spec.outputSchema must be a JSON object or null"),
+    };
+    if (out.instructions) |bytes_value| configuration.instructions = .{
+        .state = .value,
+        .borrowed_bytes = bytes_value,
+        .length = bytes_value.len,
+        .digest = protocol.contentDigest(bytes_value),
+    };
+    if (out.output_schema) |bytes_value| configuration.output_schema = .{
+        .state = .value,
+        .borrowed_bytes = bytes_value,
+        .length = bytes_value.len,
+        .digest = protocol.contentDigest(bytes_value),
+    };
     out.task = task;
     out.attached = attached;
     return .accepted;
@@ -434,8 +487,8 @@ test "a message_agent text over its bound is rejected, across chunk boundaries" 
     }
 }
 
-test "a start_agent call's arguments carry a task and a whole spec, never a Workspace or provider" {
-    const spec = "\"spec\":{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[\"start_agent\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}";
+test "a start_agent call's arguments carry a task and a whole spec with an optional provider and Bash Workspace" {
+    const spec = "\"spec\":{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[\"start_agent\",\"bash\"],\"workspace\":\"/\",\"provider\":\"codex\",\"permissionMode\":\"ask\",\"label\":null}";
     const Case = struct { arguments: []const u8, refusal: ?[]const u8 = null };
     for ([_]Case{
         .{ .arguments = "{\"task\":\"read\",\"attached\":true," ++ spec ++ "}" },
@@ -443,12 +496,11 @@ test "a start_agent call's arguments carry a task and a whole spec, never a Work
         .{ .arguments = "{\"attached\":true," ++ spec ++ "}", .refusal = "task is required" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":1," ++ spec ++ "}", .refusal = "attached must be true or false" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true}", .refusal = "spec is required" },
-        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"workspace\":\"/\"}}", .refusal = "spec.workspace: an agent always works in your Workspace" },
-        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"provider\":\"codex\"}}", .refusal = "spec.provider: an agent always uses your provider" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"edit\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "edit is not a Rui tool (spec.tools)" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[\"bash\",\"bash\"],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.tools must be a list of distinct tool names" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":0,\"tools\":[],\"permissionMode\":\"ask\",\"label\":null}}", .refusal = "spec.compactAt must be a positive number of tokens" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":\"low\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"never\",\"label\":null}}", .refusal = "spec.permissionMode must be ask or bypass" },
+        .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"}}", .refusal = "spec.workspace is required when spec.tools includes bash" },
         .{ .arguments = "{\"task\":\"read\",\"attached\":true,\"note\":1," ++ spec ++ "}", .refusal = "note is not a start_agent field" },
         .{ .arguments = "{\"task\":\"read\",\"task\":\"again\",\"attached\":true," ++ spec ++ "}", .refusal = "a field appears more than once" },
         .{ .arguments = "[]", .refusal = "the arguments are not one JSON object" },
@@ -468,7 +520,7 @@ test "a start_agent call's arguments carry a task and a whole spec, never a Work
             try std.testing.expectEqualStrings("100000", start.configuration.compaction_trigger.value.slice());
             // Sorted, as the Store's tool list requires.
             try std.testing.expectEqualStrings("bash start_agent", start.configuration.tools.names.slice());
-            try std.testing.expect(start.configuration.workspace.state != .value and start.configuration.provider.state != .value and start.configuration.label.state != .value);
+            try std.testing.expect(start.configuration.workspace.state == .value and start.configuration.provider.state == .value and start.configuration.label.state != .value);
         }
     }
 }
@@ -492,4 +544,88 @@ test "a start_agent task at its bound is accepted however it is escaped, and one
             for (start.task) |byte| try std.testing.expectEqual(@as(u8, 1), byte);
         } else try std.testing.expectEqualStrings("task must be nonempty UTF-8 text, at most 65536 bytes", check.rejected);
     }
+}
+
+test "core_tools start_agent requires every required spec field and accepts null effort" {
+    const fields = [_][]const u8{ "model", "effort", "compactAt", "tools", "permissionMode" };
+    const values = [_][]const u8{ "\"custom\"", "null", "18446744073709551615", "[]", "\"ask\"" };
+    for (0..fields.len + 1) |omitted| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var json: std.Io.Writer.Allocating = .init(allocator);
+        try json.writer.writeAll("{\"task\":\"read\",\"attached\":true,\"spec\":{");
+        var separator: []const u8 = "";
+        for (fields, values, 0..) |field, value, index| {
+            if (index == omitted) continue;
+            try json.writer.print("{s}\"{s}\":{s}", .{ separator, field, value });
+            separator = ",";
+        }
+        try json.writer.writeAll("}}");
+        const start = try allocator.create(StartAgent);
+        const result = try checkStartAgent(allocator, json.written(), start);
+        if (omitted < fields.len) {
+            try std.testing.expect(result == .rejected);
+            try std.testing.expect(std.mem.indexOf(u8, result.rejected, fields[omitted]) != null);
+        } else {
+            try std.testing.expect(result == .accepted);
+            try std.testing.expectEqual(.explicit_null, start.configuration.reasoning_effort.state);
+            try std.testing.expectEqualStrings("18446744073709551615", start.configuration.compaction_trigger.value.slice());
+        }
+    }
+}
+
+test "core_tools start_agent optional instructions and output schema" {
+    const base = "{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"custom\",\"effort\":null,\"compactAt\":1,\"tools\":[],\"permissionMode\":\"ask\"";
+    const Case = struct { extra: []const u8, refusal: ?[]const u8 = null };
+    for ([_]Case{
+        .{ .extra = ",\"instructions\":\"Be helpful\",\"outputSchema\":{\"type\":\"object\"}" },
+        .{ .extra = ",\"instructions\":\"\",\"outputSchema\":null" },
+        .{ .extra = ",\"instructions\":null", .refusal = "spec.instructions" },
+        .{ .extra = ",\"instructions\":123", .refusal = "spec.instructions" },
+        .{ .extra = ",\"outputSchema\":[]", .refusal = "spec.outputSchema" },
+        .{ .extra = ",\"outputSchema\":\"{}\"", .refusal = "spec.outputSchema" },
+    }) |case| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const start = try allocator.create(StartAgent);
+        const bytes = try std.fmt.allocPrint(allocator, "{s}{s}}}}}", .{ base, case.extra });
+        const result = try checkStartAgent(allocator, bytes, start);
+        if (case.refusal) |field| {
+            try std.testing.expect(result == .rejected);
+            try std.testing.expect(std.mem.indexOf(u8, result.rejected, field) != null);
+        } else {
+            try std.testing.expect(result == .accepted);
+            try std.testing.expect(start.instructions != null);
+            try std.testing.expectEqual(.value, start.configuration.instructions.state);
+            try std.testing.expectEqualStrings(start.instructions.?, start.configuration.instructions.borrowed_bytes.?);
+            try std.testing.expectEqual(start.instructions.?.len, start.configuration.instructions.length);
+            try std.testing.expectEqual(protocol.contentDigest(start.instructions.?), start.configuration.instructions.digest);
+            if (start.output_schema) |schema| {
+                try std.testing.expectEqual(.value, start.configuration.output_schema.state);
+                try std.testing.expectEqualStrings(schema, start.configuration.output_schema.borrowed_bytes.?);
+                try std.testing.expectEqual(protocol.contentDigest(schema), start.configuration.output_schema.digest);
+            } else try std.testing.expectEqual(.omitted, start.configuration.output_schema.state);
+            if (start.instructions.?.len != 0) {
+                try std.testing.expectEqualStrings("Be helpful", start.instructions.?);
+                try std.testing.expectEqualStrings("{\"type\":\"object\"}", start.output_schema.?);
+            } else try std.testing.expect(start.output_schema == null);
+        }
+    }
+}
+
+test "core_tools start_agent bounds nested output schema before serialization" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var json: std.Io.Writer.Allocating = .init(allocator);
+    try json.writer.writeAll("{\"task\":\"read\",\"attached\":true,\"spec\":{\"model\":\"custom\",\"effort\":null,\"compactAt\":1,\"tools\":[],\"permissionMode\":\"ask\",\"outputSchema\":");
+    for (0..protocol.max_json_depth) |_| try json.writer.writeAll("{\"nested\":");
+    try json.writer.writeAll("null");
+    for (0..protocol.max_json_depth) |_| try json.writer.writeAll("}");
+    try json.writer.writeAll("}}");
+    const start = try allocator.create(StartAgent);
+    const result = try checkStartAgent(allocator, json.written(), start);
+    try std.testing.expectEqualStrings("the arguments exceed the maximum JSON nesting depth", result.rejected);
 }

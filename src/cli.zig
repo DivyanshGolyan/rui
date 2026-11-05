@@ -1731,9 +1731,9 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         binding = try snapshot.resolveUnprompted();
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
-        if (!input.reasoning_effort.present) if (model_capability.startEffort(snapshot.defaults.reasoning_effort, binding.model.slice())) |effort| {
-            input.reasoning_effort = .{ .present = true, .value = @tagName(effort) };
-        };
+        if (!input.reasoning_effort.present) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), snapshot.defaults.reasoning_effort);
+        if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), null);
+        if (!input.compaction_trigger.present or input.compaction_trigger.value == null) input.compaction_trigger = .{ .present = true, .value = client.defaultCompactionTrigger(binding.model.slice()) };
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -1751,6 +1751,20 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     errdefer reportFailureStep(step);
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
+    if (input.session == .named and ((input.compaction_trigger.present and input.compaction_trigger.value == null) or (input.reasoning_effort.present and input.reasoning_effort.value == null))) {
+        var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
+        if (input.model.present) {
+            try current_model.set(input.model.value);
+        } else {
+            var discard: std.Io.Writer.Discarding = .init(&.{});
+            const observed = try inspectWorkTo(init, requester, input.store, named.?, &discard.writer);
+            defer observed.file.close(io);
+            try current_model.set(observed.current.settings.model.slice());
+        }
+        if (input.compaction_trigger.present and input.compaction_trigger.value == null) input.compaction_trigger.value = client.defaultCompactionTrigger(current_model.slice());
+        if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(current_model.slice(), null);
+    }
+
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var sender = requester;
@@ -3473,4 +3487,14 @@ fn testPipe() ![2]std.posix.fd_t {
 
 fn closeDescriptor(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
+}
+
+test "cli fresh defaults are explicit for known and unknown models" {
+    const known = client.defaultStartEffort("gpt-6.1-sol", null);
+    try std.testing.expect(known.present);
+    try std.testing.expectEqualStrings(@tagName(model_capability.defaultReasoningEffort("gpt-6.1-sol").?), known.value.?);
+    const unknown = client.defaultStartEffort("unlisted-model", null);
+    try std.testing.expect(unknown.present and unknown.value == null);
+    try std.testing.expectEqualStrings("115200", client.defaultCompactionTrigger("unlisted-model"));
+    try std.testing.expectEqual(model_capability.contextWindow("gpt-6.1-sol") * 90 / 100, try std.fmt.parseInt(u64, client.defaultCompactionTrigger("gpt-6.1-sol"), 10));
 }

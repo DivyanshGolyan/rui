@@ -22,21 +22,23 @@ export interface SessionSpec {
 	/** `openai` or `codex`. Fixed for the Session's life. */
 	provider?: string;
 	/** Fixed for the Session's life. */
-	model?: string;
+	model: string;
 	instructions?: string;
+	/** JSON output schema as JSON text; `null` clears it. */
+	outputSchema?: string | null;
 	/** Tool names the Host offers, such as `bash` and `web_search`. */
-	tools?: string[];
-	permissionMode?: "ask" | "bypass";
-	/** Reasoning effort. `null` returns to the model's default. */
-	effort?: string | null;
-	/** Compact the conversation at this many tokens. `null` returns to the default. */
-	compactAt?: number | null;
+	tools: readonly string[];
+	permissionMode: "ask" | "bypass";
+	/** Reasoning effort. `null` sends none, so the provider uses its own (D111). */
+	effort: string | null;
+	/** Compact the conversation at this many tokens. */
+	compactAt: number;
 	/** A name shown in lists. `null` clears it. */
 	label?: string | null;
 }
 
 /** The settings `update` may change: everything but the ones fixed at creation. */
-export type SessionUpdate = Omit<SessionSpec, "workspace" | "provider" | "model">;
+export type SessionUpdate = Partial<Pick<SessionSpec, "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label">>;
 
 export interface WriteOptions {
 	/** Required on `create` and `send`, built as `kind:driftId`. Other writes get a fresh UUIDv4 when it is left out (D123). */
@@ -77,7 +79,7 @@ function clearable<T>(field: T | null | undefined): Omitted | typeof NULL | { st
 	return field === null ? NULL : { state: "value", value: field };
 }
 
-function configuration(spec: SessionSpec): Schemas["Configuration"] {
+function configuration(spec: Partial<SessionSpec>): Schemas["Configuration"] {
 	return {
 		workspace: optional(spec.workspace),
 		provider: optional(spec.provider),
@@ -87,15 +89,15 @@ function configuration(spec: SessionSpec): Schemas["Configuration"] {
 		// ASCII, so code-unit order is byte order.
 		tools: optional(spec.tools === undefined ? undefined : [...new Set(spec.tools)].sort()),
 		permission_mode: optional(spec.permissionMode),
-		output_schema: OMITTED,
-		compaction_trigger: clearable(spec.compactAt == null ? spec.compactAt : String(spec.compactAt)),
+		output_schema: clearable(spec.outputSchema),
+		compaction_trigger: optional(spec.compactAt === undefined ? undefined : String(spec.compactAt)),
 		output_reservation: OMITTED,
 		reasoning_effort: clearable(spec.effort),
 		label: clearable(spec.label),
 	};
 }
 
-function configureBody(store: string, key: string, session: string, spec: SessionSpec): string {
+function configureBody(store: string, key: string, session: string, spec: Partial<SessionSpec>): string {
 	return JSON.stringify({
 		version: WIRE_VERSION,
 		kind: "configure",

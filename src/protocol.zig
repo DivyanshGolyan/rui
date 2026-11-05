@@ -130,6 +130,9 @@ pub const ContentField = struct {
     // A parsed request owns an unlinked file descriptor. The Store imports
     // through this sealed custody; no pathname can be swapped after capture.
     file: ?std.Io.File = null,
+    /// D113: bounded start_agent content borrows its call arena through commit.
+    /// Wire content still uses sealed file custody; this pointer is never saved.
+    borrowed_bytes: ?[]const u8 = null,
     scratch_budget: ?ScratchBudget = null,
     charged: u64 = 0,
     length: u64 = 0,
@@ -389,6 +392,7 @@ pub const ConfigurationRejection = enum {
     model_capability_unavailable,
     invalid_output_schema,
     invalid_compaction_trigger,
+    compact_at_too_large,
     invalid_output_reservation,
     unsupported_reasoning_effort,
     unknown_tool,
@@ -411,6 +415,7 @@ pub const MessageRejection = enum {
     model_capability_unavailable,
     invalid_output_schema,
     invalid_compaction_trigger,
+    compact_at_too_large,
     invalid_output_reservation,
     unsupported_reasoning_effort,
     unknown_tool,
@@ -1188,6 +1193,7 @@ fn removeContent(content: *ContentField, io: std.Io) !void {
     if (content.scratch_budget) |budget| budget.release(content.charged);
     content.charged = 0;
     content.file = null;
+    content.borrowed_bytes = null;
     content.state = .omitted;
 }
 
@@ -1752,6 +1758,7 @@ const Parser = struct {
             .require_model => out.require_model = try self.readBoolean(),
         };
         try require(Field, seen, &.{ .key, .session, .configuration });
+        if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration);
     }
 
     /// Fills `out`, which holds its defaults.
@@ -1774,7 +1781,19 @@ const Parser = struct {
             .reasoning_effort => try self.readOptionalSmallNullable(16, &out.reasoning_effort, true),
             .label => try self.readOptionalSmallNullable(max_label_bytes, &out.label, true),
         };
-        try require(Field, seen, &.{ .workspace, .provider, .model, .instructions, .tools, .permission_mode, .output_schema });
+    }
+
+    fn validateCreatingConfiguration(configuration: *const Configuration) !void {
+        if (configuration.model.state != .value or
+            configuration.compaction_trigger.state != .value or
+            configuration.tools.state != .value or
+            configuration.permission_mode.state != .value or
+            configuration.reasoning_effort.state == .omitted) return error.MissingField;
+        var tools = configuration.tools.iterator();
+        while (tools.next()) |tool| {
+            if (std.mem.eql(u8, tool, "bash") and configuration.workspace.state != .value)
+                return error.MissingField;
+        }
     }
 
     fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
@@ -1805,6 +1824,7 @@ const Parser = struct {
         // configuration and a capability condition, and it must carry the
         // configuration.
         if (out.session.len == 0 and out.configuration == null) return error.MissingField;
+        if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
         if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
         if (out.text.state != .value) return error.InvalidMessage;
         if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
@@ -3777,8 +3797,8 @@ test "initial Message ingress retains text custody and rejects extra content bef
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
     const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
-        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":";
-    const between = ",\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":";
+        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"value\",\"value\":\"model\"},\"instructions\":";
+    const between = ",\"tools\":{\"state\":\"value\",\"value\":[]},\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"},\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"},\"reasoning_effort\":{\"state\":\"null\"},\"output_schema\":";
     const suffix = "},\"text\":{\"state\":\"value\",\"value\":\"assignment\\u0000雪\\n\\n\"}}";
     const omitted = "{\"state\":\"omitted\"}";
     const value = "{\"state\":\"value\",\"value\":\"rules\\n\"}";
@@ -3834,8 +3854,8 @@ test "only a creating Message carries require_model, and it binds the digest" {
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
     const creating = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
-        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":{\"state\":\"omitted\"}," ++
-        "\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"value\",\"value\":\"model\"},\"instructions\":{\"state\":\"omitted\"}," ++
+        "\"tools\":{\"state\":\"value\",\"value\":[]},\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"},\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"},\"reasoning_effort\":{\"state\":\"null\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
     const addressed = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
     const cases = [_]struct { bytes: []const u8, require_model: bool = false, failure: ?anyerror = null }{
         .{ .bytes = creating ++ "}" },
@@ -4083,4 +4103,44 @@ test "SessionRow borrowed fields preserve offered tool names" {
     try fields.writeJson(&out.writer);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"tools\":[\"bash\",\"offered_tool\"]") != null);
     try std.testing.expect(out.written().len <= SessionRow.max_json_bytes);
+}
+
+test "protocol creation requires five explicit settings independent of field order" {
+    const fields = [_][]const u8{
+        "\"model\":{\"state\":\"value\",\"value\":\"model\"}",
+        "\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"}",
+        "\"tools\":{\"state\":\"value\",\"value\":[]}",
+        "\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"}",
+        "\"reasoning_effort\":{\"state\":\"null\"}",
+    };
+    inline for (.{ "configure", "message" }) |kind| {
+        for (0..fields.len + 1) |skip| {
+            var buffer: [2048]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            try writer.writeAll("{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",\"key\":\"k\",\"configuration\":{");
+            var comma = false;
+            for (fields, 0..) |field, index| {
+                if (index == skip) continue;
+                if (comma) try writer.writeByte(',');
+                try writer.writeAll(field);
+                comma = true;
+            }
+            try writer.writeAll("},\"session\":\"\"");
+            if (comptime std.mem.eql(u8, kind, "message"))
+                try writer.writeAll(",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"omitted\"}");
+            try writer.writeByte('}');
+            const json = writer.buffered();
+            var source: MetadataSource = .{ .input = json };
+            var retained: ?named_scratch.Owner = null;
+            var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+            if (skip < fields.len) {
+                try std.testing.expectError(error.MissingField, parseForTest(&parser));
+            } else if (comptime std.mem.eql(u8, kind, "message")) {
+                // Configuration passed without workspace or provider; only text is invalid.
+                try std.testing.expectError(error.InvalidMessage, parseForTest(&parser));
+            } else {
+                _ = try parseForTest(&parser);
+            }
+        }
+    }
 }

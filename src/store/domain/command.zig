@@ -601,22 +601,22 @@ pub const AgentStart = enum {
     stopped,
 };
 
-/// The calling Session's settings a `start_agent` call inherits or may
-/// only narrow. Its Workspace fills the creating Configuration in place.
+/// D113/D133: a child supplies its binding; only tools and permission
+/// mode are narrowed against its caller's settings.
 const parent_settings = rsql.Read(.{
-    .sql = "SELECT workspace,provider," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,permission_mode FROM session WHERE session_ref=?1",
+    .sql = "SELECT " ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,permission_mode FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { workspace: *protocol.Bounded(protocol.max_workspace_bytes), provider: protocol.Provider, tools_mask: c_int, permission_mode: u8 },
+    .Row = struct { tools_mask: c_int, permission_mode: u8 },
     .cardinality = .optional,
 });
 
 /// Runs a `start_agent` call as one core command (D24, D122): creates a
-/// Session with `configuration` in the caller's Workspace and with its
-/// provider, as its child when `attached`, admits `task` to it from the
-/// caller, and resolves the call with what happened, in one transaction.
+/// Session with the supplied agent spec (D113/D133), as its child when
+/// `attached`, admits `task` to it from the caller, and resolves the call
+/// with what happened, in one transaction.
 /// The spec may only narrow the caller's tools and permission mode.
-/// `configuration` is the caller's; its Workspace and provider are filled
-/// here. `committed` runs once the task's admission commits.
+/// `configuration` is borrowed through the transaction; `committed` runs
+/// once the task's admission commits.
 pub fn startAgent(
     a: anytype,
     io: std.Io,
@@ -635,8 +635,7 @@ pub fn startAgent(
     a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .start_agent_name = names.start_agent }, &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
-    configuration.workspace = .{ .state = .value, .value = .{ .len = 0 } };
-    var parent: parent_settings.Row = .{ .workspace = &configuration.workspace.value, .provider = undefined, .tools_mask = undefined, .permission_mode = undefined };
+    var parent: parent_settings.Row = undefined;
     var parent_found: store_access.Found = .missing;
     a.readInto(parent_settings, .{ .session = caller }, &parent, &parent_found);
     // Over 4.6 KB, so held where the Store owns it, as a configure does.
@@ -662,8 +661,6 @@ pub fn startAgent(
             break :refusal "spec.permissionMode: you ask before running commands, so your agents ask too. Nothing was started.";
         break :refusal null;
     };
-    configuration.provider = .{ .state = .value, .value = .{ .len = 0 } };
-    configuration.provider.value.set(@tagName(parent.provider)) catch unreachable;
     if (attached) creation.parent = found.session.ref;
     const application: ?configuration_domain.Application = if (refusal == null)
         try configuration_domain.applyConfiguration(a, io, "", configuration, faults, creation)

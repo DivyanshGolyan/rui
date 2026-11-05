@@ -356,6 +356,12 @@ pub fn sealedIdentity(field: *const protocol.ContentField) Import {
 /// verified. It ends no round.
 pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField, value: *Import, faults: Faults) !u64 {
     std.debug.assert(field.state == .value);
+    // D113: start_agent owns these bounded bytes until this transaction ends.
+    // Verify their identity just as sealed files are verified before import.
+    if (field.borrowed_bytes) |bytes| {
+        if (bytes.len != field.length or !std.mem.eql(u8, &protocol.contentDigest(bytes), &field.digest)) return error.ContentChanged;
+        return importBytes(a, value, bytes);
+    }
     if (field.file) |source| {
         if (try source.length(io) != field.length) return error.ContentChanged;
     } else if (field.length != 0 or !std.mem.eql(u8, &protocol.contentDigest(""), &field.digest)) {

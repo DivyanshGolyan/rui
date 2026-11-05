@@ -328,8 +328,11 @@ const ToolNameList = struct {
     }
 };
 
-/// Fields after `output_schema` are optional to the Host, in any order; the
-/// client always sends all four, in this order.
+/// Fields after `output_schema` are optional to the parser, in any order;
+/// the client always sends all four, in this order. Creation requires model,
+/// effort, compaction trigger, tools and permission mode, and a Workspace
+/// with bash (D113, D133); the schema states no `required` because an
+/// addressed configure may omit every field.
 fn configurationShape(comptime name: []const u8, comptime instructions: anytype, comptime output_schema: anytype) type {
     return struct {
         pub const openapi_name = name;
