@@ -2370,6 +2370,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
         @embedFile("domain/content.zig"),
+        @embedFile("domain/find_tools.zig"),
         @embedFile("domain/historical.zig"),
         @embedFile("domain/history_floor.zig"),
         @embedFile("domain/model_admission.zig"),
@@ -2378,6 +2379,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/report.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
+        @embedFile("find_tools_tests.zig"),
         @embedFile("mysql_literal.zig"),
         @embedFile("mysql_row.zig"),
         @embedFile("rsql.zig"),
@@ -4265,7 +4267,7 @@ test "loaded tools select saved records even after the Host catalog changes or r
             var records = [_]tool_catalog.Record{
                 tool_catalog.bash_record,
                 .{ .name = "fetch_page", .owner = .mcp, .server = "original", .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
-                .{ .name = "find_tools", .owner = .rui },
+                tool_catalog.find_tools_record,
                 tool_catalog.message_agent_record,
                 .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
                 tool_catalog.read_transcript_record,
@@ -8564,6 +8566,7 @@ const EntryPoint = enum {
     deliverAgentMessage,
     deliverChildEnding,
     startAgent,
+    findTools,
     stopOwedSession,
     resolveCoreCall,
     actionSupersededByStop,
@@ -8625,6 +8628,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .deliverAgentMessage = 3,
     .deliverChildEnding = 2,
     .startAgent = 4,
+    .findTools = 5,
     .stopOwedSession = 2,
     .resolveCoreCall = 2,
     .actionSupersededByStop = 1,
@@ -8669,7 +8673,7 @@ fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     return switch (engine) {
         // One window holds the driven content.
         .sqlite, .mysql => switch (point) {
-            .readOwnedContent, .readCatalogText, .searchActivity => 1,
+            .readOwnedContent, .readCatalogText, .searchActivity, .findTools => 1,
             else => 0,
         },
     };
@@ -8695,6 +8699,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
         @embedFile("domain/content.zig"),
+        @embedFile("domain/find_tools.zig"),
         @embedFile("domain/historical.zig"),
         @embedFile("domain/history_floor.zig"),
         @embedFile("domain/model_admission.zig"),
@@ -8703,6 +8708,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/report.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
+        @embedFile("find_tools_tests.zig"),
         @embedFile("mysql_literal.zig"),
         @embedFile("mysql_row.zig"),
         @embedFile("rsql.zig"),
@@ -8879,6 +8885,7 @@ test "each Store entry point takes its round budget on its common path" {
             try toolTurn(&storage, &tmp, &meter);
             try compactedTurn(&storage, &tmp, &meter);
             try coreTurn(&storage, &tmp, &meter);
+            try findTurn(&storage, &tmp, &meter);
             var failed = false;
             for (std.enums.values(EntryPoint)) |point| {
                 const measured = meter.measured.get(point) orelse {
@@ -9004,6 +9011,27 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
             meter.stop(.stopSession);
+        }
+
+        /// SQL narrows one unloaded tool; eight matchers share one description
+        /// window. A no-match call still writes no revision.
+        fn findTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
+            var path: [protocol.max_workspace_bytes]u8 = undefined;
+            var configuration = try completeConfiguration("budget-find", "", try canonicalCwd(std.testing.io, &path), "model-a");
+            configuration.configuration.tools = try .of(&.{ "bash", "find_tools" });
+            configuration.configuration.loaded_tools = try .of(&.{"find_tools"});
+            const session = storage.configure(&configuration, .{}).accepted.session;
+            try submitTestMessage(storage, tmp, "budget-find-input", "budget-find-key", session.slice(), "find tools");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{.{ .item_id = "find-item", .name = "find_tools", .encoded_call_id = "find-call", .decoded_call_id = "find-call", .encoded_arguments = "{\\\"words\\\":\\\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\\\"}", .decoded_arguments = "{\"words\":\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\"}" }};
+            try settleCallsForTesting(storage, tmp, model, "budget-find-calls", &calls);
+            const input = (try storage.nextCoreWork()).?.action;
+            const words: @import("../core_tools.zig").FindTools = .{ .words = .{ "absent0", "absent1", "absent2", "absent3", "absent4", "absent5", "absent6", "absent7" }, .count = 8 };
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            meter.start();
+            try std.testing.expect(try storage.findTools(input.binding, arena.allocator(), &words, null, .{}));
+            meter.stop(.findTools);
         }
 
         /// Three core calls: a Message delivered, an agent started, and a
@@ -10493,16 +10521,7 @@ test "loaded tools preserve and intersect a saved subset through the catalog" {
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            // A synthetic catalog entry exercises the rule without implementing
-            // find_tools or adding it to the Host's production catalog.
-            var records: [tool_catalog.built_in.records.len + 1]tool_catalog.Record = undefined;
-            records[0] = tool_catalog.built_in.records[0];
-            records[1] = .{ .name = "find_tools", .owner = .rui };
-            @memcpy(records[2..], tool_catalog.built_in.records[1..]);
-            var digests: [records.len][32]u8 = undefined;
-            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
-            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
-            try storage.saveCatalog(&catalog);
+            // The production catalog now makes strict loaded subsets reachable.
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
             var initial = try completeConfiguration("loaded-subset-create", "", workspace, "model-a");

@@ -158,6 +158,13 @@ pub const bash_record: Record = .{
         "\"required\":[\"cmd\",\"description\"],\"additionalProperties\":false}",
 };
 
+pub const find_tools_record: Record = .{
+    .name = "find_tools",
+    .owner = .rui,
+    .description = core_tools.find_tools_description,
+    .input_schema = core_tools.find_tools_schema,
+};
+
 pub const message_agent_record: Record = .{
     .name = "message_agent",
     .owner = .rui,
@@ -189,7 +196,7 @@ pub const Runner = enum {
     core,
 
     pub fn of(tool: *const Record) Runner {
-        return if (tool == &message_agent_record or tool == &read_transcript_record or tool == &start_agent_record) .core else .bash;
+        return if (tool == &find_tools_record or tool == &message_agent_record or tool == &read_transcript_record or tool == &start_agent_record) .core else .bash;
     }
 };
 
@@ -199,6 +206,7 @@ pub const Runner = enum {
 pub fn record(tool: Tool) *const Record {
     return switch (tool) {
         .bash => &bash_record,
+        .find_tools => &find_tools_record,
         .message_agent => &message_agent_record,
         .read_transcript => &read_transcript_record,
         .start_agent => &start_agent_record,
@@ -285,8 +293,9 @@ pub const Description = protocol.Bounded(protocol.max_tool_description_bytes);
 pub const Call = union(Tool) {
     /// Arguments the parser accepted, whose description it required.
     bash: *const BashArguments,
-    message_agent: *const core_tools.MessageAgentArguments,
     /// The core checks its arguments when it runs the call.
+    find_tools,
+    message_agent: *const core_tools.MessageAgentArguments,
     read_transcript: ?protocol.Bounded(protocol.session_id_bytes),
     start_agent,
     web_search: WebSearchCall,
@@ -310,6 +319,11 @@ pub fn describe(call: Call) Description {
         .message_agent => |arguments| blk: {
             var out: Description = .{};
             compose(&out, &.{ "Message ", "" }, &.{arguments.id.slice()});
+            break :blk out;
+        },
+        .find_tools => blk: {
+            var out: Description = .{};
+            out.set("Find tools") catch unreachable;
             break :blk out;
         },
         .read_transcript => |id| blk: {
@@ -512,6 +526,7 @@ pub fn toolBit(tool: Tool) u8 {
         .message_agent => 4,
         .start_agent => 8,
         .read_transcript => 16,
+        .find_tools => 32,
     };
 }
 
@@ -534,6 +549,7 @@ pub const CallFacts = struct {
     message_agent: ?core_tools.MessageAgentCheck = null,
     /// Whether an unknown call names a tool the Session withdrew.
     removed: bool = false,
+    find_tools: bool = false,
     read_transcript: bool = false,
     transcript_id: ?protocol.Bounded(protocol.session_id_bytes) = null,
 
@@ -561,6 +577,7 @@ pub const CallFacts = struct {
     pub fn description(self: *const CallFacts) ?Description {
         if (self.bashArguments()) |arguments| return describe(.{ .bash = arguments });
         if (self.messageAgentArguments()) |arguments| return describe(.{ .message_agent = arguments });
+        if (self.find_tools) return describe(.find_tools);
         if (self.read_transcript) return describe(.{ .read_transcript = self.transcript_id });
         if (self.tool == &start_agent_record) return describe(.start_agent);
         return null;
@@ -607,6 +624,7 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     }
     const complete = name_length <= name.len and length == name_length and try name_source.next() == null;
     const named = complete and std.mem.eql(u8, name[0..length], bash_record.name);
+    const finding = complete and std.mem.eql(u8, name[0..length], find_tools_record.name);
     const transcript = complete and std.mem.eql(u8, name[0..length], read_transcript_record.name);
     const messaging = complete and std.mem.eql(u8, name[0..length], message_agent_record.name);
     const tool = if (complete) offeredFunction(offered.slice(), name[0..length]) else null;
@@ -619,6 +637,7 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
         .bash = if (named) try checkBashArguments(arguments) else null,
         .message_agent = if (messaging) try core_tools.checkMessageAgent(arguments, &discard) else null,
         .removed = removed,
+        .find_tools = finding,
         .read_transcript = transcript,
         .transcript_id = if (transcript) try transcriptDescriptionId(arguments) else null,
     };
@@ -1400,4 +1419,31 @@ test "every provider-run tool the Host offers is run by some provider" {
         for (std.enums.values(protocol.Provider)) |provider| run = run or provider.runsTool(offered.name);
         try std.testing.expect(run);
     }
+}
+
+test "find_tools is a core tool and settlement defers its words check" {
+    const Name = struct {
+        at: usize = 0,
+        pub fn next(self: *@This()) !?u8 {
+            const bytes = "find_tools";
+            if (self.at == bytes.len) return null;
+            defer self.at += 1;
+            return bytes[self.at];
+        }
+    };
+    for ([_][]const u8{ "{}", "{", "[]", "{\"words\":false}", "{\"words\":\"bash\"}" }) |bytes| {
+        var name: Name = .{};
+        var arguments: core_tools.SliceSource = .{ .bytes = bytes };
+        const offered = Offered.of(ToolSet.initOne(.find_tools));
+        const facts = try inspectCall(&name, "find_tools".len, &arguments, &offered);
+        try std.testing.expect(facts.tool == &find_tools_record);
+        try std.testing.expect(facts.find_tools and facts.bash == null and facts.message_agent == null);
+        try std.testing.expect(protocol.ToolPresentation.validDescription(facts.description().?.slice()));
+        name = .{};
+        arguments = .{ .bytes = bytes };
+        const hidden = Offered.of(.empty);
+        const unknown = try inspectCall(&name, "find_tools".len, &arguments, &hidden);
+        try std.testing.expect(unknown.tool == null and unknown.find_tools);
+    }
+    try std.testing.expectEqual(Runner.core, Runner.of(&find_tools_record));
 }

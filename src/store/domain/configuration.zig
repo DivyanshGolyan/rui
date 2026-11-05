@@ -684,8 +684,8 @@ const NameSelection = struct {
     }
 };
 
-/// The reachability rule is name-based, so adding find_tools to the Host
-/// catalog is all that is needed to make strict subsets configurable.
+/// A strict loaded set must retain the built-in loader, so every configured
+/// tool remains reachable. Membership always refers to the selected saved set.
 fn loadedToolsRejection(tools: *const protocol.ToolsField, loaded: *const protocol.ToolsField) ?protocol.ConfigurationRejection {
     var names = loaded.iterator();
     while (names.next()) |name| if (!containsName(tools, name)) return .loaded_tools_not_in_tools;
