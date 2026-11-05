@@ -148,7 +148,7 @@ def main():
         thread.start()
         host, fields = start_ready_process(
             fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
-            env={"PATH": os.environ["PATH"], "HOME": str(home), "HOST_SECRET": HOST_SECRET},
+            env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": "", "HOST_SECRET": HOST_SECRET},
             required_fields={"execution": "enabled"})
         rui_dir = str(fixture.RUI.parent)
 

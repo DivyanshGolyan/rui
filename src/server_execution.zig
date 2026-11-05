@@ -510,6 +510,13 @@ pub fn executionMain(host: *Host) void {
             .budget = budget,
             .listing_urls = .init(.{ .provider = model_list_url, .catalog = if (catalog_url.len == 0) null else catalog_url }),
         }) catch |err| {
+            // Engine setup precedes endpoint registration (including proxy
+            // validation). With no served provider, only optional discovery
+            // needed this Reactor; report its failure without fencing the Host.
+            if (!host.providers.any() and catalog_url.len != 0) {
+                listingFailed(host, .catalog, err);
+                break :reactor null;
+            }
             fenceDispatch(host, "transport reactor initialization", err);
             return;
         };

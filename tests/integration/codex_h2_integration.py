@@ -310,6 +310,54 @@ def openai_base_url_run(*, catalog_available=False):
                 retain_failure_state("OpenAI base URL failure state", root)
 
 
+def catalog_unusable_proxy_run():
+    """Catalog-only Client initialization is optional; provider setup is not."""
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-catalog-proxy.")).resolve()
+    home = root / "home"
+    home.mkdir()
+    env = {**os.environ, "HOME": str(home), "HTTPS_PROXY": "socks5://127.0.0.1:1080"}
+    complete = False
+    try:
+        for capacity in (0, 1):
+            store = root / f"store-{capacity}"
+            log = root / f"host-{capacity}.stderr"
+            host = None
+            try:
+                host, ready = start_ready_process([
+                    "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-proxy", log,
+                    *fixture.host_arguments(store, None, active_capacity=capacity),
+                    "--test-models-dev-url", "https://127.0.0.1:1/api.json",
+                ], env=env, required_fields={"execution": "unavailable", "active_capacity": str(capacity)})
+                diagnostic = b"rui: models.dev catalog unavailable (HttpsProxySchemeUnsupported); the saved catalog stands\n"
+                fixture.wait_for(lambda: log.read_bytes() == diagnostic, "the catalog Client setup diagnostic")
+                for _ in range(3):
+                    listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")
+                    assert listed["providers"] == [], listed
+                    info = h2_fixture.closed_host_request(ready["socket"], store, "host_info")
+                    assert info["active_capacity"] == str(capacity), info
+                assert host.poll() is None, host.returncode
+                assert log.read_bytes() == diagnostic, log.read_bytes()
+            finally:
+                if host is not None:
+                    fixture.stop_host(host)
+        # Even an HTTP provider shares Engine.init's proxy validation. Do not
+        # swallow its failure or retry without the inherited network policy.
+        required = subprocess.run([
+            *fixture.host_arguments(root / "required-provider", "http://127.0.0.1:1/responses"),
+            "--test-models-dev-url", "https://127.0.0.1:1/api.json",
+        ], env=env, capture_output=True, text=True, timeout=10)
+        assert required.returncode != 0, required
+        assert "transport reactor initialization failure: HttpsProxySchemeUnsupported" in required.stderr, required
+        assert "models.dev catalog unavailable" not in required.stderr, required
+        print("catalog proxy failure passed: provider-free Hosts stay responsive at capacity 0 and 1; provider setup still fences")
+        complete = True
+    finally:
+        if complete:
+            shutil.rmtree(root)
+        else:
+            retain_failure_state("catalog proxy failure state", root)
+
+
 def catalog_unusable_trust_run():
     """Optional HTTPS discovery cannot fence a cleartext provider's Reactor."""
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-catalog-trust.")).resolve()
@@ -381,6 +429,7 @@ def catalog_unusable_trust_run():
 
 if __name__ == "__main__":
     host_process.enter()
+    catalog_unusable_proxy_run()
     if os_semantics.SSL_CERT_FILE_TRUST:
         catalog_unusable_trust_run()
         openai_base_url_run()
