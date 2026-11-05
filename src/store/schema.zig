@@ -31,7 +31,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
-    .{ .schema_version = 53, .digest = 0x4556cd0c40c55c86 },
+    .{ .schema_version = 53, .digest = 0xe615689e3ecdc677 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -108,22 +108,29 @@ pub const migrations = [_]Migration{
             "CREATE TABLE host_catalog(\n slot BIGINT NOT NULL,\n tool_set_id BIGINT NOT NULL,\n PRIMARY KEY(slot),\n FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),\n CHECK(slot=1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
-    // 53 (8b): each Store gets a random store_id. On MySQL, store_owner
-    // and content_chunk are new; each content's payload moves into chunks
-    // of content_chunk_bytes (chunk.i reaches 9999, past the 8192 chunks of
-    // the largest content) before the column goes; each leading partial
-    // index gets its generated first column; store_meta's one CHECK and
-    // content's fourth are the ones replaced.
+    // Schema 53: a Session's parent (D27). Also (8b) each Store gets a
+    // random store_id; on MySQL store_owner and content_chunk are new, each
+    // content's payload moves into chunks of content_chunk_bytes (chunk.i
+    // reaches 9999, past the 8192 chunks of the largest content) before
+    // the column goes, each leading partial index gets its generated first
+    // column, and store_meta's one CHECK and content's fourth are the ones
+    // replaced.
     .{
         .from = 52,
         .sqlite = &.{
-            "ALTER TABLE store_meta RENAME TO store_meta_52",
+            "ALTER TABLE session RENAME TO session_before_53",
+            "CREATE TABLE session(\n session_ref TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(session_ref AS BLOB))=6 AND (session_ref NOT GLOB '*[^0123456789abcdefghjkmnpqrstvwxyz]*' AND length(session_ref)=length(CAST(session_ref AS BLOB)))),\n workspace TEXT NOT NULL CHECK(length(CAST(workspace AS BLOB)) BETWEEN 1 AND 4096),\n provider TEXT NOT NULL CHECK(length(CAST(provider AS BLOB)) BETWEEN 1 AND 16 AND provider GLOB '[a-z]*' AND (provider NOT GLOB '*[^a-z0-9_-]*' AND length(provider)=length(CAST(provider AS BLOB)))),\n codec TEXT NOT NULL CHECK(length(CAST(codec AS BLOB)) BETWEEN 3 AND 40),\n codec_options BLOB CHECK(codec_options IS NULL OR length(codec_options) BETWEEN 1 AND 512),\n prefix_seal BLOB CHECK(prefix_seal IS NULL OR length(prefix_seal)=56),\n model TEXT NOT NULL CHECK(length(CAST(model AS BLOB)) BETWEEN 1 AND 256),\n instructions_content_id INTEGER NOT NULL REFERENCES content(content_id),\n tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id) CHECK(tool_set_id>0),\n permission_mode INTEGER NOT NULL CHECK(permission_mode BETWEEN 0 AND 1),\n output_schema_content_id INTEGER REFERENCES content(content_id),\n revision INTEGER NOT NULL CHECK(revision>0),\n compaction_trigger INTEGER CHECK(compaction_trigger IS NULL OR compaction_trigger>0),\n output_reservation INTEGER CHECK(output_reservation IS NULL OR output_reservation>=0),\n reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR (reasoning_effort='none' OR reasoning_effort='low' OR reasoning_effort='medium' OR reasoning_effort='high' OR reasoning_effort='xhigh' OR reasoning_effort='max')),\n label TEXT CHECK(label IS NULL OR length(CAST(label AS BLOB)) BETWEEN 1 AND 100),\n created_at INTEGER NOT NULL CHECK(created_at>0),\n next_position INTEGER NOT NULL CHECK(next_position>0),\n created_seq INTEGER NOT NULL UNIQUE CHECK(created_seq>0),\n workspace_digest BLOB NOT NULL CHECK(length(workspace_digest)=32),\n workspace_key INTEGER NOT NULL,\n parent_ref TEXT REFERENCES session(session_ref),\n CHECK(workspace_key>0 AND workspace_key<=created_seq),\n CHECK(parent_ref IS NULL OR parent_ref<>session_ref)\n) STRICT",
+            "INSERT INTO session(session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key) SELECT session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key FROM session_before_53",
+            "DROP TABLE session_before_53",
+            "CREATE INDEX session_workspace_list ON session(workspace_digest,created_seq)",
+            "ALTER TABLE store_meta RENAME TO store_meta_before_53",
             "CREATE TABLE store_meta(\n meta_key TEXT PRIMARY KEY NOT NULL CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id')),\n meta_value TEXT NOT NULL\n) STRICT",
-            "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_52",
-            "DROP TABLE store_meta_52",
+            "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_before_53",
+            "DROP TABLE store_meta_before_53",
             "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
         },
         .mysql = &.{
+            "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
             "ALTER TABLE store_meta DROP CHECK store_meta_chk_1, ADD CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id'))",
             "CREATE TABLE store_owner(\n owner_key BIGINT NOT NULL,\n epoch BIGINT NOT NULL,\n commit_seq BIGINT NOT NULL,\n PRIMARY KEY(owner_key),\n CHECK(owner_key=1),\n CHECK(epoch>=0),\n CHECK(commit_seq>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE TABLE content_chunk(\n content_id BIGINT NOT NULL,\n chunk_index BIGINT NOT NULL,\n bytes LONGBLOB NOT NULL,\n PRIMARY KEY(content_id,chunk_index),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n CHECK(chunk_index>=0),\n CHECK(length(bytes) BETWEEN 1 AND 131072)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -467,14 +474,17 @@ pub const tables = [_]Table{
             .{ .name = "workspace_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             // The change ring's key: created_seq of the Workspace's first Session.
             .{ .name = "workspace_key", .type = .int },
+            // The Session that started this one as its attached child (D27).
+            .{ .name = "parent_ref", .type = .{ .text = null }, .nullable = true },
         },
         .primary_key = &.{"session_ref"},
         .uniques = &.{&.{"created_seq"}},
-        .checks = &.{"workspace_key>0 AND workspace_key<=created_seq"},
+        .checks = &.{ "workspace_key>0 AND workspace_key<=created_seq", "parent_ref IS NULL OR parent_ref<>session_ref" },
         .foreign_keys = &.{
             references("instructions_content_id", "content", content_reference),
             references("tool_set_id", "tool_set", &.{"tool_set_id"}),
             references("output_schema_content_id", "content", content_reference),
+            references("parent_ref", "session", session_reference),
         },
     },
     .{

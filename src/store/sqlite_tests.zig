@@ -139,7 +139,7 @@ const touchForTesting = tests.touchForTesting;
 
 /// A catalog with one tool beyond the built-ins, between them by name.
 const testing_record: tool_catalog.Record = .{ .name = "test_tool", .owner = .rui, .description = "A tool only tests offer.", .input_schema = "{\"type\":\"object\"}" };
-const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, tool_catalog.message_agent_record, testing_record, tool_catalog.web_search_record };
+const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, tool_catalog.message_agent_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
 const testing_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [testing_records.len][32]u8 = undefined;
@@ -1126,12 +1126,12 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
     command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-    // The Store saved the catalog's five texts when it opened: Bash's two,
-    // message_agent's two and web search's empty one. The configure adds
-    // its two values.
-    try std.testing.expectEqual(@as(u64, 5), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
-    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    // The Store saved the catalog's seven texts when it opened: two each
+    // for Bash, message_agent and start_agent, and web search's empty one.
+    // The configure adds its two values.
     try std.testing.expectEqual(@as(u64, 7), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+    try std.testing.expect(storage.configure(&command, .{}) == .accepted);
+    try std.testing.expectEqual(@as(u64, 9), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
 }
 
 test "a Session's tools are saved once and read back as saved, not as today's built-ins" {
@@ -1156,19 +1156,19 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
             };
         }
     };
-    // The Host's catalog: one set of the three built-ins, saved at open.
-    try std.testing.expectEqual([3]u64{ 1, 3, 3 }, try Tools.counts(&storage));
+    // The Host's catalog: one set of the four built-ins, saved at open.
+    try std.testing.expectEqual([3]u64{ 1, 4, 4 }, try Tools.counts(&storage));
     // Two Sessions offering Bash share one set, of the catalog's record.
     const first = try configureTestSessionAsk(&storage, "saved-tools-first");
     const second = try configureTestSessionAsk(&storage, "saved-tools-second");
-    try std.testing.expectEqual([3]u64{ 2, 3, 4 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 2, 4, 5 }, try Tools.counts(&storage));
     // A set with the catalog's members is the catalog's set.
-    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "message_agent", "web_search" });
-    try std.testing.expectEqual([3]u64{ 2, 3, 4 }, try Tools.counts(&storage));
+    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "message_agent", "start_agent", "web_search" });
+    try std.testing.expectEqual([3]u64{ 2, 4, 5 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-both", second, &.{ "bash", "web_search" });
-    try std.testing.expectEqual([3]u64{ 3, 3, 6 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 3, 4, 7 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-none", first, &.{});
-    try std.testing.expectEqual([3]u64{ 4, 3, 6 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 4, 4, 7 }, try Tools.counts(&storage));
     // Each revision keeps the set it was saved with.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
         "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')", .{}));
@@ -8849,20 +8849,80 @@ test "a Session with message_agent keeps it through its list row and report, as 
     try std.testing.expectEqual(@as(usize, 1), sink.core_calls);
 }
 
+test "a start_agent call creates its agent where its caller works, with the task from the caller, and may only narrow" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try store_testing.completeConfiguration("starting-caller", "", workspace, "model-a");
+    command.configuration.tools.state = .value;
+    command.configuration.tools = try .of(&.{ "message_agent", "start_agent" });
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("ask");
+    const caller = storage.configure(&command, .{}).accepted.session;
+    try submitTestMessage(&storage, &tmp, "start-task", "start-task", caller.slice(), "split the work");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const calls = [_]TestingCall{
+        .{ .item_id = "attached-item", .name = "start_agent", .encoded_call_id = "attached", .decoded_call_id = "attached", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "standalone-item", .name = "start_agent", .encoded_call_id = "standalone", .decoded_call_id = "standalone", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "wider-item", .name = "start_agent", .encoded_call_id = "wider", .decoded_call_id = "wider", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        .{ .item_id = "bypass-item", .name = "start_agent", .encoded_call_id = "bypass", .decoded_call_id = "bypass", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    };
+    try settleCallsForTesting(&storage, &tmp, model, "start-metadata", &calls);
+    // Decided at once under `ask`, and never a Bash Attempt.
+    try std.testing.expectEqual(@as(u64, 4), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND approval_position IS NULL", .{}));
+    try std.testing.expect(try storage.admitNextActionAttempt(300_000, .{}) == null);
+
+    const attached = (try storage.nextCoreAction()).?;
+    try std.testing.expect(attached.tool == .start_agent);
+    var spec = try tests.testingAgentSpec(&.{"message_agent"}, "ask");
+    try std.testing.expectEqual(command_domain.AgentStart.started, try storage.startAgent(attached.binding, caller.slice(), "read the tests", true, &spec, null, .{}));
+    const standalone = (try storage.nextCoreAction()).?;
+    spec = try tests.testingAgentSpec(&.{}, "ask");
+    try std.testing.expectEqual(command_domain.AgentStart.started, try storage.startAgent(standalone.binding, caller.slice(), "read the docs", false, &spec, null, .{}));
+    const wider = (try storage.nextCoreAction()).?;
+    spec = try tests.testingAgentSpec(&.{"bash"}, "ask");
+    try std.testing.expectEqual(command_domain.AgentStart.failed, try storage.startAgent(wider.binding, caller.slice(), "run things", true, &spec, null, .{}));
+    const bypass = (try storage.nextCoreAction()).?;
+    spec = try tests.testingAgentSpec(&.{"message_agent"}, "bypass");
+    try std.testing.expectEqual(command_domain.AgentStart.failed, try storage.startAgent(bypass.binding, caller.slice(), "run freely", true, &spec, null, .{}));
+    try std.testing.expect(try storage.nextCoreAction() == null);
+
+    // Two agents, both in the caller's Workspace with its provider; only
+    // the attached one is its child.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref<>?1 AND workspace=?2 AND provider=(SELECT provider FROM session WHERE session_ref=?1)", .{ caller.slice(), workspace }));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{caller.slice()}));
+    // Each task is its agent's first Message, from the caller, under the
+    // call's own command key.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE sender_session_ref=?1 AND admission_position=1 AND command_key LIKE 'rui.core/start_agent/%'", .{caller.slice()}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN session s ON s.session_ref=m.session_ref JOIN content c ON c.content_id=m.content_id WHERE s.parent_ref=?1 AND c.byte_length=14", .{caller.slice()}));
+    // The refusals name the field and start nothing.
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='succeeded'", .{}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='failed'", .{}));
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'Started %'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'spec.tools: bash is not one of your tools.%'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE CAST(c.payload AS TEXT) LIKE 'spec.permissionMode:%'", .{}));
+}
+
 test "a catalog at its bound saves and opens again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const count = tool_catalog.max_catalog_records - 3;
+    const count = tool_catalog.max_catalog_records - 4;
     var names: [count][9]u8 = undefined;
-    var records: [count + 3]tool_catalog.Record = undefined;
-    var digests: [count + 3][32]u8 = undefined;
+    var records: [count + 4]tool_catalog.Record = undefined;
+    var digests: [count + 4][32]u8 = undefined;
     records[0] = tool_catalog.bash_record;
     records[1] = tool_catalog.message_agent_record;
-    for (&names, records[2 .. count + 2], 0..) |*name, *record, index| {
+    records[2] = tool_catalog.start_agent_record;
+    for (&names, records[3 .. count + 3], 0..) |*name, *record, index| {
         _ = try std.fmt.bufPrint(name, "tool_{d:0>4}", .{index});
         record.* = .{ .name = name, .owner = .rui, .description = "A tool among many.", .input_schema = "{\"type\":\"object\"}" };
     }
-    records[count + 2] = tool_catalog.web_search_record;
+    records[count + 3] = tool_catalog.web_search_record;
     for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
     const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
     var storage: Store = undefined;
@@ -8870,12 +8930,12 @@ test "a catalog at its bound saves and opens again" {
     try storage.close();
     try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, count + 3), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
+    try std.testing.expectEqual(@as(u64, count + 4), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
 }
 
 /// The testing catalog with an MCP server's tool beside it.
 const mcp_record: tool_catalog.Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page from the docs server.", .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}" };
-const mcp_records = [_]tool_catalog.Record{ tool_catalog.bash_record, mcp_record, tool_catalog.message_agent_record, testing_record, tool_catalog.web_search_record };
+const mcp_records = [_]tool_catalog.Record{ tool_catalog.bash_record, mcp_record, tool_catalog.message_agent_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
 const mcp_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [mcp_records.len][32]u8 = undefined;

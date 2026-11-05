@@ -145,6 +145,13 @@ pub const message_agent_record: Record = .{
     .input_schema = core_tools.message_agent_schema,
 };
 
+pub const start_agent_record: Record = .{
+    .name = "start_agent",
+    .owner = .rui,
+    .description = core_tools.start_agent_description,
+    .input_schema = core_tools.start_agent_schema,
+};
+
 pub const web_search_record: Record = .{ .name = "web_search", .owner = .provider };
 
 /// Who carries out an accepted call to a tool Rui owns, derived from its
@@ -155,7 +162,7 @@ pub const Runner = enum {
     core,
 
     pub fn of(tool: *const Record) Runner {
-        return if (tool == &message_agent_record) .core else .bash;
+        return if (tool == &message_agent_record or tool == &start_agent_record) .core else .bash;
     }
 };
 
@@ -166,6 +173,7 @@ pub fn record(tool: Tool) *const Record {
     return switch (tool) {
         .bash => &bash_record,
         .message_agent => &message_agent_record,
+        .start_agent => &start_agent_record,
         .web_search => &web_search_record,
     };
 }
@@ -250,6 +258,8 @@ pub const Call = union(Tool) {
     /// Arguments the parser accepted, whose description it required.
     bash: *const BashArguments,
     message_agent: *const core_tools.MessageAgentArguments,
+    /// The core checks its arguments when it runs the call.
+    start_agent,
     web_search: WebSearchCall,
 };
 
@@ -271,6 +281,11 @@ pub fn describe(call: Call) Description {
         .message_agent => |arguments| blk: {
             var out: Description = .{};
             compose(&out, &.{ "Message ", "" }, &.{arguments.id.slice()});
+            break :blk out;
+        },
+        .start_agent => blk: {
+            var out: Description = .{};
+            out.set("Start an agent") catch unreachable;
             break :blk out;
         },
         .web_search => |search| describeWebSearch(search),
@@ -461,6 +476,7 @@ pub fn toolBit(tool: Tool) u8 {
         .bash => 1,
         .web_search => 2,
         .message_agent => 4,
+        .start_agent => 8,
     };
 }
 
@@ -508,6 +524,7 @@ pub const CallFacts = struct {
     pub fn description(self: *const CallFacts) ?Description {
         if (self.bashArguments()) |arguments| return describe(.{ .bash = arguments });
         if (self.messageAgentArguments()) |arguments| return describe(.{ .message_agent = arguments });
+        if (self.tool == &start_agent_record) return describe(.start_agent);
         return null;
     }
 };

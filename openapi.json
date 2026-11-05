@@ -8699,6 +8699,7 @@
               "enum": [
                 "bash",
                 "message_agent",
+                "start_agent",
                 "web_search"
               ]
             },

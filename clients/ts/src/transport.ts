@@ -20,7 +20,7 @@ const TRANSFER_IDLE_MS = 60_000;
 export interface Post {
 	socketPath: string;
 	path: string;
-	/** The request JSON, already serialized in the field order the Host requires. */
+	/** The serialized request JSON. */
 	body: string;
 	/** The Host instance from host-info; a different instance refuses the call. */
 	instance?: string;

@@ -1143,9 +1143,16 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
         fenceDispatch(host, "core tool selection", err);
         return .retry_later;
     }) orelse return .no_work;
+    return switch (input.tool) {
+        .message_agent => runMessageAgent(host, &input),
+        .start_agent => runStartAgent(host, &input),
+    };
+}
+
+noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
     const arguments_bytes = host.allocator.alloc(u8, std.math.cast(usize, input.arguments.length) orelse return .retry_later) catch return .retry_later;
     defer host.allocator.free(arguments_bytes);
-    host.store.readCoreArguments(&input, arguments_bytes) catch |err| {
+    host.store.readCoreArguments(input, arguments_bytes) catch |err| {
         fenceDispatch(host, "core tool input", err);
         return .retry_later;
     };
@@ -1177,6 +1184,68 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
         },
     };
     _ = host.store.deliverAgentMessage(input.binding, arguments.id.slice(), text.list.items, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+        // A stop resolved the call first.
+        error.StaleActionAttemptBinding => return .admitted,
+        else => {
+            fenceDispatch(host, "core tool command", err);
+            return .retry_later;
+        },
+    };
+    return .admitted;
+}
+
+/// Runs a `start_agent` call: its arguments are read whole and checked
+/// here, since a refusal is the call's own failed result (D140), and one
+/// Store command starts the agent. An attached or standalone agent starts
+/// from its caller's client environment, installed as the task commits.
+noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
+    var arena_state: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // The spec's Configuration is kilobytes, so it lives in the arena.
+    const start = arena.create(tools.core_tools.StartAgent) catch return .retry_later;
+    const check: tools.core_tools.StartAgentCheck = if (input.arguments.length > tools.core_tools.start_agent_max_argument_bytes)
+        .{ .rejected = std.fmt.comptimePrint("the arguments take more than {d} bytes", .{tools.core_tools.start_agent_max_argument_bytes}) }
+    else check: {
+        const bytes = arena.alloc(u8, @intCast(input.arguments.length)) catch return .retry_later;
+        host.store.readCoreArguments(input, bytes) catch |err| {
+            fenceDispatch(host, "core tool input", err);
+            return .retry_later;
+        };
+        break :check tools.core_tools.checkStartAgent(arena, bytes, start) catch return .retry_later;
+    };
+    switch (check) {
+        .accepted => {},
+        .rejected => |reason| {
+            const result = std.fmt.allocPrint(arena, "Rui could not start the agent: {s}. Nothing was started.", .{reason}) catch return .retry_later;
+            _ = host.store.failCoreCall(input.binding, result, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+                error.StaleActionAttemptBinding => {},
+                else => fenceDispatch(host, "core tool command", err),
+            };
+            return .admitted;
+        },
+    }
+    var offer: SessionEnvironments.Offer = .{};
+    defer offer.deinit(host.allocator);
+    const Install = struct {
+        environments: *SessionEnvironments,
+        offer: *SessionEnvironments.Offer,
+
+        fn call(context: *anyopaque, admission: store_module.Store.MessageAdmission) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.environments.offer(admission.session, .{ .origin = .peer, .admission = admission.admission_id }, self.offer);
+        }
+    };
+    var install: Install = undefined;
+    const committed: ?store_module.Store.MessageCommitted = if (host.environments) |environments| committed: {
+        const base = environments.copy(input.session.slice(), arena) catch return .retry_later;
+        const value = base orelse break :committed null;
+        offer = SessionEnvironments.Offer.init(host.allocator, value.len) catch return .retry_later;
+        @memcpy(offer.room()[0..value.len], value);
+        install = .{ .environments = environments, .offer = &offer };
+        break :committed .{ .context = &install, .call = Install.call };
+    } else null;
+    _ = host.store.startAgent(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         // A stop resolved the call first.
         error.StaleActionAttemptBinding => return .admitted,
         else => {

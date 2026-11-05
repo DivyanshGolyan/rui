@@ -5,6 +5,7 @@
 // the Host holds no reply buffer for either (D168).
 
 import type { Link } from "./sessions.ts";
+import { WIRE_VERSION } from "./transport.ts";
 import type { components } from "./wire.ts";
 
 type Schemas = components["schemas"];
@@ -119,11 +120,29 @@ function entryOf(row: Row): { entry: FeedEntry; reference: Schemas["ActivityItem
 }
 
 function activityBody(store: string, session: string, request: { end: string | null; position: string; ordinal: string | null; kinds: readonly FeedKind[] }): string {
-	return `{"version":"8","kind":"activity_page","store":${JSON.stringify(store)},"session":${JSON.stringify(session)},"end":${request.end === null ? "null" : JSON.stringify(request.end)},"position":${JSON.stringify(request.position)},"ordinal":${request.ordinal === null ? "null" : JSON.stringify(request.ordinal)},"direction":"forward","kinds":${JSON.stringify(request.kinds)},"limit":"${PAGE_ROWS}"}`;
+	return JSON.stringify({
+		version: WIRE_VERSION,
+		kind: "activity_page",
+		store,
+		session,
+		end: request.end,
+		position: request.position,
+		ordinal: request.ordinal,
+		direction: "forward",
+		kinds: [...request.kinds],
+		limit: String(PAGE_ROWS),
+	} satisfies Schemas["ActivityPageRequest"]);
 }
 
 function contentBody(store: string, session: string, entry: { position: string; ordinal: string }): string {
-	return `{"version":"8","kind":"activity_content","store":${JSON.stringify(store)},"session":${JSON.stringify(session)},"position":${JSON.stringify(entry.position)},"ordinal":${JSON.stringify(entry.ordinal)}}`;
+	return JSON.stringify({
+		version: WIRE_VERSION,
+		kind: "activity_content",
+		store,
+		session,
+		position: entry.position,
+		ordinal: entry.ordinal,
+	} satisfies Schemas["ActivityContentRequest"]);
 }
 
 /** The Host stores up to a little under 1 GiB of text in one entry. */
