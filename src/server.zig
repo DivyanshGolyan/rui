@@ -1309,6 +1309,7 @@ const Route = enum {
     conversation_page,
     conversation_content,
     activity_page,
+    activity_search,
     activity_content,
     model_list,
     unsupported_control,
@@ -1599,6 +1600,18 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try fd.json(200, protocol.max_activity_page_response_bytes, renderActivityPage, .{page});
         },
+        .activity_search => |*command| {
+            const page = try createUnfilled(host.allocator, protocol.ActivitySearchFacts);
+            defer host.allocator.destroy(page);
+            host.store.searchActivity(command, page) catch |err| switch (err) {
+                error.SessionNotFound, error.InvalidCursor => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                else => {
+                    fenceDispatch(host, "activity search", err);
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                },
+            };
+            try fd.json(200, protocol.max_activity_search_response_bytes, renderActivitySearch, .{page});
+        },
         .activity_content => |*command| {
             const location = host.store.openActivityContent(command) catch |err| switch (err) {
                 error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
@@ -1633,6 +1646,9 @@ fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMem
 }
 
 fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
+    page.writeJson(out.writer) catch return error.BufferTooLarge;
+}
+fn renderActivitySearch(out: protocol.JsonOut, page: *const protocol.ActivitySearchFacts) error{BufferTooLarge}!void {
     page.writeJson(out.writer) catch return error.BufferTooLarge;
 }
 
@@ -1730,6 +1746,8 @@ const HeaderReader = struct {
             .conversation_page
         else if (std.mem.eql(u8, path, "/v1/conversation-content"))
             .conversation_content
+        else if (std.mem.eql(u8, path, "/v1/activity-search"))
+            .activity_search
         else if (std.mem.eql(u8, path, "/v1/activity-page"))
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))

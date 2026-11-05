@@ -752,6 +752,19 @@ pub const Store = struct {
         return entry.finish(Ordinary.page, reads_domain.activityPage(&access, request, out));
     }
 
+    pub fn searchActivity(self: *Store, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+        return self.queue().run(searchActivityHeld, .{ self, request, out });
+    }
+
+    fn searchActivityHeld(self: *Store, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+        try request.validate();
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.page, reads_domain.searchActivity(&access, request, out));
+    }
+
     pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
         return self.queue().run(openActivityContentHeld, .{ self, request });
     }
@@ -763,6 +776,19 @@ pub const Store = struct {
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
         return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
+    }
+
+    pub fn activityTool(self: *Store, request: *const protocol.ReadActivityContent) !reads_domain.ActivityTool {
+        return self.queue().run(activityToolHeld, .{ self, request });
+    }
+
+    fn activityToolHeld(self: *Store, request: *const protocol.ReadActivityContent) !reads_domain.ActivityTool {
+        if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.content, reads_domain.activityTool(&access, request));
     }
 
     /// Authenticates the Session/Operation/Attempt before reading optional
@@ -1042,15 +1068,20 @@ pub const Store = struct {
     /// Fails the core tool call `binding` names with `result`, in one
     /// transaction; false when a stop selected its Turn first.
     pub fn failCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
-        return self.queue().write(failCoreCallHeld, .{ self, binding, result, faults });
+        return self.queue().write(resolveCoreCallHeld, .{ self, binding, ActionResolutionCode.failed, result, faults });
     }
 
-    fn failCoreCallHeld(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
+    /// Succeeds a core tool call; false when a stop selected its Turn first.
+    pub fn succeedCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
+        return self.queue().write(resolveCoreCallHeld, .{ self, binding, ActionResolutionCode.succeeded, result, faults });
+    }
+
+    fn resolveCoreCallHeld(self: *Store, binding: ActionAttemptBinding, code: ActionResolutionCode, result: []const u8, faults: Faults) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.failCoreCall(&access, binding, result, faults)));
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.resolveCoreCall(&access, binding, code, result, faults)));
     }
 
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {

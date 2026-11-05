@@ -17,6 +17,7 @@ const store_testing = @import("store/testing.zig");
 pub const ModelFact = @import("store/domain/model_facts.zig").Fact;
 pub const ModelCatalogSource = @import("store/domain/model_facts.zig").Source;
 pub const Store = store_core.Store;
+pub const ActivityTool = reads_domain.ActivityTool;
 pub const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
 pub const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 pub const AgentDelivery = command_domain.AgentDelivery;
