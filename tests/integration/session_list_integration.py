@@ -168,15 +168,18 @@ def main():
             assert_empty_full(initial[1])
             baseline = released_resources(process.pid, diagnostics, latest_invocation)
             # A rejected configuration creates a request fact but no Session.
-            def configure(key, reference, workspace, complete=True, model="gpt-6-sol", label=None):
+            def configure(key, reference, workspace, model="gpt-6-sol", label=None):
                 config = {
-                    "workspace": {"state": "value", "value": workspace} if complete else {"state": "omitted"},
+                    "workspace": {"state": "value", "value": workspace},
                     "provider": {"state": "value", "value": "codex"},
                     "model": {"state": "value", "value": model},
                     "instructions": {"state": "omitted"},
-                    "tools": {"state": "omitted"},
-                    "permission_mode": {"state": "omitted"},
+                    "tools": {"state": "value", "value": ["bash", "web_search"]},
+                    "permission_mode": {"state": "value", "value": "bypass"},
                     "output_schema": {"state": "omitted"},
+                    "compaction_trigger": {"state": "value", "value": "100000"},
+                    # D111: a model the catalog does not list states no effort.
+                    "reasoning_effort": {"state": "value", "value": "low"} if model == "gpt-6-sol" else {"state": "null"},
                 }
                 if label is not None:
                     config["label"] = {"state": "value", "value": label}
@@ -190,7 +193,8 @@ def main():
                 assert len(reference) == 6 and all(character in "0123456789abcdefghjkmnpqrstvwxyz" for character in reference), result
                 return reference
 
-            assert configure("rejected", "", str(root), False)[1]["answer"]["status"] == "rejected"
+            # An empty model is a domain rejection, answered without a Session.
+            assert configure("rejected", "", str(root), model="")[1]["answer"]["status"] == "rejected"
             # Keep allocation order independently of the random IDs' lexical order.
             names = [create(f"created-{i}", str(other) if i == 3 else str(root)) for i in range(10)]
             first_status, first = listing(str(root))

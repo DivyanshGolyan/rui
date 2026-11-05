@@ -3,17 +3,10 @@ const named_scratch = @import("named_scratch.zig");
 const protocol = @import("protocol.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 
-pub const orchestration_bytes: usize = 64 * 1024;
-
-const State = enum(u8) { free, reserved, retained, evicting, failed };
-
-pub const Entry = struct {
-    state: State = .free,
-    generation: u64 = 0,
-    sequence: u64 = 0,
-    name: protocol.Bounded(96) = .{},
-    charged: u64 = 0,
-};
+const capacity = @import("retention_capacity.zig");
+pub const orchestration_bytes = capacity.orchestration_bytes;
+const State = capacity.State;
+pub const Entry = capacity.Entry;
 
 pub const Token = struct {
     index: usize,

@@ -1723,11 +1723,13 @@ def command_interruption_cases(state, library, only=None):
                     assert "replayed-into-scratch" not in marks, (case, marks)
                     assert caller.returncode == 1, (case, caller.returncode, output, errors)
                     if case.endswith("stdout"):
-                        assert "replayed-to-safe-sink" in marks and b"error: TerminalCleanupFailed" in errors, (case, marks, errors)
+                        assert "replayed-to-safe-sink" in marks and b"Configuration accepted; do not resubmit it" in errors, (case, marks, errors)
+                        assert b"error: TerminalCleanupFailed" not in errors, errors
                     else:
                         assert b"rui: Interrupted command output:" not in errors, (case, errors)
                 elif case == "configure-canonical":
-                    assert caller.returncode == 1 and b"error: CanonicalStoreFailure" in errors and b"Resume: " in errors, (case, output, errors)
+                    assert caller.returncode == 4 and b"Configuration not confirmed; do not replace uncertain work (CanonicalStoreFailure)" in errors and b"Resume: " in errors, (case, output, errors)
+                    assert b"error: CanonicalStoreFailure" not in errors, errors
                 else:
                     assert caller.returncode == 0, (case, caller.returncode, output, errors)
                 if case == "requests" or case.startswith("inspect-"):
@@ -1817,8 +1819,8 @@ def fatal_reporting_cases(state):
         missing_session = "000000" if session != "000000" else "000001"
         diagnostics = [
             (["session", "resume", "--store", str(store), missing_session], b"SessionNotConfigured"),
-            (["defaults", "configure", "--provider", "unsupported"], b"UnsupportedPreferenceProvider"),
-            (["--store", str(store), "--provider", "unsupported", "--model", "gpt-6-sol"], b"UnsupportedSelectionProvider"),
+            (["defaults", "configure", "--provider", "unsupported"], b"[choice_unsupported]"),
+            (["--store", str(store), "--provider", "unsupported", "--model", "gpt-6-sol"], b"[choice_unsupported]"),
         ]
         for args, error, stopped in ((args, error, stopped) for args, error in diagnostics for stopped in (False, True)):
             master, slave = open_pty()
@@ -1830,7 +1832,7 @@ def fatal_reporting_cases(state):
                     termios.tcflow(error_slave, termios.TCOOFF)
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=error_slave)
-                assert caller.wait(timeout=3) == 1, "fatal diagnostic did not exit"
+                assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "fatal diagnostic did not exit"
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(error_slave, fcntl.F_GETFL), error_flags)
                 if not stopped:
@@ -1854,7 +1856,7 @@ def fatal_reporting_cases(state):
             try:
                 caller = subprocess.Popen([str(fixture.RUI), *args],
                     env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=write_error)
-                assert caller.wait(timeout=3) == 1, "disconnected stderr replaced the real exit"
+                assert caller.wait(timeout=3) == (2 if error == b"[choice_unsupported]" else 1), "disconnected stderr replaced the real exit"
                 assert termios.tcgetattr(slave) == original
                 assert_file_flags(fcntl.fcntl(write_error, fcntl.F_GETFL), error_flags)
                 print(f"fatal reporting: {error.decode()} disconnected stderr passed", flush=True)
@@ -2163,7 +2165,7 @@ def detach_reporting_cases(state, library):
                     assert caller.returncode == 0 and not errors, (output, errors)
                     assert b"Detached. Host work continues." in output and session.encode() in output, output
                 else:
-                    assert caller.returncode == 1 and b"TerminalCleanupFailed" in errors, (output, errors)
+                    assert caller.returncode == 1 and b"error: TerminalCleanupFailed" not in errors, (output, errors)
                     assert guide in errors and request["key"].encode() in errors, errors
                     assert (b"rui request read-result " if kind == "message" else b"rui request inspect ") + request["key"].encode() in errors
                 assert "cleanup-flags-restored\ndetach-enable\n" in log.read_text(), log.read_text()
@@ -2407,7 +2409,8 @@ def visible_stream_handoff_cases(state, library):
                     tail, errors = human.terminal_exit(caller, master)
                     # Without output credit, cleanup cannot claim delivery: an
                     # explicit failure that still names exact recovery.
-                    assert caller.returncode == 1 and b"error: TerminalCleanupFailed" in errors, (phase, tail, errors)
+                    assert caller.returncode == 1 and b"Message accepted; do not resubmit it" in errors, (phase, tail, errors)
+                    assert b"error: TerminalCleanupFailed" not in errors, errors
                     assert b"Use rui request read-result " in errors and b"Resume: rui session resume --store " in errors, errors
                     assert f" Status · {session}".encode() not in tail, "interrupted pending command ran"
                 else:

@@ -121,6 +121,19 @@ pub const ContentReader = struct {
         return count;
     }
 
+    /// Streams inside an existing read access, without re-entering the Store
+    /// queue. No read-ahead: the caller's content-byte budget is exact.
+    pub fn readWithAccess(self: *ContentReader, a: anytype, start: u64, destination: []u8) !usize {
+        std.debug.assert(self.active and a.store == self.store);
+        if (destination.len > content_window_bytes) return error.WindowTooLarge;
+        if (start > self.reference.length) return error.RangeOutOfBounds;
+        const wanted: usize = @intCast(@min(destination.len, self.reference.length - start));
+        try readWindow(a, self, start, destination[0..wanted]);
+        if (!self.absorb(start, destination[0..wanted])) return error.CorruptStore;
+        if (@import("builtin").is_test) _ = self.store.testing_content_work.read.fetchAdd(wanted, .monotonic);
+        return wanted;
+    }
+
     /// `DigestCheck.absorb` against this reader's reference.
     pub fn absorb(self: *ContentReader, start: u64, bytes: []const u8) bool {
         return self.check.absorb(self.reference, start, bytes);
@@ -348,6 +361,13 @@ pub fn sealedIdentity(field: *const protocol.ContentField) Import {
     return .{ .digest = field.digest, .length = field.length, .private = false };
 }
 
+/// noinline: the digest stays off importSealed's frame, which sits on the
+/// engine thread's deepest chain.
+noinline fn importBorrowed(a: anytype, field: *const protocol.ContentField, bytes: []const u8, value: *Import) !u64 {
+    if (!std.mem.eql(u8, &protocol.contentDigest(bytes), &field.digest)) return error.ContentChanged;
+    return importBytes(a, value, bytes);
+}
+
 /// After `lookup`'s round: the id of the sealed content `field`, whose
 /// identity `value` is. A file must still hold `field.length` bytes. A new
 /// row is queued, then the file streams into its payload while hashed
@@ -358,10 +378,7 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField,
     std.debug.assert(field.state == .value);
     // D113: start_agent owns these bounded bytes until this transaction ends.
     // Verify their identity just as sealed files are verified before import.
-    if (field.borrowed_bytes) |bytes| {
-        if (bytes.len != field.length or !std.mem.eql(u8, &protocol.contentDigest(bytes), &field.digest)) return error.ContentChanged;
-        return importBytes(a, value, bytes);
-    }
+    if (field.borrowedBytes()) |bytes| return importBorrowed(a, field, bytes, value);
     if (field.file) |source| {
         if (try source.length(io) != field.length) return error.ContentChanged;
     } else if (field.length != 0 or !std.mem.eql(u8, &protocol.contentDigest(""), &field.digest)) {

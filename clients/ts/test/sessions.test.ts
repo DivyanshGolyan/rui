@@ -19,7 +19,7 @@ async function connect(): Promise<Rui> {
 	});
 }
 
-const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: null, compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
+const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
 
 test("create, list, send, update, interrupt and stop a Session", { skip }, async () => {
 	const rui = await connect();
@@ -36,7 +36,7 @@ test("create, list, send, update, interrupt and stop a Session", { skip }, async
 		);
 
 		const listed = await rui.sessions.list();
-		assert.deepEqual(listed.map((each) => [each.id, each.label]), [[session.id, "first"]]);
+		assert.deepEqual(listed.map((each) => [each.id, each.label, each.parent]), [[session.id, "first", null]]);
 
 		const receipt = await session.send("hello", { idempotencyKey: "msg:1", env: { PATH: "/usr/bin" } });
 		assert.match(receipt.messageId, /^[0-9]+$/);

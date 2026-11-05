@@ -193,7 +193,7 @@ def main():
         # An environment over 64 KiB is refused before anything is sent, naming
         # its largest variable; the saved request recovers from a smaller one.
         large = terminal(home, CLIENT_MARK="terminal-large", LARGE_VARIABLE="x" * (64 * 1024))
-        refused = send(large, session, "show", "large", expect=1)
+        refused = send(large, session, "show", "large", expect=2)
         assert "nothing was sent" in refused.stderr and "LARGE_VARIABLE" in refused.stderr, refused.stderr
         unsent = json.loads(run(b, "request", "inspect", "--store", store, "--key", "large").stdout)
         assert unsent["observation"]["status"] == "absent", unsent

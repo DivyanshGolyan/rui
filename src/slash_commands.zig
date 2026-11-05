@@ -93,7 +93,7 @@ comptime {
 
 /// The settings a live Session changes. Its model and sign-in never change,
 /// and its instructions come only from a shell.
-const live_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "output-schema", "text-output" }, false, true);
+const live_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "loaded-tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "output-schema", "text-output" }, false, true);
 
 /// Future defaults, as /setup saves them; /setup alone shows them.
 const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider", "reasoning-effort", "notifications", "clear-model", "store" }, true, false);
@@ -145,7 +145,7 @@ pub const conversation = Commands(ConversationName, .{
 
 /// What the overview's /configure holds for the next Session: a fresh
 /// Session's settings.
-const start_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "model", "provider" }, false, true);
+const start_options: Options = .of(cli_args.live_configure, &.{ "permission-mode", "tools", "loaded-tools", "reasoning-effort", "label", "workspace", "compaction-trigger", "output-reservation", "model", "provider" }, false, true);
 
 /// The overview's commands. /rename and /setup run as a conversation runs
 /// them; /rename names the selected Session.
@@ -795,15 +795,15 @@ test "/effort lists the efforts the screen's model offers, the one in force mark
 test "/configure lists its options, then an option's fixed values" {
     const options = conversation.suggest("/configure ", .{}).?;
     try std.testing.expectEqualStrings("--permission-mode ", options.shown()[0].word);
-    try std.testing.expectEqualStrings("--permission-mode bypass|ask", options.shown()[0].shown);
+    try std.testing.expectEqualStrings("--permission-mode ask|bypass", options.shown()[0].shown);
     for (options.shown()) |entry| try std.testing.expect(!std.mem.eql(u8, entry.word, "--model ") and !std.mem.eql(u8, entry.word, "--instructions "));
     const narrowed = conversation.suggest("/configure --label x --p", .{}).?;
     try std.testing.expectEqual(@as(usize, 1), narrowed.count);
     try std.testing.expectEqualStrings("ermission-mode ", narrowed.completion(0));
     const modes = conversation.suggest("/configure --permission-mode ", .{}).?;
     try std.testing.expectEqual(@as(usize, 2), modes.count);
-    try std.testing.expectEqualStrings("bypass", modes.shown()[0].word);
-    try std.testing.expectEqualStrings("ask", modes.shown()[1].word);
+    try std.testing.expectEqualStrings("ask", modes.shown()[0].word);
+    try std.testing.expectEqualStrings("bypass", modes.shown()[1].word);
     // A shape with a placeholder offers only its fixed words; free text
     // offers nothing.
     const trigger = conversation.suggest("/configure --compaction-trigger ", .{}).?;

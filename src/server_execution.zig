@@ -1133,7 +1133,7 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
 }
 
 /// Runs the next core tool call (D24) to its resolution: it reads the
-/// call's arguments, which settlement already checked, and one Store
+/// call's arguments, whose runtime checker may still refuse them, and one Store
 /// command does what they ask. Nothing is written before that command, so
 /// a call this stops short of is simply run again. The arguments are read
 /// whole onto the heap, so its frame stays small: every Store call may run
@@ -1146,8 +1146,11 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
     return switch (work) {
         .stop => |*owed| runOwedStop(host, owed),
         .ending => |*owed| runOwedEnding(host, owed),
+        .forward => |id| runSessionForward(host, id),
         .action => |*input| switch (input.tool) {
+            .find_tools => runFindTools(host, input),
             .message_agent => runMessageAgent(host, input),
+            .read_transcript => runReadTranscript(host, input),
             .start_agent => runStartAgent(host, input),
         },
     };
@@ -1176,6 +1179,14 @@ noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) executi
 noinline fn runOwedEnding(host: *Host, owed: *const store_module.OwedEnding) execution_turn.Admission {
     _ = host.store.deliverChildEnding(owed.turn_id, host.hooks.storeFaults(.action_result)) catch |err| {
         fenceDispatch(host, "child ending", err);
+        return .retry_later;
+    };
+    return .admitted;
+}
+
+noinline fn runSessionForward(host: *Host, forward_id: u64) execution_turn.Admission {
+    _ = host.store.deliverSessionForward(forward_id, host.hooks.storeFaults(.action_result)) catch |err| {
+        fenceDispatch(host, "session forward", err);
         return .retry_later;
     };
     return .admitted;
@@ -1220,6 +1231,39 @@ noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionIn
         error.StaleActionAttemptBinding => return .admitted,
         else => {
             fenceDispatch(host, "core tool command", err);
+            return .retry_later;
+        },
+    };
+    return .admitted;
+}
+
+/// Tool loading owns its buffers in a per-call arena, off Host stacks.
+noinline fn runFindTools(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
+    var arena: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena.deinit();
+    @import("find_tools.zig").run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+        error.OutOfMemory => return .retry_later,
+        // A stop may resolve the call before its command starts.
+        error.StaleActionAttemptBinding => return .admitted,
+        else => {
+            fenceDispatch(host, "find_tools core command", err);
+            return .retry_later;
+        },
+    };
+    return .admitted;
+}
+
+/// Rare public-feed reads own their large page and text windows in an arena,
+/// never in the engine's recurring workspace or its dispatch frame.
+noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
+    var arena: std.heap.ArenaAllocator = .init(host.allocator);
+    defer arena.deinit();
+    @import("read_transcript.zig").run(host.store, arena.allocator(), input, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+        error.OutOfMemory => return .retry_later,
+        // A stop resolved the call while the public feed was being read.
+        error.StaleActionAttemptBinding => return .admitted,
+        else => {
+            fenceDispatch(host, "read_transcript core command", err);
             return .retry_later;
         },
     };
@@ -3120,6 +3164,12 @@ test "failed admission releases its reservation and fences the Store and dispatc
             try command.configuration.provider.value.set("codex");
             command.configuration.model.state = .value;
             try command.configuration.model.value.set("model-a");
+            command.configuration.tools = try .of(&.{ "bash", "web_search" });
+            command.configuration.permission_mode.state = .value;
+            try command.configuration.permission_mode.value.set("bypass");
+            command.configuration.compaction_trigger.state = .value;
+            try command.configuration.compaction_trigger.value.set("115200");
+            command.configuration.reasoning_effort.state = .explicit_null;
             const configured = storage.configure(&command, .{});
             try std.testing.expect(configured == .accepted);
             const file = try tmp.dir.createFile(std.testing.io, "failed-admission-message", .{ .read = true });
@@ -3341,6 +3391,12 @@ test "preparing slots belong to their live preparations" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
+    command.configuration.tools = try .of(&.{ "bash", "web_search" });
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("bypass");
+    command.configuration.compaction_trigger.state = .value;
+    try command.configuration.compaction_trigger.value.set("115200");
+    command.configuration.reasoning_effort.state = .explicit_null;
     const configured = storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "prep-belong-message", .{ .read = true });
@@ -3662,6 +3718,12 @@ test "an encode failure settles unanswered and releases request scratch" {
     try command.configuration.provider.value.set("codex");
     command.configuration.model.state = .value;
     try command.configuration.model.value.set("model-a");
+    command.configuration.tools = try .of(&.{ "bash", "web_search" });
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("bypass");
+    command.configuration.compaction_trigger.state = .value;
+    try command.configuration.compaction_trigger.value.set("115200");
+    command.configuration.reasoning_effort.state = .explicit_null;
     const configured = storage.configure(&command, .{});
     try std.testing.expect(configured == .accepted);
     const file = try tmp.dir.createFile(std.testing.io, "encode-failure-message", .{ .read = true });

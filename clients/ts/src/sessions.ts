@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 
 import { RuiRequestError } from "./errors.ts";
-import { FEED_KINDS, listActivity, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
+import { FEED_KINDS, listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -29,7 +29,7 @@ export interface AgentSpec {
 	/** Tool names the Host offers, such as `bash` and `web_search`. */
 	tools: readonly string[];
 	permissionMode: "ask" | "bypass";
-	/** Reasoning effort. `null` sends none, so the provider uses its own (D111). */
+	/** Reasoning effort. `null` sends none, so the provider uses its own; only for a model Rui does not list (D111). */
 	effort: string | null;
 	/** Compact the conversation at this many tokens. */
 	compactAt: number;
@@ -62,7 +62,6 @@ export interface SessionSummary {
 	label: string | null;
 	/** The Session's work state, such as `idle`, `working` or `approval`. */
 	state: string;
-	/** Always `null` until Sessions have parents. */
 	parent: string | null;
 }
 
@@ -152,6 +151,11 @@ export class Session {
 	 */
 	listActivity(options?: ListActivityOptions): AsyncGenerator<FeedEntry, void, undefined> {
 		return listActivity(this.#link, this.id, options);
+	}
+
+	/** Search public feed text newest first, with bounded snippets. */
+	searchActivity(query: string, options?: SearchActivityOptions): AsyncGenerator<ActivitySearchEntry, void, undefined> {
+		return searchActivity(this.#link, this.id, query, options);
 	}
 
 	/** The whole text of an entry (D134). Past about 512 MiB a string cannot hold it and this throws: use `readContentBytes`. */
@@ -309,7 +313,7 @@ export class Sessions {
 				),
 			);
 			for (const row of page.sessions) {
-				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, parent: null });
+				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, parent: row.parent });
 			}
 			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;
