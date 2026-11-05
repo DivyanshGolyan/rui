@@ -342,14 +342,14 @@ def compiled_model_cases():
                 assert result.returncode != 0 and not result.stdout, result
                 assert listing in result.stderr and "invalid model" in result.stderr, result.stderr
                 assert "syntax and recovery:" not in result.stderr, result.stderr
-                assert result.stderr.endswith("error: InvalidModel (exit status 1)\n"), result.stderr
+                assert "error: InvalidModel" not in result.stderr, result.stderr
                 assert "\x1b" not in result.stderr, result.stderr
                 assert not record.exists() and not (root / "absent-store").exists()
                 assert list(home.iterdir()) == [], "invalid model created capture or preference state"
         rejected_default = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", "two words"],
             env=env, capture_output=True, text=True, timeout=10)
         assert rejected_default.returncode != 0 and listing in rejected_default.stderr and not list(home.iterdir())
-        assert rejected_default.stderr.endswith("error: InvalidModel (exit status 1)\n"), rejected_default.stderr
+        assert "error: InvalidModel" not in rejected_default.stderr, rejected_default.stderr
         # An unlisted ID with valid syntax is saved, with one line on its limits.
         for model in ("retired-model", "GPT-6-SOL"):
             accepted = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", model],
@@ -2301,7 +2301,7 @@ def persistent_opening_case():
             rejected = subprocess.run([str(fixture.RUI), "session", "read-conversation", *map(str, flags),
                 "--position", "1", "--ordinal", "0"], capture_output=True, timeout=10)
             assert rejected.returncode == 1 and not rejected.stdout, (flags, rejected)
-            assert any(code in rejected.stderr for code in (b"UnknownArgument", b"InvalidHexIdentity", b"DuplicateArgument", b"ConflictingArguments")), rejected.stderr
+            assert any(code in rejected.stderr for code in (b"unknown option", b"is not even-length hex", b"was given twice", b"can't be used with")), rejected.stderr
         assert "late beyond captured end" not in recovered and "saved user 09" not in recovered, "history recaptured or replayed opening"
         assert proxy.exchanges[0][0] == proxy.exchanges[2][0], "history failure advanced its actual cursor"
         # At the start there is nothing older: /history reads nothing more.
@@ -3929,12 +3929,12 @@ def opaque_session_commands_case():
                     env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=10)
                 assert rejected.returncode != 0 and b"InteractiveTerminalRequired" not in rejected.stderr, (route, flags, rejected)
                 if "--last" in flags:
-                    assert b"rui: session resume: unknown option." in rejected.stderr, (flags, rejected)
+                    assert b"rui: session resume: unknown option --last" in rejected.stderr, (flags, rejected)
         # Retired --last rejects before selecting a Store, starting a Host
         # or capturing a request; the HOME Store stays absent below.
         retired = subprocess.run([str(fixture.RUI), "session", "resume", "--last"], cwd=state,
             env={**os.environ, "HOME": str(home)}, capture_output=True, timeout=10)
-        assert retired.returncode != 0 and b"rui: session resume: unknown option." in retired.stderr, retired
+        assert retired.returncode != 0 and b"rui: session resume: unknown option --last" in retired.stderr, retired
         assert {path: path.read_bytes() for path in before} == before
         assert set((home / ".config/rui/requests").glob("*.json")) == set(before)
         absent = "000000" if reference != "000000" else "111111"
@@ -6806,8 +6806,8 @@ def main(selected="all"):
             terminal_step(master, "/setup --clear-model", "Saved defaults for future Sessions", composer=True)
             assert interactive_saved.read_text().endswith("provider=codex\nmodel=\n")
             cleared_preferences = interactive_saved.read_bytes()
-            for command, error in (("/setup --clear-model --model gpt-6-luna", "ConflictingArguments"),
-                                   ("/setup --model gpt-6-luna --clear-model", "ConflictingArguments"),
+            for command, error in (("/setup --clear-model --model gpt-6-luna", "can't be used with"),
+                                   ("/setup --model gpt-6-luna --clear-model", "can't be used with"),
                                    ('/setup --model ""', 'invalid model ""')):
                 rejected = terminal_step(master, command, error, composer=True)
                 if 'invalid model' in error:
@@ -7493,7 +7493,7 @@ def main(selected="all"):
                 output, errors = terminal_exit(entered, master)
                 assert entered.returncode == (1 if columns == 7 else 0), errors
                 # Below eight columns the Session refuses to draw, with resume guidance.
-                assert (b"error: TerminalTooSmall" in errors and b"Resume: rui session resume --store " in errors) == (columns == 7), errors
+                assert (b"Enlarge the terminal" in errors and b"Resume: rui session resume --store " in errors) == (columns == 7), errors
                 assert (b"Detached." in output) == (columns == 8), output
                 actual = termios.tcgetattr(slave)
                 assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal)

@@ -1722,11 +1722,13 @@ def command_interruption_cases(state, library, only=None):
                     assert "replayed-into-scratch" not in marks, (case, marks)
                     assert caller.returncode == 1, (case, caller.returncode, output, errors)
                     if case.endswith("stdout"):
-                        assert "replayed-to-safe-sink" in marks and b"error: TerminalCleanupFailed" in errors, (case, marks, errors)
+                        assert "replayed-to-safe-sink" in marks and b"Configuration accepted; do not resubmit it" in errors, (case, marks, errors)
+                        assert b"error: TerminalCleanupFailed" not in errors, errors
                     else:
                         assert b"rui: Interrupted command output:" not in errors, (case, errors)
                 elif case == "configure-canonical":
-                    assert caller.returncode == 1 and b"error: CanonicalStoreFailure" in errors and b"Resume: " in errors, (case, output, errors)
+                    assert caller.returncode == 1 and b"Configuration not confirmed; do not replace uncertain work (CanonicalStoreFailure)" in errors and b"Resume: " in errors, (case, output, errors)
+                    assert b"error: CanonicalStoreFailure" not in errors, errors
                 else:
                     assert caller.returncode == 0, (case, caller.returncode, output, errors)
                 if case == "requests" or case.startswith("inspect-"):
@@ -2162,7 +2164,7 @@ def detach_reporting_cases(state, library):
                     assert caller.returncode == 0 and not errors, (output, errors)
                     assert b"Detached. Host work continues." in output and session.encode() in output, output
                 else:
-                    assert caller.returncode == 1 and b"TerminalCleanupFailed" in errors, (output, errors)
+                    assert caller.returncode == 1 and b"error: TerminalCleanupFailed" not in errors, (output, errors)
                     assert guide in errors and request["key"].encode() in errors, errors
                     assert (b"rui request read-result " if kind == "message" else b"rui request inspect ") + request["key"].encode() in errors
                 assert "cleanup-flags-restored\ndetach-enable\n" in log.read_text(), log.read_text()
@@ -2406,7 +2408,8 @@ def visible_stream_handoff_cases(state, library):
                     tail, errors = human.terminal_exit(caller, master)
                     # Without output credit, cleanup cannot claim delivery: an
                     # explicit failure that still names exact recovery.
-                    assert caller.returncode == 1 and b"error: TerminalCleanupFailed" in errors, (phase, tail, errors)
+                    assert caller.returncode == 1 and b"Message accepted; do not resubmit it" in errors, (phase, tail, errors)
+                    assert b"error: TerminalCleanupFailed" not in errors, errors
                     assert b"Use rui request read-result " in errors and b"Resume: rui session resume --store " in errors, errors
                     assert f" Status · {session}".encode() not in tail, "interrupted pending command ran"
                 else:

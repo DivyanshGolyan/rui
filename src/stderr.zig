@@ -2,6 +2,12 @@ const std = @import("std");
 
 const State = enum(u8) { available, borrowed, disabled };
 var state: std.atomic.Value(State) = .init(.available);
+var diagnostic_attempted: std.atomic.Value(bool) = .init(false);
+
+/// An attempted diagnostic owns the explanation even when stderr drops it.
+pub fn hasDiagnostic() bool {
+    return diagnostic_attempted.load(.monotonic);
+}
 
 /// Process-local custody only: external aliases share the temporary flags.
 /// No concurrent external flag mutation or restoration after abrupt death is
@@ -57,6 +63,7 @@ pub noinline fn print(comptime format: []const u8, args: anytype) void {
 /// Optional fatal guidance cannot retain a restored caller on stderr credit.
 /// One bounded write is best-effort; its failure never replaces the real error.
 pub fn diagnostic(comptime format: []const u8, args: anytype) void {
+    diagnostic_attempted.store(true, .monotonic);
     // The preceding transcript may end mid-line, including a partial command.
     print("\n" ++ format, args);
 }

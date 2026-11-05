@@ -49,10 +49,10 @@ pub const Command = enum {
             .session_stop => .{ .resource = .session, .name = "stop", .description = "Admit a stop for selected Session work. The stop is saved, so a restarted Host does not resume that work. The address remains reusable by later input; acknowledgment is not physical retirement. --all stops every Session in the Store that is pending, working, retrying, running Bash or awaiting approval, as overview Ctrl-X would, each as its own recoverable request with one JSON reply line and a recovery handle on stderr; it needs a running Host.", .options = destination ++ session ++ capture ++ &[_]Option{flag("all")}, .conflicts = &.{ .{ "all", "session" }, .{ "all", "record" }, .{ "all", "key" }, .{ "all", "key-hex" } }, .mutation = true, .requires = &.{&.{ "session", "all" }} },
             .session_interrupt_model => .{ .resource = .session, .name = "interrupt-model", .description = "Interrupt the exact model Operation after inspecting its Session and Turn.", .options = destination ++ session ++ capture ++ &[_]Option{ value("turn", "ID"), value("operation", "ID") }, .mutation = true, .requires = need_session ++ &[_][]const []const u8{ &.{"turn"}, &.{"operation"} } },
             .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
-            .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host.", .options = destination ++ session, .positional = "ID", .positional_conflicts = &.{"session"}, .requires = &.{&.{ "", "session" }} },
-            .request_inspect => .{ .resource = .request, .name = "inspect", .description = "Observe the original submitted command once. HANDLE loads its saved identity; --store and --key address it explicitly. Never transmits captured intent.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
-            .request_recover => .{ .resource = .request, .name = "recover", .description = "Retransmit the original saved command and inputs. This may first admit work if the original never committed. Use HANDLE, or --store PATH --record FILE --kind KIND.", .options = destination ++ &[_]Option{ value("record", "FILE"), value("kind", "configure|message|session-stop|model-interruption|permission-decision") }, .positional = "HANDLE", .positional_conflicts = &.{ "store", "store-hex", "record", "kind" }, .mutation = true, .requires = &.{&.{ "", "record" }} },
-            .request_read_result => .{ .resource = .request, .name = "read-result", .description = "Stream only the originally bound saved answer, without waiting or substituting newer Session work. Use HANDLE or --store and --key.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
+            .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host.", .options = destination ++ session, .positional = "ID", .positional_conflicts = &.{"session"}, .positional_conflict_reason = "ID already names the Session", .requires = &.{&.{ "", "session" }} },
+            .request_inspect => .{ .resource = .request, .name = "inspect", .description = "Observe the original submitted command once. HANDLE loads its saved identity; --store and --key address it explicitly. Never transmits captured intent.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .positional_conflict_reason = "HANDLE already names its Store and key", .requires = &.{&.{ "", "key", "key-hex" }} },
+            .request_recover => .{ .resource = .request, .name = "recover", .description = "Retransmit the original saved command and inputs. This may first admit work if the original never committed. Use HANDLE, or --store PATH --record FILE --kind KIND.", .options = destination ++ &[_]Option{ value("record", "FILE"), value("kind", "configure|message|session-stop|model-interruption|permission-decision") }, .positional = "HANDLE", .positional_conflicts = &.{ "store", "store-hex", "record", "kind" }, .positional_conflict_reason = "HANDLE already names its Store, record and kind", .mutation = true, .requires = &.{&.{ "", "record" }} },
+            .request_read_result => .{ .resource = .request, .name = "read-result", .description = "Stream only the originally bound saved answer, without waiting or substituting newer Session work. Use HANDLE or --store and --key.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .positional_conflict_reason = "HANDLE already names its Store and key", .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_list => .{ .resource = .request, .name = "list", .description = "Enumerate local generated captures as JSON. This is not Store history or guaranteed correlation after all output from concurrent calls is lost." },
             .action_inspect => .{ .resource = .action, .name = "inspect", .description = "Read the exact saved Action proposal before allowing or denying it. Inspection grants nothing.", .options = destination ++ session ++ action, .requires = need_action },
             .action_allow => .{ .resource = .action, .name = "allow", .description = "Admit permission to run this exact inspected Action once; the Host revalidates its target.", .options = destination ++ session ++ action ++ capture, .mutation = true, .requires = need_action },
@@ -102,6 +102,45 @@ const compaction_help = label_help ++ reasoning_help ++ compaction_policy ++
     \\Omit --session to allocate a new six-character ID. --session ID updates only an existing Session; unknown IDs never create one.
     \\
 ++ model_capability.model_help ++ "These release-supported IDs do not guarantee account availability or live qualification.\n";
+
+pub const Problem = union(enum) {
+    unknown: struct { token: []const u8, suggestion: ?[]const u8 },
+    duplicate: struct { name: []const u8, bound: ?usize = null },
+    missing_value: struct { name: []const u8, argument: []const u8 },
+    conflict: struct { first: []const u8, second: []const u8, positional: bool = false, reason: ?[]const u8 = null },
+    unexpected: []const u8,
+    hex: struct { name: []const u8, bound: usize },
+    instructions_source,
+    allocation,
+};
+
+// Distances above two are equivalent for spelling guidance. Keeping only
+// those bands bounds scratch independently of untrusted token length.
+fn spellingDistance(a: []const u8, b: []const u8) usize {
+    if (a.len > b.len + 2 or b.len > a.len + 2) return 3;
+    var previous: [5]usize = @splat(3);
+    for (0..3) |j| if (j <= b.len) {
+        previous[j + 2] = j;
+    };
+    for (1..a.len + 1) |i| {
+        var current: [5]usize = @splat(3);
+        for (0..5) |band| {
+            const signed_j = @as(isize, @intCast(i)) + @as(isize, @intCast(band)) - 2;
+            if (signed_j < 0 or signed_j > b.len) continue;
+            const j: usize = @intCast(signed_j);
+            if (j == 0) {
+                current[band] = i;
+                continue;
+            }
+            const deletion = if (band < 4) previous[band + 1] + 1 else 3;
+            const insertion = if (band > 0) current[band - 1] + 1 else 3;
+            current[band] = @min(3, @min(previous[band] + @intFromBool(a[i - 1] != b[j - 1]), @min(deletion, insertion)));
+        }
+        previous = current;
+    }
+    const band: usize = @intCast(@as(isize, @intCast(b.len)) - @as(isize, @intCast(a.len)) + 2);
+    return previous[band];
+}
 
 const Option = struct {
     name: []const u8,
@@ -228,6 +267,7 @@ pub const Definition = struct {
     conflicts: []const [2][]const u8 = &.{},
     /// Options an invocation may not combine with the positional.
     positional_conflicts: []const []const u8 = &.{},
+    positional_conflict_reason: ?[]const u8 = null,
 
     pub fn help(self: Definition, writer: *std.Io.Writer) !void {
         try writer.print("rui {s} {s}", .{ @tagName(self.resource), self.name });
@@ -293,7 +333,8 @@ pub const Definition = struct {
         return count;
     }
 
-    pub fn parse(self: Definition, args: []const []const u8, allocator: std.mem.Allocator) Error!Parsed {
+    pub fn parse(self: Definition, args: []const []const u8, allocator: std.mem.Allocator, problem: *Problem) Error!Parsed {
+        problem.* = .allocation;
         var parsed: Parsed = .{ .definition = self };
         var hexed: u64 = 0;
         var literal = false;
@@ -309,21 +350,45 @@ pub const Definition = struct {
                 continue;
             }
             if (literal or !std.mem.startsWith(u8, arg, "--")) {
-                if (self.positional == null or parsed.positional != null or (!literal and arg.len > 1 and arg[0] == '-')) return error.InvalidArguments;
+                if (self.positional == null or parsed.positional != null or (!literal and arg.len > 1 and arg[0] == '-')) {
+                    problem.* = .{ .unexpected = arg };
+                    return error.InvalidArguments;
+                }
                 parsed.positional = arg;
                 parsed.literal_positional = literal;
                 continue;
             }
-            const n = self.indexOf(arg[2..]) orelse return error.UnknownArgument;
+            const n = self.indexOf(arg[2..]) orelse {
+                var suggestion: ?[]const u8 = null;
+                var closest: usize = 3;
+                for (self.options) |candidate| {
+                    const distance = spellingDistance(arg[2..], candidate.name);
+                    if (distance < closest) {
+                        closest = distance;
+                        suggestion = candidate.name;
+                    }
+                }
+                problem.* = .{ .unknown = .{ .token = arg, .suggestion = suggestion } };
+                return error.UnknownArgument;
+            };
             const option = self.options[n];
             const bit = @as(u64, 1) << @as(u6, @intCast(n));
-            if (parsed.seen & bit != 0 and !option.repeated) return error.DuplicateArgument;
+            if (parsed.seen & bit != 0 and !option.repeated) {
+                problem.* = .{ .duplicate = .{ .name = option.name } };
+                return error.DuplicateArgument;
+            }
             parsed.seen |= bit;
             if (option.argument == null) continue;
             index += 1;
-            if (index == args.len) return error.MissingArgumentValue;
+            if (index == args.len) {
+                problem.* = .{ .missing_value = .{ .name = option.name, .argument = option.argument.? } };
+                return error.MissingArgumentValue;
+            }
             if (option.repeated) {
-                if (parsed.repeat_count == parsed.repeats.len) return error.DuplicateArgument;
+                if (parsed.repeat_count == parsed.repeats.len) {
+                    problem.* = .{ .duplicate = .{ .name = option.name, .bound = parsed.repeats.len } };
+                    return error.DuplicateArgument;
+                }
                 // Each option's values stay together, in order, so `all`
                 // answers a slice.
                 var at = parsed.repeat_count;
@@ -338,21 +403,44 @@ pub const Definition = struct {
             }
             // Both spellings of one identity fill the same value.
             const slot = if (option.hex_of) |named| self.indexOf(named).? else n;
-            if (parsed.values[slot] != null) return error.ConflictingArguments;
+            if (parsed.values[slot] != null) {
+                for (self.options) |other| {
+                    if (parsed.has(other.name) and !std.mem.eql(u8, other.name, option.name) and std.mem.eql(u8, other.hex_of orelse other.name, self.options[slot].name)) {
+                        problem.* = .{ .conflict = .{ .first = other.name, .second = option.name } };
+                        break;
+                    }
+                }
+                return error.ConflictingArguments;
+            }
             parsed.values[slot] = args[index];
             if (option.hex_of != null) hexed |= @as(u64, 1) << @as(u6, @intCast(slot));
         }
-        for (self.conflicts) |pair| if (parsed.has(pair[0]) and parsed.has(pair[1])) return error.ConflictingArguments;
-        if (parsed.positional != null) for (self.positional_conflicts) |name| if (parsed.has(name)) return error.ConflictingArguments;
+        for (self.conflicts) |pair| if (parsed.has(pair[0]) and parsed.has(pair[1])) {
+            problem.* = .{ .conflict = .{ .first = pair[0], .second = pair[1] } };
+            return error.ConflictingArguments;
+        };
+        if (parsed.positional != null) for (self.positional_conflicts) |name| if (parsed.has(name)) {
+            problem.* = .{ .conflict = .{ .first = name, .second = self.positional.?, .positional = true, .reason = self.positional_conflict_reason } };
+            return error.ConflictingArguments;
+        };
         if (parsed.help) return parsed;
         if (parsed.get("instructions")) |source| {
-            if (!std.mem.eql(u8, source, "-")) return error.InvalidInstructionsSource;
-            if (std.mem.eql(u8, parsed.get("output-schema") orelse "", "-")) return error.ConflictingArguments;
+            if (!std.mem.eql(u8, source, "-")) {
+                problem.* = .instructions_source;
+                return error.InvalidInstructionsSource;
+            }
+            if (std.mem.eql(u8, parsed.get("output-schema") orelse "", "-")) {
+                problem.* = .{ .conflict = .{ .first = "instructions", .second = "output-schema" } };
+                return error.ConflictingArguments;
+            }
         }
         for (self.options) |option| {
             const named = self.indexOf(option.hex_of orelse continue).?;
             if (hexed & (@as(u64, 1) << @as(u6, @intCast(named))) == 0) continue;
-            parsed.values[named] = try decodeHex(allocator, parsed.values[named].?, option.hex_limit);
+            parsed.values[named] = decodeHex(allocator, parsed.values[named].?, option.hex_limit) catch |err| {
+                problem.* = if (err == error.OutOfMemory) .allocation else .{ .hex = .{ .name = option.name, .bound = option.hex_limit } };
+                return err;
+            };
         }
         return parsed;
     }
@@ -480,7 +568,8 @@ pub fn find(resource: Resource, name: []const u8) ?Command {
 
 fn testParse(definition: Definition, args: []const []const u8, storage: []u8) Definition.Error!Parsed {
     var fixed = std.heap.FixedBufferAllocator.init(storage);
-    return definition.parse(args, fixed.allocator());
+    var problem: Problem = undefined;
+    return definition.parse(args, fixed.allocator(), &problem);
 }
 
 /// `expected` is the help request of a valid invocation.
@@ -496,6 +585,83 @@ fn expectMissing(command: Command, args: []const []const u8) !?[]const u8 {
     var storage: [1024]u8 = undefined;
     const parsed = try testParse(command.definition(), args, &storage);
     return if (parsed.missing()) |group| group[0] else null;
+}
+
+fn expectOptionalText(expected: ?[]const u8, actual: ?[]const u8) !void {
+    try std.testing.expectEqual(expected == null, actual == null);
+    if (expected) |text| try std.testing.expectEqualStrings(text, actual.?);
+}
+
+fn expectSameProblem(expected: Problem, actual: Problem) !void {
+    try std.testing.expectEqual(std.meta.activeTag(expected), std.meta.activeTag(actual));
+    switch (expected) {
+        .unknown => |detail| {
+            try std.testing.expectEqualStrings(detail.token, actual.unknown.token);
+            try expectOptionalText(detail.suggestion, actual.unknown.suggestion);
+        },
+        .duplicate => |detail| {
+            try std.testing.expectEqualStrings(detail.name, actual.duplicate.name);
+            try std.testing.expectEqual(detail.bound, actual.duplicate.bound);
+        },
+        .missing_value => |detail| {
+            try std.testing.expectEqualStrings(detail.name, actual.missing_value.name);
+            try std.testing.expectEqualStrings(detail.argument, actual.missing_value.argument);
+        },
+        .conflict => |detail| {
+            try std.testing.expectEqualStrings(detail.first, actual.conflict.first);
+            try std.testing.expectEqualStrings(detail.second, actual.conflict.second);
+            try std.testing.expectEqual(detail.positional, actual.conflict.positional);
+            try expectOptionalText(detail.reason, actual.conflict.reason);
+        },
+        .unexpected => |detail| try std.testing.expectEqualStrings(detail, actual.unexpected),
+        .hex => |detail| {
+            try std.testing.expectEqualStrings(detail.name, actual.hex.name);
+            try std.testing.expectEqual(detail.bound, actual.hex.bound);
+        },
+        .instructions_source, .allocation => {},
+    }
+}
+
+fn expectProblem(command: Command, args: []const []const u8, expected: Definition.Error, problem_expected: Problem) !void {
+    var storage: [1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var problem: Problem = undefined;
+    try std.testing.expectError(expected, command.definition().parse(args, fixed.allocator(), &problem));
+    try expectSameProblem(problem_expected, problem);
+}
+
+test "parser problems identify tokens and declaration ordered suggestions" {
+    try expectProblem(.session_list, &.{"--bogus"}, error.UnknownArgument, .{ .unknown = .{ .token = "--bogus", .suggestion = null } });
+    try expectProblem(.session_start, &.{"--lable"}, error.UnknownArgument, .{ .unknown = .{ .token = "--lable", .suggestion = "label" } });
+    try expectProblem(.session_send, &.{"--to"}, error.MissingArgumentValue, .{ .missing_value = .{ .name = "to", .argument = "ID" } });
+    try expectProblem(.session_send, &.{ "--to", "a", "--to", "b" }, error.DuplicateArgument, .{ .duplicate = .{ .name = "to" } });
+    try expectProblem(.session_inspect, &.{"foo"}, error.InvalidArguments, .{ .unexpected = "foo" });
+    try expectProblem(.session_start, &.{"foo"}, error.InvalidArguments, .{ .unexpected = "foo" });
+    try expectProblem(.session_send, &.{"foo"}, error.InvalidArguments, .{ .unexpected = "foo" });
+    try expectProblem(.session_start, &.{ "--key-hex", "z" }, error.InvalidHexIdentity, .{ .hex = .{ .name = "key-hex", .bound = 128 } });
+    try expectProblem(.request_inspect, &.{ "HANDLE", "--store", "P" }, error.ConflictingArguments, .{ .conflict = .{ .first = "store", .second = "HANDLE", .positional = true, .reason = "HANDLE already names its Store and key" } });
+    try expectProblem(.request_read_result, &.{ "HANDLE", "--key", "k" }, error.ConflictingArguments, .{ .conflict = .{ .first = "key", .second = "HANDLE", .positional = true, .reason = "HANDLE already names its Store and key" } });
+    try expectProblem(.request_recover, &.{ "HANDLE", "--record", "r" }, error.ConflictingArguments, .{ .conflict = .{ .first = "record", .second = "HANDLE", .positional = true, .reason = "HANDLE already names its Store, record and kind" } });
+    try expectProblem(.session_resume, &.{ "ID", "--session", "s" }, error.ConflictingArguments, .{ .conflict = .{ .first = "session", .second = "ID", .positional = true, .reason = "ID already names the Session" } });
+    try expectProblem(.defaults_configure, &.{ "--model", "m", "--clear-model" }, error.ConflictingArguments, .{ .conflict = .{ .first = "model", .second = "clear-model" } });
+    try expectProblem(.session_configure, &.{ "--instructions", "file" }, error.InvalidInstructionsSource, .instructions_source);
+    try expectProblem(.session_inspect, &.{ "--store-hex", "61", "--store", "a" }, error.ConflictingArguments, .{ .conflict = .{ .first = "store-hex", .second = "store" } });
+    var repeated: [34][]const u8 = undefined;
+    for (0..17) |i| {
+        repeated[2 * i] = "--provider";
+        repeated[2 * i + 1] = "p";
+    }
+    try expectProblem(.host_serve, &repeated, error.DuplicateArgument, .{ .duplicate = .{ .name = "provider", .bound = 16 } });
+    const definition: Definition = .{ .resource = .session, .name = "test", .description = "", .options = &.{ flag("cat"), flag("bat"), flag("longer") } };
+    var problem: Problem = undefined;
+    try std.testing.expectError(error.UnknownArgument, definition.parse(&.{"--hat"}, std.testing.allocator, &problem));
+    try expectSameProblem(.{ .unknown = .{ .token = "--hat", .suggestion = "cat" } }, problem);
+    try std.testing.expectError(error.UnknownArgument, definition.parse(&.{"--batt"}, std.testing.allocator, &problem));
+    try expectSameProblem(.{ .unknown = .{ .token = "--batt", .suggestion = "bat" } }, problem);
+    try std.testing.expectEqual(@as(usize, 2), spellingDistance("lable", "label"));
+    try std.testing.expectEqual(@as(usize, 2), spellingDistance("", "ab"));
+    try std.testing.expectEqual(@as(usize, 2), spellingDistance("ab", ""));
+    try std.testing.expectEqual(@as(usize, 3), spellingDistance("abcdef", "a"));
 }
 
 test "grammar rejects ambiguous invocations before any effect" {

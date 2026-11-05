@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
         if (err == error.EmptyMessageInput) {
             @import("stderr.zig").print("Standard input was empty; provide Message text. Nothing was sent.\n", .{});
-        } else if (err != error.HostStopped) stderr.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
+        } else if (err != error.HostStopped and !stderr.hasDiagnostic()) stderr.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }
@@ -92,21 +92,9 @@ fn run(init: std.process.Init) !void {
     };
     const definition = command.definition();
     // The arena outlives this invocation, so decoded identities do too.
-    const parsed = definition.parse(args[3..], init.arena.allocator()) catch |err| {
-        const problem = switch (err) {
-            error.DuplicateArgument => "an option was repeated",
-            error.UnknownArgument => "unknown option",
-            error.MissingArgumentValue => "an option is missing its value",
-            error.ConflictingArguments => "conflicting selectors or input sources",
-            error.InvalidArguments => if (command == .session_send or command == .session_start)
-                "Message text must come from stdin; positional text is not accepted"
-            else
-                "unexpected argument",
-            error.InvalidInstructionsSource => "use --instructions - to read instructions from stdin",
-            error.InvalidHexIdentity => "a hex selector is not even-length UTF-8 hex within its bound",
-            error.OutOfMemory => "out of memory",
-        };
-        stderr.diagnostic("rui: {s} {s}: {s}. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, problem, @tagName(resource), definition.name });
+    var problem: cli_args.Problem = undefined;
+    const parsed = definition.parse(args[3..], init.arena.allocator(), &problem) catch |err| {
+        reportParseProblem(problem, @tagName(resource), definition.name, null);
         return err;
     };
     if (parsed.help) return printHelp(init.io, .{ .command = definition });
@@ -151,6 +139,112 @@ noinline fn reportEnvironmentTooLarge(environment: client.Environment) void {
     environment.describeTooLarge(&writer) catch unreachable;
     writer.writeAll(advice) catch unreachable;
     stderr.diagnostic("{s}", .{writer.buffered()});
+}
+
+/// All argument text, including option spellings copied from argv, crosses
+/// TerminalText before reaching the terminal. No allocation on a parse failure.
+fn writeArgument(writer: *std.Io.Writer, text: []const u8) !void {
+    var safe: TerminalText = .{ .mode = .line };
+    try safe.feed(writer, text);
+    try safe.finish(writer);
+}
+
+fn writeProblem(writer: *std.Io.Writer, problem: cli_args.Problem) !void {
+    switch (problem) {
+        .unknown => |value| {
+            try writer.writeAll("unknown option ");
+            try writeArgument(writer, value.token);
+            if (value.suggestion) |suggestion| {
+                try writer.writeAll("; did you mean --");
+                try writeArgument(writer, suggestion);
+                try writer.writeByte('?');
+            }
+        },
+        .duplicate => |value| {
+            try writer.writeAll("--");
+            try writeArgument(writer, value.name);
+            if (value.bound) |bound| {
+                try writer.print(" was given more than {d} times", .{bound});
+            } else try writer.writeAll(" was given twice");
+        },
+        .missing_value => |value| {
+            try writer.writeAll("--");
+            try writeArgument(writer, value.name);
+            try writer.writeAll(" is missing its value (");
+            try writeArgument(writer, value.argument);
+            try writer.writeByte(')');
+        },
+        .conflict => |value| {
+            try writer.writeAll("--");
+            try writeArgument(writer, value.first);
+            try writer.writeAll(if (value.positional) " can't be used with " else " can't be used with --");
+            try writeArgument(writer, value.second);
+            if (value.reason) |reason| {
+                try writer.writeAll(", because ");
+                try writeArgument(writer, reason);
+            }
+        },
+        .unexpected => |token| {
+            try writer.writeAll("unexpected argument \"");
+            try writeArgument(writer, token);
+            try writer.writeByte('"');
+        },
+        .hex => |value| {
+            try writer.writeAll("--");
+            try writeArgument(writer, value.name);
+            try writer.print(" is not even-length hex of at most {d} bytes", .{value.bound});
+        },
+        .instructions_source => try writer.writeAll("use --instructions - to read instructions from stdin"),
+        .allocation => try writer.writeAll("out of memory while reading arguments"),
+    }
+}
+
+test "argument problem rendering names exact repairs and escapes terminal controls" {
+    const Case = struct { problem: cli_args.Problem, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .problem = .{ .unknown = .{ .token = "--sesion", .suggestion = "session" } }, .expected = "unknown option --sesion; did you mean --session?" },
+        .{ .problem = .{ .unknown = .{ .token = "--bad\x1b[31m\n\xff", .suggestion = null } }, .expected = "unknown option --bad\\x1b[31m\\n\\xff" },
+        .{ .problem = .{ .duplicate = .{ .name = "store" } }, .expected = "--store was given twice" },
+        .{ .problem = .{ .duplicate = .{ .name = "provider", .bound = 8 } }, .expected = "--provider was given more than 8 times" },
+        .{ .problem = .{ .missing_value = .{ .name = "model", .argument = "MODEL" } }, .expected = "--model is missing its value (MODEL)" },
+        .{ .problem = .{ .conflict = .{ .first = "model", .second = "clear-model" } }, .expected = "--model can't be used with --clear-model" },
+        .{ .problem = .{ .conflict = .{ .first = "store", .second = "HANDLE", .positional = true, .reason = "HANDLE already names its Store and key" } }, .expected = "--store can't be used with HANDLE, because HANDLE already names its Store and key" },
+        .{ .problem = .{ .conflict = .{ .first = "store", .second = "bad\r\x1b", .positional = true, .reason = "untrusted\nreason" } }, .expected = "--store can't be used with bad\\r\\x1b, because untrusted\\nreason" },
+        .{ .problem = .{ .unexpected = "text\n\"quoted\"" }, .expected = "unexpected argument \"text\\n\\\"quoted\\\"\"" },
+        .{ .problem = .{ .hex = .{ .name = "store-hex", .bound = 492 } }, .expected = "--store-hex is not even-length hex of at most 492 bytes" },
+        .{ .problem = .instructions_source, .expected = "use --instructions - to read instructions from stdin" },
+        .{ .problem = .allocation, .expected = "out of memory while reading arguments" },
+    };
+    for (cases) |case| {
+        var buffer: [512]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        try writeProblem(&writer, case.problem);
+        try std.testing.expectEqualStrings(case.expected, writer.buffered());
+    }
+}
+
+noinline fn reportParseProblem(problem: cli_args.Problem, resource: ?[]const u8, operation: ?[]const u8, unchanged: ?[]const u8) void {
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    writeProblem(&writer, problem) catch {
+        // Oversized hostile argv must not swallow the repair or emit a prefix
+        // of a UTF-8 escape. Fall back to a complete bounded explanation.
+        writer = .fixed(&buffer);
+        writer.writeAll("invalid arguments (details exceed the diagnostic display bound)") catch unreachable;
+    };
+    if (resource) |name| {
+        if (problem == .unexpected and std.mem.eql(u8, name, "session") and
+            (std.mem.eql(u8, operation.?, "start") or std.mem.eql(u8, operation.?, "send")))
+        {
+            stderr.diagnostic("rui: {s} {s}: {s}; Message text must come from stdin, not positional arguments. Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ name, operation.?, writer.buffered(), name, operation.? });
+            return;
+        }
+        stderr.diagnostic("rui: {s} {s}: {s}{s} Nothing was captured or sent. Usage: rui {s} {s} --help\n", .{ name, operation.?, writer.buffered(), if (problem == .unknown and problem.unknown.suggestion != null) "" else ".", name, operation.? });
+    } else if (operation) |name| {
+        stderr.diagnostic("rui: {s}: {s}{s}\n", .{ name, writer.buffered(), unchanged orelse "" });
+    } else {
+        stderr.diagnostic("rui: {s}. Nothing was captured or sent. Usage: rui --help\n", .{writer.buffered()});
+    }
 }
 
 noinline fn reportMissing(resource: cli_args.Resource, definition: cli_args.Definition, group: []const []const u8) !void {
@@ -1175,7 +1269,11 @@ const NewSessionOptions = struct {
     fn parse(args: []const []const u8) !?NewSessionOptions {
         // The fresh-session grammar has no hex spellings to allocate.
         var nothing = std.heap.FixedBufferAllocator.init(&.{});
-        const parsed = cli_args.fresh_session.parse(args, nothing.allocator()) catch return usage();
+        var problem: cli_args.Problem = undefined;
+        const parsed = cli_args.fresh_session.parse(args, nothing.allocator(), &problem) catch |err| {
+            reportParseProblem(problem, null, null, null);
+            return err;
+        };
         if (parsed.help) return null;
         return .{ .store = parsed.get("store"), .provider = parsed.get("provider"), .model = parsed.get("model") };
     }
@@ -1673,7 +1771,6 @@ fn admitModel(model: []const u8) error{InvalidModel}!void {
 /// its message instead and is never true.
 fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool) !bool {
     const io = init.io;
-    const interactive = live != null;
     const named = if (live) |address| address.session else parsed.get("session");
     var input = client.ConfigureInput{
         .store = "",
@@ -1732,14 +1829,23 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         return false;
     }
     var step: ?client.Step = .store;
-    errdefer reportFailureStep(step);
+    return configureCaptured(init, requester, parsed, live, input, &step) catch |err| {
+        reportFailureStep(step, err);
+        return err;
+    };
+}
+
+fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, configuration: client.ConfigureInput, step: *?client.Step) !bool {
+    const io = init.io;
+    const interactive = live != null;
+    var input = configuration;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var sender = requester;
     sender.drop_reply = parsed.get("test-drop-reply");
-    var captured = try takeCapture(&step, client.captureConfigure(io, input, target));
+    var captured = try takeCapture(step, client.captureConfigure(io, input, target));
     const saved = captured.identity().*;
     const replay = captured.replay;
     const human = replay == .generated;
@@ -1748,7 +1854,7 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     const reply = blk: {
         defer captured.close(io);
         if (!interactive) try announceCapture(io, &captured);
-        break :blk takeReply(&step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
+        break :blk takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
     } catch |err| {
         if (human and interactive) reportConfigurationFailure(err, admitted, saved.key.slice());
         return err;
@@ -1775,9 +1881,15 @@ fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) v
 }
 
 fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?client.ConfigureInput) !void {
-    const io = init.io;
     var step: ?client.Step = .input_parse;
-    errdefer reportFailureStep(step);
+    return messageWithStep(init, parsed, configuration, &step) catch |err| {
+        reportFailureStep(step, err);
+        return err;
+    };
+}
+
+fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, configuration: ?client.ConfigureInput, step: *?client.Step) !void {
+    const io = init.io;
     const destination = if (configuration != null) "" else parsed.get("to").?;
     if (configuration == null and !protocol.validSessionId(destination)) {
         stderr.diagnostic("rui: --to needs exactly six lowercase Crockford characters, for example k7m2qx. Nothing was sent.\n", .{});
@@ -1798,7 +1910,7 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
         }
         input.sender = .{ .store = sender_store.?, .session = address.? };
     }
-    step = .store;
+    step.* = .store;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (sender_store) |trusted| {
         const sender_paths = try platform.resolveClientPaths(io, trusted);
@@ -1813,13 +1925,13 @@ fn message(init: std.process.Init, parsed: *const cli_args.Parsed, configuration
     } else input.store = try selectedStore(init, parsed.get("store"), &selected_buffer);
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
-    var captured = try takeCapture(&step, client.captureMessage(io, input, target));
+    var captured = try takeCapture(step, client.captureMessage(io, input, target));
     const sender: client.Requests = .{ .io = io, .drop_reply = parsed.get("test-drop-reply") };
-    if (configuration == null) return sendCapturedMutation(sender, &captured, .{ .map = init.environ_map }, &step);
+    if (configuration == null) return sendCapturedMutation(sender, &captured, .{ .map = init.environ_map }, step);
     defer captured.close(io);
     try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
-    const reply = try takeReply(&step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
+    const reply = try takeReply(step, sender.sendCaptured(&captured, .{ .map = init.environ_map }, &reply_buffer));
     if (!reply.isAccepted()) return writeMutationReply(io, reply, .json, captured.replay);
     // This is the first Message's admission, never execution/completion.
     try std.Io.File.stdout().writeStreamingAll(io, reply.context.session.slice());
@@ -1852,9 +1964,9 @@ fn takeReply(step: *?client.Step, stepped: anytype) !protocol_reply.MutationRepl
 }
 
 /// Null once the Host's reply was presented.
-fn reportFailureStep(held: ?client.Step) void {
+fn reportFailureStep(held: ?client.Step, err: anyerror) void {
     const step = held orelse return;
-    stderr.diagnostic("rui: failure during {s}; cause follows.\n", .{@tagName(step)});
+    stderr.diagnostic("rui: failure during {s}: {s}.\n", .{ @tagName(step), @errorName(err) });
     if (step.mayHaveReachedHost())
         stderr.diagnostic("rui: admission outcome is unconfirmed; inspect or recover the original request, never replace it with a fresh key.\n", .{});
 }
@@ -2111,8 +2223,9 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             // there to leave alone.
             const reader: SetupReader = if (reference.len == 0) .overview else .conversation;
             const unchanged = if (reader == .conversation) "; active Session unchanged" else "";
-            const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator()) catch |err| {
-                stderr.diagnostic("rui: /setup: {s}{s}\n", .{ @errorName(err), unchanged });
+            var problem: cli_args.Problem = undefined;
+            const parsed = cli_args.live_setup.parse(setup_args[0..count], nothing.allocator(), &problem) catch {
+                reportParseProblem(problem, null, "/setup", unchanged);
                 return;
             };
             if (parsed.help) return std.Io.File.stdout().writeStreamingAll(init.io, setup_usage);
@@ -2191,7 +2304,8 @@ test "/effort and /rename give what their /configure spelling gives" {
             const command = slash_commands.parse(line[0..text.len]).command;
             const argument = line[@intFromPtr(command.argument.ptr) - @intFromPtr(line) ..][0..command.argument.len];
             var nothing = std.heap.FixedBufferAllocator.init(&.{});
-            const parsed = try cli_args.live_configure.parse(try liveArguments(command.name, argument, arguments), nothing.allocator());
+            var problem: cli_args.Problem = undefined;
+            const parsed = try cli_args.live_configure.parse(try liveArguments(command.name, argument, arguments), nothing.allocator(), &problem);
             value.* = parsed.get(case.option).?;
         }
         try std.testing.expectEqualStrings(values[1], values[0]);
@@ -2247,7 +2361,9 @@ test "the CLI refuses a line the table does not admit, which the frontend never 
 /// Host accepted it.
 fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live: LiveAddress, arguments: []const []const u8, typed_usage: []const u8) !bool {
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
-    const parsed = cli_args.live_configure.parse(arguments, nothing.allocator()) catch {
+    var problem: cli_args.Problem = undefined;
+    const parsed = cli_args.live_configure.parse(arguments, nothing.allocator(), &problem) catch {
+        reportParseProblem(problem, null, "/configure", null);
         try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
         return false;
     };
@@ -2308,7 +2424,8 @@ test "/setup takes every option in one line" {
     const count = try interactiveTokens(&line, &tokens);
     try std.testing.expectEqual(@as(usize, 10), count);
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
-    const parsed = try cli_args.live_setup.parse(tokens[0..count], nothing.allocator());
+    var problem: cli_args.Problem = undefined;
+    const parsed = try cli_args.live_setup.parse(tokens[0..count], nothing.allocator(), &problem);
     try std.testing.expectEqualStrings("high", parsed.get("reasoning-effort").?);
     try std.testing.expectEqualStrings("/path/to/store", parsed.get("store").?);
 }
