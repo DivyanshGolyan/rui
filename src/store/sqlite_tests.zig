@@ -8784,39 +8784,35 @@ test "a stop or a context full ending stops every attached child below it, each 
     try expectDenseSessionPositions(&storage, parent.slice());
 }
 
-test "an owed stop whose key a client already used is settled by that command and never runs again" {
+test "a child's core call selected before its parent stopped runs only after the stop it owes, which cancels it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    const parent = try configureTestSession(&storage, "taken-parent");
-    const matching = try configureTestSession(&storage, "taken-matching");
-    const conflicting = try configureTestSession(&storage, "taken-conflicting");
-    const other = try configureTestSession(&storage, "taken-other");
-    for ([_][]const u8{ matching.slice(), conflicting.slice() }) |child|
-        try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child });
-    var stop = try completeSessionStop("taken-stop", parent.slice());
-    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
+    const parent = try configureTestSession(&storage, "priority-parent");
+    const child = try configureMessagingSession(&storage, "priority-child");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+    try submitTestMessage(&storage, &tmp, "priority-task", "priority-task", child.slice(), "message your parent");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    var arguments_buffer: [96]u8 = undefined;
+    const arguments = try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"late\"}}", .{parent.slice()});
+    var encoded_buffer: [128]u8 = undefined;
+    const encoded = try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"late\\\"}}", .{parent.slice()});
+    const calls = [_]TestingCall{.{ .item_id = "priority-item", .name = "message_agent", .encoded_call_id = "priority-call", .decoded_call_id = "priority-call", .encoded_arguments = encoded, .decoded_arguments = arguments }};
+    try settleCallsForTesting(&storage, &tmp, model, "priority-metadata", &calls);
+    const selected = (try storage.nextCoreWork()).?.action;
 
-    var settled: usize = 0;
-    while (try storage.nextCoreWork()) |work| : (settled += 1) {
-        const owed = work.stop;
-        // A client took each key first: the same stop for one child, a
-        // stop of another Session under the other child's key.
-        const target = if (std.mem.eql(u8, owed.session.slice(), matching.slice())) matching.slice() else other.slice();
-        var client = try completeSessionStop(owed.key.slice(), target);
-        try std.testing.expect(storage.stopSession(&client, .{}) == .accepted);
-        var owed_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
-        const reply = storage.stopOwedSession(&owed_stop, .{});
-        if (target.ptr == matching.slice().ptr) try std.testing.expect(reply == .accepted and reply.accepted.replayed) else try std.testing.expect(reply == .conflict);
-        try std.testing.expect(settled < 2);
-    }
-    try std.testing.expectEqual(@as(usize, 2), settled);
-    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed", .{}));
-    try std.testing.expect(!storage.isFenced());
+    var stop = try completeSessionStop("priority-stop", parent.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try std.testing.expectEqual(command_domain.AgentDelivery.stopped, try storage.deliverAgentMessage(selected.binding, parent.slice(), "late", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
+    const owed = (try storage.nextCoreWork()).?.stop;
+    var owed_stop = try completeSessionStop(owed.key.slice(), owed.session.slice());
+    try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
+    try std.testing.expect(try storage.nextCoreWork() == null);
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
 }
 
 test "an owed stop a client's stop already settled, or a newer one replaced, runs nothing" {

@@ -423,7 +423,8 @@ pub const AgentDelivery = enum {
     delivered,
     /// Nothing was sent, and the call failed with a result saying why.
     failed,
-    /// A stop selected the call's Turn, and the stop resolves the call.
+    /// A stop selected the call's Turn, or its Session owes one, and the
+    /// stop resolves the call.
     stopped,
 };
 
@@ -571,7 +572,8 @@ pub const AgentStart = enum {
     started,
     /// Nothing was started, and the call failed with a result saying why.
     failed,
-    /// A stop selected the call's Turn, and the stop resolves the call.
+    /// A stop selected the call's Turn, or its Session owes one, and the
+    /// stop resolves the call.
     stopped,
 };
 
@@ -771,12 +773,6 @@ const insert_stop = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-fn settleOwed(a: anytype, session: *const [protocol.session_id_bytes]u8, faults: Faults) !void {
-    a.write(settle_owed_stop, .{ .session = session });
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-}
-
 const settle_owed_stop = rsql.Write(.{
     .sql = "DELETE FROM session_stop_owed WHERE child_ref=?1",
     .Args = struct { session: []const u8 },
@@ -884,10 +880,11 @@ pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faul
     };
 }
 
-/// The stop an attached child owes (D38), under its owed key. Any stop
-/// settles what the Session owes; when that key already names a command,
-/// as a client may choose any key, the owed stop is settled with the
-/// reply that command has, so it never runs again.
+/// The stop an attached child owes (D38), under its owed key. Clients
+/// cannot use `rui.core/` keys (`protocol.reserved_key_prefix`), so the
+/// key is free while the obligation stands. Any stop settles what the
+/// Session owes, and a newer obligation has another key: an owed stop
+/// whose key is not the one owed now runs nothing and answers conflict.
 pub fn stopOwedSession(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
     return stopRounds(a, command, true, faults) catch |err| switch (err) {
         error.InterruptionTargetChanged => error.StopSelectionChanged,
@@ -924,17 +921,15 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
     }
     try a.run();
     // An owed stop runs only while its obligation stands: a stop under
-    // another key, or a newer obligation, settled or replaced it. One
-    // whose key a command already holds settles what it owed.
-    const settles = owed and target != null and target.?.owedUnder(key);
-    if (owed and !settles and saved == null) {
+    // another key, or a newer obligation, settled or replaced it.
+    if (owed and !(target != null and target.?.owedUnder(key) and saved == null)) {
         try a.abandon(.{});
         return .conflict;
     }
     switch (try classify(protocol.SessionStopRejection, &saved, .session_stop, session, &digest)) {
         .fresh => {},
         .conflict => {
-            if (settles) try settleOwed(a, &target.?.session.ref, faults) else try a.abandon(.{});
+            try a.abandon(.{});
             return .conflict;
         },
         .accepted => {
@@ -943,7 +938,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
             a.read(stop_selection, .{ .key = key }, &selection);
             a.read(stop_interrupted, .{ .key = key }, &interrupted);
             try a.run();
-            if (settles) try settleOwed(a, &target.?.session.ref, faults) else try a.abandon(.{});
+            try a.abandon(.{});
             const observed = stopObservation(&selection);
             return .{ .accepted = .{
                 .replayed = true,
@@ -953,7 +948,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
             } };
         },
         .rejected => |code| {
-            if (settles) try settleOwed(a, &target.?.session.ref, faults) else try a.abandon(.{});
+            try a.abandon(.{});
             return .{ .rejected = .{ .replayed = true, .code = code } };
         },
     }
