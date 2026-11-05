@@ -144,6 +144,7 @@ def main():
                 {"RUI_STORE": "", "RUI_ADDRESS": session, "RUI_SENDER_HANDLE": handle},
                 {"RUI_STORE": str(store), "RUI_ADDRESS": "peer/old", "RUI_SENDER_HANDLE": handle},
                 {"RUI_STORE": str(store), "RUI_ADDRESS": "ABC123", "RUI_SENDER_HANDLE": handle},
+                {"RUI_STORE": str(store), "RUI_ADDRESS": session, "RUI_SENDER_HANDLE": "h" * 33},
             )):
                 # Explicit Store selection, even of another Store, is not
                 # authority to downgrade a malformed peer into an anonymous

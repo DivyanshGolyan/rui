@@ -1877,7 +1877,8 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     const handle = init.environ_map.get("RUI_SENDER_HANDLE");
     if (address != null or sender_store != null or handle != null) {
         if (address == null or sender_store == null or handle == null or
-            !protocol.validSessionId(address.?) or sender_store.?.len == 0 or handle.?.len == 0)
+            !protocol.validSessionId(address.?) or sender_store.?.len == 0 or handle.?.len == 0 or
+            std.meta.isError(client.validatePeer(sender_store.?, address.?, handle.?)))
         {
             stderr.diagnostic("rui: invalid peer context; nothing was sent. RUI_ADDRESS, RUI_STORE and RUI_SENDER_HANDLE come as a set from a Session's Bash. To send as a plain caller, run without them: " ++ plain_caller ++ "\n", .{});
             return error.InvalidRuiAddress;
