@@ -171,7 +171,8 @@ Enabling Bash later runs it in the saved Workspace, which a later configure cann
 Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer.
 The CLI and TUI send their own explicit creation defaults: Bash and web search, `bypass`, the model's catalog effort when known or explicit null otherwise, and 90% of its known context window or a fixed 115,200 tokens when unlisted.
 Addressed configure preserves every omitted setting; the model, provider and Workspace binding remain immutable.
-A creation-only `preset` seeds configure from a connect-time spec: supplied values or nulls override it, omissions inherit it, and only the resolved configuration is saved and compared for idempotent replay (D22).
+A creation-only `preset` seeds configure from a connect-time spec: supplied values or nulls override it, omissions inherit it, and resolved answers bind the resolved configuration for idempotent replay (D22).
+Preset lookup/update rejections instead bind the original request, including the preset name, and replay that saved rejection even if the Host can later resolve the preset.
 
 Later configurations preserve omitted provider/model values and accept explicit equal values.
 A different provider or model rejects the whole update, without a revision or partial changes.

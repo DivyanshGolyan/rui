@@ -271,7 +271,7 @@ pub const ConfigureCommand = struct {
     key: Bounded(max_key_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
     configuration: Configuration = .{},
-    /// Host-memory creation seed; resolved before the Store sees this command.
+    /// Host-memory creation seed; its resolution or refusal is supplied to the Store.
     preset: ?Bounded(max_preset_name_bytes) = null,
     require_model: bool = false,
 
@@ -281,6 +281,17 @@ pub const ConfigureCommand = struct {
 
     pub fn semanticDigest(self: *const ConfigureCommand) [32]u8 {
         return configureDigest(self.session.slice(), &self.configuration, self.require_model);
+    }
+
+    /// A preset refusal binds the unresolved request, including its name;
+    /// unlike an accepted creation, it has no resolved spec to identify.
+    pub fn presetRequestDigest(self: *const ConfigureCommand) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, "rui/core/configure-preset-request/v1");
+        hash.update(&self.semanticDigest());
+        hash.update(&.{@intFromBool(self.preset != null)});
+        if (self.preset) |name| hashField(&hash, name.slice());
+        return hash.finalResult();
     }
 };
 

@@ -419,19 +419,31 @@ pub const Store = struct {
         command: *const protocol.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, faults });
+        return self.queue().write(configureHeld, .{ self, command, @as(?configuration_domain.PresetDecision, null), faults });
+    }
+
+    /// A Host-resolved preset or its refusal uses the same key lookup,
+    /// rejection persistence and transaction as every other configure.
+    pub fn configureWithPreset(
+        self: *Store,
+        command: *const protocol.ConfigureCommand,
+        preset: configuration_domain.PresetDecision,
+        faults: Faults,
+    ) ConfigureReply {
+        return self.queue().write(configureHeld, .{ self, command, @as(?configuration_domain.PresetDecision, preset), faults });
     }
 
     fn configureHeld(
         self: *Store,
         command: *const protocol.ConfigureCommand,
+        preset: ?configuration_domain.PresetDecision,
         faults: Faults,
     ) ConfigureReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, faults))) catch .infrastructure_failure;
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, faults))) catch .infrastructure_failure;
     }
 
     /// A fresh Message admission, as `MessageCommitted` receives it.

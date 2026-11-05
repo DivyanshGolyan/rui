@@ -1373,14 +1373,23 @@ noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, 
     return host.store.submitMessageWithModel(command, .{ .context = &install, .call = Install.call }, faults);
 }
 
-/// Resolve a creation seed before the Store hashes or saves the command.
-/// Only the resolved fields cross the Store boundary; preset names never do.
+/// Resolve before the Store hashes or saves. Normal answers bind the resolved
+/// configuration; a preset lookup/update refusal binds the original request,
+/// including its name. The Store keeps that identity for a saved refusal even
+/// if the preset later exists: the same request cannot become an acceptance.
 noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureCommand) store_module.ConfigureReply {
     const name = command.preset orelse return host.store.configure(command, host.hooks.storeFaults(.command));
-    if (command.session.len != 0) return .{ .rejected = .{ .replayed = false, .code = .preset_on_update } };
+    var decision: store_module.PresetDecision = .{ .request_digest = command.presetRequestDigest() };
+    if (command.session.len != 0) {
+        decision.rejection = .preset_on_update;
+        return host.store.configureWithPreset(command, decision, host.hooks.storeFaults(.command));
+    }
     const preset = for (host.presets) |*entry| {
         if (std.mem.eql(u8, entry.name, name.slice())) break entry;
-    } else return .{ .rejected = .{ .replayed = false, .code = .unknown_preset } };
+    } else {
+        decision.rejection = .unknown_preset;
+        return host.store.configureWithPreset(command, decision, host.hooks.storeFaults(.command));
+    };
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
     const arena = memory.allocator();
@@ -1399,7 +1408,7 @@ noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureComma
         const override = &@field(command.configuration, field);
         if (override.state != .omitted) @field(resolved.configuration, field) = override.*;
     }
-    return host.store.configure(resolved, host.hooks.storeFaults(.command));
+    return host.store.configureWithPreset(resolved, decision, host.hooks.storeFaults(.command));
 }
 
 /// `client_environment` holds a Message's checked environment.
@@ -4313,11 +4322,23 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expect(refused == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_compaction_trigger, refused.rejected.code);
     host.presets = &.{};
-    const unknown = submitConfigure(&host, create);
+    try std.testing.expect(submitConfigure(&host, create) == .conflict);
+    const missing = try arena.create(protocol.ConfigureCommand);
+    missing.* = .{ .preset = create.preset };
+    try missing.key.set("preset-missing");
+    const unknown = submitConfigure(&host, missing);
     try std.testing.expect(unknown == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, unknown.rejected.code);
+    host.presets = &presets;
+    const refused_again = submitConfigure(&host, missing);
+    try std.testing.expect(refused_again == .rejected and refused_again.rejected.replayed);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, refused_again.rejected.code);
     invalid.session = session;
+    try invalid.key.set("preset-on-update");
     const update = submitConfigure(&host, invalid);
     try std.testing.expect(update == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update.rejected.code);
+    const update_replay = submitConfigure(&host, invalid);
+    try std.testing.expect(update_replay == .rejected and update_replay.rejected.replayed);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update_replay.rejected.code);
 }

@@ -3478,7 +3478,7 @@ test "real SQLite full during import publishes no canonical prefix" {
             defer entry.release();
             var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
             defer a.deinit();
-            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, .{}));
+            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, .{}));
         },
     );
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));

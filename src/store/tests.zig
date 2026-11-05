@@ -10275,3 +10275,129 @@ test "core_tools presets retain caller narrowing after overrides resolve" {
         }
     }.run);
 }
+
+test "preset unknown rejection survives reopen and later resolution" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var request: protocol.ConfigureCommand = .{ .preset = .{} };
+            try request.key.set("preset-unknown-replay");
+            try request.preset.?.set("review");
+            request.configuration.label.state = .value;
+            try request.configuration.label.value.set("Review");
+            {
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const refused = storage.configureWithPreset(&request, .{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
+                try std.testing.expect(refused == .rejected and !refused.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, refused.rejected.code);
+                const saved = try storage.observeCommand(request.key.slice());
+                try std.testing.expectEqual(protocol.CommandObservationStatus.rejected, saved.status);
+                try std.testing.expectEqualStrings("unknown_preset", saved.code.slice());
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+            }
+            {
+                var reopened: Store = undefined;
+                try store_testing.testingStore(case, &reopened, &tmp, std.testing.io);
+                defer reopened.close() catch unreachable;
+                // The restarted Host now knows review, but the same original
+                // request must replay its rejection, not admit this full spec.
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var resolved = try completeConfiguration(request.key.slice(), "", workspace, "model-a");
+                resolved.configuration.label = request.configuration.label;
+                const replay = reopened.configureWithPreset(&resolved, .{ .request_digest = request.presetRequestDigest() }, .{});
+                try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, replay.rejected.code);
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&reopened, "SELECT count(*) FROM session", .{}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&reopened, "SELECT count(*) FROM core_command", .{}));
+                // Neither a different name nor different overrides share that
+                // rejection's identity, even if they resolve to the same spec.
+                try request.preset.?.set("other");
+                try std.testing.expect(reopened.configureWithPreset(&resolved, .{ .request_digest = request.presetRequestDigest() }, .{}) == .conflict);
+                try request.preset.?.set("review");
+                try request.configuration.label.value.set("Changed");
+                try std.testing.expect(reopened.configureWithPreset(&resolved, .{ .request_digest = request.presetRequestDigest() }, .{}) == .conflict);
+                try std.testing.expect(reopened.configure(&resolved, .{}) == .conflict);
+            }
+        }
+    }.run);
+}
+
+test "preset refusal cannot replace an accepted configure key" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("preset-bound-key", "", workspace, "model-a");
+            const first = storage.configure(&create, .{});
+            try std.testing.expect(first == .accepted);
+            var request = create;
+            request.preset = .{};
+            try request.preset.?.set("missing");
+            const result = storage.configureWithPreset(&request, .{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
+            try std.testing.expect(result == .conflict);
+            const saved = try storage.observeCommand(create.key.slice());
+            try std.testing.expectEqual(protocol.CommandObservationStatus.accepted, saved.status);
+            try std.testing.expectEqualStrings(first.accepted.session.slice(), saved.target.slice());
+            const replay = storage.configure(&create, .{});
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            try std.testing.expectEqualStrings(first.accepted.session.slice(), replay.accepted.session.slice());
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+        }
+    }.run);
+}
+
+test "preset on update rejection is durable and replayed before applying fields" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var request: protocol.ConfigureCommand = .{ .preset = .{} };
+            try request.key.set("preset-update-replay");
+            try request.preset.?.set("review");
+            request.configuration.label.state = .value;
+            try request.configuration.label.value.set("Must not apply");
+            {
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("preset-update-parent", "", workspace, "model-a");
+                const first = storage.configure(&create, .{});
+                try std.testing.expect(first == .accepted);
+                request.session = first.accepted.session;
+                const refused = storage.configureWithPreset(&request, .{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{});
+                try std.testing.expect(refused == .rejected and !refused.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, refused.rejected.code);
+                const saved = try storage.observeCommand(request.key.slice());
+                try std.testing.expectEqual(protocol.CommandObservationStatus.rejected, saved.status);
+                try std.testing.expectEqualStrings("preset_on_update", saved.code.slice());
+                try std.testing.expectEqualStrings(request.session.slice(), saved.target.slice());
+                try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(request.session.slice())).revision);
+            }
+            {
+                var reopened: Store = undefined;
+                try store_testing.testingStore(case, &reopened, &tmp, std.testing.io);
+                defer reopened.close() catch unreachable;
+                const replay = reopened.configureWithPreset(&request, .{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{});
+                try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, replay.rejected.code);
+                try request.preset.?.set("other");
+                try std.testing.expect(reopened.configureWithPreset(&request, .{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{}) == .conflict);
+                request.preset = null;
+                try std.testing.expect(reopened.configure(&request, .{}) == .conflict);
+                try std.testing.expectEqual(@as(u64, 1), (try reopened.inspectSessionForTesting(request.session.slice())).revision);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&reopened, "SELECT count(*) FROM session WHERE label IS NULL", .{}));
+            }
+        }
+    }.run);
+}

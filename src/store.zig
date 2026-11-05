@@ -31,6 +31,7 @@ pub const AttemptBinding = store_core.AttemptBinding;
 pub const BashExecutionInput = action_domain.BashExecutionInput;
 pub const CommandObservation = command_domain.CommandObservation;
 pub const ConfigureReply = configuration_domain.ConfigureReply;
+pub const PresetDecision = configuration_domain.PresetDecision;
 pub const ContentLocation = content_domain.ContentLocation;
 pub const ContentReader = content_domain.ContentReader;
 pub const ContentReference = content_domain.ContentReference;
