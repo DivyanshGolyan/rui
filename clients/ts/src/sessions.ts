@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { SessionNotifications } from "./notifications.ts";
-import { RuiRequestError } from "./errors.ts";
+import { RuiRequestError, type RequestAnswer } from "./errors.ts";
 import { listActivity, searchActivity, type ActivitySearchEntry, type SearchActivityOptions, readContent, readContentBytes, type FeedEntry, type ListActivityOptions } from "./feed.ts";
 import { WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
@@ -22,7 +22,7 @@ export interface AgentSpec {
 	/** The working directory for Bash. Required with `bash`, fixed for the Session's life. */
 	workspace?: string;
 	/** `openai` or `codex`. Fixed for the Session's life. */
-	provider?: string;
+	provider?: NonNullable<Schemas["AgentSpec"]["provider"]>;
 	/** Fixed for the Session's life. */
 	model: string;
 	instructions?: string;
@@ -32,7 +32,7 @@ export interface AgentSpec {
 	tools: readonly string[];
 	permissionMode: "ask" | "bypass";
 	/** Reasoning effort. `null` sends none, so the provider uses its own; only for a model Rui does not list (D111). */
-	effort: string | null;
+	effort: Schemas["AgentSpec"]["effort"];
 	/** Compact the conversation at this many tokens. */
 	compactAt: number;
 	/** A name shown in lists. `null` clears it. */
@@ -143,8 +143,8 @@ function parse<T>(reply: Buffer): T {
 }
 
 /** Throws the Host's rejection or conflict; returns the accepted answer. */
-function accepted<A extends { status: string; code?: string }>(answer: A): Extract<A, { status: "accepted" }> {
-	if (answer.status !== "accepted") throw new RuiRequestError(answer.status, answer.code ?? "rejected");
+function accepted<A extends RequestAnswer>(answer: A): Extract<A, { status: "accepted" }> {
+	if (answer.status !== "accepted") throw new RuiRequestError(answer.status, answer.code);
 	return answer as Extract<A, { status: "accepted" }>;
 }
 

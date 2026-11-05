@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Rui, RuiRequestError } from "../src/index.ts";
+import { Rui, RuiRequestError, type AgentSpec } from "../src/index.ts";
 
 const binary = process.env.RUI_BINARY;
 const skip = binary ? false : "set RUI_BINARY to a built rui";
@@ -19,7 +19,7 @@ async function connect(): Promise<Rui> {
 	});
 }
 
-const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
+const spec: AgentSpec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
 
 test("create, list, send, update, interrupt and stop a Session", { skip }, async () => {
 	const rui = await connect();
