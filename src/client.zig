@@ -1051,6 +1051,17 @@ fn writeConfigureCapture(io: std.Io, paths: *const platform.Paths, input: Config
     return finishCapture(io, &capture, &location, paths.store.slice(), session, .configure);
 }
 
+/// The one check of a peer identity's shape, shared by the CLI (which
+/// must refuse malformed context even when it then sends unsigned to
+/// another Store) and the message capture.
+pub fn validatePeer(store: []const u8, session: []const u8, handle: ?[]const u8) !void {
+    if (handle) |bytes| if (bytes.len > protocol.max_sender_handle_bytes) return error.InvalidSenderHandle;
+    var address: protocol.Address = .{};
+    try address.store.set(store);
+    try address.session.set(session);
+    try address.validate();
+}
+
 pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) Stepped(CaptureError, CapturedRecord) {
     return stepCapture(io, input, target, writeMessageCapture);
 }
@@ -1058,15 +1069,11 @@ pub fn captureMessage(io: std.Io, input: MessageInput, target: CaptureTarget) St
 fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageInput, target: CaptureTarget, input_failure: *?Step) !CapturedRecord {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     var key_buffer: [36]u8 = undefined;
-    if (input.sender_handle) |handle| if (handle.len > protocol.max_sender_handle_bytes) return error.InvalidSenderHandle;
     // Validate the full sender before resolving or opening any capture.
     // The Host authenticates admission, including legitimate self-sends.
-    if (input.sender) |sender| {
-        var address: protocol.Address = .{};
-        try address.store.set(sender.store orelse return error.InvalidRuiAddress);
-        try address.session.set(sender.session);
-        try address.validate();
-    }
+    if (input.sender) |sender|
+        try validatePeer(sender.store orelse return error.InvalidRuiAddress, sender.session, input.sender_handle)
+    else if (input.sender_handle) |handle| if (handle.len > protocol.max_sender_handle_bytes) return error.InvalidSenderHandle;
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     if (input.configuration != null) {
         if (input.session.len != 0 or location.key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(location.key)) return error.InvalidSession;
