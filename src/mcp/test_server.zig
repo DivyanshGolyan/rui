@@ -72,6 +72,8 @@ fn requestIn(self: *const Script) bool {
 }
 
 pub fn stop(self: *Script) void {
+    // Also release a scripted future accept when an assertion aborts a test.
+    _ = std.c.shutdown(self.listener, std.c.SHUT.RDWR);
     if (self.thread) |thread| thread.join();
     _ = std.c.close(self.listener);
 }

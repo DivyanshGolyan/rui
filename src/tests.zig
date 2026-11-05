@@ -21,6 +21,7 @@ test {
     _ = @import("mcp/Call.zig");
     _ = @import("mcp/result_text.zig");
     _ = @import("mcp/Running.zig");
+    _ = @import("mcp/servers.zig");
     _ = @import("mcp/Listing.zig");
     _ = @import("mcp/offered.zig");
     _ = @import("mcp/Request.zig");
@@ -35,6 +36,7 @@ test {
     _ = @import("server.zig");
     _ = @import("server_execution.zig");
     _ = @import("server_host.zig");
+    _ = @import("server_mcp_tests.zig");
     _ = @import("SessionEnvironments.zig");
     _ = @import("client_defaults.zig");
     _ = @import("client.zig");

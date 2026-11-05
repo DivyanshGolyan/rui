@@ -36,6 +36,7 @@ const ActionResolutionCode = action_domain.ActionResolutionCode;
 const ActionSettlement = action_domain.ActionSettlement;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptAdmission = model_admission_domain.AttemptAdmission;
+const McpExecutionInput = action_domain.McpExecutionInput;
 const BashExecutionInput = action_domain.BashExecutionInput;
 const CommandObservation = command_domain.CommandObservation;
 const ConfigureReply = configuration_domain.ConfigureReply;
@@ -876,6 +877,28 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitNextActionAttempt(&candidate, &access, self.io, bash_timeout_ms, faults)));
     }
 
+    pub fn admitMcpActionAttempt(self: *Store, action_id: u64, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
+        return self.queue().write(admitMcpActionAttemptHeld, .{ self, action_id, timeout_ms, faults });
+    }
+    fn admitMcpActionAttemptHeld(self: *Store, action_id: u64, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
+        if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidMcpTimeout;
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitMcpActionAttempt(&access, self.io, action_id, timeout_ms, faults)));
+    }
+    pub fn readMcpExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *McpExecutionInput) !void {
+        return self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out });
+    }
+    fn readMcpExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *McpExecutionInput) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: ReadAccess = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.action_attempt, action_domain.readMcpExecutionInput(&access, binding, out));
+    }
+
     /// `out` is valid only when this returns without error.
     pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
         return self.queue().run(readBashExecutionInputHeld, .{ self, binding, out });
@@ -997,15 +1020,19 @@ pub const Store = struct {
 
     /// Owed stops, ending Messages and ancestor feed hops precede calls.
     pub fn nextCoreWork(self: *Store) !?CoreWork {
-        return self.queue().run(nextCoreWorkHeld, .{self});
+        return self.nextCoreWorkForHost(true);
     }
 
-    fn nextCoreWorkHeld(self: *Store) !?CoreWork {
+    pub fn nextCoreWorkForHost(self: *Store, include_mcp: bool) !?CoreWork {
+        return self.queue().run(nextCoreWorkHeld, .{ self, include_mcp });
+    }
+
+    fn nextCoreWorkHeld(self: *Store, include_mcp: bool) !?CoreWork {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.nextCoreWork(&access));
+        return entry.finish(Ordinary.none, action_domain.nextCoreWork(&access, include_mcp));
     }
 
     /// Runs the `message_agent` call `binding` names with its checked

@@ -1268,7 +1268,7 @@ export interface components {
                 name: string;
                 url: string;
                 bearerToken: string;
-                callTimeoutMs: number;
+                callTimeoutMs?: number;
             }[];
         };
         ListSessionsReply: {

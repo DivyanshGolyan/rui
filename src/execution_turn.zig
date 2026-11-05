@@ -104,7 +104,7 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
     };
     const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
     var found_nothing = true;
-    // Core calls, owed stops and the interim MCP resolver take no slot.
+    // Core calls, owed stops and MCP admission take no execution slot.
     // Their shared empty scan reruns only once a commit moves the generation.
     if (state.idle_core_generation != admission_key.generation) switch (context.runCoreAction()) {
         .admitted => {
