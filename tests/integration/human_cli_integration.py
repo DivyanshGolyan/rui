@@ -373,11 +373,13 @@ def compiled_model_cases():
                 assert not record.exists() and not (root / "absent-store").exists()
                 assert list(home.iterdir()) == [], "invalid model created capture or preference state"
         # A failure no owner explains still names its cause on the generic line.
-        for arguments, cause in ((("session", "list", "--store", ""), "InvalidStore"),
-                (("session", "inspect", "--store", str(root / "absent-store"), "--session", "k7m2qx", "--profile", "invalid"), "UnknownReportProfile")):
-            result = subprocess.run([str(fixture.RUI), *arguments], env=env, capture_output=True, text=True, timeout=10)
-            assert result.returncode == 1 and not result.stdout, result
-            assert f"failed: {cause}. Syntax and recovery:" in result.stderr, result.stderr
+        result = subprocess.run([str(fixture.RUI), "session", "list", "--store", ""], env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 1 and not result.stdout, result
+        assert "failed: InvalidStore. Syntax and recovery:" in result.stderr, result.stderr
+        result = subprocess.run([str(fixture.RUI), "session", "inspect", "--store", str(root / "absent-store"), "--session", "k7m2qx",
+            "--profile", "invalid"], env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode == 1 and not result.stdout, result
+        assert "--profile invalid: That value is not supported. Accepted: current, full." in result.stderr, result.stderr
         rejected_default = subprocess.run([str(fixture.RUI), "defaults", "configure", "--provider", "codex", "--model", "two words"],
             env=env, capture_output=True, text=True, timeout=10)
         assert rejected_default.returncode != 0 and listing in rejected_default.stderr and not list(home.iterdir())

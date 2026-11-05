@@ -170,7 +170,7 @@ def failed_response_export_case(state, processes, endpoints):
     export("999999", "metadata", error="ContentNotFound")
     export(records[0][0]["operation"], "body", extra=("--profile", "full"), error="[profile_excludes_failed_response]")
     export(records[0][0]["operation"], "unknown", error="Accepted: body, metadata.")
-    export("0", "body", error="InvalidTarget")
+    export("0", "body", error="--operation 0: That is not an ID.")
     stop_host(host)
     processes.remove(host)
     assert snapshot() == before, "export mutated canonical data, retained bytes or write timestamps"
