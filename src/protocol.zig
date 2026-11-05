@@ -185,6 +185,9 @@ pub const ToolsField = struct {
 /// A `tools` list's names, one space apart.
 pub const max_tool_names_bytes = max_tool_list_name_bytes + max_tools - 1;
 
+/// A JSON list of validated tool names, including brackets, quotes and commas.
+pub const max_tool_names_json_bytes = 2 + max_tool_list_name_bytes + 2 * max_tools + max_tools - 1;
+
 pub const BuiltInTool = built_in_tool.BuiltInTool;
 pub const ToolSelection = built_in_tool.Selection;
 
@@ -1047,18 +1050,18 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"reference\":",       Hole{ .string = max_session_bytes },           ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",      Hole{ .tag = Provider },                       "\",\"model\":",           Hole{ .string = max_model_bytes },
-        ",\"tools\":",           Hole{ .text = max_tool_selection_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
-        "\",\"label\":",         Hole{ .optional_string = max_label_bytes },    ",\"created_at\":\"",      Hole.decimal,
-        "\",\"revision\":\"",    Hole.decimal,                                  "\",\"end\":\"",           Hole.decimal,
-        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },         ",\"work\":",              Hole{ .json = SessionWork },
-        ",\"peers\":",           Hole{ .json = PeerFacts },                     "}",
+        "{\"reference\":",       Hole{ .string = max_session_bytes },        ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",      Hole{ .tag = Provider },                    "\",\"model\":",           Hole{ .string = max_model_bytes },
+        ",\"tools\":",           Hole{ .text = max_tool_names_json_bytes },  ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
+        "\",\"label\":",         Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"",      Hole.decimal,
+        "\",\"revision\":\"",    Hole.decimal,                               "\",\"end\":\"",           Hole.decimal,
+        "\",\"first_message\":", Hole{ .optional_json = FirstMessage },      ",\"work\":",              Hole{ .json = SessionWork },
+        ",\"peers\":",           Hole{ .json = PeerFacts },                  "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     /// A row may never exceed this, whatever its fields hold: a new field that
     /// would grow every page's scratch charge past it fails the build.
-    pub const budget_bytes = 32 * 1024;
+    pub const budget_bytes = 36 * 1024;
     comptime {
         std.debug.assert(max_json_bytes <= budget_bytes);
     }
@@ -1070,7 +1073,8 @@ pub const SessionRow = struct {
         workspace: []const u8,
         provider: Provider,
         model: []const u8,
-        tools: ToolSelection,
+        /// Already-rendered JSON borrowed from the Store read.
+        tools: []const u8,
         permission_mode: PermissionMode,
         label: ?[]const u8,
         created_at: u64,
@@ -1083,23 +1087,23 @@ pub const SessionRow = struct {
         pub const max_json_bytes = SessionRow.max_json_bytes;
 
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
-            var tools_buffer: [max_tool_selection_json_bytes]u8 = undefined;
             try writeShape(out, json_shape, .{
-                f.reference,                               f.workspace,       f.provider,      f.model,
-                toolSelectionJson(f.tools, &tools_buffer), f.permission_mode, f.label,         f.created_at,
-                f.revision,                                f.end,             f.first_message, f.work,
+                f.reference, f.workspace,       f.provider,      f.model,
+                f.tools,     f.permission_mode, f.label,         f.created_at,
+                f.revision,  f.end,             f.first_message, f.work,
                 f.peers,
             });
         }
     };
 
     pub fn writeJson(self: *const SessionRow, out: *std.Io.Writer) !void {
+        var tools_buffer: [max_tool_selection_json_bytes]u8 = undefined;
         const fields: Fields = .{
             .reference = self.reference.slice(),
             .workspace = self.workspace.slice(),
             .provider = self.provider,
             .model = self.model.slice(),
-            .tools = self.tools,
+            .tools = toolSelectionJson(self.tools, &tools_buffer),
             .permission_mode = self.permission_mode,
             .label = if (self.label) |*label| label.slice() else null,
             .created_at = self.created_at,
@@ -4045,4 +4049,27 @@ test "an order-free request still names each member once, carries every required
     }
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expect(retained == null);
+}
+
+test "SessionRow borrowed fields preserve offered tool names" {
+    const fields: SessionRow.Fields = .{
+        .reference = "peer",
+        .workspace = "/w",
+        .provider = .codex,
+        .model = "model",
+        .tools = "[\"bash\",\"offered_tool\"]",
+        .permission_mode = .ask,
+        .label = null,
+        .created_at = 0,
+        .revision = 0,
+        .end = 0,
+        .first_message = null,
+        .work = &.{},
+        .peers = &.{},
+    };
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try fields.writeJson(&out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"tools\":[\"bash\",\"offered_tool\"]") != null);
+    try std.testing.expect(out.written().len <= SessionRow.max_json_bytes);
 }

@@ -381,7 +381,7 @@ const ModelListEntry = struct {
 /// `SessionRow`'s `tools`, written as raw JSON text.
 const ToolNames = struct {
     pub fn openapi_inline(d: *Document) !Value {
-        return d.holeSchema(Hole{ .tag_set = Tool }, false);
+        return ToolNameList.openapi_inline(d);
     }
 };
 
@@ -1025,11 +1025,17 @@ fn equal(a: Value, b: Value) bool {
     };
 }
 
-/// The two pattern forms this document writes: decimal, and fixed-length hex.
+/// The pattern forms this document writes: decimal, tool names and fixed-length hex.
 fn matches(pattern: []const u8, text: []const u8) bool {
     if (std.mem.eql(u8, pattern, "^(0|[1-9][0-9]*)$")) {
         if (text.len == 0 or (text.len > 1 and text[0] == '0')) return false;
         for (text) |byte| if (!std.ascii.isDigit(byte)) return false;
+        return true;
+    }
+    if (std.mem.startsWith(u8, pattern, "^[A-Za-z0-9_-]{1,")) {
+        const maximum = std.fmt.parseInt(usize, pattern["^[A-Za-z0-9_-]{1,".len .. pattern.len - "}$".len], 10) catch unreachable;
+        if (text.len == 0 or text.len > maximum) return false;
+        for (text) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return false;
         return true;
     }
     const length = std.fmt.parseInt(usize, pattern["^[0-9a-f]{".len .. pattern.len - "}$".len], 10) catch unreachable;

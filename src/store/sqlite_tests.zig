@@ -9018,6 +9018,7 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
     const list = try testingSessionList(&storage, &tmp, .{}, &used, 1);
     defer std.testing.allocator.free(list);
     try std.testing.expect(std.mem.indexOf(u8, list, session.slice()) != null);
+    try std.testing.expect(std.mem.indexOf(u8, list, offered) != null);
 }
 
 test "a record names a server exactly when an MCP server owns it" {
