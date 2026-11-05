@@ -4,7 +4,6 @@
 
 const std = @import("std");
 const attempt = @import("../attempt.zig");
-const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
@@ -22,9 +21,8 @@ const report_domain = @import("domain/report.zig");
 const rsql = @import("rsql.zig");
 const Access = @import("access.zig").Access;
 const ReadAccess = reads_domain.ReadAccess;
-const store_schema = @import("schema.zig");
-const sqlite = @import("sqlite.zig");
-const c = sqlite.c;
+const Engine = @import("engine.zig").Engine;
+const Sqlite = @import("engine/Sqlite.zig");
 const ActionAttemptAdmission = action_domain.ActionAttemptAdmission;
 const ActionAttemptBinding = action_domain.ActionAttemptBinding;
 const AgentDelivery = command_domain.AgentDelivery;
@@ -37,7 +35,6 @@ const AttemptAdmission = model_admission_domain.AttemptAdmission;
 const BashExecutionInput = action_domain.BashExecutionInput;
 const CommandObservation = command_domain.CommandObservation;
 const ConfigureReply = configuration_domain.ConfigureReply;
-const ContentBlob = @import("access.zig").ContentBlob;
 const Found = @import("access.zig").Found;
 const ContentLocation = content_domain.ContentLocation;
 const ContentReference = content_domain.ContentReference;
@@ -58,15 +55,15 @@ const SessionReport = report_domain.SessionReport;
 const SessionReportCapture = report_domain.SessionReportCapture;
 const SessionReportOptions = report_domain.SessionReportOptions;
 const SessionStopReply = command_domain.SessionStopReply;
-const StatementCache = sqlite.StatementCache;
 const SupersedingControl = action_domain.SupersedingControl;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
-const sqlite_heap_bytes = sqlite.sqlite_heap_bytes;
 const Queue = @import("queue.zig").Queue;
 
 pub const Store = struct {
     io: std.Io,
-    database: *c.sqlite3,
+    /// The connection, its prepared statements and an Entry's content
+    /// read handle.
+    engine: Engine,
     selector: protocol.Bounded(protocol.max_store_bytes),
     fenced: std.atomic.Value(bool) = .init(false),
     /// Advances before `release` of any entry point that changed rows, so
@@ -84,7 +81,6 @@ pub const Store = struct {
     /// This opening's identity: a `since` token from any other opening
     /// names generations this one never counted.
     instance: [16]u8 = undefined,
-    statements: StatementCache = .{},
     /// The Host hands out every id and sequence value, and each
     /// transaction's second; see `HostValues`. Out of line beside the
     /// change ring, so a new identity does not grow the Store.
@@ -92,9 +88,6 @@ pub const Store = struct {
     /// The labels of the providers whose Sessions get model Attempts, each
     /// between commas, fixed at open.
     served: protocol.Routes = protocol.routesAll(.unserved),
-    // Entry.release closes the read transaction before the next request, including
-    // errors and yielded historical scans. Logical readers cannot pin the WAL.
-    read_blob: ContentBlob = .{},
     /// Which use holds the out-of-line scratch in this entry point.
     scratch_use: ScratchUse = .none,
     /// The batch of writes the holder is running (`Queue.Batch`). `.ready`
@@ -154,14 +147,7 @@ pub const Store = struct {
         var bounded: protocol.Bounded(protocol.max_model_bytes) = .{};
         try bounded.set(model);
         if (bounded.len == 0) return error.InvalidModel;
-        const statement = try fixtureStatement(self, "UPDATE session_revision SET model=?2 " ++
-            "WHERE (session_ref,revision)=(SELECT o.session_ref,o.settings_revision FROM model_operation o " ++
-            "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1 AND o.settings_revision<s.revision)");
-        defer sqlite.resetCached(statement);
-        try sqlite.bindU64(statement, 1, binding.operation_id);
-        try sqlite.bindText(statement, 2, model);
-        try sqlite.expectDone(statement);
-        if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingRevision;
+        try self.engine.sqlite.setHistoricalModelForTesting(binding.operation_id, model);
     }
 
     /// Flips the first byte of the provider bag of the `binding` Operation's
@@ -169,17 +155,12 @@ pub const Store = struct {
     /// damage would.
     pub fn damageOutputBagForTesting(self: *Store, binding: AttemptBinding) !void {
         if (!@import("builtin").is_test) @compileError("test-only Store fixture");
-        const statement = try fixtureStatement(self, "UPDATE content SET payload=CAST(CASE WHEN substr(CAST(payload AS TEXT),1,1)='X' THEN 'Y' ELSE 'X' END || substr(CAST(payload AS TEXT),2) AS BLOB) " ++
-            "WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE operation_id=?1 AND item_ordinal=0)");
-        defer sqlite.resetCached(statement);
-        try sqlite.bindU64(statement, 1, binding.operation_id);
-        try sqlite.expectDone(statement);
-        if (c.sqlite3_changes(self.database) != 1) return error.InvalidTestingOutput;
+        try self.engine.sqlite.damageOutputBagForTesting(binding.operation_id);
     }
 
     /// Opens in place: the Host holds exactly one Store, never a copy. It
-    /// runs once per process; noinline keeps its path buffers off the
-    /// caller's frame, which lives as long as the Host.
+    /// runs once per process; noinline keeps its work off the caller's
+    /// frame, which lives as long as the Host.
     pub noinline fn openWithOptions(
         self: *Store,
         io: std.Io,
@@ -188,86 +169,8 @@ pub const Store = struct {
         options: OpenOptions,
     ) !void {
         errdefer self.* = undefined;
-        if (options.cache_kib == 0 or options.cache_kib > 4096) return error.InvalidSqliteCacheSize;
-        if (c.sqlite3_hard_heap_limit64(@intCast(sqlite_heap_bytes)) < 0) {
-            return error.SqliteHeapLimitConfigurationFailed;
-        }
-        errdefer _ = c.sqlite3_hard_heap_limit64(0);
-
-        const existing = blk: {
-            const stat = std.Io.Dir.cwd().statFile(io, database_path, .{}) catch |err| switch (err) {
-                error.FileNotFound => break :blk false,
-                else => return err,
-            };
-            if (stat.kind != .file) return error.InvalidStoreDatabase;
-            break :blk stat.size != 0;
-        };
-
-        var path_buffer: [platform.max_database_path_bytes + 1:0]u8 = undefined;
-        const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}", .{database_path}, 0);
-        var database: ?*c.sqlite3 = null;
-        const open_result = c.sqlite3_open_v2(
-            path,
-            &database,
-            c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_NOMUTEX,
-            null,
-        );
-        if (open_result != c.SQLITE_OK) {
-            if (database) |db| _ = c.sqlite3_close(db);
-            return error.StoreOpenFailed;
-        }
-        // The handle may still be null on later failure paths; never unwrap
-        // it while unwinding an open failure.
-        errdefer {
-            if (database) |db| _ = c.sqlite3_close(db);
-        }
-
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LENGTH, @intCast(protocol.max_sqlite_content_bytes + 4096));
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_SQL_LENGTH, 16 * 1024);
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, 32);
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, protocol.max_json_depth);
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
-        // 65: a settlement's wide duplicate read binds its Operation and 64 digests as
-        // ?1..?65 (`model_settlement.batch_items`); a created Session's INSERT binds 17.
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_VARIABLE_NUMBER, rsql.max_parameters);
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_TRIGGER_DEPTH, 0);
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LIKE_PATTERN_LENGTH, 4096);
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_ATTACHED, 0);
-        try sqlite.setLimit(database.?, c.SQLITE_LIMIT_WORKER_THREADS, 0);
-        try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_DEFENSIVE, 1);
-        try sqlite.dbConfig(database.?, c.SQLITE_DBCONFIG_TRUSTED_SCHEMA, 0);
-        // Before the first read: the Host keeps the file lock until close, and
-        // WAL then keeps its index in heap memory, so no -shm file exists.
-        try sqlite.exec(database.?, "PRAGMA locking_mode=EXCLUSIVE");
-        if (existing) {
-            if (options.found_schema_version) |found| found.* = try sqlite.pragmaInt(database.?, "PRAGMA user_version");
-            try store_schema.openExisting(io, database.?, selector);
-        }
-        try sqlite.exec(database.?, "PRAGMA busy_timeout=0");
-        try sqlite.exec(database.?, "PRAGMA foreign_keys=ON");
-        try sqlite.exec(database.?, "PRAGMA mmap_size=0");
-        try sqlite.exec(database.?, "PRAGMA temp_store=FILE");
-        var cache_size_buffer: [64:0]u8 = undefined;
-        const cache_size = try std.fmt.bufPrintSentinel(&cache_size_buffer, "PRAGMA cache_size=-{d}", .{options.cache_kib}, 0);
-        try sqlite.exec(database.?, cache_size);
-        try sqlite.exec(database.?, if (options.cache_spill) "PRAGMA cache_spill=ON" else "PRAGMA cache_spill=OFF");
-        try sqlite.exec(database.?, "PRAGMA synchronous=FULL");
-        if (@import("../os/os.zig").full_fsync) try sqlite.exec(database.?, "PRAGMA fullfsync=ON");
-        // Validation precedes this, so an incompatible Store keeps its journal mode.
-        const journal_mode = sqlite.diagnosticTextPragma(database.?, "PRAGMA journal_mode=WAL") orelse return error.StoreJournalModeFailed;
-        if (!std.mem.eql(u8, journal_mode.slice(), "wal")) return error.StoreJournalModeFailed;
-        // Checkpoints truncate a grown WAL back to the auto-checkpoint size.
-        try sqlite.exec(database.?, "PRAGMA journal_size_limit=4194304");
-        if (!existing) try store_schema.bootstrap(database.?, selector);
-        // A new Host never inherits a lost Action's sender authority. It
-        // clears every Session's rows, so it cannot tie to one as a typed
-        // Write must; its text is held to rsql's portability rules only.
-        const sender_sweep = "UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL";
-        if (@import("builtin").is_test) @import("mysql_dialect_check.zig").shadowPrepare(comptime rsql.render(.mysql, sender_sweep));
-        try sqlite.exec(database.?, comptime portable(sender_sweep));
-
-        if (@import("builtin").is_test) try sqlite.createTouchOracleForTesting(database.?);
+        const opened = try Sqlite.open(io, database_path, selector, options);
+        errdefer opened.abandon();
 
         var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
         try stored_selector.set(selector);
@@ -275,24 +178,23 @@ pub const Store = struct {
         errdefer destroyRing(changes);
         const ids: *HostValues = &@as(*OutOfLine, @fieldParentPtr("ring", changes)).ids;
         ids.* = .{ .next = undefined };
-        self.* = .{ .io = io, .database = database.?, .selector = stored_selector, .changes = changes, .ids = ids };
+        self.* = .{ .io = io, .engine = .{ .sqlite = opened }, .selector = stored_selector, .changes = changes, .ids = ids };
         self.served = options.served;
         self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch });
         // The Store is in final storage, so the function may keep its address.
-        if (c.sqlite3_create_function_v2(self.database, "rui_served", 1, c.SQLITE_UTF8 | c.SQLITE_DETERMINISTIC, &self.served, sqlite.servedFunction, null, null, null) != c.SQLITE_OK)
-            return error.StoreOpenFailed;
+        try self.engine.sqlite.serve(&self.served);
         // Tells this opening's `since` tokens from another's. It grants
         // nothing, so the process CSPRNG serves, and Session IDs keep sole
         // use of secure draws.
         io.random(&self.instance);
-        errdefer self.statements.deinit();
-        // Error paths then roll back without preparing or allocating.
-        _ = try controlStatement(self, .rollback);
-        _ = try controlStatement(self, .rollback_to);
-        _ = try controlStatement(self, .release);
+        errdefer self.engine.sqlite.statements.deinit();
+        try self.engine.sqlite.prepareRollback();
         try loadIdentities(self, .full);
         self.queue().opened();
-        try self.saveCatalog(options.catalog);
+        if (options.catalog) |offered| try self.saveCatalog(offered) else {
+            const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
+            owned.tools = .{ .catalog = &tool_catalog.built_in, .set_id = 0 };
+        }
     }
 
     /// The tools the Host offers, and the id of their saved set.
@@ -302,8 +204,9 @@ pub const Store = struct {
     }
 
     /// Saves `offered` as the catalog set, if no set holds it yet: its
-    /// records a few to a transaction, then the set in one more. Once per
-    /// open, before any request.
+    /// records a few to a transaction, then the set in one more. It becomes
+    /// the catalog `readCatalog` reads back. Once per open, before any
+    /// request.
     pub fn saveCatalog(self: *Store, offered: *const tool_catalog.Catalog) !void {
         if (!offered.valid()) return error.InvalidToolCatalog;
         for (std.enums.values(tool_catalog.Tool)) |tool| {
@@ -334,65 +237,133 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, saveCatalogStep(&access, offered, digest, start)));
     }
 
+    /// The catalog the last `saveCatalog` saved, read back with every
+    /// text, in `allocator`'s memory; null before the first. A Host reads
+    /// it at start to keep the tools of a server it cannot reach. A saved
+    /// catalog that fails its checks fences the Store.
+    pub fn readCatalog(self: *Store, allocator: std.mem.Allocator) !?SavedCatalog {
+        return self.readCatalogChecked(allocator) catch |err| switch (err) {
+            error.CorruptStore => fence(self, error.CorruptStore),
+            else => err,
+        };
+    }
+
+    fn readCatalogChecked(self: *Store, allocator: std.mem.Allocator) !?SavedCatalog {
+        const head = (try self.readCatalogSet()) orelse return null;
+        const count = std.math.cast(usize, head.member_count) orelse return error.CorruptStore;
+        if (count > tool_catalog.max_catalog_records) return error.CorruptStore;
+        const rows = try allocator.alloc(tool_set_domain.catalog_records.Row, count);
+        defer allocator.free(rows);
+        var filled: usize = 0;
+        while (filled < count) {
+            const read = try self.readCatalogRecords(head.tool_set_id.get(), filled, rows[filled..]);
+            if (read == 0) return error.CorruptStore;
+            filled += read;
+        }
+        var text_bytes: usize = 0;
+        for (rows, 0..) |*row, ordinal| {
+            if (row.ordinal != ordinal or row.description_private or row.schema_private) return error.CorruptStore;
+            text_bytes += row.name.slice().len + row.server.slice().len;
+            text_bytes += std.math.cast(usize, row.description_length) orelse return error.CorruptStore;
+            text_bytes += std.math.cast(usize, row.schema_length) orelse return error.CorruptStore;
+        }
+        var saved: SavedCatalog = .{
+            .records = try allocator.alloc(tool_catalog.Record, count),
+            .digests = &.{},
+            .texts = &.{},
+        };
+        errdefer saved.deinit(allocator);
+        saved.digests = try allocator.alloc([32]u8, count);
+        saved.texts = try allocator.alloc(u8, text_bytes);
+        var used: usize = 0;
+        for (rows, saved.records, saved.digests) |*row, *out, *digest| {
+            const name = take(saved.texts, &used, row.name.slice().len);
+            @memcpy(name, row.name.slice());
+            const server = take(saved.texts, &used, row.server.slice().len);
+            @memcpy(server, row.server.slice());
+            const description = take(saved.texts, &used, @intCast(row.description_length));
+            const schema = take(saved.texts, &used, @intCast(row.schema_length));
+            try self.readCatalogText(row.description_id.get(), description);
+            try self.readCatalogText(row.schema_id.get(), schema);
+            if (!std.mem.eql(u8, &protocol.contentDigest(description), &row.description_digest) or
+                !std.mem.eql(u8, &protocol.contentDigest(schema), &row.schema_digest)) return error.CorruptStore;
+            out.* = .{ .name = name, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
+            digest.* = tool_catalog.recordDigest(out);
+        }
+        if (!saved.catalog().valid()) return error.CorruptStore;
+        return saved;
+    }
+
+    fn take(texts: []u8, used: *usize, length: usize) []u8 {
+        defer used.* += length;
+        return texts[used.*..][0..length];
+    }
+
+    /// The Host's catalog set and its record count, in one round.
+    pub fn readCatalogSet(self: *Store) !tool_set_domain.SavedCatalog {
+        return self.queue().run(readCatalogSetHeld, .{self});
+    }
+
+    /// One round: the catalog set's records from `ordinal`, at most one
+    /// batch and `rows.len`; how many it read.
+    pub fn readCatalogRecords(self: *Store, set: u64, ordinal: usize, rows: []tool_set_domain.catalog_records.Row) !usize {
+        return self.queue().run(readCatalogRecordsHeld, .{ self, set, ordinal, rows });
+    }
+
+    fn readCatalogSetHeld(self: *Store) !tool_set_domain.SavedCatalog {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, tool_set_domain.savedCatalogOf(&access));
+    }
+
+    fn readCatalogRecordsHeld(self: *Store, set: u64, ordinal: usize, rows: []tool_set_domain.catalog_records.Row) !usize {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, tool_set_domain.catalogRecordsOf(&access, set, ordinal, rows));
+    }
+
+    /// `destination` from the content row `content_id`, a window at a time.
+    pub fn readCatalogText(self: *Store, content_id: u64, destination: []u8) !void {
+        var start: usize = 0;
+        while (start < destination.len) {
+            const window = destination[start..][0..@min(destination.len - start, content_domain.ContentReader.content_window_bytes)];
+            try self.queue().run(readCatalogTextHeld, .{ self, content_id, start, window });
+            start += window.len;
+        }
+    }
+
+    fn readCatalogTextHeld(self: *Store, content_id: u64, start: usize, window: []u8) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, access.readRaw(content_id, start, window));
+    }
+
     pub fn sqliteDiagnostic(self: *Store) SqliteDiagnostic {
         return self.queue().run(sqliteDiagnosticHeld, .{self});
     }
 
     fn sqliteDiagnosticHeld(self: *Store) SqliteDiagnostic {
-        var result: SqliteDiagnostic = .{};
-        var current: c.sqlite3_int64 = 0;
-        var highwater: c.sqlite3_int64 = 0;
-        if (c.sqlite3_status64(c.SQLITE_STATUS_MEMORY_USED, &current, &highwater, 0) == c.SQLITE_OK and
-            current >= 0 and highwater >= 0)
-        {
-            result.process_memory_current_bytes = @intCast(current);
-            result.process_memory_highwater_bytes = @intCast(highwater);
-        }
+        return self.engine.sqlite.diagnostic();
+    }
 
-        var cache_used: c_int = 0;
-        var unused_highwater: c_int = 0;
-        if (c.sqlite3_db_status(
-            self.database,
-            c.SQLITE_DBSTATUS_CACHE_USED,
-            &cache_used,
-            &unused_highwater,
-            0,
-        ) == c.SQLITE_OK and cache_used >= 0) {
-            result.cache_used_bytes = @intCast(cache_used);
-        }
-        var spills: c_int = 0;
-        if (c.sqlite3_db_status(
-            self.database,
-            c.SQLITE_DBSTATUS_CACHE_SPILL,
-            &spills,
-            &unused_highwater,
-            0,
-        ) == c.SQLITE_OK and spills >= 0) {
-            result.cache_spills = @intCast(spills);
-        }
-
-        const hard_heap_limit = c.sqlite3_hard_heap_limit64(-1);
-        if (hard_heap_limit >= 0) result.hard_heap_limit_bytes = @intCast(hard_heap_limit);
-        result.page_size_bytes = sqlite.diagnosticUnsignedPragma(self.database, "PRAGMA page_size");
-        result.cache_size_setting = sqlite.diagnosticSignedPragma(self.database, "PRAGMA cache_size");
-        result.cache_spill_threshold = sqlite.diagnosticSignedPragma(self.database, "PRAGMA cache_spill");
-        result.mmap_size_bytes = sqlite.diagnosticUnsignedPragma(self.database, "PRAGMA mmap_size");
-        result.synchronous = sqlite.diagnosticSignedPragma(self.database, "PRAGMA synchronous");
-        result.temp_store = sqlite.diagnosticSignedPragma(self.database, "PRAGMA temp_store");
-        result.busy_timeout_ms = sqlite.diagnosticUnsignedPragma(self.database, "PRAGMA busy_timeout");
-        result.journal_mode = sqlite.diagnosticTextPragma(self.database, "PRAGMA journal_mode");
-        return result;
+    /// The SQLite connection, for SQLite-only tests and fixtures.
+    pub fn sqliteDatabase(self: *const Store) Sqlite.Database {
+        return self.engine.sqlite.database;
     }
 
     pub fn close(self: *Store) !void {
         // Every caller has its answer, so the queue is empty.
         self.queue().closing();
-        self.statements.deinit();
-        const close_result = c.sqlite3_close(self.database);
-        // Freed even when SQLite keeps the handle: nothing retries a close.
+        const closed = self.engine.close();
+        // Freed even when the engine keeps its connection: nothing retries a close.
         destroyRing(self.changes);
-        if (close_result != c.SQLITE_OK) return error.StoreCloseFailed;
-        _ = c.sqlite3_hard_heap_limit64(0);
+        try closed;
         self.* = undefined;
     }
 
@@ -410,7 +381,7 @@ pub const Store = struct {
         return @ptrCast(self.scratch(.configuration));
     }
 
-    /// The one thread that touches `database`, the scratch and `ids`,
+    /// The one thread that touches `engine`, the scratch and `ids`,
     /// beside the change ring (`OutOfLine`).
     pub fn queue(self: *Store) *Queue {
         const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
@@ -1166,7 +1137,9 @@ pub const OpenOptions = struct {
     cache_kib: u32 = 1024,
     found_schema_version: ?*u32 = null,
     /// The tools the Host offers, which it keeps for the Store's life.
-    catalog: *const tool_catalog.Catalog = &tool_catalog.built_in,
+    /// Null saves none: the Host reads the last one back (`readCatalog`)
+    /// and saves its own (`saveCatalog`) before it serves.
+    catalog: ?*const tool_catalog.Catalog = &tool_catalog.built_in,
 };
 
 pub const SqliteDiagnostic = struct {
@@ -1381,12 +1354,11 @@ pub const Entry = struct {
 
     pub fn release(self: Entry) void {
         const store = self.store;
-        store.read_blob.close();
+        store.engine.releaseEntry();
         store.scratch_use = .none;
-        if (@import("builtin").is_test) store.statements.assertIdle();
         // Counts autocommit and explicit-transaction writes alike. A
         // rolled-back change touched everything: never a missed change.
-        if (c.sqlite3_total_changes64(store.database) != self.changes) {
+        if (store.engine.totalChanges() != self.changes) {
             if (@import("builtin").is_test) if (untouchedForTesting(store)) |id|
                 std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
             const generation = store.commit_generation.fetchAdd(1, .release) + 1;
@@ -1431,7 +1403,7 @@ pub fn enter(self: *Store, trace: EntryTrace) error{StoreFenced}!Entry {
     self.touched = .{};
     // Rows a test changed outside any entry point belong to none.
     if (@import("builtin").is_test) clearTouchOracleForTesting(self);
-    const entry: Entry = .{ .store = self, .trace = trace, .changes = c.sqlite3_total_changes64(self.database), .borrowed = borrowed };
+    const entry: Entry = .{ .store = self, .trace = trace, .changes = self.engine.totalChanges(), .borrowed = borrowed };
     trace.mark(.acquired);
     if (self.isFenced()) {
         entry.release();
@@ -1447,12 +1419,12 @@ pub fn begin(self: *Store) !void {
     switch (self.batch) {
         .none => {
             std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
-            try control(self, .begin);
+            try self.engine.control(.begin);
             return;
         },
         .ready => {
             std.debug.assert(self.ids.taken.count() == 0 and self.ids.second == 0);
-            try control(self, .begin);
+            try self.engine.control(.begin);
             self.batch = .first;
             return;
         },
@@ -1460,7 +1432,7 @@ pub fn begin(self: *Store) !void {
         .first, .lost => unreachable,
     }
     std.debug.assert(!self.savepoint);
-    try control(self, .savepoint);
+    try self.engine.control(.savepoint);
     self.savepoint = true;
 }
 
@@ -1474,14 +1446,14 @@ pub fn commit(self: *Store) !void {
             return;
         },
         .open => {
-            try control(self, .release);
+            try self.engine.control(.release);
             self.savepoint = false;
             return;
         },
         .none => {},
         .ready, .lost => unreachable,
     }
-    try control(self, .commit);
+    try self.engine.control(.commit);
     self.ids.taken = .empty;
     self.ids.second = 0;
 }
@@ -1512,7 +1484,7 @@ fn finishBatch(context: *anyopaque) bool {
 fn commitBatch(self: *Store) !void {
     switch (self.batch) {
         .ready => {},
-        .open => control(self, .commit) catch |err| return fence(self, err),
+        .open => self.engine.control(.commit) catch |err| return fence(self, err),
         .lost => return fence(self, error.CanonicalRollbackFailed),
         .none, .first => unreachable,
     }
@@ -1526,7 +1498,7 @@ pub fn transactionSecond(self: *Store) error{ClockReadFailed}!i64 {
     if (self.ids.second != 0) return self.ids.second;
     const second = std.math.cast(u32, @divFloor(try readUnixMilliseconds(self.io), 1000)) orelse return error.ClockReadFailed;
     if (second == 0) return error.ClockReadFailed;
-    if (c.sqlite3_get_autocommit(self.database) == 0) self.ids.second = second;
+    if (self.engine.inTransaction()) self.ids.second = second;
     return second;
 }
 
@@ -1545,26 +1517,12 @@ pub fn workspaceDigest(workspace: []const u8) [32]u8 {
 pub fn untouchedForTesting(self: *Store) ?change_ring.Id {
     if (!@import("builtin").is_test) @compileError("test-only check");
     if (self.touched.everything) return null;
-    // Cached, so a test that counts prepared or uncached statements sees
-    // none. A test that makes SQLite fail gets no verdict.
-    const statement = fixtureStatement(self, "SELECT DISTINCT session_ref FROM temp.touched_oracle WHERE session_ref IS NOT NULL") catch return null;
-    defer sqlite.resetCached(statement);
-    while (c.sqlite3_step(statement) == c.SQLITE_ROW) {
-        const changed = c.sqlite3_column_text(statement, 0)[0..@intCast(c.sqlite3_column_bytes(statement, 0))];
-        if (self.touched.contains(changed)) continue;
-        var id: change_ring.Id = @splat('?');
-        const length = @min(id.len, changed.len);
-        @memcpy(id[0..length], changed[0..length]);
-        return id;
-    }
-    return null;
+    return self.engine.sqlite.untouchedForTesting(&self.touched);
 }
 
 fn clearTouchOracleForTesting(self: *Store) void {
     if (!@import("builtin").is_test) @compileError("test-only oracle");
-    const statement = fixtureStatement(self, "DELETE FROM temp.touched_oracle") catch return;
-    defer sqlite.resetCached(statement);
-    _ = c.sqlite3_step(statement);
+    self.engine.sqlite.clearTouchOracleForTesting();
 }
 
 /// The only fence setter. Returns `err` so callers can propagate it.
@@ -1601,91 +1559,6 @@ pub fn publicConversationPageForTesting(self: *Store, request: protocol.Conversa
     return page;
 }
 
-/// `text`, once it passes `rsql.portabilityError`: for the one data
-/// statement opening runs outside the cache and outside a typed statement.
-fn portable(comptime text: [:0]const u8) [:0]const u8 {
-    if (rsql.portabilityError(text, rsql.reserved_names_checked)) |message| @compileError(message ++ ": " ++ text);
-    return text;
-}
-
-/// The statements this file prepares that are not typed: transaction
-/// control, which rsql refuses (`forbidden_words`) because only `begin`,
-/// `commit` and `rollbackAfterError` may run it. A closed set: no other
-/// text reaches `cachedStatic` outside test builds.
-const Control = enum {
-    begin,
-    commit,
-    rollback,
-    savepoint,
-    release,
-    rollback_to,
-
-    fn sql(comptime which: Control) [:0]const u8 {
-        return switch (which) {
-            .begin => "BEGIN IMMEDIATE",
-            .commit => "COMMIT",
-            .rollback => "ROLLBACK",
-            // One write at a time holds the batch's one savepoint.
-            .savepoint => "SAVEPOINT write",
-            .release => "RELEASE write",
-            .rollback_to => "ROLLBACK TO write",
-        };
-    }
-};
-
-/// `which`'s prepared form, cached for the Store's lifetime; the caller
-/// resets it before the Store runs the next request.
-fn controlStatement(self: *Store, comptime which: Control) !*c.sqlite3_stmt {
-    return cachedStatic(self, comptime which.sql());
-}
-
-/// Runs `which`, which returns no rows.
-fn control(self: *Store, comptime which: Control) !void {
-    const statement = try controlStatement(self, which);
-    defer sqlite.resetCached(statement);
-    if (c.sqlite3_step(statement) != c.SQLITE_DONE) return error.SqliteExecFailed;
-}
-
-/// A typed statement's prepared form, cached like `controlStatement`'s.
-/// Only a type `rsql.Read` or `rsql.Write` made passes, so its text passed
-/// rsql's checks when that type was made (`rsql.isStatement`). A test
-/// build also renders `S.mysql`, so it fails on a statement it reaches
-/// here that has no MySQL spelling, and hands that text to the live
-/// MySQL check (`mysql_dialect_check.shadowPrepare`); a release build
-/// renders none.
-pub fn cachedTyped(self: *Store, comptime S: type) !*c.sqlite3_stmt {
-    comptime if (!rsql.isStatement(S)) @compileError("cachedTyped runs only a type rsql.Read or rsql.Write made: " ++ @typeName(S));
-    if (@import("builtin").is_test) @import("mysql_dialect_check.zig").shadowPrepare(comptime S.mysql.prepared());
-    return cachedStatic(self, S.sql);
-}
-
-/// A test fixture's or oracle's own text, prepared like `cachedTyped`'s.
-/// Unchecked by rsql, and refused outside test builds.
-fn fixtureStatement(self: *Store, comptime sql: [:0]const u8) !*c.sqlite3_stmt {
-    if (!@import("builtin").is_test) @compileError("test-only Store statement");
-    return cachedStatic(self, sql);
-}
-
-/// Prepares `sql` once for the Store's lifetime. Reached only through
-/// `controlStatement`, `cachedTyped` and `fixtureStatement`, each of which
-/// passes static text, so the cache's key never aliases a reused buffer.
-fn cachedStatic(self: *Store, sql: [:0]const u8) !*c.sqlite3_stmt {
-    if (self.statements.find(sql.ptr)) |statement| {
-        std.debug.assert(c.sqlite3_stmt_busy(statement) == 0);
-        return statement;
-    }
-    var prepared: ?*c.sqlite3_stmt = null;
-    if (c.sqlite3_prepare_v3(self.database, sql, -1, c.SQLITE_PREPARE_PERSISTENT, &prepared, null) != c.SQLITE_OK) {
-        return error.StatementPrepareFailed;
-    }
-    const statement = prepared orelse return error.StatementPrepareFailed;
-    self.statements.insert(sql.ptr, statement) catch |err| {
-        _ = c.sqlite3_finalize(statement);
-        return err;
-    };
-    return statement;
-}
-
 /// A column whose values the Host hands out: a row's id, or its place in
 /// a Store-wide order.
 pub const Identity = enum { turn_id, operation_id, action_id, content_id, created_seq, command_seq, admission_id, tool_record_id, tool_set_id };
@@ -1700,8 +1573,17 @@ fn saveCatalogStep(a: anytype, offered: *const tool_catalog.Catalog, digest: *co
         var set: tool_set_domain.CatalogSet = null;
         tool_set_domain.lookupCatalog(a, digest, &set);
         try a.run();
-        try a.abandon(.{});
-        return if (set) |row| row.tool_set_id.get() else null;
+        const row = set orelse {
+            try a.abandon(.{});
+            return null;
+        };
+        if (row.current) {
+            try a.abandon(.{});
+        } else {
+            tool_set_domain.pointCatalog(a, row.tool_set_id.get());
+            try a.commit();
+        }
+        return row.tool_set_id.get();
     };
     if (at < offered.records.len) {
         var reads: tool_set_domain.RecordReads = undefined;
@@ -1711,9 +1593,29 @@ fn saveCatalogStep(a: anytype, offered: *const tool_catalog.Catalog, digest: *co
     }
     const set_id = try a.identity(.tool_set_id);
     tool_set_domain.insertCatalog(a, offered, digest, set_id);
+    tool_set_domain.pointCatalog(a, set_id);
     try a.commit();
     return set_id;
 }
+
+/// A catalog `readCatalog` read back, in its caller's memory.
+pub const SavedCatalog = struct {
+    records: []tool_catalog.Record,
+    digests: [][32]u8,
+    /// Every name, server and text the records point into.
+    texts: []u8,
+
+    pub fn catalog(self: *const SavedCatalog) tool_catalog.Catalog {
+        return .{ .records = self.records, .digests = self.digests };
+    }
+
+    pub fn deinit(self: *SavedCatalog, allocator: std.mem.Allocator) void {
+        allocator.free(self.records);
+        allocator.free(self.digests);
+        allocator.free(self.texts);
+        self.* = undefined;
+    }
+};
 
 /// The tools the Host offers and the id of their saved set, which
 /// configure resolves a Session's tool names against.
@@ -1736,7 +1638,7 @@ const HostValues = struct {
 /// an identity is allocated, so a per-Host range can replace the counter.
 pub fn takeIdentity(self: *Store, comptime column: Identity) error{ IdentityExhausted, IdentityOutsideTransaction }!u64 {
     // Rollback is what gives an id back; outside a transaction nothing would.
-    if (c.sqlite3_get_autocommit(self.database) != 0) return error.IdentityOutsideTransaction;
+    if (!self.engine.inTransaction()) return error.IdentityOutsideTransaction;
     const value = self.ids.next.get(column);
     if (value > std.math.maxInt(i64)) return error.IdentityExhausted;
     self.ids.next.set(column, value + 1);
@@ -1775,11 +1677,11 @@ fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
             .Row = struct { ceiling: u64 },
             .cardinality = .one,
         });
-        const statement = try cachedTyped(self, Ceiling);
-        defer sqlite.resetCached(statement);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.IdentityReadFailed;
+        const statement = try self.engine.statementFor(Ceiling);
+        defer self.engine.endStatement(statement);
+        if (!(self.engine.nextRow(statement) catch false)) return error.IdentityReadFailed;
         var row: Ceiling.Row = undefined;
-        try sqlite.decodeRow(Ceiling.Row, statement, &row);
+        try self.engine.decodeRow(Ceiling.Row, statement, &row);
         self.ids.next.set(column, row.ceiling + 1);
     };
     self.ids.taken = .empty;
@@ -1796,11 +1698,11 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
             const savepoint = self.savepoint;
             self.savepoint = false;
             errdefer self.batch = .lost;
-            if (c.sqlite3_get_autocommit(self.database) != 0) return error.CanonicalRollbackFailed;
+            if (!self.engine.inTransaction()) return error.CanonicalRollbackFailed;
             if (savepoint) {
                 if (faults.rollback_failure) return error.CanonicalRollbackFailed;
-                control(self, .rollback_to) catch return error.CanonicalRollbackFailed;
-                control(self, .release) catch return error.CanonicalRollbackFailed;
+                self.engine.control(.rollback_to) catch return error.CanonicalRollbackFailed;
+                self.engine.control(.release) catch return error.CanonicalRollbackFailed;
             }
             loadIdentities(self, self.ids.taken) catch return error.CanonicalRollbackFailed;
             return;
@@ -1820,10 +1722,10 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
 }
 
 fn rollbackTransaction(self: *Store, faults: Faults) error{CanonicalRollbackFailed}!void {
-    if (c.sqlite3_get_autocommit(self.database) == 0) {
+    if (self.engine.inTransaction()) {
         if (faults.rollback_failure) return error.CanonicalRollbackFailed;
-        control(self, .rollback) catch return error.CanonicalRollbackFailed;
-        if (c.sqlite3_get_autocommit(self.database) == 0) return error.CanonicalRollbackFailed;
+        self.engine.control(.rollback) catch return error.CanonicalRollbackFailed;
+        if (self.engine.inTransaction()) return error.CanonicalRollbackFailed;
     }
     self.ids.second = 0;
     loadIdentities(self, self.ids.taken) catch return error.CanonicalRollbackFailed;

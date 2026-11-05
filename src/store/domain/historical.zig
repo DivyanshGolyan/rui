@@ -595,7 +595,7 @@ fn declaredToolOf(a: *ReadAccess, view: *HistoricalView, declaration: *Declarati
     }, &row, &found);
     try store_access.runAs(a, error.CorruptStore);
     if (!found.get()) return false;
-    if (row.description_private or row.schema_private or row.owner != .rui) return error.CorruptStore;
+    if (row.description_private or row.schema_private or row.owner == .provider) return error.CorruptStore;
     declaration.next_ordinal = row.ordinal + 1;
     out.owner = row.owner;
     out.description = .{ .view = view, .content_id = @intCast(row.description_id.get()), .length = row.description_length, .digest = row.description_digest };
@@ -1066,14 +1066,14 @@ fn declarationAnchor(view: *const HistoricalView) u64 {
 }
 
 /// The function tools `set` declares at the Operation boundary at
-/// `position`: its rui-run members that the set of the last earlier
+/// `position`: its function-tool members that the set of the last earlier
 /// Operation at or after `anchor` lacks, or all of them when there is
 /// none. `member` and `tool` name the member and its record, and the
 /// Operation `current` names gives the Session.
 const declared_members_from = "tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id";
 
 fn declared_members_where(comptime set: []const u8, comptime position: []const u8, comptime anchor: []const u8) []const u8 {
-    return "member.tool_set_id=" ++ set ++ " AND tool.owner='rui' AND member.tool_record_id NOT IN (" ++
+    return "member.tool_set_id=" ++ set ++ " AND tool.owner!='provider' AND member.tool_record_id NOT IN (" ++
         "SELECT previous_member.tool_record_id FROM tool_set_member previous_member WHERE previous_member.tool_set_id=coalesce((" ++
         "SELECT previous_revision.tool_set_id FROM model_operation previous JOIN session_revision previous_revision " ++
         "ON previous_revision.session_ref=previous.session_ref AND previous_revision.revision=previous.settings_revision " ++

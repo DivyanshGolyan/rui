@@ -368,7 +368,7 @@ pub fn importSealed(a: anytype, io: std.Io, field: *const protocol.ContentField,
         return id;
     }
     const file = field.file orelse return error.MissingContentCustody;
-    const sink = try a.contentSink(id);
+    const sink = try a.contentSink(id, field.length);
     defer sink.close();
     try verifyExternalContent(io, file, field.length, &field.digest, sink, faults);
     return id;

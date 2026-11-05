@@ -5,6 +5,7 @@ const named_scratch = @import("../named_scratch.zig");
 const platform = @import("../platform.zig");
 const protocol = @import("../protocol.zig");
 const tool_catalog = @import("../tools.zig");
+const tool_set_domain = @import("domain/tool_set.zig");
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
 const output_format = @import("../output_format.zig");
@@ -982,21 +983,21 @@ test "a content sink opens only a content id its Access itself took, stepping it
             // this Access's first, one other code took between its own, and one
             // past its last. A check of the range from its first id to its last
             // accepted `between`.
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(0));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(before));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(between));
-            try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(0, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(existing, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(before, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(between, 4));
+            try std.testing.expectError(error.ContentNotInserted, a.contentSink(last + 1, 4));
             // The old rule took only the last id, with nothing queued: here the
             // first id opens while inserts are queued, and the pass steps them.
-            const sink = try a.contentSink(first);
+            const sink = try a.contentSink(first, 4);
             try sink.write("sink", 0);
             sink.close();
             try std.testing.expectEqual(0, a.queued);
-            const again = try a.contentSink(last);
+            const again = try a.contentSink(last, 4);
             again.close();
             // Taken but never inserted: there is no row to open.
-            try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never));
+            try std.testing.expectError(error.ContentWriteFailed, a.contentSink(never, 4));
             try a.abandon(.{});
         }
     }.run);
@@ -2318,7 +2319,7 @@ test "the Store prepares only typed statements, its transaction control and test
     // Open text cannot reach SQLite beside `rsql`: the one prepare is
     // `cachedStatic`, called only by these three, and `cachedTyped` takes
     // only a type `rsql.Read` or `rsql.Write` made (`rsql.isStatement`).
-    const source = @embedFile("Store.zig");
+    const source = @embedFile("engine/Sqlite.zig");
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "sqlite3_" ++ "prepare"));
     const callers = [_][]const u8{ "controlStatement", "cachedTyped", "fixtureStatement" };
     var calls = std.mem.splitSequence(u8, source, "cachedStatic" ++ "(self, ");
@@ -2352,6 +2353,8 @@ test "Store entry points queue and fence only through canonical access" {
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
+        @embedFile("engine.zig"),
+        @embedFile("engine/Sqlite.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
@@ -8306,6 +8309,9 @@ test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
 /// gives it (less the `Held` of a body an entry point queues).
 const EntryPoint = enum {
     saveCatalog,
+    readCatalogSet,
+    readCatalogRecords,
+    readCatalogText,
     configure,
     submitMessageWithModel,
     stopSession,
@@ -8415,6 +8421,9 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .checkAttempt = 1,
     // A Host's catalog is saved once; each later open finds it.
     .saveCatalog = 1,
+    .readCatalogSet = 1,
+    .readCatalogRecords = 1,
+    .readCatalogText = 0,
 });
 
 /// Each entry point's content rounds (`readRaw` windows, counted in
@@ -8426,7 +8435,7 @@ fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     return switch (engine) {
         // One window holds the driven content.
         .sqlite => switch (point) {
-            .readOwnedContent => 1,
+            .readOwnedContent, .readCatalogText => 1,
             else => 0,
         },
     };
@@ -8442,6 +8451,8 @@ test "every function that enters the Store has a round budget" {
     const sources = .{
         @embedFile("Store.zig"),
         @embedFile("access.zig"),
+        @embedFile("engine.zig"),
+        @embedFile("engine/Sqlite.zig"),
         @embedFile("domain/action.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
@@ -8558,6 +8569,18 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try storage.saveCatalog(&tool_catalog.built_in);
             meter.stop(.saveCatalog);
+            meter.start();
+            const saved = (try storage.readCatalogSet()).?;
+            meter.stop(.readCatalogSet);
+            var rows: [tool_catalog.built_in.records.len]tool_set_domain.catalog_records.Row = undefined;
+            meter.start();
+            try std.testing.expectEqual(rows.len, try storage.readCatalogRecords(saved.tool_set_id.get(), 0, &rows));
+            meter.stop(.readCatalogRecords);
+            var text: [tool_catalog.bash_record.description.len]u8 = undefined;
+            meter.start();
+            try storage.readCatalogText(rows[0].description_id.get(), &text);
+            meter.stop(.readCatalogText);
+            try std.testing.expectEqualStrings(tool_catalog.bash_record.description, &text);
             try plainTurn(&storage, &tmp, &meter);
             try toolTurn(&storage, &tmp, &meter);
             try compactedTurn(&storage, &tmp, &meter);

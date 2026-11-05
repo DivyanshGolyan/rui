@@ -148,7 +148,7 @@ const testing_digests = blk: {
 };
 const testing_catalog: tool_catalog.Catalog = .{ .records = &testing_records, .digests = &testing_digests };
 
-fn testingStoreCatalog(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, catalog: *const tool_catalog.Catalog) !void {
+fn testingStoreCatalog(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, catalog: ?*const tool_catalog.Catalog) !void {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(io, &root_buffer);
     const root = root_buffer[0..root_length];
@@ -262,8 +262,8 @@ test "creating a Session takes the same work however many Sessions exist" {
     const Creation = struct {
         fn steps(store: *Store, key: []const u8) !u64 {
             var counter: TestingSteps = .{};
-            counter.begin(store.database);
-            defer counter.end(store.database);
+            counter.begin(store.sqliteDatabase());
+            defer counter.end(store.sqliteDatabase());
             _ = try configureTestSession(store, key);
             return counter.steps;
         }
@@ -304,8 +304,8 @@ test "a Workspace's changed page reads only its own Sessions, however many other
         fn steps(store: *Store, dir: *std.testing.TmpDir, request: protocol.ListSessions, watched: *const change_ring.Id) !u64 {
             _ = try TestingListing.read(store, dir, request);
             var counter: TestingSteps = .{};
-            counter.begin(store.database);
-            defer counter.end(store.database);
+            counter.begin(store.sqliteDatabase());
+            defer counter.end(store.sqliteDatabase());
             const page = try TestingListing.read(store, dir, request);
             try std.testing.expectEqual(protocol.ListDelta.changed, page.delta);
             try page.expectReferences(&.{watched.*});
@@ -381,8 +381,8 @@ test "a statement that fails after an entry point touched its Session fails and 
                 var relabel = try completeConfiguration("key-fault-relabel", session.slice(), try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
                 relabel.configuration.label.state = .value;
                 try relabel.configuration.label.value.set("Relabelled");
-                fault.arm(storage.database);
-                defer fault.disarm(storage.database);
+                fault.arm(storage.sqliteDatabase());
+                defer fault.disarm(storage.sqliteDatabase());
                 try std.testing.expectEqual(std.meta.Tag(ConfigureReply).infrastructure_failure, std.meta.activeTag(storage.configure(&relabel, .{})));
             },
             .message => {
@@ -391,8 +391,8 @@ test "a statement that fails after an entry point touched its Session fails and 
                 try file.sync(std.testing.io);
                 var command = try completeMessage("key-fault-message", session.slice(), file, "work");
                 defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-                fault.arm(storage.database);
-                defer fault.disarm(storage.database);
+                fault.arm(storage.sqliteDatabase());
+                defer fault.disarm(storage.sqliteDatabase());
                 try std.testing.expectEqual(std.meta.Tag(MessageReply).infrastructure_failure, std.meta.activeTag(storage.submitMessageWithModel(&command, null, .{})));
             },
         }
@@ -423,7 +423,7 @@ fn takeEveryIdentityForTesting(storage: *Store) ![std.enums.values(store_core.Id
     defer entry.release();
     try store_core.begin(storage);
     inline for (comptime std.enums.values(store_core.Identity), maxima, &taken) |column, maximum, *value| {
-        const committed = try store_testing.sqliteQueryU64(storage.database, maximum, .{});
+        const committed = try store_testing.sqliteQueryU64(storage.sqliteDatabase(), maximum, .{});
         try std.testing.expect(committed > 0);
         value.* = try store_core.takeIdentity(storage, column);
         try std.testing.expectEqual(committed + 1, value.*);
@@ -490,7 +490,7 @@ test "a round queues one statement any number of times, an engine pass before ea
     for (ids, 0..) |id, index| {
         var lengths: [64]u8 = undefined;
         const sql = try std.fmt.bufPrintSentinel(&lengths, "SELECT byte_length FROM content WHERE content_id={d}", .{id}, 0);
-        try std.testing.expectEqual(index + 1, try store_testing.sqliteQueryU64(storage.database, sql, .{}));
+        try std.testing.expectEqual(index + 1, try store_testing.sqliteQueryU64(storage.sqliteDatabase(), sql, .{}));
     }
     try a.abandon(.{});
 }
@@ -560,9 +560,9 @@ test "abandoning an Access that has ended runs nothing" {
             try a.abandon(.{});
         }
         var statements: TestingStatements = .{};
-        statements.begin(storage.database);
+        statements.begin(storage.sqliteDatabase());
         try a.abandon(.{});
-        statements.end(storage.database);
+        statements.end(storage.sqliteDatabase());
         try std.testing.expectEqual(@as(u64, 0), statements.count);
     }
     try std.testing.expect(!storage.isFenced());
@@ -603,9 +603,9 @@ test "a list row reads the same steps however long its Session's history" {
             var used = std.atomic.Value(u64).init(0);
             std.testing.allocator.free(try testingSessionList(store, dir, .{}, &used, 78));
             var counter: TestingSteps = .{};
-            counter.begin(store.database);
+            counter.begin(store.sqliteDatabase());
             const bytes = testingSessionList(store, dir, .{}, &used, 79);
-            counter.end(store.database);
+            counter.end(store.sqliteDatabase());
             std.testing.allocator.free(try bytes);
             var listed = try testingListRow(store, dir, session);
             defer listed.deinit();
@@ -656,7 +656,7 @@ test "a person's Message next to a position is a one-row page of admission rows,
         try touchForTesting(&storage, peer.slice());
     }
     var positions: [3]u64 = undefined;
-    inline for (0..3) |index| positions[index] = try store_testing.sqliteQueryU64(storage.database, std.fmt.comptimePrint("SELECT admission_position FROM message_admission WHERE sender_session_ref IS NULL ORDER BY admission_id LIMIT 1 OFFSET {d}", .{index}), .{});
+    inline for (0..3) |index| positions[index] = try store_testing.sqliteQueryU64(storage.sqliteDatabase(), std.fmt.comptimePrint("SELECT admission_position FROM message_admission WHERE sender_session_ref IS NULL ORDER BY admission_id LIMIT 1 OFFSET {d}", .{index}), .{});
     const page = try store_core.activityPageForTesting(&storage, request);
     try std.testing.expect(page.more);
     try std.testing.expectEqual(positions[2], page.items[0].position);
@@ -775,9 +775,9 @@ test "contradictory work inputs fence the Store" {
         const session = try configureTestSession(&storage, "contradiction-config");
         try submitTestMessage(&storage, &tmp, "contradiction-file", "contradiction-message", session.slice(), "x");
         _ = (try storage.admitNextModelAttempt(.{})).?;
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-        try sqlite.exec(storage.database, fault);
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.sqliteDatabase(), fault);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         var request: protocol.ActivityPage = .{};
         try request.session.set(session.slice());
         try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
@@ -854,9 +854,9 @@ test "canonical report and Action read failures fence later commands" {
     try testingStore(&report_store, &report_tmp, std.testing.io);
     defer report_store.close() catch unreachable;
     const allocated_session_0 = try configureTestSession(&report_store, "report-corrupt-config");
-    try sqlite.exec(report_store.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(report_store.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&report_store, "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref=?1", .{allocated_session_0.slice()});
-    try sqlite.exec(report_store.database, "PRAGMA foreign_keys=ON");
+    try sqlite.exec(report_store.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     var report_root: [protocol.max_store_bytes]u8 = undefined;
     const report_root_length = try report_tmp.dir.realPath(std.testing.io, &report_root);
     var report_used = std.atomic.Value(u64).init(0);
@@ -904,7 +904,7 @@ test "canonical report and Action read failures fence later commands" {
             try submitTestMessage(&storage, &tmp, "descriptor-input", "descriptor-message", allocated_session_2.slice(), "propose");
             const source = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleTwoActionsForTesting(&storage, &tmp, source, "descriptor-metadata");
-            try sqlite.exec(storage.database, damage);
+            try sqlite.exec(storage.sqliteDatabase(), damage);
             const result: anyerror!void = switch (route) {
                 .report => if (testingSessionReport(&storage, &tmp, allocated_session_2.slice(), 1024 * 1024)) |bytes| blk: {
                     std.testing.allocator.free(bytes);
@@ -928,7 +928,7 @@ test "canonical report and Action read failures fence later commands" {
 /// every table that saves one, are exactly 1 through `next_position - 1`.
 fn expectDenseSessionPositions(storage: *Store, session: []const u8) !void {
     // Each compound keeps within the Store's four-term limit.
-    const statement = try sqlite.prepare(storage.database, "WITH messages(position) AS (" ++
+    const statement = try sqlite.prepare(storage.sqliteDatabase(), "WITH messages(position) AS (" ++
         "SELECT admission_position FROM message_admission WHERE session_ref=?1 AND admission_position IS NOT NULL " ++
         "UNION ALL SELECT sender_position FROM message_admission WHERE sender_session_ref=?1 " ++
         "UNION ALL SELECT sender_position FROM sent_rejection WHERE sender_session_ref=?1 " ++
@@ -983,7 +983,7 @@ test "Core classifies trustworthy calls atomically without Action-shaped rejecti
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal WHERE tool_call.rejection_code IS NOT NULL", .{}));
     try expectDenseSessionPositions(&storage, allocated_session_0.slice());
     {
-        const rejected_action = try sqlite.prepare(storage.database, "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,resolution_code) VALUES(999,?1,1,?2,1,1,0,NULL)");
+        const rejected_action = try sqlite.prepare(storage.sqliteDatabase(), "INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,resolution_code) VALUES(999,?1,1,?2,1,1,0,NULL)");
         defer _ = c.sqlite3_finalize(rejected_action);
         try sqlite.bindU64(rejected_action, 1, binding.operation_id);
         try sqlite.bindText(rejected_action, 2, allocated_session_0.slice());
@@ -1177,7 +1177,7 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
     // Operation offers.
     const reworded = "Reworded description.";
     try submitTestMessage(&storage, &tmp, "saved-tools-message", "saved-tools-message", second.slice(), reworded);
-    try sqlite.exec(storage.database, "UPDATE tool_record SET description_content_id=(SELECT content_id FROM content WHERE CAST(payload AS TEXT)='Reworded description.') WHERE name='bash'");
+    try sqlite.exec(storage.sqliteDatabase(), "UPDATE tool_record SET description_content_id=(SELECT content_id FROM content WHERE CAST(payload AS TEXT)='Reworded description.') WHERE name='bash'");
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view: HistoricalView = undefined;
     try storage.openHistoricalView(binding, &view);
@@ -1278,8 +1278,8 @@ test "lifecycle CHECKs reject null-valued invalid combinations on the CHECK itse
     };
     var outcomes: [cases.len]ConstraintProbe = undefined;
     for (cases, &outcomes) |case, *outcome| {
-        try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.database, case.valid));
-        outcome.* = try probeConstraint(storage.database, case.invalid);
+        try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.sqliteDatabase(), case.valid));
+        outcome.* = try probeConstraint(storage.sqliteDatabase(), case.invalid);
     }
     try std.testing.expectEqual(@as([cases.len]ConstraintProbe, @splat(.check_violation)), outcomes);
 }
@@ -1326,9 +1326,9 @@ test "closed value columns accept exactly their values" {
     var sql: [512]u8 = undefined;
     inline for (columns) |column| {
         for (column.accepted) |value|
-            try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.database, try std.mem.printSentinel(&sql, column.update, .{value}, 0)));
+            try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.sqliteDatabase(), try std.mem.printSentinel(&sql, column.update, .{value}, 0)));
         for (column.rejected) |value|
-            try std.testing.expectEqual(ConstraintProbe.check_violation, try probeConstraint(storage.database, try std.mem.printSentinel(&sql, column.update, .{value}, 0)));
+            try std.testing.expectEqual(ConstraintProbe.check_violation, try probeConstraint(storage.sqliteDatabase(), try std.mem.printSentinel(&sql, column.update, .{value}, 0)));
     }
 }
 
@@ -1360,7 +1360,7 @@ test "claiming Session positions stops at the largest position, and fails when i
     try std.testing.expectEqual(last, try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{}));
 
     try store_testing.sqlite_only.exec(&storage, "UPDATE session SET next_position=1 WHERE session_ref=?1", .{session.slice()});
-    try sqlite.exec(storage.database, "CREATE TEMP TRIGGER skip_claim BEFORE UPDATE OF next_position ON main.session BEGIN SELECT RAISE(IGNORE); END");
+    try sqlite.exec(storage.sqliteDatabase(), "CREATE TEMP TRIGGER skip_claim BEFORE UPDATE OF next_position ON main.session BEGIN SELECT RAISE(IGNORE); END");
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
@@ -1433,8 +1433,8 @@ test "each state-bearing row keeps exactly the time its state owns" {
     };
     var outcomes: [cases.len]ConstraintProbe = undefined;
     for (cases, &outcomes) |case, *outcome| {
-        try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.database, case.valid));
-        outcome.* = try probeConstraint(storage.database, case.invalid);
+        try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.sqliteDatabase(), case.valid));
+        outcome.* = try probeConstraint(storage.sqliteDatabase(), case.invalid);
     }
     try std.testing.expectEqual(@as([cases.len]ConstraintProbe, @splat(.check_violation)), outcomes);
 }
@@ -1451,7 +1451,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
     try settleTwoActionsForTesting(&storage, &tmp, binding, "stale-metadata");
     for ([_][]const u8{ "stale-allow-first", "stale-allow-second" }, [_][]const u8{ "min", "max" }) |key, end| {
         var sql: [64]u8 = undefined;
-        var allow: protocol.PermissionDecisionCommand = .{ .action_id = try store_testing.sqliteQueryU64(storage.database, try std.fmt.bufPrintSentinel(&sql, "SELECT {s}(action_id) FROM action_operation", .{end}, 0), .{}), .decision = .allow_once };
+        var allow: protocol.PermissionDecisionCommand = .{ .action_id = try store_testing.sqliteQueryU64(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "SELECT {s}(action_id) FROM action_operation", .{end}, 0), .{}), .decision = .allow_once };
         try allow.key.set(key);
         try allow.session.set(session.slice());
         try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
@@ -1530,7 +1530,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
         pub fn commit(self: *@This()) Inner.Error!void {
             var sql: [160]u8 = undefined;
             const unattempt = std.fmt.bufPrintSentinel(&sql, "UPDATE action_operation SET attempt_ordinal=0,bash_timeout_ms=NULL,attempt_at=NULL,sender_handle=NULL WHERE action_id={d}", .{self.action_id}, 0) catch unreachable;
-            sqlite.exec(self.inner.store.database, unattempt) catch unreachable;
+            sqlite.exec(self.inner.store.sqliteDatabase(), unattempt) catch unreachable;
             return self.inner.commit();
         }
     };
@@ -1601,7 +1601,7 @@ test "every transition dates its fact from the Host clock" {
     for (columns) |column| {
         var sql_buffer: [160]u8 = undefined;
         const sql = try std.fmt.bufPrintSentinel(&sql_buffer, "SELECT count(*) FROM {s} WHERE {s} BETWEEN {d} AND {d}", .{ column.table, column.column, before, after }, 0);
-        const dated = try store_testing.sqliteQueryU64(storage.database, sql, .{});
+        const dated = try store_testing.sqliteQueryU64(storage.sqliteDatabase(), sql, .{});
         if (dated == 0) std.debug.print("{s}.{s} is not dated within the transition\n", .{ column.table, column.column });
         try std.testing.expect(dated != 0);
     }
@@ -1630,7 +1630,7 @@ test "Action admission never visits an Action waiting for permission" {
         try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
         allowed_id.* = try store_testing.sqlite_only.queryU64(&storage, "SELECT max(action_id) FROM action_operation", .{});
 
-        const select = try sqlite.prepare(storage.database, next_action_attempt_sql);
+        const select = try sqlite.prepare(storage.sqliteDatabase(), next_action_attempt_sql);
         defer _ = c.sqlite3_finalize(select);
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(select));
         cost.* = c.sqlite3_stmt_status(select, c.SQLITE_STMTSTATUS_VM_STEP, 0);
@@ -1647,7 +1647,7 @@ test "Action admission never visits an Action waiting for permission" {
         try allow.session.set(session.slice());
         try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
     }
-    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqliteQueryU64(storage.database, "SELECT count(*) FROM action_operation INDEXED BY action_operation_executable " ++
+    try std.testing.expectEqual(@as(u64, 2), try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM action_operation INDEXED BY action_operation_executable " ++
         "WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0", .{}));
     for (allowed) |action_id| {
         const admitted = (try storage.admitNextActionAttempt(300_000, .{})).?;
@@ -1741,7 +1741,7 @@ test "complete call outcomes continue once in call order ahead of pending input"
         var buffer: [128]u8 = undefined;
         const call_id_count = try call_id.read(0, &buffer);
         try std.testing.expectEqualStrings(expected_call_id, buffer[0..call_id_count]);
-        const checkpoint = c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null);
+        const checkpoint = c.sqlite3_wal_checkpoint_v2(storage.sqliteDatabase(), null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null);
         const output_count = try output.read(0, &buffer);
         try std.testing.expectEqualStrings(expected_output, buffer[0..output_count]);
         output.close();
@@ -1767,7 +1767,7 @@ test "tool continuation admission runs its selection once" {
     const calls = [_]TestingCall{.{ .item_id = "item", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
     try settleCallsForTesting(&storage, &tmp, first, "output", &calls);
 
-    const selection = try store_core.cachedTyped(&storage, tool_continuation_selection);
+    const selection = try storage.engine.sqlite.cachedTyped(tool_continuation_selection);
     const runs_before = c.sqlite3_stmt_status(selection, c.SQLITE_STMTSTATUS_RUN, 0);
     const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
     try std.testing.expectEqual(first.turn_id, continued.turn_id);
@@ -1783,8 +1783,8 @@ test "a stored continuation never names a later Operation than its Turn's" {
     const session = try configureTestSession(&storage, "later-config");
     try submitTestMessage(&storage, &tmp, "later", "later", session.slice(), "start");
     _ = (try storage.admitModelAttempt(.message, .{})).?;
-    try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.database, "UPDATE turn SET continuation_operation_id=operation_id"));
-    try std.testing.expectEqual(ConstraintProbe.check_violation, try probeConstraint(storage.database, "UPDATE turn SET continuation_operation_id=operation_id+1"));
+    try std.testing.expectEqual(ConstraintProbe.accepted, try probeConstraint(storage.sqliteDatabase(), "UPDATE turn SET continuation_operation_id=operation_id"));
+    try std.testing.expectEqual(ConstraintProbe.check_violation, try probeConstraint(storage.sqliteDatabase(), "UPDATE turn SET continuation_operation_id=operation_id+1"));
 }
 
 test "tool continuation selection never visits a Turn waiting for its tool results" {
@@ -1806,7 +1806,7 @@ test "tool continuation selection never visits a Turn waiting for its tool resul
         const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
         try settleTwoActionsForTesting(&storage, &tmp, binding, config);
 
-        const select = try sqlite.prepare(storage.database, tool_continuation_selection.sql);
+        const select = try sqlite.prepare(storage.sqliteDatabase(), tool_continuation_selection.sql);
         defer _ = c.sqlite3_finalize(select);
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(select));
         cost.* = c.sqlite3_stmt_status(select, c.SQLITE_STMTSTATUS_VM_STEP, 0);
@@ -1871,8 +1871,8 @@ test "complete historical tool-result traversal scales with groups and calls" {
             }
 
             var counter: Counter = .{};
-            c.sqlite3_progress_handler(storage.database, 1, Counter.progress, &counter);
-            defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+            c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Counter.progress, &counter);
+            defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
             var view: HistoricalView = undefined;
             try storage.openHistoricalView(binding, &view);
             defer view.close();
@@ -1949,7 +1949,7 @@ test "historical preparation yields covered group populations under small allowa
         var items: usize = 1;
         try std.testing.expect(try view.nextEntryStep(view.output_boundary, &bytes, &items) == .pending);
         _ = try configureTestSession(&storage, "yielded-checkpoint");
-        const checkpoint = c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null);
+        const checkpoint = c.sqlite3_wal_checkpoint_v2(storage.sqliteDatabase(), null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null);
         view.close();
         try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), checkpoint);
     }
@@ -2015,7 +2015,7 @@ test "large historical readers leave checkpoints free" {
         try std.testing.expectEqualSlices(u8, text[offset..][0..wanted], buffer[0..wanted]);
         if (offset == 0) {
             _ = try configureTestSession(&storage, "large-history-write");
-            try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
+            try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.sqliteDatabase(), null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
         }
         offset += wanted;
     }
@@ -2054,9 +2054,9 @@ test "historical preparation rejects missing extra and reordered sibling classif
                 try settleCompactionForTesting(&storage, &tmp, compact, &.{.compaction});
                 next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             }
-            try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-            try sqlite.exec(storage.database, fault.sql);
-            try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+            try sqlite.exec(storage.sqliteDatabase(), fault.sql);
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
             var view: HistoricalView = undefined;
             try storage.openHistoricalView(next, &view);
             defer view.close();
@@ -2192,15 +2192,15 @@ test "historical accepted assistant output completeness and provenance fence rea
             .none => {},
             .model => try storage.setHistoricalModelForTesting(source_binding, "different-model"),
         }
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         if (case.tied_owners) try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET admission_position=" ++
             "(SELECT min(admission_position) FROM model_operation WHERE output_item_count IS NOT NULL) WHERE output_item_count IS NOT NULL", .{});
         // Deliberately bypass the message-certificate CHECK too: these cases
         // exercise read-time detection of damaged persisted item kinds.
-        try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=ON");
-        if (case.fault) |fault| try sqlite.exec(storage.database, fault);
-        try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=OFF");
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+        if (case.fault) |fault| try sqlite.exec(storage.sqliteDatabase(), fault);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         var preparation: @import("../model_adapter.zig").Preparation = undefined;
         try storage.openHistoricalView(binding, &preparation.view);
         try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
@@ -2250,7 +2250,7 @@ test "historical preparation fences a served call that does not match its certif
         };
         try settleCallsForTesting(&storage, &tmp, source, "incompatible-output", &calls);
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try sqlite.exec(storage.database, fault);
+        try sqlite.exec(storage.sqliteDatabase(), fault);
         var root: [protocol.max_store_bytes]u8 = undefined;
         const length = try tmp.dir.realPath(std.testing.io, &root);
         var used: std.atomic.Value(u64) = .init(0);
@@ -2301,7 +2301,7 @@ test "historical accepted output selection work excludes failed Operation popula
             try submitTestMessage(&storage, &tmp, "selection-input", "selection-input", session.slice(), "retain");
             const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
-            const insert = try sqlite.prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
+            const insert = try sqlite.prepare(storage.sqliteDatabase(), "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
                 "attempt_ordinal,output_reservation,resolution_code,resolved_at) " ++
@@ -2315,8 +2315,8 @@ test "historical accepted output selection work excludes failed Operation popula
             try storage.openHistoricalView(current, &view);
             defer view.close();
             var measured: @This() = .{};
-            c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
-            defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+            c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, progress, &measured);
+            defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
             while (!try view.validateOutputsStep()) {}
             return measured.steps;
         }
@@ -2401,8 +2401,8 @@ test "Current report work is independent of terminal tool history" {
             const root_length = try tmp.dir.realPath(std.testing.io, &root);
             var used = std.atomic.Value(u64).init(0);
             var counter: Counter = .{};
-            c.sqlite3_progress_handler(storage.database, 1, Counter.progress, &counter);
-            defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+            c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Counter.progress, &counter);
+            defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
             var report = try storage.captureSessionReport(session.slice(), .{
                 .scratch_path = root[0..root_length],
                 .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
@@ -2427,7 +2427,7 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "pending-cost-config");
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
 
     var costs: [2]i32 = undefined;
     for ([_]usize{ 100, 10_000 }, 0..) |history, index| {
@@ -2444,7 +2444,7 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
             0,
         );
         defer std.testing.allocator.free(insert);
-        try sqlite.exec(storage.database, insert);
+        try sqlite.exec(storage.sqliteDatabase(), insert);
         var counted: reads_domain.First(command_domain.pending_messages.Row) = .{};
         {
             const entry = try store_core.enter(&storage, .none);
@@ -2456,12 +2456,12 @@ test "Current pending count skips excluded Message history by indexed cutoff" {
         }
         try std.testing.expectEqual(@as(u64, 1), counted.row.?.pending);
 
-        const cutoff_statement = try sqlite.prepare(storage.database, session_stop_cutoff_sql);
+        const cutoff_statement = try sqlite.prepare(storage.sqliteDatabase(), session_stop_cutoff_sql);
         defer _ = c.sqlite3_finalize(cutoff_statement);
         try sqlite.bindText(cutoff_statement, 1, session.slice());
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(cutoff_statement));
         const cutoff = c.sqlite3_column_int64(cutoff_statement, 0);
-        const count_statement = try sqlite.prepare(storage.database, pending_message_count_sql);
+        const count_statement = try sqlite.prepare(storage.sqliteDatabase(), pending_message_count_sql);
         defer _ = c.sqlite3_finalize(count_statement);
         try sqlite.bindText(count_statement, 1, session.slice());
         try sqlite.bindI64(count_statement, 2, cutoff);
@@ -2492,7 +2492,7 @@ test "Full Message projection work does not multiply Messages by stops" {
             try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "full-scale-config");
-            try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
 
             for (1..message_count + 1) |index| {
                 const insert = try std.testing.allocator.printSentinel(
@@ -2502,7 +2502,7 @@ test "Full Message projection work does not multiply Messages by stops" {
                     0,
                 );
                 defer std.testing.allocator.free(insert);
-                try sqlite.exec(storage.database, insert);
+                try sqlite.exec(storage.sqliteDatabase(), insert);
             }
             for (1..stop_count + 1) |index| {
                 const insert = try std.testing.allocator.printSentinel(
@@ -2514,12 +2514,12 @@ test "Full Message projection work does not multiply Messages by stops" {
                     0,
                 );
                 defer std.testing.allocator.free(insert);
-                try sqlite.exec(storage.database, insert);
+                try sqlite.exec(storage.sqliteDatabase(), insert);
             }
 
             var counter: Counter = .{};
-            c.sqlite3_progress_handler(storage.database, 1, Counter.progress, &counter);
-            defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+            c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Counter.progress, &counter);
+            defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
             const full = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 8 * 1024 * 1024, .full);
             defer std.testing.allocator.free(full);
             return counter.steps;
@@ -2563,7 +2563,7 @@ test "an item id repeated in a later batch or the same batch fails the settlemen
 /// statement.
 fn digestReadsForTesting(storage: *Store) [4]i64 {
     var reads: [4]i64 = @splat(0);
-    for (storage.statements.slots) |slot| if (slot.statement) |statement| {
+    for (storage.engine.sqlite.statements.slots) |slot| if (slot.statement) |statement| {
         const sql = std.mem.span(slot.sql.?);
         const kind: usize = if (std.mem.startsWith(u8, sql, "SELECT item_id_digest AS digest FROM model_output_item WHERE operation_id=?1"))
             0
@@ -2635,7 +2635,7 @@ test "a full item batch followed by calls keeps every queued row's bound bytes" 
     try settleCallsForTesting(&storage, &tmp, binding, "full-batch-calls", &calls);
     try std.testing.expectEqual(64, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(DISTINCT item_id_digest) FROM model_output_item", .{}));
     const digest = protocol.contentDigest("item-63");
-    const statement = try sqlite.prepare(storage.database, "SELECT count(*) FROM model_output_item WHERE item_ordinal=63 AND item_id_digest=?1");
+    const statement = try sqlite.prepare(storage.sqliteDatabase(), "SELECT count(*) FROM model_output_item WHERE item_ordinal=63 AND item_id_digest=?1");
     defer _ = c.sqlite3_finalize(statement);
     try sqlite.bindBlob(statement, 1, &digest);
     try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
@@ -2657,9 +2657,9 @@ test "a success settlement keeps main's answers for a missing Session or revisio
         const session = try configureTestSession(&storage, "missing-row-config");
         try submitTestMessage(&storage, &tmp, "missing-row-input", "missing-row-key", session.slice(), "missing");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-        try sqlite.exec(storage.database, case[0]);
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.sqliteDatabase(), case[0]);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         // A missing revision row is a stale binding, as on main; a missing
         // Session row fences, as main's session facts read did, where an
         // inner join reported a stale binding that does not fence.
@@ -2679,9 +2679,9 @@ test "a success settlement whose pending Messages read fails reports main's Sess
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     // A pending Message makes the count read the stop cutoff.
     try submitTestMessage(&storage, &tmp, "stop-read-second", "stop-read-second-key", session.slice(), "second");
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) VALUES('stop-read-stop',?1,NULL,0,1)", .{session.slice()});
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     try store_testing.failReadsOf(&storage, "session_stop");
     // Round 1 reads it with the Attempt; a step failure there was
     // `OperationReadFailed` before each read kept main's name.
@@ -2984,7 +2984,7 @@ test "controls wait behind an active model settlement transaction" {
     try std.testing.expect(shared.transaction_active_order.load(.seq_cst) < settlement_complete_order);
     try std.testing.expect(settlement_complete_order < stop_context.probe.lock_acquired_order.load(.seq_cst));
     try std.testing.expect(settlement_complete_order < interrupt_context.probe.lock_acquired_order.load(.seq_cst));
-    try std.testing.expectEqual(c.SQLITE_TXN_NONE, c.sqlite3_txn_state(storage.database, "main"));
+    try std.testing.expectEqual(c.SQLITE_TXN_NONE, c.sqlite3_txn_state(storage.sqliteDatabase(), "main"));
 
     const stop_reply = stop_context.reply.?;
     try std.testing.expect(stop_reply == .accepted);
@@ -3093,7 +3093,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
         "UPDATE session SET provider='' WHERE session_ref=?1",
         "UPDATE session SET provider='abcdefghijklmnopq' WHERE session_ref=?1",
         "UPDATE session SET codec_options=x'' WHERE session_ref=?1",
-    }) |fault| try std.testing.expectError(error.StatementFailed, store_testing.sqliteExec(storage.database, fault, .{created_session_0.slice()}));
+    }) |fault| try std.testing.expectError(error.StatementFailed, store_testing.sqliteExec(storage.sqliteDatabase(), fault, .{created_session_0.slice()}));
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
 
@@ -3116,7 +3116,7 @@ test "a Session pinned to a codec this Host cannot build fences its settings" {
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT codec='openai-responses/2' AND codec_options IS NULL FROM session", .{}));
         try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "text");
         const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        if (fault) |sql| try store_testing.sqliteExec(storage.database, sql, .{session.slice()});
+        if (fault) |sql| try store_testing.sqliteExec(storage.sqliteDatabase(), sql, .{session.slice()});
         var view: HistoricalView = undefined;
         try storage.openHistoricalView(binding, &view);
         defer view.close();
@@ -3167,7 +3167,7 @@ test "configuration rejections bypass content effects and replay committed answe
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
         try std.testing.expect((try storage.observeCommand("rejected-content")).status == .absent);
-        const rolled_back_content = try sqlite.prepare(storage.database, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)");
+        const rolled_back_content = try sqlite.prepare(storage.sqliteDatabase(), "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)");
         defer _ = c.sqlite3_finalize(rolled_back_content);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(rolled_back_content));
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(rolled_back_content, 0));
@@ -3176,7 +3176,7 @@ test "configuration rejections bypass content effects and replay committed answe
         try std.testing.expect(rejected == .rejected);
         try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, rejected.rejected.code);
         const committed_content = try sqlite.prepare(
-            storage.database,
+            storage.sqliteDatabase(),
             "SELECT COUNT(*) FROM core_command WHERE command_key='rejected-content' " ++
                 "AND primary_content_id IS NULL AND secondary_content_id IS NULL",
         );
@@ -3188,7 +3188,7 @@ test "configuration rejections bypass content effects and replay committed answe
         try std.testing.expect(replay == .rejected);
         try std.testing.expect(replay.rejected.replayed);
         try std.testing.expectEqual(protocol.ConfigurationRejection.invalid_session_reference, replay.rejected.code);
-        const retained_content = try sqlite.prepare(storage.database, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)");
+        const retained_content = try sqlite.prepare(storage.sqliteDatabase(), "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)");
         defer _ = c.sqlite3_finalize(retained_content);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(retained_content));
         try std.testing.expectEqual(@as(i64, 0), c.sqlite3_column_int64(retained_content, 0));
@@ -3227,11 +3227,11 @@ test "interleaved large content readers bound repeated SQLite page reads" {
     try std.testing.expectEqualSlices(u8, first[0..buffer.len], &buffer);
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expect(!storage.isFenced());
-    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
     for (&readers) |*reader| reader.allocator = std.testing.allocator;
     var misses: c_int = 0;
     var ignored: c_int = 0;
-    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_db_status(storage.database, c.SQLITE_DBSTATUS_CACHE_MISS, &misses, &ignored, 1));
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_db_status(storage.sqliteDatabase(), c.SQLITE_DBSTATUS_CACHE_MISS, &misses, &ignored, 1));
     var offset: usize = 0;
     while (offset < length) : (offset += buffer.len) {
         for (&readers, [_][]const u8{ first, second }) |*reader, expected| {
@@ -3240,18 +3240,18 @@ test "interleaved large content readers bound repeated SQLite page reads" {
         }
         if (offset == 0) {
             _ = try configureTestSession(&storage, "interleaved-write");
-            try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
+            try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.sqliteDatabase(), null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
         }
     }
     for (&readers) |*reader| try std.testing.expectEqual(@as(usize, 0), try reader.read(length, &buffer));
-    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_db_status(storage.database, c.SQLITE_DBSTATUS_CACHE_MISS, &misses, &ignored, 0));
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_db_status(storage.sqliteDatabase(), c.SQLITE_DBSTATUS_CACHE_MISS, &misses, &ignored, 0));
     // Two 4-MiB streams through a 1-MiB SQLite cache must not re-read their
     // entire overflow prefix for every 4-KiB delivery, including interleaving.
     const pages = 2 * length / 4096;
     try std.testing.expect(misses <= 16 * pages);
-    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
     {
-        const corrupt = try sqlite.prepare(storage.database, "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=?1");
+        const corrupt = try sqlite.prepare(storage.sqliteDatabase(), "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=?1");
         defer _ = c.sqlite3_finalize(corrupt);
         try sqlite.bindI64(corrupt, 1, readers[0].content_id);
         try sqlite.expectDone(corrupt);
@@ -3267,7 +3267,7 @@ test "interleaved large content readers bound repeated SQLite page reads" {
     try std.testing.expectEqual(@as(usize, 1), try fresh.read(length - 1, buffer[0..1]));
     try std.testing.expectEqual(@as(u8, 0), buffer[0]);
     {
-        const remove = try sqlite.prepare(storage.database, "DELETE FROM content WHERE content_id=?1");
+        const remove = try sqlite.prepare(storage.sqliteDatabase(), "DELETE FROM content WHERE content_id=?1");
         defer _ = c.sqlite3_finalize(remove);
         try sqlite.bindI64(remove, 1, readers[0].content_id);
         try sqlite.expectDone(remove);
@@ -3302,8 +3302,8 @@ test "retained readers allow checkpoints between committed windows" {
         // Keep the reader alive across an unrelated ordinary commit, just as
         // slow Reply delivery or an allowance-limited preparation does.
         _ = try configureTestSession(&storage, "checkpoint-write");
-        checkpoints[index] = c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null);
-        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        checkpoints[index] = c.sqlite3_wal_checkpoint_v2(storage.sqliteDatabase(), null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null);
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
         var offset: usize = window.len;
         while (offset < text.len) {
             const count = try reader.read(offset, &window);
@@ -3359,7 +3359,7 @@ test "yielded Bash preparation leaves checkpoints free while retaining its descr
         var prepared: bash.Prepared = undefined;
         try std.testing.expect(preparation.advance(&prepared) == .pending);
         _ = try configureTestSession(&storage, "bash-checkpoint");
-        try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.database, null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
+        try std.testing.expectEqual(@as(c_int, c.SQLITE_OK), c.sqlite3_wal_checkpoint_v2(storage.sqliteDatabase(), null, c.SQLITE_CHECKPOINT_TRUNCATE, null, null));
         while (true) {
             var progress = preparation.advance(&prepared);
             switch (progress) {
@@ -3445,11 +3445,11 @@ test "real SQLite full during import publishes no canonical prefix" {
     var storage_open = true;
     defer if (storage_open) storage.close() catch unreachable;
 
-    const page_count = try sqlite.pragmaInt(storage.database, "PRAGMA page_count");
+    const page_count = try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA page_count");
     var limit_buffer: [64:0]u8 = undefined;
     const limit = try std.fmt.bufPrintSentinel(&limit_buffer, "PRAGMA max_page_count={d}", .{page_count}, 0);
-    try sqlite.exec(storage.database, limit);
-    try std.testing.expectEqual(page_count, try sqlite.pragmaInt(storage.database, "PRAGMA max_page_count"));
+    try sqlite.exec(storage.sqliteDatabase(), limit);
+    try std.testing.expectEqual(page_count, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA max_page_count"));
 
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -3481,7 +3481,7 @@ test "real SQLite full during import publishes no canonical prefix" {
             break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, .{}));
         },
     );
-    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
     store_core.fence(&storage, error.CanonicalStorageFull) catch {};
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, storage.observeCommand("full-import"));
@@ -3515,7 +3515,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     try first_file.sync(std.testing.io);
     var first = try completeMessage("message-1", created_session_0.slice(), first_file, first_text);
     defer first.removeTemporaryContent(std.testing.io) catch unreachable;
-    const before = try sqlite.pragmaInt(storage.database, "SELECT unixepoch()");
+    const before = try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT unixepoch()");
     var commits: TestingCommits = .{};
     const first_reply = storage.submitMessageWithModel(&first, commits.callback(), .{});
     try std.testing.expectEqual(@as(usize, 1), commits.count);
@@ -3536,8 +3536,8 @@ test "message admissions remain queued in order and retain bounded canonical con
     try std.testing.expect(second_reply == .accepted);
     try std.testing.expect(first_reply.accepted.admission_id < second_reply.accepted.admission_id);
     // The Host stamps each admission with its wall clock, to the second.
-    const after = try sqlite.pragmaInt(storage.database, "SELECT unixepoch()");
-    const stamped = try sqlite.pragmaInt(storage.database, "SELECT admitted_at FROM message_admission WHERE admission_id=1");
+    const after = try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT unixepoch()");
+    const stamped = try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT admitted_at FROM message_admission WHERE admission_id=1");
     try std.testing.expect(before <= stamped and stamped <= after);
     // A replayed or restarted admission keeps the time it was admitted at.
     try store_testing.sqlite_only.exec(&storage, "UPDATE message_admission SET admitted_at=1000 WHERE admission_id=1", .{});
@@ -3578,7 +3578,7 @@ test "message admissions remain queued in order and retain bounded canonical con
     const restarted = try storage.observeCommand("message-1");
     try std.testing.expectEqual(first_reply.accepted.admission_id, restarted.message.?.queue.?.admission_id);
     try std.testing.expectEqual(@as(u64, 2), (try storage.inspectSessionForTesting(created_session_0.slice())).pending_messages);
-    try std.testing.expectEqual(@as(u32, 1000), try sqlite.pragmaInt(storage.database, "SELECT admitted_at FROM message_admission WHERE admission_id=1"));
+    try std.testing.expectEqual(@as(u32, 1000), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT admitted_at FROM message_admission WHERE admission_id=1"));
 }
 
 /// Gives `session` Bash, has its model propose two calls, and attempts
@@ -3640,9 +3640,9 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     var rebound = action;
     rebound.turn_id += 1000;
     try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(rebound, &input));
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET permission_revision=999 WHERE session_ref=?1 AND attempt_ordinal=1", .{session.slice()});
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(action, &input));
     try std.testing.expect(!storage.isFenced());
 }
@@ -3660,9 +3660,9 @@ test "revoking a sender runs main's statements, with no transaction, and a missi
 
     // Main: its UPDATE, then its touch's Workspace read. Now: the read, then the UPDATE.
     var statements: TestingStatements = .{};
-    statements.begin(storage.database);
+    statements.begin(storage.sqliteDatabase());
     try storage.revokeActionSender(action);
-    statements.end(storage.database);
+    statements.end(storage.sqliteDatabase());
     try std.testing.expectEqual(@as(u64, 2), statements.count);
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, held, .{session.slice()}));
 
@@ -3670,9 +3670,9 @@ test "revoking a sender runs main's statements, with no transaction, and a missi
     unknown.action_id += 1000;
     const generation = storage.commit_generation.load(.acquire);
     statements = .{};
-    statements.begin(storage.database);
+    statements.begin(storage.sqliteDatabase());
     try storage.revokeActionSender(unknown);
-    statements.end(storage.database);
+    statements.end(storage.sqliteDatabase());
     try std.testing.expectEqual(@as(u64, 1), statements.count);
     try std.testing.expectEqual(generation, storage.commit_generation.load(.acquire));
     try std.testing.expect(!storage.isFenced());
@@ -3715,7 +3715,7 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
                 .rollback_failure = true,
             }),
         );
-        try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_get_autocommit(storage.database));
+        try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
         try std.testing.expect(storage.isFenced());
         try std.testing.expectError(error.StoreFenced, storage.admitNextModelAttempt(.{}));
         var later = try completeConfiguration("rollback-later", "", workspace, "model-a");
@@ -3733,7 +3733,7 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
         );
         {
             const partial = try sqlite.prepare(
-                storage.database,
+                storage.sqliteDatabase(),
                 "SELECT (SELECT count(*) FROM turn),(SELECT count(*) FROM model_operation)," ++
                     "(SELECT count(*) FROM conversation_entry)",
             );
@@ -3788,21 +3788,21 @@ test "production Store applies finite durable SQLite settings" {
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(storage.database, "PRAGMA busy_timeout"));
-    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.database, "PRAGMA foreign_keys"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(storage.database, "PRAGMA mmap_size"));
-    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.database, "PRAGMA temp_store"));
-    try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(storage.database, "PRAGMA synchronous"));
-    try std.testing.expectEqual(@as(u32, 4194304), try sqlite.pragmaInt(storage.database, "PRAGMA journal_size_limit"));
-    try std.testing.expectEqualStrings("exclusive", (sqlite.diagnosticTextPragma(storage.database, "PRAGMA locking_mode") orelse return error.TestUnexpectedResult).slice());
-    try std.testing.expectEqual(@as(u32, 4096), try sqlite.pragmaInt(storage.database, "PRAGMA page_size"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(storage.database, "PRAGMA trusted_schema"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA busy_timeout"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA foreign_keys"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA mmap_size"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA temp_store"));
+    try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA synchronous"));
+    try std.testing.expectEqual(@as(u32, 4194304), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA journal_size_limit"));
+    try std.testing.expectEqualStrings("exclusive", (sqlite.diagnosticTextPragma(storage.sqliteDatabase(), "PRAGMA locking_mode") orelse return error.TestUnexpectedResult).slice());
+    try std.testing.expectEqual(@as(u32, 4096), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA page_size"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA trusted_schema"));
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_threadsafe());
     try std.testing.expectEqual(@as(i64, sqlite_heap_bytes), c.sqlite3_hard_heap_limit64(-1));
-    try std.testing.expectEqual(@as(c_int, 16 * 1024), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_SQL_LENGTH, -1));
-    try std.testing.expectEqual(@as(c_int, 65), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_VARIABLE_NUMBER, -1));
-    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_ATTACHED, -1));
-    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.database, c.SQLITE_LIMIT_WORKER_THREADS, -1));
+    try std.testing.expectEqual(@as(c_int, 16 * 1024), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_SQL_LENGTH, -1));
+    try std.testing.expectEqual(@as(c_int, 65), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_VARIABLE_NUMBER, -1));
+    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_ATTACHED, -1));
+    try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_WORKER_THREADS, -1));
 
     const diagnostic = storage.sqliteDiagnostic();
     try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
@@ -3978,10 +3978,10 @@ test "fresh Store uses current schema and rejects the prior version" {
 
     var storage: Store = undefined;
     try storage.open(std.testing.io, database, root);
-    try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(storage.database, "PRAGMA user_version"));
+    try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
     {
         const removed_index = try sqlite.prepare(
-            storage.database,
+            storage.sqliteDatabase(),
             "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='model_operation_runnable'",
         );
         defer _ = c.sqlite3_finalize(removed_index);
@@ -3991,7 +3991,7 @@ test "fresh Store uses current schema and rejects the prior version" {
     {
         // Uncertainty is derived from resolution and retry facts, not stored.
         const stored_uncertainty = try sqlite.prepare(
-            storage.database,
+            storage.sqliteDatabase(),
             "SELECT (SELECT count(*) FROM pragma_table_info('action_operation') WHERE name='uncertain')+" ++
                 "(SELECT count(*) FROM pragma_table_info('model_operation') WHERE name='uncertain')",
         );
@@ -4002,7 +4002,7 @@ test "fresh Store uses current schema and rejects the prior version" {
     {
         // An Action stores only its authorization; its denial is its Resolution.
         const stored_permission = try sqlite.prepare(
-            storage.database,
+            storage.sqliteDatabase(),
             "SELECT count(*) FROM pragma_table_info('action_operation') WHERE name='permission_state'",
         );
         defer _ = c.sqlite3_finalize(stored_permission);
@@ -4146,7 +4146,7 @@ test "a Workspace is matched by its digest and then its text" {
     {
         var sql: [160]u8 = undefined;
         const forged = std.fmt.bytesToHex(store_core.workspaceDigest(other_workspace), .lower);
-        try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&sql, "UPDATE session SET workspace_digest=x'{s}'", .{&forged}, 0));
+        try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE session SET workspace_digest=x'{s}'", .{&forged}, 0));
     }
     var other_command = try completeConfiguration("digest-other", "", other_workspace, "model");
     const other = storage.configure(&other_command, .{}).accepted.session;
@@ -4171,8 +4171,8 @@ test "a reference is checked when its row is written, not at commit" {
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     const session = try configureTestSession(&storage, "immediate-config");
-    try sqlite.exec(storage.database, "BEGIN");
-    defer sqlite.exec(storage.database, "ROLLBACK") catch unreachable;
+    try sqlite.exec(storage.sqliteDatabase(), "BEGIN");
+    defer sqlite.exec(storage.sqliteDatabase(), "ROLLBACK") catch unreachable;
     const Admission = struct {
         fn insert(database: *c.sqlite3, session_ref: []const u8, command_key: []const u8) !void {
             var sql: [320]u8 = undefined;
@@ -4185,10 +4185,10 @@ test "a reference is checked when its row is written, not at commit" {
             ));
         }
     };
-    try std.testing.expectError(error.SqliteExecFailed, Admission.insert(storage.database, session.slice(), "later-command"));
+    try std.testing.expectError(error.SqliteExecFailed, Admission.insert(storage.sqliteDatabase(), session.slice(), "later-command"));
     try store_testing.sqlite_only.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) " ++
         "VALUES('later-command',2,'',zeroblob(32),1,'',0,0,(SELECT max(command_seq)+1 FROM core_command))", .{});
-    try Admission.insert(storage.database, session.slice(), "later-command");
+    try Admission.insert(storage.sqliteDatabase(), session.slice(), "later-command");
 }
 
 test "existing Store rejects noncanonical durable authority" {
@@ -4202,7 +4202,7 @@ test "existing Store rejects noncanonical durable authority" {
 
     var storage: Store = undefined;
     try storage.open(std.testing.io, database, root);
-    try sqlite.exec(storage.database, "CREATE TABLE tool_result_authority(call_id INTEGER PRIMARY KEY, result_content_id INTEGER NOT NULL)");
+    try sqlite.exec(storage.sqliteDatabase(), "CREATE TABLE tool_result_authority(call_id INTEGER PRIMARY KEY, result_content_id INTEGER NOT NULL)");
     try storage.close();
 
     var refused: Store = undefined;
@@ -4227,9 +4227,9 @@ test "canonical observation failure fences later admission" {
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
 
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&storage, "UPDATE session SET instructions_content_id=9223372036854775807 WHERE session_ref=?1", .{created_session_0.slice()});
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     try std.testing.expectError(error.CorruptStore, storage.inspectSessionForTesting(created_session_0.slice()));
 
     var later = try completeConfiguration("later", "", workspace, "model-a");
@@ -4253,8 +4253,8 @@ test "public content SQL failure fences Store instead of reporting absence" {
             return 1;
         }
     };
-    c.sqlite3_progress_handler(storage.database, 1, Interrupt.progress, null);
-    defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+    c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Interrupt.progress, null);
+    defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
     // The shared provenance query is interrupted during preparation, before
     // identity lookup can step. Either phase must retain the public fence.
     try std.testing.expectError(error.StatementPrepareFailed, storage.openPublicConversationContent(&request));
@@ -4293,9 +4293,9 @@ test "public content SQLite step failure fences after successful preparation" {
             return 0;
         }
     };
-    var interrupt = Interrupt{ .database = storage.database };
-    c.sqlite3_progress_handler(storage.database, 1, Interrupt.progress, &interrupt);
-    defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+    var interrupt = Interrupt{ .database = storage.sqliteDatabase() };
+    c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, Interrupt.progress, &interrupt);
+    defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
     try std.testing.expectError(error.ConversationReadFailed, storage.openPublicConversationContent(&request));
     try std.testing.expect(interrupt.interrupted_step);
     try std.testing.expect(storage.isFenced());
@@ -4322,7 +4322,7 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
         const foreign_session = try configureTestSession(&storage, "foreign-config");
         try submitTestMessage(&storage, &tmp, "foreign-input", "foreign-key", foreign_session.slice(), "other input");
         _ = (try storage.admitNextModelAttempt(.{})).?;
-        const corrupt = try sqlite.prepare(storage.database, "UPDATE conversation_entry SET turn_id=(SELECT turn_id FROM turn WHERE session_ref=?1) WHERE session_ref=?2 AND entry_kind=1");
+        const corrupt = try sqlite.prepare(storage.sqliteDatabase(), "UPDATE conversation_entry SET turn_id=(SELECT turn_id FROM turn WHERE session_ref=?1) WHERE session_ref=?2 AND entry_kind=1");
         defer _ = c.sqlite3_finalize(corrupt);
         try sqlite.bindText(corrupt, 1, foreign_session.slice());
         try sqlite.bindText(corrupt, 2, session.slice());
@@ -4330,7 +4330,7 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     } else {
         try store_testing.sqlite_only.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND entry_kind=1)", .{session.slice()});
     }
-    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
     request.end = valid.end;
     if (route == .cursor) request.before_position = valid.items[0].position;
     const result: anyerror!void = if (route == .content)
@@ -4344,8 +4344,8 @@ fn testingOrdinaryPublicCorruption(route: TestingPublicReadRoute, foreign_turn: 
     try std.testing.expectError(error.CorruptStore, result);
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, store_core.publicConversationPageForTesting(&storage, request));
-    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
-    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
 }
 
 test "public ordinary private bytes and cursor fence" {
@@ -4408,7 +4408,7 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
             try store_testing.sqlite_only.withoutForeignKeys(&storage, "DELETE FROM content WHERE content_id=(SELECT rejection_content_id FROM model_tool_call WHERE call_ordinal=0)", .{});
         },
     }
-    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
     request.end = item.position;
     if (route == .cursor) {
         request.before_position = item.position;
@@ -4425,8 +4425,8 @@ fn testingToolPublicCorruption(route: TestingPublicReadRoute, damage: enum { pri
     try std.testing.expectError(error.CorruptStore, result);
     try std.testing.expect(storage.isFenced());
     try std.testing.expectError(error.StoreFenced, store_core.publicConversationPageForTesting(&storage, request));
-    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
-    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
 }
 
 test "public private tool bytes fence" {
@@ -4488,10 +4488,10 @@ test "public completed Action sibling corruption fences first Conversation read"
             // Obtain only the immutable identity, not a traversal on another
             // public route that could accidentally supply validation authority.
             const position = try store_testing.sqlite_only.queryU64(&storage, "SELECT max(acceptance_position) FROM action_operation", .{});
-            try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-            try sqlite.exec(storage.database, fault);
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
-            try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+            try sqlite.exec(storage.sqliteDatabase(), fault);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
             var request: protocol.ConversationPage = .{ .end = position };
             try request.session.set(session.slice());
             if (route == .cursor) {
@@ -4509,8 +4509,8 @@ test "public completed Action sibling corruption fences first Conversation read"
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, store_core.publicConversationPageForTesting(&storage, request));
-            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
         }
     }
 }
@@ -4537,7 +4537,7 @@ test "replay fences part damage that keeps every digest" {
         try answerTestTurn(&storage, &tmp, session.slice(), "part-damage", &answer);
         try submitTestMessage(&storage, &tmp, "part-damage-next", "part-damage-next", session.slice(), "next");
         const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-        try sqlite.exec(storage.database, fault);
+        try sqlite.exec(storage.sqliteDatabase(), fault);
         var view: HistoricalView = undefined;
         try storage.openHistoricalView(next, &view);
         defer view.close();
@@ -4578,7 +4578,7 @@ test "a message's text is stored once and its parts replay as lengths of it" {
         .{ .check_violation, "UPDATE model_output_part SET part_kind=4,text_content_id=extras_content_id WHERE part_ordinal=0" },
         .{ .check_violation, "UPDATE model_output_item SET message_content_id=NULL WHERE item_kind=2" },
         .{ .check_violation, "UPDATE model_output_item SET item_kind=1,phase=0 WHERE item_kind=2" },
-    }) |case| try std.testing.expectEqual(case[0], try probeConstraint(storage.database, case[1]));
+    }) |case| try std.testing.expectEqual(case[0], try probeConstraint(storage.sqliteDatabase(), case[1]));
     try submitTestMessage(&storage, &tmp, "text-once-next", "text-once-next", session.slice(), "next");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view: HistoricalView = undefined;
@@ -4666,13 +4666,13 @@ test "a warm Turn prepares no statement" {
             return 0;
         }
     };
-    var steps = Steps{ .cache = &storage.statements };
-    const prepared = storage.statements.count;
-    _ = c.sqlite3_trace_v2(storage.database, c.SQLITE_TRACE_STMT, Steps.traced, &steps);
-    defer _ = c.sqlite3_trace_v2(storage.database, 0, null, null);
+    var steps = Steps{ .cache = &storage.engine.sqlite.statements };
+    const prepared = storage.engine.sqlite.statements.count;
+    _ = c.sqlite3_trace_v2(storage.sqliteDatabase(), c.SQLITE_TRACE_STMT, Steps.traced, &steps);
+    defer _ = c.sqlite3_trace_v2(storage.sqliteDatabase(), 0, null, null);
     try answerTestTurn(&storage, &tmp, session.slice(), "warm", &answer);
     try std.testing.expectEqual(@as(usize, 0), steps.uncached);
-    try std.testing.expectEqual(prepared, storage.statements.count);
+    try std.testing.expectEqual(prepared, storage.engine.sqlite.statements.count);
 }
 
 test "public assistant message provenance binds the exact accepted item" {
@@ -4692,10 +4692,10 @@ test "public assistant message provenance binds the exact accepted item" {
             try testingStore(&storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             const request = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = "visible", .decoded = "visible" }});
-            try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-            try sqlite.exec(storage.database, fault);
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
-            try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+            try sqlite.exec(storage.sqliteDatabase(), fault);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
             try storage.close();
             try testingStore(&storage, &tmp, std.testing.io);
             const result: anyerror!void = switch (route) {
@@ -4720,8 +4720,8 @@ test "public assistant message provenance binds the exact accepted item" {
             };
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
-            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
         }
     }
 }
@@ -4741,7 +4741,7 @@ test "missing assistant certificates respect page windows and fixed ends" {
         }
         _ = (try storage.admitNextModelAttempt(.{})).?;
         try store_testing.sqlite_only.exec(&storage, "DELETE FROM conversation_entry WHERE entry_kind=3", .{});
-        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
         try storage.close();
         try testingStore(&storage, &tmp, std.testing.io);
         // A historical window ending before the damage remains readable.
@@ -4829,8 +4829,8 @@ test "one committed selection freezes its settings and input prefix" {
 
     // Failed admission publishes neither projection nor instruction
     // inclusion; the revision's change row holds position 3.
-    try std.testing.expectEqual(@as(i64, 0), try sqlite.pragmaInt(storage.database, "SELECT count(*) FROM conversation_entry"));
-    try std.testing.expectEqual(@as(i64, 4), try sqlite.pragmaInt(storage.database, "SELECT next_position FROM session"));
+    try std.testing.expectEqual(@as(i64, 0), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT count(*) FROM conversation_entry"));
+    try std.testing.expectEqual(@as(i64, 4), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT next_position FROM session"));
 
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
@@ -5046,7 +5046,7 @@ test "continued accepted output keeps model immutable and public text readable" 
     public_reader.open(try storage.openPublicConversationContent(&.{ .session = public_request.session, .position = public_page.items[0].position }));
     {
         // The answer is the message's public text row; its bag is private.
-        const backing = try sqlite.prepare(storage.database, "SELECT text.private,bag.private FROM model_output_item item " ++
+        const backing = try sqlite.prepare(storage.sqliteDatabase(), "SELECT text.private,bag.private FROM model_output_item item " ++
             "JOIN content text ON text.content_id=item.message_content_id " ++
             "JOIN content bag ON bag.content_id=item.extras_content_id WHERE item.message_content_id=?1");
         defer _ = c.sqlite3_finalize(backing);
@@ -5068,11 +5068,11 @@ test "continued accepted output keeps model immutable and public text readable" 
     try std.testing.expectEqual(@as(usize, 1), before_answer.count);
     try std.testing.expect(before_answer.items[0].kind == .user);
     try std.testing.expect(!storage.isFenced());
-    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
-    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
     {
         const resolution = try sqlite.prepare(
-            storage.database,
+            storage.sqliteDatabase(),
             "SELECT resolution_code FROM model_operation WHERE operation_id=?1",
         );
         defer _ = c.sqlite3_finalize(resolution);
@@ -5173,13 +5173,13 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
 
         {
             const force_exhausted = try sqlite.prepare(
-                storage.database,
+                storage.sqliteDatabase(),
                 "UPDATE model_operation SET attempt_ordinal=4 WHERE operation_id=?1",
             );
             defer _ = c.sqlite3_finalize(force_exhausted);
             try sqlite.bindU64(force_exhausted, 1, replacement_binding.operation_id);
             try sqlite.expectDone(force_exhausted);
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
         }
 
         const Active = struct {
@@ -5225,7 +5225,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
         var resolution: protocol.Bounded(protocol.max_code_bytes) = .{};
         var recorded: protocol.Bounded(256) = .{};
         {
-            const statement = try sqlite.prepare(storage.database, "SELECT coalesce(resolution_code,''),coalesce(request_id,'') FROM model_operation WHERE operation_id=?1");
+            const statement = try sqlite.prepare(storage.sqliteDatabase(), "SELECT coalesce(resolution_code,''),coalesce(request_id,'') FROM model_operation WHERE operation_id=?1");
             defer _ = c.sqlite3_finalize(statement);
             try sqlite.bindU64(statement, 1, binding.operation_id);
             try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
@@ -5253,7 +5253,7 @@ test "HTTP status failures keep the settling Attempt's provider correlation" {
     try ordinary.correlated.request_id.set("terminal-\"request\"-é");
     try storage.settleModelAttemptFailure(correlated, ordinary, .ordinary, .{});
     {
-        const statement = try sqlite.prepare(storage.database, "SELECT request_id FROM model_operation WHERE operation_id=?1");
+        const statement = try sqlite.prepare(storage.sqliteDatabase(), "SELECT request_id FROM model_operation WHERE operation_id=?1");
         defer _ = c.sqlite3_finalize(statement);
         try sqlite.bindU64(statement, 1, correlated.operation_id);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
@@ -5296,7 +5296,7 @@ test "a refresh claim whose UPDATE changes no row answers false and does not fen
             return self.inner.abandon(faults);
         }
         pub fn commit(self: *@This()) Inner.Error!void {
-            sqlite.exec(self.inner.store.database, "UPDATE model_operation SET auth_refresh_claimed=1") catch unreachable;
+            sqlite.exec(self.inner.store.sqliteDatabase(), "UPDATE model_operation SET auth_refresh_claimed=1") catch unreachable;
             return self.inner.commit();
         }
     };
@@ -5350,7 +5350,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try std.testing.expect((try admitRetryForTesting(&storage)) == null);
     {
         const statement = try sqlite.prepare(
-            storage.database,
+            storage.sqliteDatabase(),
             "SELECT resolution_code IS NULL AND retry_due_at_ms IS 0,retry_due_at_ms,last_failure_code,resolution_code " ++
                 "FROM model_operation WHERE operation_id=?1",
         );
@@ -5368,11 +5368,11 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     // Make this fixture's operation eligible explicitly; admission still uses
     // the real Store transition and checks the allowance and stale binding.
     {
-        const due = try sqlite.prepare(storage.database, "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1");
+        const due = try sqlite.prepare(storage.sqliteDatabase(), "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1");
         defer _ = c.sqlite3_finalize(due);
         try sqlite.bindU64(due, 1, first.operation_id);
         try sqlite.expectDone(due);
-        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
     }
     const second = (try admitRetryForTesting(&storage)).?.permit.binding;
     try std.testing.expectEqual(first.operation_id, second.operation_id);
@@ -5417,7 +5417,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
     try expectActivityOutcome(&storage, created_session_0.slice(), fourth, .provider_unavailable, "retry_exhausted");
     try std.testing.expect((try admitRetryForTesting(&storage)) == null);
     const statement = try sqlite.prepare(
-        storage.database,
+        storage.sqliteDatabase(),
         "SELECT attempt_ordinal,resolution_code IS NULL AND retry_due_at_ms IS 0,retry_due_at_ms,last_failure_code,resolution_code " ++
             "FROM model_operation WHERE operation_id=?1",
     );
@@ -5458,9 +5458,9 @@ test "canonical historical read failure fences dispatch without a fabricated out
     var admitted_attempt = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted_attempt.permit.consume();
 
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&storage, "UPDATE session_revision SET instructions_content_id=9223372036854775807 WHERE session_ref=?1", .{created_session_0.slice()});
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     var view: HistoricalView = undefined;
     try storage.openHistoricalView(binding, &view);
     defer view.close();
@@ -5479,7 +5479,7 @@ test "runnable selection finds age through pending index then groups one session
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    const statement = try sqlite.prepare(storage.database, "EXPLAIN QUERY PLAN " ++ runnable_selection_sql);
+    const statement = try sqlite.prepare(storage.sqliteDatabase(), "EXPLAIN QUERY PLAN " ++ runnable_selection_sql);
     defer _ = c.sqlite3_finalize(statement);
     var uses_pending_index = false;
     var uses_session_index = false;
@@ -5508,7 +5508,7 @@ test "activity revalidation takes the same steps however long a Session's histor
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
 
     var steps: [2]i32 = undefined;
     for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
@@ -5527,8 +5527,8 @@ test "activity revalidation takes the same steps however long a Session's histor
             0,
         );
         defer std.testing.allocator.free(insert);
-        try sqlite.exec(storage.database, insert);
-        const guard = try sqlite.prepare(storage.database, reads_domain.activity_sequence_guard.sql);
+        try sqlite.exec(storage.sqliteDatabase(), insert);
+        const guard = try sqlite.prepare(storage.sqliteDatabase(), reads_domain.activity_sequence_guard.sql);
         defer _ = c.sqlite3_finalize(guard);
         try sqlite.bindText(guard, 1, "h1st0r");
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(guard));
@@ -5544,7 +5544,7 @@ test "runnable discovery measures eligible ineligible and history populations in
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     // Query-only populations use canonical six-byte fixtures, not named
     // Session creation. Command keys retain their independent text identities.
     const QueryCost = struct {
@@ -5640,8 +5640,8 @@ test "runnable discovery measures eligible ineligible and history populations in
 
     var history_selection_costs: [3]i32 = undefined;
     for ([_]usize{ 100, 1_000, 10_000 }, 0..) |history, index| {
-        try QueryCost.reset(storage.database, 1, 0, history);
-        const measured = try QueryCost.measureSelection(storage.database);
+        try QueryCost.reset(storage.sqliteDatabase(), 1, 0, history);
+        const measured = try QueryCost.measureSelection(storage.sqliteDatabase());
         try std.testing.expectEqual(@as(i64, 1), measured.first_admission);
         history_selection_costs[index] = measured.steps;
     }
@@ -5650,8 +5650,8 @@ test "runnable discovery measures eligible ineligible and history populations in
 
     var ineligible_selection_costs: [3]i32 = undefined;
     for ([_]usize{ 10, 100, 1_000 }, 0..) |ineligible, index| {
-        try QueryCost.reset(storage.database, 1, ineligible, 0);
-        const measured = try QueryCost.measureSelection(storage.database);
+        try QueryCost.reset(storage.sqliteDatabase(), 1, ineligible, 0);
+        const measured = try QueryCost.measureSelection(storage.sqliteDatabase());
         try std.testing.expectEqual(@as(i64, @intCast(ineligible + 1)), measured.first_admission);
         ineligible_selection_costs[index] = measured.steps;
     }
@@ -5661,12 +5661,12 @@ test "runnable discovery measures eligible ineligible and history populations in
     var eligible_selection_costs: [3]i32 = undefined;
     var eligible_drain_costs: [3]i64 = undefined;
     for ([_]usize{ 10, 100, 1_000 }, 0..) |eligible, index| {
-        try QueryCost.reset(storage.database, eligible, 0, 0);
-        const measured = try QueryCost.measureSelection(storage.database);
+        try QueryCost.reset(storage.sqliteDatabase(), eligible, 0, 0);
+        const measured = try QueryCost.measureSelection(storage.sqliteDatabase());
         try std.testing.expectEqual(@as(i64, 1), measured.first_admission);
         eligible_selection_costs[index] = measured.steps;
-        try QueryCost.reset(storage.database, eligible, 0, 0);
-        eligible_drain_costs[index] = try QueryCost.measureDrain(storage.database, eligible);
+        try QueryCost.reset(storage.sqliteDatabase(), eligible, 0, 0);
+        eligible_drain_costs[index] = try QueryCost.measureDrain(storage.sqliteDatabase(), eligible);
     }
     try std.testing.expect(@max(eligible_selection_costs[0], eligible_selection_costs[1], eligible_selection_costs[2]) -
         @min(eligible_selection_costs[0], eligible_selection_costs[1], eligible_selection_costs[2]) <= 32);
@@ -5698,7 +5698,7 @@ test "retry admission and exhausted recovery use their selection indexes" {
         },
     };
     for (queries) |query| {
-        const statement = try sqlite.prepare(storage.database, query.sql);
+        const statement = try sqlite.prepare(storage.sqliteDatabase(), query.sql);
         defer _ = c.sqlite3_finalize(statement);
         var uses_index = false;
         while (true) switch (c.sqlite3_step(statement)) {
@@ -5738,7 +5738,7 @@ test "retry due index excludes future population and preserves age ordering" {
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     const QueryCost = struct {
         fn measure(database: *c.sqlite3, sql: [:0]const u8, snapshot_ms: i64) !i32 {
             const statement = try sqlite.prepare(database, sql);
@@ -5757,7 +5757,7 @@ test "retry due index excludes future population and preserves age ordering" {
     var future_costs: [3]i32 = undefined;
     var age_control_costs: [3]i32 = undefined;
     try sqlite.exec(
-        storage.database,
+        storage.sqliteDatabase(),
         "CREATE INDEX test_model_operation_retry_age ON model_operation(operation_id) " ++
             "WHERE resolution_code IS NULL AND attempt_ordinal<4",
     );
@@ -5779,9 +5779,9 @@ test "retry due index excludes future population and preserves age ordering" {
             0,
         );
         defer std.testing.allocator.free(insert);
-        try sqlite.exec(storage.database, insert);
-        future_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99);
-        age_control_costs[index] = try QueryCost.measure(storage.database, age_control_sql, 99);
+        try sqlite.exec(storage.sqliteDatabase(), insert);
+        future_costs[index] = try QueryCost.measure(storage.sqliteDatabase(), retry_admission_select_sql, 99);
+        age_control_costs[index] = try QueryCost.measure(storage.sqliteDatabase(), age_control_sql, 99);
     }
     const minimum_future_cost = @min(future_costs[0], future_costs[1], future_costs[2]);
     const maximum_future_cost = @max(future_costs[0], future_costs[1], future_costs[2]);
@@ -5800,8 +5800,8 @@ test "retry due index excludes future population and preserves age ordering" {
             0,
         );
         defer std.testing.allocator.free(insert);
-        try sqlite.exec(storage.database, insert);
-        due_costs[index] = try QueryCost.measure(storage.database, retry_admission_select_sql, 99);
+        try sqlite.exec(storage.sqliteDatabase(), insert);
+        due_costs[index] = try QueryCost.measure(storage.sqliteDatabase(), retry_admission_select_sql, 99);
     }
     try std.testing.expect(due_costs[1] > due_costs[0]);
     try std.testing.expect(due_costs[2] > due_costs[1]);
@@ -5812,7 +5812,7 @@ test "retry due index excludes future population and preserves age ordering" {
         "(1,1,'000001',1,1,1,1,99,0,1)," ++
         "(2,2,'000002',1,1,1,1,50,0,1)," ++
         "(3,3,'000003',1,1,1,1,1,0,1)", .{});
-    try insertTestingSessionsForOperations(storage.database);
+    try insertTestingSessionsForOperations(storage.sqliteDatabase());
     const Active = struct {
         fn contains(_: *const anyopaque, operation_id: u64) bool {
             return operation_id == 1;
@@ -5853,7 +5853,7 @@ test "a 401 forced refresh is claimed at most once per Operation across failures
     // A completed refresh makes the one replacement immediately eligible,
     // without generic backoff, and records the 401.
     try storage.settleModelAttemptFailure(a1, testing_401, .refreshed, .{});
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(storage.database, "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL AND retry_due_at_ms!=0 AND last_failure_code='provider_http_401' AND retry_due_at_ms<=CAST(unixepoch('subsec')*1000 AS INTEGER)", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM model_operation WHERE resolution_code IS NULL AND retry_due_at_ms!=0 AND last_failure_code='provider_http_401' AND retry_due_at_ms<=CAST(unixepoch('subsec')*1000 AS INTEGER)", .{}));
     const a2 = (try admitRetryForTesting(&storage)).?.permit.binding;
     try std.testing.expectEqual(@as(u64, 2), a2.attempt_ordinal);
     // Counterexample A: a transient failure intervenes; the next 401 must
@@ -5906,7 +5906,7 @@ test "retry admission reads past a full page of active Operations" {
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     const insert = try std.testing.allocator.printSentinel(
         "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{d}) " ++
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
@@ -5916,8 +5916,8 @@ test "retry admission reads past a full page of active Operations" {
         0,
     );
     defer std.testing.allocator.free(insert);
-    try sqlite.exec(storage.database, insert);
-    try insertTestingSessionsForOperations(storage.database);
+    try sqlite.exec(storage.sqliteDatabase(), insert);
+    try insertTestingSessionsForOperations(storage.sqliteDatabase());
     const Active = struct {
         fn contains(_: *const anyopaque, operation_id: u64) bool {
             return operation_id <= retry_admission_page_rows;
@@ -5939,13 +5939,13 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
 
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&storage, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<201) " ++
         "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
         "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,retry_scheduled_at) " ++
         "SELECT value,value,printf('%06d',value),1,1,1,1," ++
         "CASE WHEN value<=100 THEN 9223372036854775807 ELSE 1 END,0,1 FROM sequence", .{});
-    try insertTestingSessionsForOperations(storage.database);
+    try insertTestingSessionsForOperations(storage.sqliteDatabase());
 
     const Active = struct {
         const Context = struct {
@@ -5986,7 +5986,7 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     comparisons = 0;
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     const admitted = (try storage.tryAdmitNextModelRetry(active_filter, .{})).?;
     try std.testing.expectEqual(@as(u64, 201), admitted.permit.binding.operation_id);
     try std.testing.expectEqual(@as(u64, 2), admitted.permit.binding.attempt_ordinal);
@@ -5997,12 +5997,12 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         var buffer: [32]u8 = undefined;
         const key = try std.fmt.bufPrint(&buffer, "exhausted-{d}", .{value});
         const session = try configureTestSession(&storage, key);
-        const insert_turn = try sqlite.prepare(storage.database, "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id) VALUES(?1,?2,1,1,?1)");
+        const insert_turn = try sqlite.prepare(storage.sqliteDatabase(), "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id) VALUES(?1,?2,1,1,?1)");
         defer _ = c.sqlite3_finalize(insert_turn);
         try sqlite.bindU64(insert_turn, 1, value);
         try sqlite.bindText(insert_turn, 2, session.slice());
         try sqlite.expectDone(insert_turn);
-        const insert_operation = try sqlite.prepare(storage.database, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
+        const insert_operation = try sqlite.prepare(storage.sqliteDatabase(), "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
             "admission_position,attempt_ordinal,retry_due_at_ms,output_reservation,attempt_at) " ++
             "VALUES(?1,?1,?2,1,1,1,4,0,0,1)");
         defer _ = c.sqlite3_finalize(insert_operation);
@@ -6010,7 +6010,7 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
         try sqlite.bindText(insert_operation, 2, session.slice());
         try sqlite.expectDone(insert_operation);
     }
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
 
     var active_exhausted: [100]u64 = undefined;
     for (&active_exhausted, 0..) |*operation_id, index| operation_id.* = 6000 + @as(u64, @intCast(index));
@@ -6026,7 +6026,7 @@ test "retry transitions preserve age and settle one exhausted outcome per call" 
     }));
     try std.testing.expectEqual(@as(usize, 5150), exhausted_comparisons);
     const outcomes = try sqlite.prepare(
-        storage.database,
+        storage.sqliteDatabase(),
         "SELECT operation_id,resolution_code FROM model_operation WHERE operation_id IN (6100,6101) ORDER BY operation_id",
     );
     defer _ = c.sqlite3_finalize(outcomes);
@@ -6072,15 +6072,15 @@ test "public proposal structural corruption fences the activity page" {
         try std.testing.expectEqual(binding.turn_id, call.turn);
         try std.testing.expectEqual(@as(u64, 0), call.call_ordinal);
         try std.testing.expectEqualSlices(u8, &protocol.contentDigest("unknown"), &call.fields[0].digest);
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-        try sqlite.exec(storage.database, fault);
-        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.sqliteDatabase(), fault);
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
         try std.testing.expect(storage.isFenced());
         try std.testing.expectError(error.StoreFenced, store_core.activityPageForTesting(&storage, request));
-        try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
-        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+        try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
     }
 }
 
@@ -6107,8 +6107,8 @@ test "public activity admission corruption fences page and content independently
             try std.testing.expectEqualStrings("message", item.value.admission.key.slice());
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest("input bytes"), &item.value.admission.content.digest);
             _ = (try storage.admitNextModelAttempt(.{})).?;
-            try sqlite.exec(storage.database, fault);
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            try sqlite.exec(storage.sqliteDatabase(), fault);
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
             request.position = item.position - 1;
             const result: anyerror!void = if (content_route)
                 if (storage.openActivityContent(&.{ .session = request.session, .position = item.position })) |value| blk: {
@@ -6121,8 +6121,8 @@ test "public activity admission corruption fences page and content independently
             try std.testing.expectError(error.CorruptStore, result);
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, store_core.activityPageForTesting(&storage, request));
-            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
         }
     }
 }
@@ -6133,7 +6133,7 @@ test "the queued Messages cost the queue, not the history after a page's end" {
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     // Messages 1..n wait at positions 2, 4, ...; a stop at 2n+1 excludes all
     // but the newest. A page ending at the first Message has one waiting,
     // as one ending after the stop does.
@@ -6149,8 +6149,8 @@ test "the queued Messages cost the queue, not the history after a page's end" {
             0,
         );
         defer std.testing.allocator.free(insert);
-        try sqlite.exec(storage.database, insert);
-        const statement = try store_core.cachedTyped(&storage, reads_domain.queued);
+        try sqlite.exec(storage.sqliteDatabase(), insert);
+        const statement = try storage.engine.sqlite.cachedTyped(reads_domain.queued);
         for ([_]u64{ 2, 2 * history + 1 }, [_]u64{ 1, history }, cost) |end, newest, *probe| {
             _ = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
             const entry = try store_core.enter(&storage, .none);
@@ -6198,9 +6198,9 @@ test "a stop cancels its Actions in pages of one write each, in call order at de
         try std.testing.expectEqual(@as(u64, count), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NULL AND attempt_ordinal=0", .{}));
         var stop = try completeSessionStop("many-stop", session.slice());
         var statements: TestingStatements = .{};
-        statements.begin(storage.database);
+        statements.begin(storage.sqliteDatabase());
         const reply = storage.stopSession(&stop, .{});
-        statements.end(storage.database);
+        statements.end(storage.sqliteDatabase());
         try std.testing.expect(reply.accepted.completion == .completed);
         // BEGIN, the three reads of round 1, the command, the stop, the
         // Turn's close, the position advance and COMMIT; with no Action the
@@ -6258,7 +6258,7 @@ test "Session work dates a tool group by its last acceptance, even when the cloc
     const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
     _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
     var sql: [256]u8 = undefined;
-    try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&sql, "UPDATE model_operation SET resolved_at=300 WHERE session_ref='{0s}';" ++
+    try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE model_operation SET resolved_at=300 WHERE session_ref='{0s}';" ++
         "UPDATE action_operation SET decided_at=300 WHERE session_ref='{0s}';" ++
         "UPDATE action_operation SET resolved_at=70 WHERE session_ref='{0s}' AND resolution_code IS NOT NULL", .{bypass.slice()}, 0));
     try std.testing.expectEqual(@as(u64, 70), try expectOneWork(&storage, &tmp, bypass.slice(), "pending"));
@@ -6298,8 +6298,8 @@ test "persisted tool label corruption fences every publication route" {
                 try std.testing.expectEqual(@as(usize, 3), (try store_core.publicConversationPageForTesting(&storage, .{ .session = request.session })).count);
             }
             var sql: [256]u8 = undefined;
-            try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&sql, "UPDATE model_tool_call SET description={s} WHERE call_ordinal=0", .{description.sql}, 0));
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+            try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE model_tool_call SET description={s} WHERE call_ordinal=0", .{description.sql}, 0));
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
             const result: anyerror!void = switch (route) {
                 .current, .full => if (testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, if (route == .full) .full else .current)) |bytes| blk: {
                     std.testing.allocator.free(bytes);
@@ -6311,8 +6311,8 @@ test "persisted tool label corruption fences every publication route" {
             try std.testing.expectError(description.failure, result);
             try std.testing.expect(storage.isFenced());
             try std.testing.expectError(error.StoreFenced, store_core.activityPageForTesting(&storage, request));
-            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.database));
-            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+            try std.testing.expectEqual(@as(usize, 0), busyStatements(storage.sqliteDatabase()));
+            try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
         }
     }
 }
@@ -6332,7 +6332,7 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
         const session = try configureTestSession(&storage, "cost-config");
         // Foreign keys are off: each history Message names its Turn before
         // the Turn row exists, which an immediate key would refuse.
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT value,next_position+4*(value-1) AS position,instructions_content_id AS content FROM sequence,session; " ++
@@ -6351,8 +6351,8 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
             0,
         );
         defer std.testing.allocator.free(insert);
-        try sqlite.exec(storage.database, insert);
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try sqlite.exec(storage.sqliteDatabase(), insert);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         // The history rows bypass the Host's ids.
         try store_core.reloadIdentitiesForTesting(&storage);
         const tail = (try store_core.readSessionForTesting(&storage, session.slice())).?.next_position;
@@ -6396,7 +6396,7 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
         const session = try configureTestSession(&storage, "recall-config");
         const peer = try configureTestSession(&storage, "recall-peer");
         try submitTestMessage(&storage, &tmp, "recall-first", "first", session.slice(), "first");
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT value,next_position+value-1 AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
@@ -6407,8 +6407,8 @@ test "a one-row page of a person's Messages costs the same steps after 10 or 10,
             0,
         );
         defer std.testing.allocator.free(insert);
-        try sqlite.exec(storage.database, insert);
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try sqlite.exec(storage.sqliteDatabase(), insert);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         try store_core.reloadIdentitiesForTesting(&storage);
         var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
         try request.session.set(session.slice());
@@ -6436,7 +6436,7 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
         const first = try store_testing.sqlite_only.queryU64(&storage, "SELECT min(admission_position) FROM message_admission", .{});
         // Foreign keys are off: each tool group names its Turn before the
         // Turn row exists. A cancelled Turn needs no answer content.
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
         const insert = try std.testing.allocator.printSentinel(
             "CREATE TEMP TABLE history AS WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<{0}) " ++
                 "SELECT 1000+value AS value,next_position+3*(value-1) AS position,instructions_content_id AS content FROM sequence,session WHERE session_ref='{1s}'; " ++
@@ -6453,8 +6453,8 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
             0,
         );
         defer std.testing.allocator.free(insert);
-        try sqlite.exec(storage.database, insert);
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try sqlite.exec(storage.sqliteDatabase(), insert);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         try store_core.reloadIdentitiesForTesting(&storage);
         try submitTestMessage(&storage, &tmp, "forward-third", "third", session.slice(), "third");
         var request: protocol.ActivityPage = .{ .position = first, .kinds = .initOne(.admission), .limit = 1 };
@@ -6490,9 +6490,9 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
         );
         defer std.testing.allocator.free(insert);
         // Foreign keys are off: the waiting Messages have no commands.
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-        try sqlite.exec(storage.database, insert);
-        try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        try sqlite.exec(storage.sqliteDatabase(), insert);
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
         try store_core.reloadIdentitiesForTesting(&storage);
         try submitTestMessage(&storage, &tmp, "waiting-newest", "newest", session.slice(), "newest");
         var request: protocol.ActivityPage = .{ .direction = .backward, .kinds = .initOne(.admission), .limit = 1 };
@@ -6508,13 +6508,13 @@ test "a one-row page of a person's Messages costs the same steps past 100 or 10,
 /// The VM steps every statement of the Store's connection takes to read one
 /// Activity page.
 fn activityPageSteps(storage: *Store, request: protocol.ActivityPage) !i64 {
-    var statement = c.sqlite3_next_stmt(storage.database, null);
-    while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.database, each))
+    var statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);
+    while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), each))
         _ = c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 1);
     _ = try store_core.activityPageForTesting(storage, request);
     var total: i64 = 0;
-    statement = c.sqlite3_next_stmt(storage.database, null);
-    while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.database, each))
+    statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), null);
+    while (statement) |each| : (statement = c.sqlite3_next_stmt(storage.sqliteDatabase(), each))
         total += c.sqlite3_stmt_status(each, c.SQLITE_STMTSTATUS_VM_STEP, 0);
     return total;
 }
@@ -6569,7 +6569,7 @@ test "activity judges every candidate Operation's tool outcomes, not only its ke
         // presentation reads that call.
         try store_testing.sqlite_only.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE (operation_id,item_ordinal)=" ++
             "(SELECT operation_id,item_ordinal FROM model_tool_call ORDER BY operation_id DESC,call_ordinal DESC LIMIT 1)", .{});
-        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+        try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
         try std.testing.expectError(error.CorruptStore, store_core.activityPageForTesting(&storage, request));
         try std.testing.expect(storage.isFenced());
     }
@@ -6588,7 +6588,7 @@ test "the tool outcome rule counts an Operation's calls against its call items" 
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "count-calls");
     try store_testing.sqlite_only.exec(&storage, "UPDATE model_output_item SET item_kind=1 WHERE item_kind=3 AND item_ordinal=" ++
         "(SELECT item_ordinal FROM model_tool_call WHERE call_ordinal=1)", .{});
-    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
     try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
     try std.testing.expect(storage.isFenced());
 }
@@ -6610,7 +6610,7 @@ test "the Current report fences an unauthorized Action proposed under bypass" {
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "unauthorized-calls");
     // The CHECK pairs a grant with its decision, so the damage clears both.
     try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET authorized=0,decided_at=NULL WHERE call_ordinal=1", .{});
-    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.database));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_changes(storage.sqliteDatabase()));
     try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024));
     try std.testing.expect(storage.isFenced());
 }
@@ -6625,7 +6625,7 @@ fn configureTestEffort(storage: *Store, key: []const u8, session: []const u8, st
 }
 
 fn testingRevisionEfforts(storage: *Store, session: []const u8, destination: []?protocol.ReasoningEffort) !usize {
-    const statement = try sqlite.prepare(storage.database, "SELECT reasoning_effort FROM session_revision WHERE session_ref=?1 ORDER BY revision");
+    const statement = try sqlite.prepare(storage.sqliteDatabase(), "SELECT reasoning_effort FROM session_revision WHERE session_ref=?1 ORDER BY revision");
     defer _ = c.sqlite3_finalize(statement);
     try sqlite.bindText(statement, 1, session);
     var count: usize = 0;
@@ -6764,7 +6764,7 @@ test "historical accepted output completeness and provenance fence both read pat
                 try settleCompactionForTesting(&storage, &tmp, output, &.{ .reasoning, .message, .reasoning });
                 const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 if (tied_id) |previous| {
-                    const tie = try sqlite.prepare(storage.database, "UPDATE model_operation SET admission_position=" ++
+                    const tie = try sqlite.prepare(storage.sqliteDatabase(), "UPDATE model_operation SET admission_position=" ++
                         "(SELECT admission_position FROM model_operation WHERE operation_id=?1) WHERE operation_id=?2");
                     defer _ = c.sqlite3_finalize(tie);
                     try sqlite.bindU64(tie, 1, previous);
@@ -6773,12 +6773,12 @@ test "historical accepted output completeness and provenance fence both read pat
                 }
                 // Message entries now reference their exact raw items. Bypass
                 // that FK only while injecting the intended missing-item fault.
-                try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
-                const mutation = try sqlite.prepare(storage.database, sql);
+                try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+                const mutation = try sqlite.prepare(storage.sqliteDatabase(), sql);
                 defer _ = c.sqlite3_finalize(mutation);
                 try sqlite.bindU64(mutation, 1, corrupt_id);
                 try sqlite.expectDone(mutation);
-                try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+                try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
                 var view: HistoricalView = undefined;
                 try storage.openHistoricalView(next, &view);
                 defer view.close();
@@ -6823,7 +6823,7 @@ test "historical context selection work excludes nonmatching Operation populatio
             // Operations have no accepted output. Their population must not be
             // scanned inside one source/frontier/anchor selection step.
             try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL", .{});
-            const insert = try sqlite.prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
+            const insert = try sqlite.prepare(storage.sqliteDatabase(), "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
                 "output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
@@ -6838,8 +6838,8 @@ test "historical context selection work excludes nonmatching Operation populatio
             try storage.openHistoricalView(current, &view);
             defer view.close();
             var measured: @This() = .{};
-            c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
-            defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+            c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, progress, &measured);
+            defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
             while (!try view.validateOutputsStep()) {}
             try std.testing.expectEqual(with_base, (try view.coverage()).anchor != null);
             return measured.steps;
@@ -6873,7 +6873,7 @@ test "model admission work excludes failed historical Operation population" {
             const current = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             // Keep the actual current Operation newer than all injected history.
             try store_testing.sqlite_only.exec(&storage, "UPDATE model_operation SET admission_position=100000 WHERE resolution_code IS NULL; UPDATE session SET next_position=100001", .{});
-            const insert = try sqlite.prepare(storage.database, "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
+            const insert = try sqlite.prepare(storage.sqliteDatabase(), "WITH RECURSIVE sequence(value) AS (VALUES(1) UNION ALL " ++
                 "SELECT value+1 FROM sequence WHERE value<?1) " ++
                 "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
                 "output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
@@ -6888,8 +6888,8 @@ test "model admission work excludes failed historical Operation population" {
 
             var measured: @This() = .{};
             const admitted = blk: {
-                c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
-                defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+                c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, progress, &measured);
+                defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
                 break :blk (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             };
             try std.testing.expectEqual(if (overflow) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
@@ -6958,8 +6958,8 @@ test "model admission work excludes accepted compaction base history" {
             try submitTestMessage(&storage, &tmp, "pending", "pending", session.slice(), "");
             var measured: @This() = .{};
             const admitted = blk: {
-                c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
-                defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+                c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, progress, &measured);
+                defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
                 break :blk (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             };
             try std.testing.expectEqual(if (suffix == .high) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
@@ -7058,8 +7058,8 @@ test "model admission work excludes usage-covered accepted tool and instruction 
             try submitTestMessage(&storage, &tmp, "pending", "pending", session.slice(), "");
             var measured: @This() = .{};
             const admitted = blk: {
-                c.sqlite3_progress_handler(storage.database, 1, progress, &measured);
-                defer c.sqlite3_progress_handler(storage.database, 0, null, null);
+                c.sqlite3_progress_handler(storage.sqliteDatabase(), 1, progress, &measured);
+                defer c.sqlite3_progress_handler(storage.sqliteDatabase(), 0, null, null);
                 break :blk (try storage.admitNextModelAttempt(.{}) orelse return error.MissingPressureAdmission).permit.binding;
             };
             try std.testing.expectEqual(if (compact) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(admitted));
@@ -7099,7 +7099,7 @@ test "admission fails before COMMIT when a counted write changes other than its 
         defer patch.removeTemporaryContent(std.testing.io) catch unreachable;
         try std.testing.expect(storage.configure(&patch, .{}) == .accepted);
         try submitTestMessage(&storage, &tmp, "counted-admission-input", "counted-admission-message", session.slice(), "work");
-        try sqlite.exec(storage.database, case.trigger);
+        try sqlite.exec(storage.sqliteDatabase(), case.trigger);
         try std.testing.expectError(case.expected, storage.admitModelAttempt(.message, .{}));
         try std.testing.expect(storage.isFenced());
         // The round failed before COMMIT: no Turn, entry or bound Message stays.
@@ -7120,7 +7120,7 @@ test "a failed Turn whose diagnostic is not UTF-8 gives no reset time, as on mai
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try storage.settleModelAttemptFailure(binding, .{ .rejected = .{ .code = "provider_quota", .diagnostic = "{\"refusal\":\"quota\",\"resets_at\":5}", .request_id = .{}, .report = "" } }, .ordinary, .{});
     // The saved record's first byte made one no UTF-8 decoder accepts.
-    try sqlite.exec(storage.database, "UPDATE content SET payload=CAST(X'FF'||substr(payload,2) AS BLOB) WHERE payload=CAST('{\"refusal\":\"quota\",\"resets_at\":5}' AS BLOB)");
+    try sqlite.exec(storage.sqliteDatabase(), "UPDATE content SET payload=CAST(X'FF'||substr(payload,2) AS BLOB) WHERE payload=CAST('{\"refusal\":\"quota\",\"resets_at\":5}' AS BLOB)");
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT changes()", .{}));
     var request: protocol.ActivityPage = .{};
     try request.session.set(session.slice());
@@ -7152,8 +7152,8 @@ fn expectListStepFailure(sql: [:0]const u8, expected: anyerror) !void {
     try submitTestMessage(&storage, &tmp, "list-names-input", "list-names-message", session.slice(), "q");
     var used = std.atomic.Value(u64).init(0);
     var fault: TestingStatementFault = .{ .sql = sql };
-    fault.arm(storage.database);
-    defer fault.disarm(storage.database);
+    fault.arm(storage.sqliteDatabase());
+    defer fault.disarm(storage.sqliteDatabase());
     try std.testing.expectError(expected, testingSessionList(&storage, &tmp, .{}, &used, 5));
     try std.testing.expect(fault.failed > 0);
     try std.testing.expect(storage.isFenced());
@@ -7189,13 +7189,13 @@ test "a list row that fails to render reports its error before a later row's fai
     const second = try configureTestSession(&storage, "render-order-second");
     try submitTestMessage(&storage, &tmp, "render-order-input", "render-order-message", second.slice(), "q");
     var update: [160]u8 = undefined;
-    try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=ON");
-    try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='two'||char(10)||'lines' WHERE session_ref='{s}'", .{first.slice()}, 0));
-    try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+    try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&update, "UPDATE session SET label='two'||char(10)||'lines' WHERE session_ref='{s}'", .{first.slice()}, 0));
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
     var used = std.atomic.Value(u64).init(0);
     var fault: TestingStatementFault = .{ .sql = reportStatementForTesting(error.SessionReadFailed, "JOIN message_admission m") };
-    fault.arm(storage.database);
-    defer fault.disarm(storage.database);
+    fault.arm(storage.sqliteDatabase());
+    defer fault.disarm(storage.sqliteDatabase());
     // Main read and rendered the first row before the second's step.
     try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
     try std.testing.expect(fault.failed > 0);
@@ -7212,9 +7212,9 @@ test "a list row whose first Message is missing is CorruptStore" {
     _ = (try storage.admitNextModelAttempt(.{})).?;
     // The first Turn still names the admission, whose content is gone, so
     // the row's settings read finds no row.
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=OFF");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
     try store_testing.sqlite_only.exec(&storage, "DELETE FROM content WHERE content_id IN (SELECT content_id FROM message_admission WHERE session_ref=?1)", .{session.slice()});
-    try sqlite.exec(storage.database, "PRAGMA foreign_keys=ON");
+    try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     var used = std.atomic.Value(u64).init(0);
     try std.testing.expectError(error.CorruptStore, testingSessionList(&storage, &tmp, .{}, &used, 5));
 }
@@ -7292,8 +7292,8 @@ test "a Current report's step faults answer the name of the earliest round that 
 /// and expects `expected`.
 fn expectRouteStepFailure(storage: *Store, tmp: *std.testing.TmpDir, route: enum { report, inspection, activity }, session: []const u8, sql: [:0]const u8, expected: anyerror) !void {
     var fault: TestingStatementFault = .{ .sql = sql };
-    fault.arm(storage.database);
-    defer fault.disarm(storage.database);
+    fault.arm(storage.sqliteDatabase());
+    defer fault.disarm(storage.sqliteDatabase());
     const result: anyerror!void = switch (route) {
         .report => if (testingSessionReport(storage, tmp, session, 1024 * 1024)) |report| std.testing.allocator.free(report) else |err| err,
         .inspection => if (storage.inspectSessionForTesting(session)) |_| {} else |err| err,
@@ -7377,14 +7377,56 @@ test "admission's context read answers CorruptStore, as admission names it" {
         try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
         try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
         var fault: TestingStatementFault = .{ .sql = namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT") };
-        fault.arm(storage.database);
-        defer fault.disarm(storage.database);
+        fault.arm(storage.sqliteDatabase());
+        defer fault.disarm(storage.sqliteDatabase());
         if (report)
             try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
         else
             try std.testing.expectError(error.CorruptStore, storage.admitNextModelAttempt(.{}));
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
+    }
+}
+
+test "a round's failed step is named by the statement that failed" {
+    // `failedOn` records the failed runner's text; each pair of a round
+    // names its own failure, and a statement that did not fail names none.
+    const Pair = struct {
+        const first = rsql.Read(.{
+            .sql = "SELECT count(*) AS sessions FROM session WHERE session_ref<>?1",
+            .Args = struct { session_ref: []const u8 },
+            .Row = struct { sessions: u64 },
+            .cardinality = .one,
+        });
+        const second = rsql.Read(.{
+            .sql = "SELECT count(*) AS revisions FROM session_revision WHERE session_ref<>?1",
+            .Args = struct { session_ref: []const u8 },
+            .Row = struct { revisions: u64 },
+            .cardinality = .one,
+        });
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    _ = try configureTestSession(&storage, "failed-on");
+    inline for (.{ .{ Pair.first, error.FirstFailed }, .{ Pair.second, error.SecondFailed } }) |case| {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: reads_domain.ReadAccess = .open(&entry);
+        defer a.deinit();
+        var first: Pair.first.Result = undefined;
+        var second: Pair.second.Result = undefined;
+        a.read(Pair.first, .{ .session_ref = "" }, &first);
+        a.read(Pair.second, .{ .session_ref = "" }, &second);
+        var fault: TestingStatementFault = .{ .sql = case[0].sql };
+        fault.arm(storage.sqliteDatabase());
+        defer fault.disarm(storage.sqliteDatabase());
+        try std.testing.expectError(case[1], store_access.runNamed(&a, .{ .{ Pair.first, error.FirstFailed }, .{ Pair.second, error.SecondFailed } }, error.OtherFailed));
+        try std.testing.expect(fault.failed > 0);
+        try std.testing.expect(a.failedOn(case[0]));
+        try std.testing.expect(a.failedOn(Pair.first) != a.failedOn(Pair.second));
     }
 }
 
@@ -7415,7 +7457,7 @@ test "Session inspection's count reads answer main's names" {
 fn cachedWorkForTesting(storage: *Store) struct { statements: i64, steps: i64 } {
     var statements: i64 = 0;
     var steps: i64 = 0;
-    for (storage.statements.slots) |slot| if (slot.statement) |statement| {
+    for (storage.engine.sqlite.statements.slots) |slot| if (slot.statement) |statement| {
         statements += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_RUN, 1);
         steps += c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
     };
@@ -7514,13 +7556,13 @@ test "a Current report's work grows linearly in one Operation's calls, as main's
 
 /// How many times `S` ran since the last call for it.
 fn testingRuns(storage: *Store, comptime S: type) i64 {
-    const statement = storage.statements.find(S.sql.ptr) orelse return 0;
+    const statement = storage.engine.sqlite.statements.find(S.sql.ptr) orelse return 0;
     return c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_RUN, 1);
 }
 
 /// How many VM steps `S` took since the last call for it.
 fn testingSteps(storage: *Store, comptime S: type) i64 {
-    const statement = storage.statements.find(S.sql.ptr) orelse return 0;
+    const statement = storage.engine.sqlite.statements.find(S.sql.ptr) orelse return 0;
     return c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 1);
 }
 
@@ -7596,7 +7638,7 @@ fn expectKeysetPlan(storage: *Store, comptime S: type) !void {
     const walk = S.page_walk;
     const text = "EXPLAIN QUERY PLAN " ++ S.sql;
     var statement: ?*c.sqlite3_stmt = null;
-    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_prepare_v2(storage.database, text.ptr, @intCast(text.len), &statement, null));
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_prepare_v2(storage.sqliteDatabase(), text.ptr, @intCast(text.len), &statement, null));
     defer _ = c.sqlite3_finalize(statement);
     var subqueries: [64]c_int = undefined;
     var subquery_count: usize = 0;
@@ -7905,7 +7947,7 @@ test "Full Messages refuse a position that leaves one out or lists one before an
         try submitTestMessage(&storage, &tmp, "ordered-message-0", "ordered-message-0", session.slice(), "first");
         try submitTestMessage(&storage, &tmp, "ordered-message-1", "ordered-message-1", session.slice(), "second");
         if (fault) |sql| {
-            try sqlite.exec(storage.database, sql);
+            try sqlite.exec(storage.sqliteDatabase(), sql);
             try std.testing.expectError(error.CorruptStore, testingFullHistory(&storage, &tmp, session.slice(), null));
         } else std.testing.allocator.free(try testingFullHistory(&storage, &tmp, session.slice(), null));
     }
@@ -7935,7 +7977,7 @@ test "Full history refuses a decision or interruption command without its row, o
         try interruption.session.set(session.slice());
         try std.testing.expect(storage.interruptModel(&interruption, .{}) == .rejected);
         if (fault) |sql| {
-            try sqlite.exec(storage.database, sql);
+            try sqlite.exec(storage.sqliteDatabase(), sql);
             try std.testing.expectError(error.CorruptStore, testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
         } else std.testing.allocator.free(try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full));
     }
@@ -7954,11 +7996,11 @@ test "Full history reads a payload's declared bytes: a short one fails, a longer
         try submitTestMessage(&storage, &tmp, "payload-message", "payload-message", session.slice(), "payload");
         const id = "(SELECT content_id FROM message_admission WHERE command_key='payload-message')";
         if (std.mem.eql(u8, case, "short")) {
-            try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=ON; UPDATE content SET payload=CAST('pay' AS BLOB) WHERE content_id=" ++ id ++ "; PRAGMA ignore_check_constraints=OFF");
+            try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON; UPDATE content SET payload=CAST('pay' AS BLOB) WHERE content_id=" ++ id ++ "; PRAGMA ignore_check_constraints=OFF");
             try std.testing.expectError(error.ContentReadFailed, testingFullHistory(&storage, &tmp, session.slice(), null));
             continue;
         }
-        if (std.mem.eql(u8, case, "longer")) try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=ON; UPDATE content SET payload=CAST('payload and more' AS BLOB) WHERE content_id=" ++ id ++ "; PRAGMA ignore_check_constraints=OFF");
+        if (std.mem.eql(u8, case, "longer")) try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON; UPDATE content SET payload=CAST('payload and more' AS BLOB) WHERE content_id=" ++ id ++ "; PRAGMA ignore_check_constraints=OFF");
         const full = try testingFullHistory(&storage, &tmp, session.slice(), null);
         defer std.testing.allocator.free(full);
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, full, .{});
@@ -7982,7 +8024,7 @@ test "Full history answers a later row's failure before a kept row's content, wh
         try submitTestMessage(&storage, &tmp, "double-fault-0", "double-fault-0", session.slice(), "first");
         try submitTestMessage(&storage, &tmp, "double-fault-1", "double-fault-1", session.slice(), "second");
         try submitTestMessage(&storage, &tmp, "double-fault-2", "double-fault-2", session.slice(), "third");
-        try sqlite.exec(storage.database, "PRAGMA ignore_check_constraints=ON; UPDATE content SET payload=CAST('fi' AS BLOB) " ++
+        try sqlite.exec(storage.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON; UPDATE content SET payload=CAST('fi' AS BLOB) " ++
             "WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='double-fault-0'); PRAGMA ignore_check_constraints=OFF");
         if (later_fails) {
             // The third is listed between the first and the second.
@@ -8059,21 +8101,21 @@ test "Attempt checks, prefix seals and content lookups do no more work than main
     const main_work = [_][2]i64{ .{ 2, 24 }, .{ 2, 24 }, .{ 6, 125 }, .{ 3, 32 }, .{ 2, 24 }, .{ 1, 14 } };
     for (0..2) |call| {
         var work: [main_work.len][2]i64 = undefined;
-        _ = statementWorkSince(storage.database);
+        _ = statementWorkSince(storage.sqliteDatabase());
         var view: HistoricalView = undefined;
         try storage.openHistoricalView(attempt.binding, &view);
         defer view.close();
-        work[0] = statementWorkSince(storage.database);
+        work[0] = statementWorkSince(storage.sqliteDatabase());
         try view.checkAttempt();
-        work[1] = statementWorkSince(storage.database);
+        work[1] = statementWorkSince(storage.sqliteDatabase());
         try view.recordPrefixSeal(&TestingAttempt.seal);
-        work[2] = statementWorkSince(storage.database);
+        work[2] = statementWorkSince(storage.sqliteDatabase());
         _ = try storage.modelOperationKind(attempt.binding);
-        work[3] = statementWorkSince(storage.database);
+        work[3] = statementWorkSince(storage.sqliteDatabase());
         try storage.withDispatchHandoff(attempt.binding, {}, TestingAttempt.handoff);
-        work[4] = statementWorkSince(storage.database);
+        work[4] = statementWorkSince(storage.sqliteDatabase());
         _ = try storage.openContent(attempt.content);
-        work[5] = statementWorkSince(storage.database);
+        work[5] = statementWorkSince(storage.sqliteDatabase());
         if (call == 0) continue;
         for (work, main_work) |measured, main| {
             try std.testing.expect(measured[0] <= main[0]);
@@ -8120,13 +8162,13 @@ test "a prefix seal on a full disk answers CanonicalStorageFull and fences" {
     defer view.close();
     // The seal rewrites a few bytes of one Session row in place, which a
     // capped file still holds, so a trigger grows the file as it writes.
-    try sqlite.exec(storage.database, "CREATE TABLE ballast(b BLOB)");
-    const page_count = try sqlite.pragmaInt(storage.database, "PRAGMA page_count");
+    try sqlite.exec(storage.sqliteDatabase(), "CREATE TABLE ballast(b BLOB)");
+    const page_count = try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA page_count");
     var limit_buffer: [64:0]u8 = undefined;
-    try sqlite.exec(storage.database, try std.fmt.bufPrintSentinel(&limit_buffer, "PRAGMA max_page_count={d}", .{page_count}, 0));
-    try sqlite.exec(storage.database, "CREATE TEMP TRIGGER seal_grows AFTER UPDATE OF prefix_seal ON main.session BEGIN INSERT INTO main.ballast VALUES(zeroblob(65536)); END");
+    try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&limit_buffer, "PRAGMA max_page_count={d}", .{page_count}, 0));
+    try sqlite.exec(storage.sqliteDatabase(), "CREATE TEMP TRIGGER seal_grows AFTER UPDATE OF prefix_seal ON main.session BEGIN INSERT INTO main.ballast VALUES(zeroblob(65536)); END");
     try std.testing.expectError(error.CanonicalStorageFull, view.recordPrefixSeal(&TestingAttempt.seal));
-    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.database));
+    try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
     try std.testing.expect(storage.isFenced());
 }
 
@@ -8193,7 +8235,7 @@ fn freshStoreWithExpectedRows(path: []const u8, root: []const u8) !void {
         defer _ = c.sqlite3_close(raw);
         try sqlite.exec(raw, "PRAGMA foreign_keys=OFF");
         // The rows hold the catalog the open saved, under their own ids.
-        try sqlite.exec(raw, "DELETE FROM tool_set_member; DELETE FROM tool_set; DELETE FROM tool_record; DELETE FROM content");
+        try sqlite.exec(raw, "DELETE FROM host_catalog; DELETE FROM tool_set_member; DELETE FROM tool_set; DELETE FROM tool_record; DELETE FROM content");
         try sqlite.exec(raw, store_testing.expected_rows);
         const violations = try sqlite.prepare(raw, "PRAGMA foreign_key_check");
         defer _ = c.sqlite3_finalize(violations);
@@ -8415,8 +8457,8 @@ test "a page of approval requests costs the same however many calls ran without 
             // The first read prepares the page's statements.
             _ = try store_core.activityPageForTesting(store, page_request);
             var counter: TestingSteps = .{};
-            counter.begin(store.database);
-            defer counter.end(store.database);
+            counter.begin(store.sqliteDatabase());
+            defer counter.end(store.sqliteDatabase());
             const page = try store_core.activityPageForTesting(store, page_request);
             try std.testing.expectEqual(@as(usize, 2), page.count);
             return counter.steps;
@@ -8438,7 +8480,7 @@ test "a page of approval requests costs the same however many calls ran without 
     try Page.addBypassed(&storage, session.slice(), 1);
     const thousand = try Page.steps(&storage, request);
     try Page.addBypassed(&storage, session.slice(), 1001);
-    try std.testing.expectEqual(@as(u64, 4002), try store_testing.sqliteQueryU64(storage.database, "SELECT count(*) FROM action_operation", .{}));
+    try std.testing.expectEqual(@as(u64, 4002), try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM action_operation", .{}));
     // A fixed cost: the seek past the bypassed rows is one step, whatever
     // their number.
     try std.testing.expect(thousand - few <= 1);
@@ -8483,7 +8525,7 @@ test "a compaction's floor counts the output bytes a request sends, and none its
             try std.testing.expect(room == null);
         } else {
             // The floor drops the answer and keeps "small" above it.
-            const position = try store_testing.sqliteQueryU64(storage.database, "SELECT admission_position FROM model_operation WHERE operation_id=?1", .{answered.operation_id});
+            const position = try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT admission_position FROM model_operation WHERE operation_id=?1", .{answered.operation_id});
             try std.testing.expectEqual(@as(u8, 2), room.?.choice.level);
             try std.testing.expect(room.?.choice.floor >= position);
         }
@@ -8511,8 +8553,8 @@ test "a compaction's floor read costs the same however long its Session's histor
             // The first read prepares the walk's statements.
             _ = try deeper(store, operation);
             var counter: TestingSteps = .{};
-            counter.begin(store.database);
-            defer counter.end(store.database);
+            counter.begin(store.sqliteDatabase());
+            defer counter.end(store.sqliteDatabase());
             try std.testing.expect(try deeper(store, operation) != null);
             return counter.steps;
         }
@@ -8539,7 +8581,7 @@ test "a compaction's floor read costs the same however long its Session's histor
     try Walk.addOlder(&storage, session.slice(), 1);
     const thousand = try Walk.steps(&storage, compaction.operation_id);
     try Walk.addOlder(&storage, session.slice(), 1001);
-    try std.testing.expectEqual(@as(u64, 2002), try store_testing.sqliteQueryU64(storage.database, "SELECT count(*) FROM conversation_entry", .{}));
+    try std.testing.expectEqual(@as(u64, 2002), try store_testing.sqliteQueryU64(storage.sqliteDatabase(), "SELECT count(*) FROM conversation_entry", .{}));
     try std.testing.expectEqual(thousand, try Walk.steps(&storage, compaction.operation_id));
 }
 
@@ -8825,14 +8867,14 @@ test "a catalog at its bound saves and opens again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const count = tool_catalog.max_catalog_records - 4;
-    var names: [count][8]u8 = undefined;
+    var names: [count][9]u8 = undefined;
     var records: [count + 4]tool_catalog.Record = undefined;
     var digests: [count + 4][32]u8 = undefined;
     records[0] = tool_catalog.bash_record;
     records[1] = tool_catalog.message_agent_record;
     records[2] = tool_catalog.start_agent_record;
     for (&names, records[3 .. count + 3], 0..) |*name, *record, index| {
-        _ = try std.fmt.bufPrint(name, "tool_{d:0>3}", .{index});
+        _ = try std.fmt.bufPrint(name, "tool_{d:0>4}", .{index});
         record.* = .{ .name = name, .owner = .rui, .description = "A tool among many.", .input_schema = "{\"type\":\"object\"}" };
     }
     records[count + 3] = tool_catalog.web_search_record;
@@ -8844,4 +8886,86 @@ test "a catalog at its bound saves and opens again" {
     try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
     defer storage.close() catch unreachable;
     try std.testing.expectEqual(@as(u64, count + 4), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
+}
+
+/// The testing catalog with an MCP server's tool beside it.
+const mcp_record: tool_catalog.Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page from the docs server.", .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}" };
+const mcp_records = [_]tool_catalog.Record{ tool_catalog.bash_record, mcp_record, tool_catalog.message_agent_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
+const mcp_digests = blk: {
+    @setEvalBranchQuota(1_000_000);
+    var out: [mcp_records.len][32]u8 = undefined;
+    for (&mcp_records, &out) |*each, *digest| digest.* = tool_catalog.recordDigest(each);
+    break :blk out;
+};
+const mcp_catalog: tool_catalog.Catalog = .{ .records = &mcp_records, .digests = &mcp_digests };
+
+fn expectCatalog(expected: *const tool_catalog.Catalog, saved: *const store_core.SavedCatalog) !void {
+    try std.testing.expectEqual(expected.records.len, saved.records.len);
+    for (expected.records, saved.records, expected.digests, saved.digests) |want, got, want_digest, got_digest| {
+        try std.testing.expectEqualStrings(want.name, got.name);
+        try std.testing.expectEqual(want.owner, got.owner);
+        try std.testing.expectEqualStrings(want.server, got.server);
+        try std.testing.expectEqualStrings(want.description, got.description);
+        try std.testing.expectEqualStrings(want.input_schema, got.input_schema);
+        try std.testing.expectEqualSlices(u8, &want_digest, &got_digest);
+    }
+}
+
+test "a Store opened without a catalog reads back the last one saved, an MCP server's tools included" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
+    try std.testing.expect(try storage.readCatalog(std.testing.allocator) == null);
+    try storage.saveCatalog(&mcp_catalog);
+    try storage.close();
+
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
+    {
+        var saved = (try storage.readCatalog(std.testing.allocator)).?;
+        defer saved.deinit(std.testing.allocator);
+        try expectCatalog(&mcp_catalog, &saved);
+        // The Host saves what it read when it reaches no server.
+        const read = saved.catalog();
+        try storage.saveCatalog(&read);
+    }
+    // A later catalog without the server's tool replaces it, and saving
+    // the earlier one again finds its set.
+    try storage.saveCatalog(&testing_catalog);
+    {
+        var saved = (try storage.readCatalog(std.testing.allocator)).?;
+        defer saved.deinit(std.testing.allocator);
+        try expectCatalog(&testing_catalog, &saved);
+    }
+    const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
+    try storage.saveCatalog(&mcp_catalog);
+    try std.testing.expectEqual(sets, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
+    var saved = (try storage.readCatalog(std.testing.allocator)).?;
+    defer saved.deinit(std.testing.allocator);
+    try expectCatalog(&mcp_catalog, &saved);
+    try storage.close();
+}
+
+test "a saved catalog whose text no longer matches its digest fences the Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, null);
+    defer storage.close() catch unreachable;
+    try storage.saveCatalog(&mcp_catalog);
+    try sqlite.exec(storage.sqliteDatabase(), "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
+    try std.testing.expectError(error.CorruptStore, storage.readCatalog(std.testing.allocator));
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectError(error.StoreFenced, storage.readCatalog(std.testing.allocator));
+}
+
+test "a record names a server exactly when an MCP server owns it" {
+    try std.testing.expect(tool_catalog.validServer(&mcp_record));
+    try std.testing.expect(!tool_catalog.validServer(&.{ .name = "fetch_page", .owner = .mcp }));
+    try std.testing.expect(!tool_catalog.validServer(&.{ .name = "fetch_page", .owner = .mcp, .server = "docs server" }));
+    try std.testing.expect(!tool_catalog.validServer(&.{ .name = "bash", .owner = .rui, .server = "docs" }));
+    // Moving servers makes another record.
+    var moved = mcp_record;
+    moved.server = "wiki";
+    try std.testing.expect(!std.mem.eql(u8, &tool_catalog.recordDigest(&mcp_record), &tool_catalog.recordDigest(&moved)));
 }
