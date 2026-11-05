@@ -418,7 +418,7 @@ def compiled_model_cases():
                 "--workspace", str(root), "--provider", "codex", "--model", model,
                 "--compaction-trigger", "1"], env=env, capture_output=True, text=True, timeout=10)
             if windows.get(model) == 0:
-                assert admitted.returncode == 1, admitted
+                assert admitted.returncode == 3, admitted
                 assert json.loads(admitted.stdout)["answer"]["code"] == "compact_at_too_large", admitted
                 continue
             assert admitted.returncode == 0, admitted
@@ -479,9 +479,9 @@ def compaction_settings_case(home, store, workspace, socket_path):
         read_terminal(master, "› ")
         status = status_frame(master, session)
         compact = status_row(status, "Compact at", "Headroom")
-        assert compact.startswith("244,800 tokens") and compact.endswith(" Session override"), status
+        assert compact.startswith("244,800 tokens") and compact.endswith(" model default"), status
         assert status_row(status, "Headroom", "Model") == "0 tokens model default", status
-        assert status_row(status, "Effort", "Permissions") == "low Session override", status
+        assert status_row(status, "Effort", "Permissions") == "low model default", status
         usage = flat(terminal_step(master, "/configure --bogus", "Omission preserves", composer=True))
         assert "A model Rui does not list is assumed to have a 128000-token context." in usage, usage
         assert "Changes apply to new model requests." in usage, usage
@@ -489,7 +489,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         for flags, trigger, origin, headroom, effort in (
             ("--compaction-trigger 12345 --output-reservation 234 --reasoning-effort high", "12,345 tokens", "Session override", "234 tokens Session override", "high Session override"),
             ("--permission-mode ask", "12,345 tokens", "Session override", "234 tokens Session override", "high Session override"),
-            ("--compaction-trigger default --output-reservation default --reasoning-effort default", "244,800 tokens", "Session override", "0 tokens model default", "low Session override"),
+            ("--compaction-trigger default --output-reservation default --reasoning-effort default", "244,800 tokens", "model default", "0 tokens model default", "low model default"),
         ):
             configured = configured_frame(master, "/configure " + flags)
             assert "revision:" not in configured and "request:" not in configured, configured
@@ -511,7 +511,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         status = status_frame(master, session)
         assert status_row(status, "Effort", "Permissions") == "high Session override" and status_row(status, "Name", "Folder") == "lane five", status
         configured_frame(master, "/effort default")
-        assert status_row(status_frame(master, session), "Effort", "Permissions") == "low Session override"
+        assert status_row(status_frame(master, session), "Effort", "Permissions") == "low model default"
         configured_frame(master, '/rename "lane four"')
         assert status_row(status_frame(master, session), "Name", "Folder") == "lane four"
         terminal_step(master, '/effort "high', "Usage: /effort LEVEL", composer=True)
@@ -563,7 +563,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         status = terminal_step(master, "/status", " Work", composer=True)
         # 90% of the 128000-token window assumed for an unlisted model.
         compact = status_row(status, "Compact at", "Headroom")
-        assert compact.startswith("115,200 tokens") and compact.endswith(" Session override"), status
+        assert compact.startswith("115,200 tokens") and compact.endswith(" assumed for an unlisted model"), status
         assert status_row(status, "Effort", "Permissions") == "unknown no catalog value; reasoning omitted", status
         assert "overflow recovery" not in status, status
         efforts = command_frame(master, "/effort ", lambda frame: "xhigh" in frame and "default" in frame, end="")
@@ -573,7 +573,7 @@ def compaction_settings_case(home, store, workspace, socket_path):
         configured_frame(master, "/effort max")
         assert status_row(status_frame(master, unknown), "Effort", "Permissions") == "max Session override"
         configured_frame(master, "/effort default")
-        assert status_row(status_frame(master, unknown), "Effort", "Permissions") == "low Session override"
+        assert status_row(status_frame(master, unknown), "Effort", "Permissions") == "low model default"
         terminal_step(master, "/exit", "Detached.")
         assert entered.wait(timeout=5) == 0
 
