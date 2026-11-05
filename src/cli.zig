@@ -1525,7 +1525,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     // and holds the frame for its life: the provider borrows the key.
     const launched: ?*launch_frame.Frame = if (parsed.has("launch-frame")) try readLaunchFrame(init) else null;
     defer if (launched) |frame| {
-        frame.wipe();
+        frame.deinit();
         std.heap.c_allocator.destroy(frame);
     };
     var launch_socket: [platform.max_launch_socket_path_bytes]u8 = undefined;
@@ -1672,7 +1672,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         bash_path,
         bash_timeout_ms,
         init.environ_map.get("HOME"),
-        if (launched) |frame| .{ .runtime_dir = frame.runtime_dir.slice(), .socket_path = frame.socketPath(&launch_socket), .stdin = 0, .paused = frame.paused, .mcp_servers = frame.mcpServerSlice(), .mysql_url = switch (frame.store) {
+        if (launched) |frame| .{ .runtime_dir = frame.runtime_dir.slice(), .socket_path = frame.socketPath(&launch_socket), .stdin = 0, .paused = frame.paused, .mcp_servers = frame.mcpServerSlice(), .presets = frame.presets, .mysql_url = switch (frame.store) {
             .mysql_url => |url| url,
             .sqlite_dir => null,
         } } else null,

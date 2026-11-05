@@ -29,6 +29,15 @@ pub const RejectedConfiguration = struct {
     code: protocol.ConfigurationRejection,
 };
 
+/// Host-only preset resolution, carried through the ordinary configure
+/// transaction. The request digest is of the original, unresolved command.
+pub const PresetDecision = struct {
+    request_digest: [32]u8,
+    rejection: ?Rejection = null,
+
+    pub const Rejection = enum { unknown_preset, preset_on_update };
+};
+
 pub const ConfigureReply = union(enum) {
     accepted: AcceptedConfiguration,
     rejected: RejectedConfiguration,
@@ -336,12 +345,11 @@ pub fn planConfigurationUpdate(
 /// write round (`importSealed`). The
 /// decision is `applyConfiguration`; the write round saves the Session,
 /// the command and its revision, then commits.
-pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, faults: Faults) !ConfigureReply {
+pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, preset: ?*const PresetDecision, faults: Faults) !ConfigureReply {
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
     const command = request;
     const creating = request.session.len == 0;
-    const digest = request.semanticDigest();
     var saved: command_domain.saved_command.Result = undefined;
     command_domain.lookupCommand(a, command.key.slice(), &saved);
     const reads = a.store.configurationReads();
@@ -349,6 +357,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
     prepareConfiguration(a, command.session.slice(), &command.configuration, reads);
     try a.run();
 
+    const digest = configureDigest(command, preset, &saved);
     if (saved != null) try a.abandon(.{});
     switch (try command_domain.classify(protocol.ConfigurationRejection, &saved, .configure, command.session.slice(), &digest)) {
         .fresh => {},
@@ -362,6 +371,9 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
         .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
     }
 
+    if (preset) |decision| if (decision.rejection) |code| switch (code) {
+        inline else => |tag| return saveConfigurationRejection(a, command, &digest, @field(protocol.ConfigurationRejection, @tagName(tag)), faults),
+    };
     if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found.get()) reads.next.provider else null)) {
         return saveConfigurationRejection(a, command, &digest, .model_capability_unavailable, faults);
     }
@@ -374,6 +386,25 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return .{ .accepted = .{ .replayed = false, .revision = applied.revision, .created = creating, .session = applied.session } };
+}
+
+// A saved preset refusal keeps its original request identity, even when
+// this Host can now resolve it. All other answers bind the resolved spec.
+// noinline: preset resolution and hashing finish before applyConfiguration,
+// keeping their scratch off the engine thread's deepest chain.
+noinline fn configureDigest(
+    command: *const protocol.ConfigureCommand,
+    preset: ?*const PresetDecision,
+    saved: *const command_domain.saved_command.Result,
+) [32]u8 {
+    if (preset) |decision| {
+        const saved_preset_refusal = if (saved.*) |*row|
+            !row.accepted and std.meta.stringToEnum(PresetDecision.Rejection, row.code.slice()) != null
+        else
+            false;
+        if (decision.rejection != null or saved_preset_refusal) return decision.request_digest;
+    }
+    return command.semanticDigest();
 }
 
 /// Settings `applyConfiguration` wrote to a Session, whose revision row

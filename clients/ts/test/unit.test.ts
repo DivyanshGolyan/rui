@@ -17,8 +17,9 @@ test("the wire version is the one openapi.json describes", () => {
 });
 
 test("a launch frame is a big-endian length and the JSON", () => {
-	const frame = encodeFrame({ v: 1, store: "/s" });
-	const json = '{"v":1,"store":"/s"}';
+	const launch = { v: 1, store: "/s", runtimeDir: "/r", provider: { kind: "openai_key", baseUrl: "https://example.com/v1", key: "test" } } satisfies import("../src/wire.ts").components["schemas"]["LaunchFrame"];
+	const frame = encodeFrame(launch);
+	const json = JSON.stringify(launch);
 	assert.equal(frame.readUInt32BE(0), json.length);
 	assert.equal(frame.subarray(4).toString("utf8"), json);
 });
@@ -34,6 +35,17 @@ test("launch frame carries the MCP servers, an empty list when none are given", 
 	assert.deepEqual(frame({ tools: [{ ...tools[0], extra: true }, tools[1]] }).mcpServers, tools);
 });
 
+test("launch presets preserve creation fields and decode output schema JSON", () => {
+	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["bash"] as const, permissionMode: "ask" as const, provider: "openai" as const, workspace: "/w", outputSchema: '{"type":"object"}' };
+	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" }, presets: { review: spec } };
+	const frame = launchFor(options, "/r").frame;
+	assert.deepEqual(frame.presets, { review: { ...spec, outputSchema: { type: "object" } } });
+	for (const [text, decoded] of [["[]", []], ["false", false], ["not JSON", "not JSON"]] as const) {
+		const invalid = launchFor({ ...options, presets: { review: { ...spec, outputSchema: text } } }, "/r").frame;
+		assert.deepEqual(JSON.parse(JSON.stringify(invalid)).presets.review.outputSchema, decoded);
+	}
+});
+
 test("the refusal line becomes a RuiStartError", () => {
 	const refusal = startError('{"rui_start_error":{"code":"store_locked","message":"another Host holds this Store"}}\n');
 	assert.ok(refusal instanceof RuiStartError);
@@ -41,6 +53,10 @@ test("the refusal line becomes a RuiStartError", () => {
 	assert.equal(refusal.message, "another Host holds this Store");
 	assert.equal(startError(""), undefined);
 	assert.equal(startError("not json\n"), undefined);
+	assert.equal(startError("null\n{}\n"), undefined);
+	for (const code of ["runtime_dir_unusable", "tool_name_collision", "invalid_preset"] satisfies RuiStartError["code"][]) {
+		assert.equal(startError(JSON.stringify({ rui_start_error: { code, message: "refused" } }))?.code, code);
+	}
 });
 
 test("environment entries the Host would refuse are left out, never split", () => {
@@ -137,6 +153,16 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 	assert.equal(bodies.length, 2);
 	assert.match(bodies[1] as string, /"position":"9","ordinal":null/);
 });
+
+// These checks are compiled by `npm run check`, but never execute invalid input.
+function launchTypeChecks() {
+	// @ts-expect-error The Host requires every non-defaulted launch field.
+	encodeFrame({ v: 1, store: "/s" });
+	new RuiStartError("store_fenced", "refused");
+	new RuiStartError("mysql_version_unsupported", "refused");
+	// @ts-expect-error Unknown codes are not launch refusals in the Host enum.
+	new RuiStartError("not_a_start_error", "refused");
+}
 
 test("activity search follows an empty budget page's next and preserves snippets", async () => {
 	const { searchActivity, encodeCursor } = await import("../src/feed.ts");

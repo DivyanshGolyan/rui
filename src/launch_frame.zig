@@ -7,6 +7,7 @@
 const std = @import("std");
 const api_key = @import("api_key.zig");
 const protocol = @import("protocol.zig");
+const core_tools = @import("core_tools.zig");
 const platform = @import("platform.zig");
 pub const MysqlUrl = @import("mysql_url.zig");
 const http1 = @import("http1/request.zig");
@@ -19,10 +20,12 @@ pub const max_frame_bytes = 1024 * 1024;
 pub const socket_name = "rui.sock";
 /// The longest `runtimeDir` whose socket path still binds.
 pub const max_runtime_dir_bytes = platform.max_launch_socket_path_bytes - "/".len - socket_name.len;
+const max_refusal_message_bytes = 256;
 
 /// A refusal at open, as `RuiStartError.code` names it (D136).
 pub const StartError = enum {
     launch_frame_invalid,
+    invalid_preset,
     store_locked,
     store_schema_missing,
     store_schema_behind,
@@ -47,6 +50,10 @@ pub const Frame = struct {
     /// The MCP servers whose tools the Host offers (D120).
     mcp_servers: [max_mcp_servers]McpServer = @splat(.{}),
     mcp_server_count: usize = 0,
+    /// Only the specs given at connect, borrowed by the Host. No allocation
+    /// at all for an omitted or empty presets object (D22).
+    presets: []const core_tools.Preset = &.{},
+    presets_memory: ?std.heap.ArenaAllocator = null,
 
     pub const max_base_url_bytes = 2048;
     pub const max_mcp_servers = 8;
@@ -72,6 +79,13 @@ pub const Frame = struct {
         mysql_url: *MysqlUrl,
     };
 
+    pub fn deinit(self: *Frame) void {
+        self.wipe();
+        if (self.presets_memory) |*memory| memory.deinit();
+        self.presets_memory = null;
+        self.presets = &.{};
+    }
+
     pub fn wipe(self: *Frame) void {
         if (self.store == .mysql_url) {
             self.store.mysql_url.destroy();
@@ -91,6 +105,8 @@ pub const Frame = struct {
 pub const Refusal = struct {
     code: StartError,
     message: []const u8,
+    /// An invalid preset diagnostic survives the parsing arena.
+    buffer: [max_refusal_message_bytes]u8 = undefined,
 };
 
 /// Reads one frame from `file` into `frame`. On refusal, `refusal` says why.
@@ -122,15 +138,15 @@ fn refuse(refusal: *Refusal, message: []const u8) error{LaunchFrameInvalid} {
     return error.LaunchFrameInvalid;
 }
 
-/// The frame as JSON. Unknown fields are refused: `presets` arrives with
-/// the unit that uses it.
-const Wire = struct {
+/// The frame as JSON. Unknown fields are refused.
+pub const Wire = struct {
     v: i64,
     store: []const u8,
     provider: struct { kind: []const u8, baseUrl: []const u8, key: []const u8 },
     runtimeDir: []const u8,
     activeCapacity: ?i64 = null,
     paused: bool = false,
+    presets: std.json.Value = .{ .object = .empty },
     mcpServers: []const struct { name: []const u8, url: []const u8, bearerToken: []const u8, callTimeoutMs: i64 } = &.{},
 };
 
@@ -140,9 +156,21 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: 
     var wiping: WipingAllocator = .{ .backing = gpa };
     var arena: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer arena.deinit();
+    // Bound recursive outputSchema serialization before parsing any preset.
+    var scanner = std.json.Scanner.initCompleteInput(arena.allocator(), bytes);
+    defer scanner.deinit();
+    try scanner.ensureTotalStackCapacity(protocol.max_json_depth);
+    while (true) {
+        const token = scanner.next() catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return refuse(refusal, "the frame is not well-formed JSON"),
+        };
+        if (scanner.stackHeight() > protocol.max_json_depth) return refuse(refusal, "the frame exceeds the maximum JSON nesting depth");
+        if (token == .end_of_document) break;
+    }
     const wire = std.json.parseFromSliceLeaky(Wire, arena.allocator(), bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        else => return refuse(refusal, "the frame is not a JSON object of v, store, provider, runtimeDir and optional activeCapacity"),
+        else => return refuse(refusal, "the frame is not a JSON object of v, store, provider, runtimeDir and optional activeCapacity, paused, mcpServers and presets"),
     };
     defer std.crypto.secureZero(u8, @constCast(wire.provider.key));
     defer for (wire.mcpServers) |server| std.crypto.secureZero(u8, @constCast(server.bearerToken));
@@ -189,6 +217,45 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: 
         entry.call_timeout_ms = std.math.cast(u32, server.callTimeoutMs) orelse return refuse(refusal, "an mcpServers callTimeoutMs is too large");
         frame.mcp_server_count = at + 1;
     }
+    const presets = switch (wire.presets) {
+        .object => |object| object,
+        else => return refusePreset(refusal, "presets", "must be an object of named agent specs"),
+    };
+    if (presets.count() > core_tools.max_presets) return refusePreset(refusal, "presets", "must name at most 64 presets");
+    if (presets.count() == 0) return;
+    const checked_configuration = try arena.allocator().create(protocol.Configuration);
+    var entries = presets.iterator();
+    while (entries.next()) |entry| {
+        const name = entry.key_ptr.*;
+        if (!core_tools.validPresetName(name)) return refusePreset(refusal, name, "name must be 1 to 64 bytes of [a-z0-9_-]");
+        const spec = switch (entry.value_ptr.*) {
+            .object => |object| object,
+            else => return refusePreset(refusal, name, "spec must be an object"),
+        };
+        const checked = try core_tools.parseAgentSpec(arena.allocator(), spec, checked_configuration);
+        if (checked == .rejected) return refusePreset(refusal, name, checked.rejected);
+    }
+    // Retain just the preset data, never the provider key or a max-sized
+    // collection. The serialized copy is temporary, in the parsing arena.
+    var memory: std.heap.ArenaAllocator = .init(gpa);
+    errdefer memory.deinit();
+    const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), wire.presets, .{});
+    const saved = try std.json.parseFromSliceLeaky(std.json.Value, memory.allocator(), encoded, .{ .allocate = .alloc_always });
+    const retained = try memory.allocator().alloc(core_tools.Preset, presets.count());
+    var saved_entries = saved.object.iterator();
+    for (retained) |*preset| {
+        const entry = saved_entries.next().?;
+        preset.* = .{ .name = entry.key_ptr.*, .spec = entry.value_ptr.object };
+    }
+    frame.presets = retained;
+    frame.presets_memory = memory;
+}
+
+fn refusePreset(refusal: *Refusal, name: []const u8, reason: []const u8) error{LaunchFrameInvalid} {
+    refusal.* = .{ .code = .invalid_preset, .message = "" };
+    const shown = core_tools.diagnosticName(name);
+    refusal.message = std.fmt.bufPrint(&refusal.buffer, "preset {s}: {s}", .{ shown, reason }) catch unreachable;
+    return error.LaunchFrameInvalid;
 }
 
 fn validServerName(name: []const u8) bool {
@@ -199,7 +266,8 @@ fn validServerName(name: []const u8) bool {
 
 /// The one stdout line a refused launch writes before exiting.
 pub fn writeRefusal(io: std.Io, refusal: Refusal) void {
-    var buffer: [512]u8 = undefined;
+    // Every diagnostic byte may need a six-byte JSON escape.
+    var buffer: [6 * max_refusal_message_bytes + 128]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     out.writeAll("{\"rui_start_error\":{\"code\":\"") catch return;
     out.writeAll(@tagName(refusal.code)) catch return;
@@ -322,7 +390,7 @@ test "a launch frame is refused with launch_frame_invalid when it is wrong" {
         ,
         \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","activeCapacity":0}
         ,
-        \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","presets":{}}
+        \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","unknown":{}}
         ,
         \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"}}
         ,
@@ -422,6 +490,26 @@ test "a MySQL launch frame keeps its login only in the stdin-owned frame" {
     try std.testing.expectEqualStrings("db", frame.store.mysql_url.database.slice());
 }
 
+test "a MySQL launch frame keeps presets after wiping its login" {
+    var frame: Frame = .{};
+    defer frame.deinit();
+    var refusal: Refusal = undefined;
+    try parse(std.testing.allocator,
+        \\{"v":1,"store":"mysql://u:secret@h/db","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","presets":{"review":{"model":"model-a","effort":null,"compactAt":1000,"tools":[],"permissionMode":"ask"}}}
+    , &frame, &refusal);
+    try std.testing.expectEqualStrings("secret", frame.store.mysql_url.options().password);
+    frame.store.mysql_url.wipe();
+    try std.testing.expectEqualStrings("", frame.store.mysql_url.options().password);
+    try std.testing.expectEqualStrings("k", frame.key.slice());
+    try std.testing.expectEqual(@as(usize, 1), frame.presets.len);
+    try std.testing.expectEqualStrings("review", frame.presets[0].name);
+    try std.testing.expectEqualStrings("model-a", frame.presets[0].spec.get("model").?.string);
+    frame.deinit();
+    try std.testing.expect(frame.store == .sqlite_dir);
+    try std.testing.expectEqual(@as(usize, 0), frame.presets.len);
+    try std.testing.expect(frame.presets_memory == null);
+}
+
 test "each MySQL policy refusal has a static launch-frame code" {
     inline for (@typeInfo(@import("store.zig").MysqlStartError).error_set.error_names.?) |name|
         try std.testing.expect(mysqlRefusal(@field(anyerror, name)) != null);
@@ -429,4 +517,96 @@ test "each MySQL policy refusal has a static launch-frame code" {
     try std.testing.expectEqual(StartError.store_schema_missing, mysqlRefusal(error.StoreSchemaMissing).?.code);
     try std.testing.expectEqual(StartError.store_schema_behind, mysqlRefusal(error.StoreSchemaBehind).?.code);
     try std.testing.expect(mysqlRefusal(error.ConnectFailed) == null);
+}
+
+const preset_head =
+    \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","presets":
+;
+const creating_spec =
+    \\{"model":"model-a","effort":null,"compactAt":1000,"tools":[],"permissionMode":"ask"}
+;
+
+test "presets in a launch frame are owned until frame deinit" {
+    var frame: Frame = .{};
+    defer frame.deinit();
+    var refusal: Refusal = undefined;
+    const input = try std.testing.allocator.dupe(u8, preset_head ++ "{\"review-1\":" ++ creating_spec ++ "}}");
+    try parse(std.testing.allocator, input, &frame, &refusal);
+    std.testing.allocator.free(input);
+    try std.testing.expectEqual(@as(usize, 1), frame.presets.len);
+    try std.testing.expectEqualStrings("review-1", frame.presets[0].name);
+    try std.testing.expectEqualStrings("model-a", frame.presets[0].spec.get("model").?.string);
+    frame.deinit();
+    try std.testing.expectEqual(@as(usize, 0), frame.presets.len);
+    try std.testing.expect(frame.presets_memory == null);
+    try parse(std.testing.allocator, preset_head ++ "{}}", &frame, &refusal);
+    try std.testing.expect(frame.presets_memory == null);
+}
+
+test "presets in a launch frame accept catalog-backed tool names" {
+    var frame: Frame = .{};
+    defer frame.deinit();
+    var refusal: Refusal = undefined;
+    try parse(std.testing.allocator, preset_head ++
+        \\{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["find_tools","fetch_page"],"permissionMode":"ask"}}}
+    , &frame, &refusal);
+    try std.testing.expectEqual(@as(usize, 1), frame.presets.len);
+    const tools = frame.presets[0].spec.get("tools").?.array.items;
+    try std.testing.expectEqualStrings("fetch_page", tools[1].string);
+}
+
+test "presets in a launch frame refuse bad names and incomplete specs with their fields" {
+    for ([_]struct { json: []const u8, name: []const u8, field: []const u8 }{
+        .{ .json = preset_head ++ "{\"\":" ++ creating_spec ++ "}}", .name = "", .field = "name" },
+        .{ .json = preset_head ++ "{\"Review\":" ++ creating_spec ++ "}}", .name = "Review", .field = "name" },
+        .{ .json = preset_head ++ "{\"a.b\":" ++ creating_spec ++ "}}", .name = "a.b", .field = "name" },
+        .{ .json = preset_head ++ "{\"" ++ @as([63]u8, @splat('a')) ++ "é\":" ++ creating_spec ++ "}}", .name = "aaaa", .field = "name" },
+        .{ .json = preset_head ++ "{\"" ++ @as([core_tools.max_preset_name_bytes + 1]u8, @splat('a')) ++ "\":" ++ creating_spec ++ "}}", .name = "aaaa", .field = "name" },
+        .{ .json = preset_head ++ "{\"review\":{}}}", .name = "review", .field = "model" },
+        .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"compactAt\":1,\"tools\":[],\"permissionMode\":\"ask\"}}}", .name = "review", .field = "effort" },
+        .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"effort\":null,\"tools\":[],\"permissionMode\":\"ask\"}}}", .name = "review", .field = "compactAt" },
+        .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"permissionMode\":\"ask\"}}}", .name = "review", .field = "tools" },
+        .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"tools\":[]}}}", .name = "review", .field = "permissionMode" },
+        .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"tools\":[\"bash\"],\"permissionMode\":\"ask\"}}}", .name = "review", .field = "workspace" },
+        .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"tools\":[\"fetch.page\"],\"permissionMode\":\"ask\"}}}", .name = "review", .field = "tools" },
+        .{ .json = preset_head ++ "{\"review\":{\"model\":\"m\",\"effort\":null,\"compactAt\":1,\"tools\":[\"fetch_page\",\"fetch_page\"],\"permissionMode\":\"ask\"}}}", .name = "review", .field = "tools" },
+        .{ .json = preset_head ++ "{\"review\":null}}", .name = "review", .field = "spec" },
+        .{ .json = preset_head ++ "null}", .name = "presets", .field = "object" },
+        .{ .json = preset_head ++ "[]}", .name = "presets", .field = "object" },
+    }) |case| {
+        var frame: Frame = .{};
+        defer frame.deinit();
+        var refusal: Refusal = undefined;
+        try std.testing.expectError(error.LaunchFrameInvalid, parse(std.testing.allocator, case.json, &frame, &refusal));
+        try std.testing.expectEqual(StartError.invalid_preset, refusal.code);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(refusal.message));
+        try std.testing.expect(std.mem.indexOf(u8, refusal.message, case.name) != null);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.message, case.field) != null);
+    }
+}
+
+test "presets in a launch frame accept their bounds and refuse one more" {
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    var json: std.Io.Writer.Allocating = .init(memory.allocator());
+    const out = &json.writer;
+    try out.writeAll(preset_head ++ "{");
+    for (0..core_tools.max_presets) |at| {
+        if (at != 0) try out.writeByte(',');
+        try out.print("\"p{d}\":", .{at});
+        try out.writeAll(creating_spec);
+    }
+    try out.writeAll("}}");
+    var frame: Frame = .{};
+    defer frame.deinit();
+    var refusal: Refusal = undefined;
+    try parse(std.testing.allocator, json.written(), &frame, &refusal);
+    try std.testing.expectEqual(core_tools.max_presets, frame.presets.len);
+    frame.deinit();
+    const extra = try std.mem.concat(memory.allocator(), u8, &.{ json.written()[0 .. json.written().len - 2], ",\"extra\":", creating_spec, "}}" });
+    try std.testing.expectError(error.LaunchFrameInvalid, parse(std.testing.allocator, extra, &frame, &refusal));
+    try std.testing.expectEqual(StartError.invalid_preset, refusal.code);
+    const longest_name = preset_head ++ "{\"" ++ @as([core_tools.max_preset_name_bytes]u8, @splat('a')) ++ "\":" ++ creating_spec ++ "}}";
+    try parse(std.testing.allocator, longest_name, &frame, &refusal);
+    try std.testing.expectEqual(core_tools.max_preset_name_bytes, frame.presets[0].name.len);
 }

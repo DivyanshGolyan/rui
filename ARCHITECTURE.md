@@ -171,6 +171,8 @@ Enabling Bash later runs it in the saved Workspace, which a later configure cann
 Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer.
 The CLI and TUI send their own explicit creation defaults: Bash and web search, `bypass`, the model's catalog effort when known or explicit null otherwise, and 90% of its known context window or a fixed 115,200 tokens when unlisted.
 Addressed configure preserves every omitted setting; the model, provider and Workspace binding remain immutable.
+A creation-only `preset` seeds configure from a connect-time spec: supplied values or nulls override it, omissions inherit it, and resolved answers bind the resolved configuration for idempotent replay (D22).
+Preset lookup/update rejections instead bind the original request, including the preset name, and replay that saved rejection even if the Host can later resolve the preset.
 
 Later configurations preserve omitted provider/model values and accept explicit equal values.
 A different provider or model rejects the whole update, without a revision or partial changes.
@@ -3521,9 +3523,11 @@ Orphan tools may retain each bounded unlinked stdin file until exit; replacement
 
 A launched Host (`rui host serve --launch-frame`) is the exception: its shutdown is bounded.
 The program that starts it writes one frame to its stdin, a 4-byte big-endian length and then UTF-8 JSON naming `v` (1), the Store directory, the OpenAI key provider `{kind: "openai_key", baseUrl, key}`, the `runtimeDir` that holds its socket `rui.sock`, and optionally `activeCapacity`.
+The optional `presets` object maps at most 64 names (1–64 bytes of `[a-z0-9_-]`) to complete agent specs, checked by the shared agent-spec parser and held only in Host memory (D22, D112).
+A `start_agent` call may name a preset and override its fields, but still refuses provider or Workspace fields, including those supplied by the preset (D221).
 The key stays in memory only, never on disk, in argv or in the environment.
 stdin then stays open and carries nothing; when it closes, the Host stops as `host-stop` does, and an alarm ends the process 10 seconds later if the drain has not finished, which is a forced termination as above.
-A refusal at open is one stdout line `{"rui_start_error":{"code","message"}}` with code `launch_frame_invalid` or `store_locked`, then exit status 1.
+A refusal at open is one stdout line `{"rui_start_error":{"code","message"}}` with code `launch_frame_invalid`, `invalid_preset` or `store_locked`, then exit status 1.
 
 `rui host pause [--store PATH]` observes the ready Host once, then sends a bounded protected `POST /v1/control/host-stop`.
 It requires the observed `X-Rui-Host-Instance`, validated before fencing.
