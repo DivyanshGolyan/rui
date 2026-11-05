@@ -294,6 +294,24 @@ test "each text has its own checked flag" {
     try std.testing.expect(&Once("SELECT 1").done == &Once("SELECT 1").done);
 }
 
+test "fixture and typed statement PREPARE text retains MySQL index hints" {
+    const text = "SELECT revision FROM session_revision r @index(session_revision_instructions) WHERE r.session_ref=?1 AND r.instructions_content_id=?2";
+    const S = rsql.Read(.{
+        .sql = text,
+        .Args = struct { session: []const u8, content_id: u64 },
+        .Row = struct { revision: u64 },
+        .cardinality = .each,
+    });
+    const fixture = comptime rsql.mysqlRendering(text).rendered.prepared();
+    const pieces = comptime statements(fixture);
+    try std.testing.expectEqual(@as(usize, 1), pieces.len);
+    try std.testing.expectEqualStrings(comptime S.mysql.prepared(), pieces[0]);
+    try std.testing.expectEqualStrings(
+        "PREPARE rui_dialect_check FROM 'SELECT revision FROM session_revision r FORCE INDEX (session_revision_instructions) WHERE r.session_ref=? AND r.instructions_content_id=?';DEALLOCATE PREPARE rui_dialect_check",
+        comptime prepareQuery(pieces[0]),
+    );
+}
+
 test "fixture text splits at semicolons outside string literals, and PREPARE quotes it whole" {
     const pieces = comptime statements("DELETE FROM turn; INSERT INTO t VALUES('a;b','it''s;');\n");
     try std.testing.expectEqual(2, pieces.len);

@@ -2014,7 +2014,7 @@ fn mysqlTemplate(comptime text: []const u8) Template {
 ///
 ///   ?k, @session(?k)     a slot for Args field k-1
 ///   @now                 a slot for the Access's second
-///   @index(name)         nothing: MySQL plans alone until PR 8 reads EXPLAIN
+///   @index(name)         FORCE INDEX (name), only for real-column MySQL indexes
 ///   @served(x)           `(x IN (?,...))`, a slot per `provider_name.Provider`
 ///   @payload(t)          t's first `content_chunk`, or X'' when it has none
 ///   @octets(x)           `OCTET_LENGTH(x)`
@@ -2235,6 +2235,11 @@ const MysqlRenderer = struct {
         if (std.mem.eql(u8, name, "index") or std.mem.eql(u8, name, "session")) {
             if (arguments.len != 1) return r.refuse("rsql: @" ++ name ++ " takes 1 arguments");
             if (std.mem.eql(u8, name, "session")) try r.range(arguments[0][0], arguments[0][1]);
+            if (std.mem.eql(u8, name, "index")) {
+                if (arguments[0][1] != arguments[0][0] + 1 or r.tokens[arguments[0][0]].kind != .word) return r.refuse("rsql: @index takes one index name");
+                const index_name = r.tokens[arguments[0][0]].text;
+                if (schema.mysqlCanForceIndex(index_name)) r.emit("FORCE INDEX (" ++ index_name ++ ")");
+            }
             return end + 1;
         }
         if (std.mem.eql(u8, name, "after")) {
@@ -2852,7 +2857,7 @@ test "each marker renders its MySQL spelling" {
     try std.testing.expectEqualStrings("GREATEST(a, b)>LEAST(c,d) AND max(e)=1 AND f='@octets(g)'", comptime render(.mysql, "max(a, b)>min(c,d) AND max(e)==1 AND f='@octets(g)'"));
 }
 
-test "a statement's MySQL text has a slot for each parameter, @now and @session, and drops @index" {
+test "a statement's MySQL text has a slot for each parameter, @now and @session, and drops a lowered @index" {
     const W = Write(.{
         .sql = "UPDATE turn SET outcome_at=@now WHERE turn_id=?1 AND session_ref=@session(?2) AND operation_id>?1",
         .Args = struct { turn_id: u64, session: SessionHead },
@@ -3132,6 +3137,28 @@ test "a typed statement renders @now after its Args, @session as its parameter a
     });
     try std.testing.expectEqualStrings("UPDATE turn SET outcome_at=?3 WHERE turn_id=?1 AND session_ref=?2", W.sql);
     try std.testing.expectEqualStrings("session", W.session_fields[0]);
+}
+
+test "@index forces only named real-column MySQL indexes, after the table or alias" {
+    inline for (.{
+        .{ "SELECT revision FROM session_revision @index(session_revision_instructions) WHERE session_ref=?1 AND instructions_content_id=?2", "SELECT revision FROM session_revision FORCE INDEX (session_revision_instructions) WHERE session_ref=? AND instructions_content_id=?" },
+        .{ "SELECT r.revision FROM session_revision r @index(session_revision_output_schema) WHERE r.session_ref=?1 AND r.output_schema_content_id=?2", "SELECT r.revision FROM session_revision r FORCE INDEX (session_revision_output_schema) WHERE r.session_ref=? AND r.output_schema_content_id=?" },
+        // A unique IS NOT NULL predicate needs no generated key on MySQL.
+        .{ "SELECT m.admission_id FROM message_admission AS m @index(message_admission_sent) WHERE m.sender_session_ref=?1 AND m.sender_position>?2", "SELECT m.admission_id FROM message_admission AS m FORCE INDEX (message_admission_sent) WHERE m.sender_session_ref=? AND m.sender_position>?" },
+        .{ "SELECT a.action_id FROM action_operation a @index(action_operation_executable) WHERE a.action_id>?1 AND a.attempt_at<=?2", "SELECT a.action_id FROM action_operation a  WHERE a.action_id>? AND a.attempt_at<=?" },
+        .{ "SELECT t.turn_id FROM turn t @index(turn_one_active_per_session) WHERE t.session_ref=?1 AND t.turn_id>?2 AND t.outcome_code IS NULL", "SELECT t.turn_id FROM turn t  WHERE t.session_ref=? AND t.turn_id>? AND t.outcome_code IS NULL" },
+    }) |case| {
+        const actual = comptime mysqlRendering(case[0]).rendered;
+        try std.testing.expectEqualStrings(case[1], comptime actual.prepared());
+        try std.testing.expectEqualDeep(@as([]const Slot, &.{ .{ .argument = 0 }, .{ .argument = 1 } }), actual.slots);
+    }
+}
+
+test "a MySQL index hint is one name, not an expression" {
+    try std.testing.expectEqualStrings(
+        "rsql: @index takes one index name",
+        comptime mysqlRendering("SELECT revision FROM session_revision @index(session_revision_instructions + bogus)").refused,
+    );
 }
 
 test "@now inside a string literal is text, not the Host's second" {

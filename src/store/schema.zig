@@ -1183,6 +1183,41 @@ pub fn hasIndex(comptime name: []const u8) bool {
     }
 }
 
+/// Whether MySQL's DDL has this named index on real columns. A lowered
+/// partial index cannot serve a query on its original prefix: forcing it
+/// would replace a lookup with a full index scan.
+pub fn mysqlCanForceIndex(comptime name: []const u8) bool {
+    comptime {
+        @setEvalBranchQuota(objects_quota);
+        if (!canForceMysqlIndex(&tables, &indexes, name)) return false;
+        for (objects(.mysql)) |object| {
+            if (object.kind == .index and std.mem.eql(u8, object.name, name)) return true;
+        }
+        return false;
+    }
+}
+
+fn canForceMysqlIndex(comptime every: []const Table, comptime all_indexes: []const Index, comptime name: []const u8) bool {
+    for (all_indexes) |index| {
+        if (!std.mem.eql(u8, index.name, name)) continue;
+        if (mysqlIndexForm(index)) |form| if (form != .plain_unique) return false;
+        for (every) |table| {
+            if (!std.mem.eql(u8, table.name, index.table)) continue;
+            if (!table.engines.on(.mysql)) return false;
+            for (index.columns) |part| {
+                const column_name = indexColumn(part).name;
+                const found = for (table.columns) |column| {
+                    if (std.mem.eql(u8, column.name, column_name)) break column.engines.on(.mysql);
+                } else false;
+                if (!found) return false;
+            }
+            return index.columns.len != 0;
+        }
+        return false;
+    }
+    return false;
+}
+
 /// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
@@ -2003,6 +2038,65 @@ test "each partial index takes its MySQL form" {
         "CREATE UNIQUE INDEX other ON turn((CASE WHEN outcome_code IS NOT NULL THEN session_ref END))",
         comptime createMysqlIndex(&tables, .{ .name = "other", .table = "turn", .columns = &.{"session_ref"}, .unique = true, .where = "outcome_code IS NOT NULL" }),
     );
+}
+
+test "MySQL index hints require a named real-column index on that engine" {
+    const table: Table = .{
+        .name = "fixture",
+        .columns = &.{ .{ .name = "id", .type = .int }, .{ .name = "value", .type = .int } },
+        .primary_key = &.{"id"},
+    };
+    const index: Index = .{ .name = "by_value", .table = "fixture", .columns = &.{"value DESC"} };
+    try std.testing.expect(comptime canForceMysqlIndex(&.{table}, &.{index}, "by_value"));
+    const unique = comptime blk: {
+        var copy = index;
+        copy.unique = true;
+        copy.columns = &.{"value"};
+        copy.where = "value IS NOT NULL";
+        break :blk copy;
+    };
+    try std.testing.expect(comptime canForceMysqlIndex(&.{table}, &.{unique}, "by_value"));
+    const plain_unique = comptime blk: {
+        var copy = unique;
+        copy.where = null;
+        break :blk copy;
+    };
+    try std.testing.expect(comptime canForceMysqlIndex(&.{table}, &.{plain_unique}, "by_value"));
+    const trailing_sqlite_column = comptime blk: {
+        var copy = index;
+        copy.columns = &.{ "id", "value DESC" };
+        break :blk copy;
+    };
+    const sqlite_table = comptime blk: {
+        var copy = table;
+        copy.engines = .sqlite;
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{sqlite_table}, &.{index}, "by_value"));
+    const sqlite_column = comptime blk: {
+        var copy = table;
+        var columns = table.columns[0..2].*;
+        columns[1].engines = .sqlite;
+        copy.columns = &columns;
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{sqlite_column}, &.{index}, "by_value"));
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{sqlite_column}, &.{trailing_sqlite_column}, "by_value"));
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{index}, "absent"));
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{}, &.{index}, "by_value"));
+    const missing_column = comptime blk: {
+        var copy = index;
+        copy.columns = &.{"absent"};
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{missing_column}, "by_value"));
+    try std.testing.expect(!comptime mysqlCanForceIndex("action_operation_executable"));
+    try std.testing.expect(!comptime mysqlCanForceIndex("turn_one_active_per_session"));
+    try std.testing.expect(!comptime mysqlCanForceIndex("absent"));
+    inline for (.{ "session_revision_instructions", "session_revision_output_schema" }) |name| {
+        try std.testing.expect(comptime hasIndex(name));
+        try std.testing.expect(comptime mysqlCanForceIndex(name));
+    }
 }
 
 test "the schema's MySQL DDL keeps each foreign key once and no SQLite spelling" {
