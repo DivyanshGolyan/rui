@@ -9948,6 +9948,17 @@ test "MCP work selected before its parent stops yields to the owed child stop" {
     try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
     try std.testing.expect((try storage.nextCoreWork()) == null);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
+    // The settled stop stays as history; the resumed child's MCP work runs.
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM session_stop_owed WHERE child_ref=?1 AND settled=1", .{child.slice()}));
+    try submitTestMessage(&storage, &tmp, "mcp-child-again", "mcp-child-again", child.slice(), "fetch again");
+    const resumed = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleCallsForTesting(&storage, &tmp, resumed, "mcp-child-calls-again", &.{
+        .{ .item_id = "item-2", .name = "fetch_page", .encoded_call_id = "call-2", .decoded_call_id = "call-2", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+    });
+    const again = (try storage.nextCoreWork()).?.mcp;
+    try storage.resolveMcpAction(again.action_id, .spawn_failed, "interim", .{});
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code IS NOT NULL", .{again.action_id}));
+    try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
 }
 
 test "an empty MCP selection does not visit queued Bash Actions from a Bash-only offer" {
