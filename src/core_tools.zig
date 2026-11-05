@@ -16,8 +16,10 @@ pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     "},\"required\":[\"id\",\"text\"],\"additionalProperties\":false}";
 
 // Prompt text: written here, and given no tests (D141).
-pub const find_tools_description = "Find and load tools available to this Session but not yet loaded. Give one to eight space-separated search words; a tool matches any word in its name or description, ignoring ASCII case. Loads at most eight matches in name order. Loaded tools become available on your next request.";
-pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
+pub const find_tools_description = "Find and load tools available to this Session but not yet loaded. Give one to eight space-separated search words, at most 64 bytes each; a tool matches any word in its name or description, ignoring ASCII case. Loads at most eight matches in name order. Loaded tools become available on your next request.";
+pub const find_tools_schema = "{\"type\":\"object\",\"properties\":{\"words\":{\"type\":\"string\",\"description\":\"One to eight search words separated by ASCII spaces; each word is at most 64 bytes.\"}},\"required\":[\"words\"],\"additionalProperties\":false}";
+
+pub const find_tools_max_word_bytes = 64;
 
 pub const FindTools = struct {
     words: [8][]const u8 = @splat(""),
@@ -37,6 +39,7 @@ pub fn checkFindTools(arena: std.mem.Allocator, bytes: []const u8, out: *FindToo
     var pieces = std.mem.splitScalar(u8, words.string, ' ');
     while (pieces.next()) |piece| {
         if (piece.len == 0) continue;
+        if (piece.len > find_tools_max_word_bytes) return refused("words must contain words of at most 64 bytes each");
         if (out.count == out.words.len) return refused("words must contain one to eight space-separated words");
         const folded = try arena.dupe(u8, piece);
         for (folded) |*byte| byte.* = std.ascii.toLower(byte.*);
@@ -711,12 +714,18 @@ test "read_transcript arguments defaults filters addresses and every refusal" {
 }
 
 test "find_tools checks words at execution time" {
+    const utf8_word: [64]u8 = @bitCast(@as([32][2]u8, @splat("é".*)));
     const Case = struct { bytes: []const u8, count: ?usize = null };
     for ([_]Case{
         .{ .bytes = "{\"words\":\"one\"}", .count = 1 },
         .{ .bytes = "{\"words\":\"  OnE   TWO  \"}", .count = 2 },
         .{ .bytes = "{\"words\":\"1 2 3 4 5 6 7 8\"}", .count = 8 },
         .{ .bytes = "{\"words\":\"one\\ttwo\"}", .count = 1 },
+        .{ .bytes = "{\"words\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}", .count = 1 },
+        .{ .bytes = "{\"words\":\"" ++ @as([65]u8, @splat('a')) ++ "\"}" },
+        .{ .bytes = "{\"words\":\"" ++ utf8_word ++ "\"}", .count = 1 },
+        .{ .bytes = "{\"words\":\"" ++ utf8_word ++ "é" ++ "\"}" },
+        .{ .bytes = "{\"words\":\"" ++ @as([64]u8, @splat('a')) ++ " " ++ @as([64]u8, @splat('b')) ++ "\"}", .count = 2 },
         .{ .bytes = "{\"words\":\"\"}" },
         .{ .bytes = "{\"words\":\"   \"}" },
         .{ .bytes = "{\"words\":\"1 2 3 4 5 6 7 8 9\"}" },

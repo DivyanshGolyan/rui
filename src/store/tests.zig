@@ -8917,7 +8917,7 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.stopSession);
         }
 
-        /// A loader with no matching tools takes no content windows or revision.
+        /// All eight search words take one SQL round, no content windows or revision.
         fn findTurn(storage: *Store, tmp: *std.testing.TmpDir, meter: *RoundMeter) !void {
             var path: [protocol.max_workspace_bytes]u8 = undefined;
             var configuration = try completeConfiguration("budget-find", "", try canonicalCwd(std.testing.io, &path), "model-a");
@@ -8925,10 +8925,10 @@ test "each Store entry point takes its round budget on its common path" {
             const session = storage.configure(&configuration, .{}).accepted.session;
             try submitTestMessage(storage, tmp, "budget-find-input", "budget-find-key", session.slice(), "find tools");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            const calls = [_]TestingCall{.{ .item_id = "find-item", .name = "find_tools", .encoded_call_id = "find-call", .decoded_call_id = "find-call", .encoded_arguments = "{\\\"words\\\":\\\"absent\\\"}", .decoded_arguments = "{\"words\":\"absent\"}" }};
+            const calls = [_]TestingCall{.{ .item_id = "find-item", .name = "find_tools", .encoded_call_id = "find-call", .decoded_call_id = "find-call", .encoded_arguments = "{\\\"words\\\":\\\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\\\"}", .decoded_arguments = "{\"words\":\"absent0 absent1 absent2 absent3 absent4 absent5 absent6 absent7\"}" }};
             try settleCallsForTesting(storage, tmp, model, "budget-find-calls", &calls);
             const input = (try storage.nextCoreWork()).?.action;
-            const words: @import("../core_tools.zig").FindTools = .{ .words = .{ "absent", "", "", "", "", "", "", "" }, .count = 1 };
+            const words: @import("../core_tools.zig").FindTools = .{ .words = .{ "absent0", "absent1", "absent2", "absent3", "absent4", "absent5", "absent6", "absent7" }, .count = 8 };
             var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
             defer arena.deinit();
             meter.start();

@@ -184,7 +184,7 @@ rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" \
 The model calls `find_tools({"words":"transcript message"})` to load up to eight
 available tools whose saved names or descriptions contain either search word,
 ignoring ASCII case.
-Words are split on ASCII spaces; supply one to eight.
+Words are split on ASCII spaces; supply one to eight, at most 64 bytes each.
 The result lists loaded names and description previews.
 They become callable on the next request.
 Searches that find nothing report how many tools remain unloaded.

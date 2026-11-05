@@ -1121,15 +1121,15 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
+    // At open, the catalog has two texts for each local tool and web
+    // search's shared empty text; configure has imported nothing yet.
+    try std.testing.expectEqual(@as(u64, 11), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var command = try completeConfiguration("fresh-tool-texts", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
     command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
     command.configuration.output_schema = try testingBytesContent(&tmp, "fresh-schema", "{\"type\":\"object\"}");
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-    // The Store saved the catalog's eleven texts when it opened: two each
-    // for Bash, find_tools, message_agent, read_transcript and start_agent, and web search's empty one.
     // The configure adds its two values.
-    try std.testing.expectEqual(@as(u64, 11), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
     try std.testing.expect(storage.configure(&command, .{}) == .accepted);
     try std.testing.expectEqual(@as(u64, 13), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
 }

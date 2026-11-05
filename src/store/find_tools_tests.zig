@@ -131,7 +131,7 @@ test "find_tools no match and bad words resolve without revisions then equality 
             const alloc = arena.allocator();
             const session = try configure(&storage, "find-empty", &.{ "bash", "find_tools" }, &.{"find_tools"});
             try testing.submitTestMessage(&storage, &tmp, "find-empty-input", "find-empty-input", session.slice(), "find tools");
-            const cases = [_][]const u8{ "{\"words\":\"no-match-at-all\"}", "{}", "[]", "{", "{\"words\":null}", "{\"words\":\"  \"}", "{\"words\":\"1 2 3 4 5 6 7 8 9\"}", "{\"words\":\"bash\",\"extra\":1}" };
+            const cases = [_][]const u8{ "{\"words\":\"no-match-at-all\"}", "{}", "[]", "{", "{\"words\":null}", "{\"words\":\"  \"}", "{\"words\":\"1 2 3 4 5 6 7 8 9\"}", "{\"words\":\"bash\",\"extra\":1}", "{\"words\":\"" ++ @as([65]u8, @splat('x')) ++ "\"}" };
             for (cases, 0..) |args, index| {
                 const id = try std.fmt.allocPrint(alloc, "find-empty-{d}", .{index});
                 const input = try call(&storage, &tmp, session.slice(), args, id, alloc);
@@ -242,17 +242,14 @@ test "find_tools searches saved descriptions across MySQL chunk boundaries with 
             for (&records, &digests) |*record, *digest| digest.* = tools.recordDigest(record);
             const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
             try storage.saveCatalog(&catalog);
-            const long_word = try alloc.alloc(u8, chunk_bytes + 1);
-            @memset(long_word, 'x');
             const cases = [_]struct { words: []const u8, match: bool }{
                 .{ .words = "boundary", .match = true },
-                .{ .words = long_word[0..5000], .match = true },
-                .{ .words = long_word, .match = true },
+                .{ .words = &@as([64]u8, @splat('x')), .match = true },
                 .{ .words = "late%_z", .match = true },
                 .{ .words = "cafÉ", .match = true },
                 .{ .words = "café", .match = false },
                 .{ .words = "%_no", .match = false },
-                // The second SQL batch must union before applying name order.
+                // All eight words participate in the same query.
                 .{ .words = "absent1 absent2 absent3 absent4 absent5 absent6 absent7 BOUNDARY", .match = true },
             };
             for (cases, 0..) |item, index| {

@@ -283,7 +283,7 @@ pub fn identifierError(comptime name: []const u8, comptime reserved: bool) ?[]co
 ///                        the function each opening registers
 ///   @contains_ascii(x,word)  ASCII-folded x contains the already folded word
 ///   @content_contains_ascii(id,word)  the saved content contains word, even
-///                        across MySQL chunks, without truncating long words
+///                        across MySQL chunks; word fits in one chunk
 ///   @payload(t)          the bytes of content row t, which its text keeps
 ///                        to one MySQL chunk (`schema.content_chunk_bytes`)
 ///                        by bounding byte_length: `payload`
@@ -1927,18 +1927,11 @@ fn mysqlAsciiLower(comptime bytes: []const u8) []const u8 {
     return result;
 }
 
-/// Most words fit in one chunk, so searching adjoining chunks avoids making
-/// a copy of the whole description. For longer words, a windowed JSON array
-/// preserves chunk order without GROUP_CONCAT's session truncation limit.
-/// Its elements are hex, so removing JSON punctuation and decoding is lossless
-/// for arbitrary bytes (including NUL and UTF-8 split across chunks).
+/// A word fits well within one chunk. Searching each chunk adjoined with
+/// its successor also finds boundary-spanning matches without reconstructing
+/// the whole description or transcoding arbitrary bytes.
 fn mysqlContentContainsAscii() []const u8 {
-    @setEvalBranchQuota(100_000);
-    const pair = "EXISTS(SELECT 1 FROM content_chunk search_chunk LEFT JOIN content_chunk search_next ON search_next.content_id=search_chunk.content_id AND search_next.chunk_index=search_chunk.chunk_index+1 WHERE search_chunk.content_id=" ++ arg_a ++ " AND INSTR(" ++ mysqlAsciiLower("CONCAT(search_chunk.bytes,COALESCE(search_next.bytes,X''))") ++ "," ++ arg_b ++ ")>0)";
-    var hex: []const u8 = "JSON_ARRAYAGG(HEX(search_all.bytes)) OVER(ORDER BY search_all.chunk_index ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)";
-    for ("[],\" ") |byte| hex = "REPLACE(" ++ hex ++ std.fmt.comptimePrint(",X'{X:0>2}',X'')", .{byte});
-    const whole = "COALESCE((SELECT INSTR(" ++ mysqlAsciiLower("UNHEX(" ++ hex ++ ")") ++ "," ++ arg_b ++ ")>0 FROM content_chunk search_all WHERE search_all.content_id=" ++ arg_a ++ " LIMIT 1),0)";
-    return "(CASE WHEN OCTET_LENGTH(" ++ arg_b ++ ")<=" ++ std.fmt.comptimePrint("{d}", .{schema.content_chunk_bytes}) ++ " THEN " ++ pair ++ " ELSE " ++ whole ++ " END)";
+    return "(EXISTS(SELECT 1 FROM content_chunk search_chunk LEFT JOIN content_chunk search_next ON search_next.content_id=search_chunk.content_id AND search_next.chunk_index=search_chunk.chunk_index+1 WHERE search_chunk.content_id=" ++ arg_a ++ " AND INSTR(" ++ mysqlAsciiLower("CONCAT(search_chunk.bytes,COALESCE(search_next.bytes,X''))") ++ "," ++ arg_b ++ ")>0))";
 }
 
 const expression_markers = [_]ExpressionMarker{
@@ -2045,8 +2038,7 @@ fn mysqlTemplate(comptime text: []const u8) Template {
 ///   @index(name)         nothing: MySQL plans alone until PR 8 reads EXPLAIN
 ///   @served(x)           `(x IN (?,...))`, a slot per `provider_name.Provider`
 ///   @contains_ascii(x,word)  INSTR over bytewise ASCII replacements
-///   @content_contains_ascii(id,word)  EXISTS over adjoining saved chunks,
-///                        or an ordered, lossless JSON hex array for long words
+///   @content_contains_ascii(id,word)  EXISTS over adjoining saved chunks
 ///   @payload(t)          t's first `content_chunk`, or X'' when it has none
 ///   @octets(x)           `OCTET_LENGTH(x)`
 ///   @charset(c,'set')    `(NOT REGEXP_LIKE(c,'[^set]','c'))`: no character
