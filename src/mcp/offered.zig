@@ -8,6 +8,7 @@
 //! shell that lists each server, one at a time with a deadline, before the
 //! Host serves anyone.
 const std = @import("std");
+const protocol = @import("../protocol.zig");
 const tools = @import("../tools.zig");
 const launch_frame = @import("../launch_frame.zig");
 const http1 = @import("../http1/request.zig");
@@ -25,7 +26,7 @@ const arena_bytes = 4 * 1024 * 1024;
 const answer_bytes = 512 * 1024;
 const request_bytes = 8 * 1024;
 
-pub const client: post.Client = .{ .name = "rui", .version = "0" };
+pub const client: post.Client = .{ .name = "rui", .version = protocol.wire_version };
 
 /// One server's tools as listed, or null when it could not be.
 pub const Source = struct {
