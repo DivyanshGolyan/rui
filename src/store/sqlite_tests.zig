@@ -9469,3 +9469,72 @@ test "an empty MCP selection does not visit queued Bash Actions from a Bash-only
     }
     try std.testing.expectEqual(costs[0], costs[1]);
 }
+
+test "MCP attempts serialize Sessions and recover without replay" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+    defer storage.close() catch unreachable;
+    var sessions: [2]protocol.Bounded(protocol.max_session_bytes) = undefined;
+    for (&sessions, 0..) |*session, index| {
+        const key = if (index == 0) "mcp-serial-a" else "mcp-serial-b";
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        var command = try completeConfiguration(key, "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+        command.configuration.tools = try .of(&.{ "fetch_page", "message_agent" });
+        command.configuration.permission_mode.state = .value;
+        try command.configuration.permission_mode.value.set("bypass");
+        const reply = storage.configure(&command, .{});
+        try std.testing.expect(reply == .accepted);
+        session.* = reply.accepted.session;
+        try submitTestMessage(&storage, &tmp, key, if (index == 0) "mcp-serial-message-a" else "mcp-serial-message-b", session.slice(), "fetch");
+        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{
+            .{ .item_id = "one", .name = "fetch_page", .encoded_call_id = "one", .decoded_call_id = "one", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            .{ .item_id = "two", .name = "fetch_page", .encoded_call_id = "two", .decoded_call_id = "two", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            .{ .item_id = "core", .name = "message_agent", .encoded_call_id = "core", .decoded_call_id = "core", .encoded_arguments = "{\\\"id\\\":\\\"zzzzzz\\\",\\\"text\\\":\\\"hi\\\"}", .decoded_arguments = "{\"id\":\"zzzzzz\",\"text\":\"hi\"}" },
+        };
+        try settleCallsForTesting(&storage, &tmp, model, if (index == 0) "mcp-serial-calls-a" else "mcp-serial-calls-b", calls[0..(if (index == 0) @as(usize, 3) else 2)]);
+    }
+    var replacement_records = mcp_records;
+    replacement_records[1].server = "replacement";
+    replacement_records[1].input_schema = "{}";
+    var replacement_digests: [mcp_records.len][32]u8 = undefined;
+    for (&replacement_records, &replacement_digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+    const replacement_catalog: tool_catalog.Catalog = .{ .records = &replacement_records, .digests = &replacement_digests };
+    try storage.saveCatalog(&replacement_catalog);
+    const first = (try storage.nextCoreWork()).?.mcp.action_id;
+    // Selection repeats until admission: later calls cannot overtake it.
+    try std.testing.expectEqual(first, (try storage.nextCoreWork()).?.mcp.action_id);
+    const binding = (try storage.admitMcpActionAttempt(first, .{})).?;
+    try std.testing.expect((try storage.admitMcpActionAttempt(first + 1, .{})) == null);
+    var input: action_domain.McpExecutionInput = undefined;
+    try storage.readMcpExecutionInput(binding, &input);
+    try std.testing.expectEqualStrings(sessions[0].slice(), input.session.slice());
+    try std.testing.expectEqualStrings(input.session.slice(), input.root.slice());
+    try std.testing.expect(input.parent == null);
+    try std.testing.expectEqualStrings("fetch_page", input.name.slice());
+    try std.testing.expectEqual(@as(usize, 32), input.sender_handle.slice().len);
+    try std.testing.expectEqualStrings("docs", input.server.slice());
+    try std.testing.expectEqual(@as(u64, mcp_record.input_schema.len), input.input_schema.length);
+    try std.testing.expectEqualSlices(u8, &protocol.contentDigest(mcp_record.input_schema), &input.input_schema.digest);
+    // Full MCP slots must not hide a later slot-free core call.
+    const core = (try storage.nextCoreWorkForHost(false)).?.action;
+    try std.testing.expectEqual(first + 2, core.binding.action_id);
+    try std.testing.expect(try storage.failCoreCall(core.binding, "Invalid arguments: missing target.", .{}));
+    const other = (try storage.nextCoreWork()).?.mcp.action_id;
+    try std.testing.expect(other > first + 1);
+    try std.testing.expect(try storage.recoverOneUncertainAction(action_domain.ActiveOperationFilter.empty()));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='indeterminate' AND CAST(c.payload AS TEXT) LIKE ?2", .{ first, "%Host stopped%" }));
+    try std.testing.expectEqual(first + 1, (try storage.nextCoreWork()).?.mcp.action_id);
+    const unsent = (try storage.admitMcpActionAttempt(first + 1, .{})).?;
+    var stop = try completeSessionStop("mcp-unsent-stop", sessions[0].slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    _ = try storage.settleActionAttempt(unsent, .spawn_failed, "not available", .{});
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not sent%" }));
+    const sent = (try storage.admitMcpActionAttempt(other, .{})).?;
+    var sent_stop = try completeSessionStop("mcp-sent-stop", sessions[1].slice());
+    try std.testing.expect(storage.stopSession(&sent_stop, .{}) == .accepted);
+    _ = try storage.settleActionAttempt(sent, .succeeded, "terminal result raced stop", .{});
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ sent.action_id, "%Outcome unknown%" }));
+}

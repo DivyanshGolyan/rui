@@ -112,6 +112,8 @@ fn refuse(refusal: *Refusal, message: []const u8) error{LaunchFrameInvalid} {
 
 /// The frame as JSON. Unknown fields are refused: `presets` arrives with
 /// the unit that uses it.
+pub const default_mcp_call_timeout_ms: u32 = 600_000;
+
 const Wire = struct {
     v: i64,
     store: []const u8,
@@ -119,7 +121,7 @@ const Wire = struct {
     runtimeDir: []const u8,
     activeCapacity: ?i64 = null,
     paused: bool = false,
-    mcpServers: []const struct { name: []const u8, url: []const u8, bearerToken: []const u8, callTimeoutMs: i64 } = &.{},
+    mcpServers: []const struct { name: []const u8, url: []const u8, bearerToken: []const u8, callTimeoutMs: i64 = default_mcp_call_timeout_ms } = &.{},
 };
 
 /// Parses `bytes` into `frame`; the key is copied, and every other copy of
@@ -262,7 +264,7 @@ test "a launch frame refuses a bad MCP server" {
             \\{"name":"a","url":"http://127.0.0.1/m","bearerToken":"t","callTimeoutMs":1},{"name":"a","url":"http://127.0.0.1/n","bearerToken":"t","callTimeoutMs":1}]}
         ,
         head ++
-            \\{"name":"a","url":"http://127.0.0.1/m","bearerToken":"t"}]}
+            \\{"name":"a","url":"http://127.0.0.1/m","callTimeoutMs":1}]}
         ,
     };
     for (cases) |json| {
@@ -357,4 +359,16 @@ test "an oversized frame length is refused before any body is read" {
     var frame: Frame = .{};
     var refusal: Refusal = undefined;
     try std.testing.expectError(error.LaunchFrameInvalid, read(io, reader, std.testing.allocator, &frame, &refusal));
+}
+
+test "MCP launch frame defaults an absent call timeout" {
+    const gpa = std.testing.allocator;
+    const value = try gpa.create(Frame);
+    defer gpa.destroy(value);
+    defer value.wipe();
+    var refusal: Refusal = undefined;
+    try parse(gpa,
+        \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"docs","url":"http://127.0.0.1:3000/mcp","bearerToken":"secret"}]}
+    , value, &refusal);
+    try std.testing.expectEqual(@as(u32, 600_000), value.mcp_servers[0].call_timeout_ms);
 }

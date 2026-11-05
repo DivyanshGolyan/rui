@@ -28,6 +28,9 @@ pub const ActionResolutionCode = action_domain.ActionResolutionCode;
 pub const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 pub const application_id = store_schema.application_id;
 pub const AttemptBinding = store_core.AttemptBinding;
+pub const mcp_stop_unknown_text = action_domain.mcp_stop_unknown_text;
+pub const mcp_stop_not_sent_text = action_domain.mcp_stop_not_sent_text;
+pub const McpExecutionInput = action_domain.McpExecutionInput;
 pub const BashExecutionInput = action_domain.BashExecutionInput;
 pub const CommandObservation = command_domain.CommandObservation;
 pub const ConfigureReply = configuration_domain.ConfigureReply;
@@ -71,6 +74,7 @@ pub const testingCanonicalCwd = store_testing.canonicalCwd;
 pub const testingCompleteConfiguration = store_testing.completeConfiguration;
 pub const testingSubmitMessage = store_testing.submitTestMessage;
 pub const settleCallsForTesting = store_test_fixtures.settleCallsForTesting;
+pub const TestingCall = store_test_fixtures.TestingCall;
 pub const testingSessionReportWithProfile = store_test_fixtures.testingSessionReportWithProfile;
 pub const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
