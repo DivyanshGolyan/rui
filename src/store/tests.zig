@@ -7504,13 +7504,14 @@ test "a list row's failed Actions read answers main's ActionReadFailed" {
     }.run);
 }
 
-test "an .each visitor owns a big Row only through a decoded field of the Row's type" {
+test "an .each visitor supplies storage for a big Row through decoded" {
     const Big = struct { bytes: [1025]u8 };
     const Small = struct { id: u64 };
     try std.testing.expectEqual(@as(?[]const u8, null), comptime store_access.eachVisitorError(Small, struct { count: u8 }));
     try std.testing.expectEqual(@as(?[]const u8, null), comptime store_access.eachVisitorError(Big, struct { decoded: Big }));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime store_access.eachVisitorError(Big, struct { decoded: *Big }));
     try std.testing.expectEqualStrings("rsql: an .each Row over 1 KiB decodes into its visitor's own decoded field", comptime store_access.eachVisitorError(Big, struct { count: u8 }).?);
-    try std.testing.expectEqualStrings("rsql: a visitor's decoded field is the Row its .each read decodes, " ++ @typeName(Small), comptime store_access.eachVisitorError(Small, struct { decoded: Big }).?);
+    try std.testing.expectEqualStrings("rsql: a visitor's decoded field is the Row or *Row its .each read decodes, " ++ @typeName(Small), comptime store_access.eachVisitorError(Small, struct { decoded: Big }).?);
 }
 
 /// The rendered text of the one statement the failure table `named`

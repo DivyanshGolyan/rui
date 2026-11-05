@@ -8894,7 +8894,7 @@ test "a Session with message_agent keeps it through its list row and report, as 
     try file.writePositionalAll(io, listed, 0);
     const list = try protocol_reply.SessionListReply.decode(io, file, null, .{}, .{ .report = .{ .bytes = listed.len } });
     try std.testing.expectEqual(@as(usize, 1), list.page.count);
-    try std.testing.expect(list.page.rows[0].tools.eql(.initOne(.message_agent)));
+    try std.testing.expect(std.mem.eql(u8, list.page.rows[0].tools.names.slice(), "message_agent"));
 
     // A call waiting to run shows as the core tool's, which needed no
     // permission decision under `ask`.
@@ -9145,6 +9145,7 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
     const list = try testingSessionList(&storage, &tmp, .{}, &used, 1);
     defer std.testing.allocator.free(list);
     try std.testing.expect(std.mem.indexOf(u8, list, session.slice()) != null);
+    try std.testing.expect(std.mem.indexOf(u8, list, offered) != null);
 }
 
 test "a record names a server exactly when an MCP server owns it" {
