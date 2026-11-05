@@ -1875,19 +1875,21 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     const address = init.environ_map.get("RUI_ADDRESS");
     const sender_store = init.environ_map.get("RUI_STORE");
     const handle = init.environ_map.get("RUI_SENDER_HANDLE");
-    const elsewhere = if (sender_store) |trusted| if (parsed.get("store")) |override|
-        !(try platform.resolveClientPaths(io, override)).store.eql((try platform.resolveClientPaths(io, trusted)).store.slice())
-    else
-        false else false;
-    if (!elsewhere and (address != null or sender_store != null or handle != null)) {
+    if (address != null or sender_store != null or handle != null) {
         if (address == null or sender_store == null or handle == null or
             !protocol.validSessionId(address.?) or sender_store.?.len == 0 or handle.?.len == 0)
         {
             stderr.diagnostic("rui: invalid peer context; nothing was sent. RUI_ADDRESS, RUI_STORE and RUI_SENDER_HANDLE come as a set from a Session's Bash. To send as a plain caller, run without them: " ++ plain_caller ++ "\n", .{});
             return error.InvalidRuiAddress;
         }
-        input.sender = .{ .store = sender_store.?, .session = address.? };
-        input.sender_handle = handle;
+        const elsewhere = if (parsed.get("store")) |override|
+            !(try platform.resolveClientPaths(io, override)).store.eql((try platform.resolveClientPaths(io, sender_store.?)).store.slice())
+        else
+            false;
+        if (!elsewhere) {
+            input.sender = .{ .store = sender_store.?, .session = address.? };
+            input.sender_handle = handle;
+        }
     }
     step.* = .store;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
