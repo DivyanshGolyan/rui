@@ -488,7 +488,8 @@ pub fn build(b: *std.Build) void {
     const launch_frame_integration = b.addSystemCommand(&.{"python3"});
     launch_frame_integration.addFileArg(b.path("tests/integration/launch_frame_integration.py"));
     launch_frame_integration.addFileArg(ci.path(release_safe));
-    b.step("launch-frame-integration", "Run a Host started from a launch frame on stdin: readiness, refusals and stop on close").dependOn(&launch_frame_integration.step);
+    launch_frame_integration.addArg("--require-mcp-sdk");
+    b.step("launch-frame-integration", "Run a Host started from a launch frame on stdin: readiness, refusals, real MCP SDK catalog and stop on close").dependOn(&launch_frame_integration.step);
 
     // The TypeScript client against the Rui this build makes; Node strips the types.
     const ts_client = b.addSystemCommand(&.{"python3"});

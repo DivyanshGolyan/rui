@@ -1,0 +1,9 @@
+{
+  "name": "rui-mcp-sdk-fixture",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.4.0",
+    "zod": "4.3.6"
+  }
+}

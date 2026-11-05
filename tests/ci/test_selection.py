@@ -621,6 +621,15 @@ class SelectionTest(unittest.TestCase):
         self.assertFalse(result["linux_memory_checks"])
         self.assertEqual(select(["tests/qualification/linux-memory/results.json"], "review", AVAILABLE)["targets"], [])
 
+    def test_real_mcp_sdk_is_selected_with_transport_and_fixture(self):
+        for path in ("src/mcp/Listing.zig", "src/http1/request.zig",
+                     "tests/integration/mcp_sdk/server.mjs",
+                     "tests/integration/mcp_sdk/package-lock.json"):
+            targets = set(select([path], "review", AVAILABLE)["targets"])
+            self.assertTrue(covered("launch-frame-integration", targets), (path, targets))
+        for target in ("launch-frame-integration", "check", "check-full"):
+            self.assertTrue(setup_requirements([target])["node"], target)
+
     def test_setup_installs_fixture_packages_for_any_target(self):
         self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False})
         self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True})
