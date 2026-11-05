@@ -1900,14 +1900,17 @@ Reject unknown options, duplicate singleton options even when equal, conflicting
 An option value spelling `--help` remains data.
 Domain validation and saved rejection stay with the existing owners.
 
-Mutation input failures report their actual stage and cause, including stdin read, input parsing, content-file read, capture, Store resolution, endpoint construction, connect, upload and admission-response validation.
+CLI failures cross one catalog boundary and render a stable code with accepted inputs and a concrete repair when their cause is mapped.
+Unmapped legacy failures remain on an explicit shrink-only pending inventory, render `internal_unexpected` without a raw Zig name and exit 1.
+The detection owner distinguishes malformed Store paths (exit 2), unusable Store directories (exit 6) and a Store with no serving Host (exit 6); the latter prints the exact `rui host start --store PATH` command.
 Missing input or endpoint paths never imply that no Host serves the selected Store.
 Failure after upload begins leaves admission unconfirmed; inspection or recovery must retain the original identity.
 
 #### Help and prerequisites
 
 Root help (`rui --help` or `rui -h`), resource help and operation help succeed with useful stdout and zero exit without a Host, credentials, preferences, TTY or state changes.
-Invalid fresh invocation exits 2 with a stderr diagnostic and relevant help path.
+Invalid fresh invocation exits 2 with a catalog stderr diagnostic naming the relevant flag or field, accepted inputs and repair.
+A positional Session ID on a command whose selector is a flag names `--to ID` or `--session ID` rather than mistaking the ID for Message text.
 
 The CLI derives exit status from admission certainty and the catalog remedy, not the rejection code alone:
 

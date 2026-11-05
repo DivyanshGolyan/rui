@@ -91,14 +91,10 @@ pub const session_list_page_size: usize = 8;
 
 pub const Bounded = @import("bounded.zig").Bounded;
 
-pub const session_id_bytes = 6;
-pub const session_alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
-
-pub fn validSessionId(value: []const u8) bool {
-    if (value.len != session_id_bytes) return false;
-    for (value) |byte| if (std.mem.indexOfScalar(u8, session_alphabet, byte) == null) return false;
-    return true;
-}
+const session_id = @import("session_id.zig");
+pub const session_id_bytes = session_id.bytes;
+pub const session_alphabet = session_id.alphabet;
+pub const validSessionId = session_id.valid;
 
 /// Exact peer address. The issuing Host authenticates the sender separately.
 pub const Address = struct {

@@ -65,7 +65,7 @@ RULES = (
      "Sequence-model oracle: no gate compiles it; nonblocking renderer contracts run it"),
     (("src/Terminal*",), ("test-logic", "admission-debug-integration", *PTY_TARGETS),
      ("test-logic", "admission-debug-integration", *PTY_TARGETS), "Terminal values and native callers"),
-    (("src/cli_args.zig", "src/caller_error.zig", "src/caller_exit.zig", "src/cli_value.zig", "src/json_ascii.zig", "src/json_scalar.zig"), ("test-logic",), ("test-logic",),
+    (("src/cli_args.zig", "src/caller_error.zig", "src/caller_exit.zig", "src/cli_value.zig", "src/session_id.zig", "src/json_ascii.zig", "src/json_scalar.zig"), ("test-logic",), ("test-logic",),
      "Portable CLI grammar, validation and terminal-safe JSON; native callers follow below"),
     (("src/cli.zig", "src/caller_rejection.zig", "src/cli_args.zig", "src/caller_error.zig", "src/caller_exit.zig", "src/cli_value.zig", "src/slash_commands.zig", "src/json_ascii.zig", "src/client.zig", "src/protocol_reply.zig", "src/ResponseTiming.zig", "src/preferences.zig", "src/provider_selection.zig",
       "src/new_session_selection.zig", "src/preference_values.zig", "src/product_defaults.zig",

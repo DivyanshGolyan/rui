@@ -108,7 +108,7 @@ def control_closed_while_host_alive(host, store, session):
     try:
         fixture.command("session", "inspect", "--store", store, "--session", session)
     except AssertionError as error:
-        return "FileNotFound" in str(error)
+        return "command returned 6, wanted 0:" in str(error) and "[host_not_serving]" in str(error)
     return False
 
 
@@ -120,8 +120,8 @@ def competing_host_is_rejected(store):
         text=True,
         timeout=5,
     )
-    assert completed.returncode != 0, completed.stdout
-    assert "StoreAlreadyOwned" in completed.stderr, completed.stderr
+    assert completed.returncode == 6, completed.stdout
+    assert "[store_locked]" in completed.stderr, completed.stderr
 
 
 def hold_incomplete_connection(host, store, session):

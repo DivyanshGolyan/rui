@@ -56,6 +56,7 @@ const cores = .{
     .{ "retry_policy.zig", @import("retry_policy.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
+    .{ "session_id.zig", @import("session_id.zig") },
     .{ "session_line.zig", @import("session_line.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
     .{ "slash_commands.zig", @import("slash_commands.zig") },
