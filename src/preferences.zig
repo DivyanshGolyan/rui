@@ -167,7 +167,8 @@ pub fn saveProviderAfterLogin(home: []const u8, provider: protocol.Provider, onl
 
 // Both preflight and locked application keep Store-selection failures
 // distinct from failures reading or publishing the preferences themselves.
-fn resolveStore(value: []const u8) !platform.Paths {
+// Keep the Paths return temporaries out of apply's frame.
+noinline fn resolveStore(value: []const u8) !platform.Paths {
     return platform.resolveClientPaths(io, value) catch |err| switch (err) {
         error.FileNotFound, error.NotDir, error.AccessDenied, error.PermissionDenied, error.InsecureDirectoryPermissions, error.SymLinkLoop, error.StorePathTooLong, error.NameTooLong, error.InvalidStorePath => error.InvalidPreferenceStore,
         else => err,
