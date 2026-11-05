@@ -1271,7 +1271,8 @@ Schema 51 is the migration baseline (Divyansh, D204): every later format change 
 A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
 Rui runs no DDL on MySQL (D203): the DB team runs `schema.mysqlMigration(from)`, which PR 8's `rui store schema --engine mysql [--from N]` will print.
 The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
-The step to 53 records a Session's parent (D27) and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
+The step to 53 records a Session's parent (D27).
+The step to 54 gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.

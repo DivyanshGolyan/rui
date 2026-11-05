@@ -8328,7 +8328,7 @@ test "a Store at the migration baseline with its rows takes every migration at o
         try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try writeRows(raw, &migrated_rows.writer);
     }
-    // Format 53 draws each migrated Store its own id.
+    // Format 54 draws each migrated Store its own id.
     try std.testing.expect(!std.mem.eql(u8, &try storeId(migrated), &try storeId(fresh)));
     {
         const raw = try openRaw(fresh);

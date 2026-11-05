@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 53;
+pub const schema_version: u32 = 54;
 /// `digest()` of each schema_version, oldest first. A change to what
 /// `bootstrap` executes changes the last row's digest: in place while that
 /// version is unreleased, so concurrent PRs share it, and as a new row and
@@ -31,7 +31,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 50, .digest = 0x5d687971ecde9643 },
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
-    .{ .schema_version = 53, .digest = 0xe615689e3ecdc677 },
+    .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
+    .{ .schema_version = 54, .digest = 0xb357b133177d7023 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -108,13 +109,7 @@ pub const migrations = [_]Migration{
             "CREATE TABLE host_catalog(\n slot BIGINT NOT NULL,\n tool_set_id BIGINT NOT NULL,\n PRIMARY KEY(slot),\n FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),\n CHECK(slot=1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
-    // Schema 53: a Session's parent (D27). Also (8b) each Store gets a
-    // random store_id; on MySQL store_owner and content_chunk are new, each
-    // content's payload moves into chunks of content_chunk_bytes (chunk.i
-    // reaches 9999, past the 8192 chunks of the largest content) before
-    // the column goes, each leading partial index gets its generated first
-    // column, and store_meta's one CHECK and content's fourth are the ones
-    // replaced.
+    // Schema 53: a Session's parent (D27).
     .{
         .from = 52,
         .sqlite = &.{
@@ -123,14 +118,27 @@ pub const migrations = [_]Migration{
             "INSERT INTO session(session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key) SELECT session_ref,workspace,provider,codec,codec_options,prefix_seal,model,instructions_content_id,tool_set_id,permission_mode,output_schema_content_id,revision,compaction_trigger,output_reservation,reasoning_effort,label,created_at,next_position,created_seq,workspace_digest,workspace_key FROM session_before_53",
             "DROP TABLE session_before_53",
             "CREATE INDEX session_workspace_list ON session(workspace_digest,created_seq)",
-            "ALTER TABLE store_meta RENAME TO store_meta_before_53",
-            "CREATE TABLE store_meta(\n meta_key TEXT PRIMARY KEY NOT NULL CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id')),\n meta_value TEXT NOT NULL\n) STRICT",
-            "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_before_53",
-            "DROP TABLE store_meta_before_53",
-            "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
         },
         .mysql = &.{
             "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
+        },
+    },
+    // Schema 54 (8b): each Store gets a random store_id. On MySQL,
+    // store_owner and content_chunk are new; each content's payload moves
+    // into chunks of content_chunk_bytes (chunk.i reaches 9999, past the
+    // 8192 chunks of the largest content) before the column goes; each
+    // leading partial index gets its generated first column; store_meta's
+    // one CHECK and content's fourth are the ones replaced.
+    .{
+        .from = 53,
+        .sqlite = &.{
+            "ALTER TABLE store_meta RENAME TO store_meta_before_54",
+            "CREATE TABLE store_meta(\n meta_key TEXT PRIMARY KEY NOT NULL CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id')),\n meta_value TEXT NOT NULL\n) STRICT",
+            "INSERT INTO store_meta(meta_key,meta_value) SELECT meta_key,meta_value FROM store_meta_before_54",
+            "DROP TABLE store_meta_before_54",
+            "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
+        },
+        .mysql = &.{
             "ALTER TABLE store_meta DROP CHECK store_meta_chk_1, ADD CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id'))",
             "CREATE TABLE store_owner(\n owner_key BIGINT NOT NULL,\n epoch BIGINT NOT NULL,\n commit_seq BIGINT NOT NULL,\n PRIMARY KEY(owner_key),\n CHECK(owner_key=1),\n CHECK(epoch>=0),\n CHECK(commit_seq>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE TABLE content_chunk(\n content_id BIGINT NOT NULL,\n chunk_index BIGINT NOT NULL,\n bytes LONGBLOB NOT NULL,\n PRIMARY KEY(content_id,chunk_index),\n FOREIGN KEY(content_id) REFERENCES content(content_id),\n CHECK(chunk_index>=0),\n CHECK(length(bytes) BETWEEN 1 AND 131072)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -320,7 +328,7 @@ const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1,
 
 /// store_meta's keys, as bootstrap writes them: a closed set, so a key is
 /// a tag, which MySQL can key. `store_id` is the Store's own random id,
-/// drawn once when it is created and never changed (D204, format 53).
+/// drawn once when it is created and never changed (D204, format 54).
 const meta_keys = [_][]const u8{ "wire_version", "store_selector", "format", "store_id" };
 
 /// The bytes of one MySQL `content_chunk` row; the last of a content's
