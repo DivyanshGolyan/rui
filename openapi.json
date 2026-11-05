@@ -1473,6 +1473,11 @@
                   "turn_ended": {
                     "type": "object",
                     "properties": {
+                      "session": {
+                        "type": "string",
+                        "maxLength": 6,
+                        "x-rui-max-bytes": 6
+                      },
                       "turn": {
                         "$ref": "#/components/schemas/Decimal"
                       },
@@ -1508,6 +1513,7 @@
                       }
                     },
                     "required": [
+                      "session",
                       "turn",
                       "operation",
                       "ending",
@@ -1811,6 +1817,11 @@
                   "approval_requested": {
                     "type": "object",
                     "properties": {
+                      "session": {
+                        "type": "string",
+                        "maxLength": 6,
+                        "x-rui-max-bytes": 6
+                      },
                       "action": {
                         "$ref": "#/components/schemas/Decimal"
                       },
@@ -1822,6 +1833,7 @@
                       }
                     },
                     "required": [
+                      "session",
                       "action",
                       "operation",
                       "call_ordinal"
@@ -3002,6 +3014,7 @@
                       "model_capability_unavailable",
                       "invalid_output_schema",
                       "invalid_compaction_trigger",
+                      "compact_at_too_large",
                       "invalid_output_reservation",
                       "unsupported_reasoning_effort",
                       "unknown_tool",
@@ -5192,6 +5205,7 @@
                       "model_capability_unavailable",
                       "invalid_output_schema",
                       "invalid_compaction_trigger",
+                      "compact_at_too_large",
                       "invalid_output_reservation",
                       "unsupported_reasoning_effort",
                       "unknown_tool",

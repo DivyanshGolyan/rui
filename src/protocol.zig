@@ -131,6 +131,11 @@ pub const ContentField = struct {
     // A parsed request owns an unlinked file descriptor. The Store imports
     // through this sealed custody; no pathname can be swapped after capture.
     file: ?std.Io.File = null,
+    /// D113: bounded start_agent content borrows its call arena through commit;
+    /// `length` counts it. Wire content still uses sealed file custody; this
+    /// pointer is never saved. A bare pointer keeps ContentField, which the
+    /// configure path copies, no larger than one word.
+    borrowed: ?[*]const u8 = null,
     scratch_budget: ?ScratchBudget = null,
     charged: u64 = 0,
     length: u64 = 0,
@@ -138,6 +143,11 @@ pub const ContentField = struct {
     /// While a request is parsed, which Ingress capture holds this value,
     /// counted from 1 in arrival order; 0 once it holds its own file.
     capture: u8 = 0,
+
+    pub fn borrowedBytes(self: *const ContentField) ?[]const u8 {
+        const bytes = self.borrowed orelse return null;
+        return bytes[0..@intCast(self.length)];
+    }
 
     pub fn hasFile(self: *const ContentField) bool {
         return self.file != null;
@@ -393,6 +403,7 @@ pub const ConfigurationRejection = enum {
     model_capability_unavailable,
     invalid_output_schema,
     invalid_compaction_trigger,
+    compact_at_too_large,
     invalid_output_reservation,
     unsupported_reasoning_effort,
     unknown_tool,
@@ -417,6 +428,7 @@ pub const MessageRejection = enum {
     model_capability_unavailable,
     invalid_output_schema,
     invalid_compaction_trigger,
+    compact_at_too_large,
     invalid_output_reservation,
     unsupported_reasoning_effort,
     unknown_tool,
@@ -637,7 +649,9 @@ pub const ActivityPage = struct {
     pub const Kinds = std.EnumSet(ActivityItem.Kind);
     pub const items = @typeInfo(@FieldType(ActivityFacts, "items")).array.len;
 
-    pub fn validate(self: ActivityPage) !void {
+    /// By pointer: a by-value copy sat in the Store read frame on every
+    /// engine chain that reads a page.
+    pub fn validate(self: *const ActivityPage) !void {
         if (self.position > std.math.maxInt(i64) or (self.ordinal != null and
             (self.position == 0 or self.ordinal.? > std.math.maxInt(i64)))) return error.InvalidCursor;
         if (self.end) |end| if (end > std.math.maxInt(i64) or self.position > end) return error.InvalidCursor;
@@ -653,7 +667,7 @@ pub const ActivitySearch = struct {
     before_ordinal: ?u64 = null,
     limit: u8 = ActivityPage.items,
 
-    pub fn validate(self: ActivitySearch) !void {
+    pub fn validate(self: *const ActivitySearch) !void {
         if (self.query.len == 0 or !std.unicode.utf8ValidateSlice(self.query.slice())) return error.InvalidCursor;
         if (self.before_position) |position| {
             if (position == 0 or position > std.math.maxInt(i64)) return error.InvalidCursor;
@@ -813,7 +827,7 @@ pub const ActivityItem = struct {
     pub const Assistant = struct { content: Content, final: bool = false };
     /// `code` is the saved code the ending was judged from; `content` a
     /// done Turn's answer or a failed one's report.
-    pub const TurnEnded = struct { turn: u64, operation: u64, ending: TurnEnding, code: Bounded(max_code_bytes), content: ?Content };
+    pub const TurnEnded = struct { session: Bounded(session_id_bytes), turn: u64, operation: u64, ending: TurnEnding, code: Bounded(max_code_bytes), content: ?Content };
     pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: SessionStopCompletion };
     /// A Message this Session sent: admitted to `target`, or rejected there.
     pub const Sent = struct { admission: u64, target: NamedPeer, content: Content, admitted_at: u64 };
@@ -821,7 +835,7 @@ pub const ActivityItem = struct {
     /// A call that waits on a person's decision because the Session asked
     /// for approval when it was made: `action` is the id a
     /// `permission_decision` names. The row follows its call at ordinal 1.
-    pub const ApprovalRequested = struct { action: u64, operation: u64, call_ordinal: u64 };
+    pub const ApprovalRequested = struct { session: Bounded(session_id_bytes), action: u64, operation: u64, call_ordinal: u64 };
     /// One setting a revision changed, at the position the revision was
     /// accepted; a revision's changes share it, one ordinal each.
     pub const SessionChanged = struct { revision: u64, field: SessionField };
@@ -850,7 +864,7 @@ pub const ActivityItem = struct {
         /// A call the provider ran, shown by its line alone. Hole: presentation.
         pub const hosted_call = .{ "{\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
         /// Holes: turn, operation, ending, code, content.
-        pub const turn_ended = .{ "{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"ending\":\"", Hole{ .tag = TurnEnding }, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
+        pub const turn_ended = .{ "{\"session\":", Hole{ .string = session_id_bytes }, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"ending\":\"", Hole{ .tag = TurnEnding }, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
         /// Holes: key, turn, cutoff, completion.
         pub const stop = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"cutoff\":\"", Hole.decimal, "\",\"completion\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
         /// Holes: admission, admitted at, target, content.
@@ -858,7 +872,7 @@ pub const ActivityItem = struct {
         /// Holes: key, target, code.
         pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = NamedPeer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
         /// Holes: action, operation, call ordinal.
-        pub const approval_requested = .{ "{\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\"}" };
+        pub const approval_requested = .{ "{\"session\":", Hole{ .string = session_id_bytes }, ",\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\"}" };
         /// Holes: revision, field.
         pub const session_changed = .{ "{\"revision\":\"", Hole.decimal, "\",\"field\":\"", Hole{ .tag = SessionField }, "\"}" };
         /// Holes: operation, dropped.
@@ -882,7 +896,7 @@ pub const ActivityItem = struct {
             }),
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
-            .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.action, request.operation, request.call_ordinal }),
+            .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal }),
             .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field }),
             .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ assistant.content, assistant.final }),
@@ -894,7 +908,7 @@ pub const ActivityItem = struct {
                 for (call.fields, &fields) |field, *content| content.* = .{ .length = field.length, .digest = field.digest };
                 try writeShape(out, value_shapes.call, .{ call.operation, call.turn, call.call_ordinal, call.action, call.rejection, fields[0], fields[1], fields[2] });
             },
-            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.turn, ended.operation, ended.ending, ended.code.slice(), ended.content }),
+            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.session.slice(), ended.turn, ended.operation, ended.ending, ended.code.slice(), ended.content }),
             .stop => |stop| try writeShape(out, value_shapes.stop, .{ stop.key.slice(), stop.turn, stop.cutoff, stop.completion }),
         }
         try writeShape(out, tail, .{});
@@ -1259,6 +1273,7 @@ fn removeContent(content: *ContentField, io: std.Io) !void {
     if (content.scratch_budget) |budget| budget.release(content.charged);
     content.charged = 0;
     content.file = null;
+    content.borrowed = null;
     content.state = .omitted;
 }
 
@@ -1836,6 +1851,7 @@ const Parser = struct {
             .require_model => out.require_model = try self.readBoolean(),
         };
         try require(Field, seen, &.{ .key, .session, .configuration });
+        if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration);
     }
 
     /// Fills `out`, which holds its defaults.
@@ -1859,7 +1875,19 @@ const Parser = struct {
             .reasoning_effort => try self.readOptionalSmallNullable(16, &out.reasoning_effort, true),
             .label => try self.readOptionalSmallNullable(max_label_bytes, &out.label, true),
         };
-        try require(Field, seen, &.{ .workspace, .provider, .model, .instructions, .tools, .permission_mode, .output_schema });
+    }
+
+    fn validateCreatingConfiguration(configuration: *const Configuration) !void {
+        if (configuration.model.state != .value or
+            configuration.compaction_trigger.state != .value or
+            configuration.tools.state != .value or
+            configuration.permission_mode.state != .value or
+            configuration.reasoning_effort.state == .omitted) return error.MissingField;
+        var tools = configuration.tools.iterator();
+        while (tools.next()) |tool| {
+            if (std.mem.eql(u8, tool, "bash") and configuration.workspace.state != .value)
+                return error.MissingField;
+        }
     }
 
     fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
@@ -1890,6 +1918,7 @@ const Parser = struct {
         // configuration and a capability condition, and it must carry the
         // configuration.
         if (out.session.len == 0 and out.configuration == null) return error.MissingField;
+        if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
         if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
         if (out.text.state != .value) return error.InvalidMessage;
         if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
@@ -3903,8 +3932,8 @@ test "initial Message ingress retains text custody and rejects extra content bef
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
     const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
-        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":";
-    const between = ",\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":";
+        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"value\",\"value\":\"model\"},\"instructions\":";
+    const between = ",\"tools\":{\"state\":\"value\",\"value\":[]},\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"},\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"},\"reasoning_effort\":{\"state\":\"null\"},\"output_schema\":";
     const suffix = "},\"text\":{\"state\":\"value\",\"value\":\"assignment\\u0000雪\\n\\n\"}}";
     const omitted = "{\"state\":\"omitted\"}";
     const value = "{\"state\":\"value\",\"value\":\"rules\\n\"}";
@@ -3960,8 +3989,8 @@ test "only a creating Message carries require_model, and it binds the digest" {
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
     const creating = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"\",\"sender\":null,\"sender_handle\":null,\"configuration\":{" ++
-        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"omitted\"},\"instructions\":{\"state\":\"omitted\"}," ++
-        "\"tools\":{\"state\":\"omitted\"},\"permission_mode\":{\"state\":\"omitted\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
+        "\"workspace\":{\"state\":\"omitted\"},\"provider\":{\"state\":\"omitted\"},\"model\":{\"state\":\"value\",\"value\":\"model\"},\"instructions\":{\"state\":\"omitted\"}," ++
+        "\"tools\":{\"state\":\"value\",\"value\":[]},\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"},\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"},\"reasoning_effort\":{\"state\":\"null\"},\"output_schema\":{\"state\":\"omitted\"}},\"text\":{\"state\":\"value\",\"value\":\"go\"}";
     const addressed = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"go\"}";
     const cases = [_]struct { bytes: []const u8, require_model: bool = false, failure: ?anyerror = null }{
         .{ .bytes = creating ++ "}" },
@@ -4226,6 +4255,46 @@ test "SessionRow borrowed fields preserve offered tool names" {
     try fields.writeJson(&out.writer);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"tools\":[\"bash\",\"offered_tool\"]") != null);
     try std.testing.expect(out.written().len <= SessionRow.max_json_bytes);
+}
+
+test "protocol creation requires five explicit settings independent of field order" {
+    const fields = [_][]const u8{
+        "\"model\":{\"state\":\"value\",\"value\":\"model\"}",
+        "\"compaction_trigger\":{\"state\":\"value\",\"value\":\"1000\"}",
+        "\"tools\":{\"state\":\"value\",\"value\":[]}",
+        "\"permission_mode\":{\"state\":\"value\",\"value\":\"default\"}",
+        "\"reasoning_effort\":{\"state\":\"null\"}",
+    };
+    inline for (.{ "configure", "message" }) |kind| {
+        for (0..fields.len + 1) |skip| {
+            var buffer: [2048]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            try writer.writeAll("{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"" ++ kind ++ "\",\"store\":\"s\",\"key\":\"k\",\"configuration\":{");
+            var comma = false;
+            for (fields, 0..) |field, index| {
+                if (index == skip) continue;
+                if (comma) try writer.writeByte(',');
+                try writer.writeAll(field);
+                comma = true;
+            }
+            try writer.writeAll("},\"session\":\"\"");
+            if (comptime std.mem.eql(u8, kind, "message"))
+                try writer.writeAll(",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"omitted\"}");
+            try writer.writeByte('}');
+            const json = writer.buffered();
+            var source: MetadataSource = .{ .input = json };
+            var retained: ?named_scratch.Owner = null;
+            var parser = Parser{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+            if (skip < fields.len) {
+                try std.testing.expectError(error.MissingField, parseForTest(&parser));
+            } else if (comptime std.mem.eql(u8, kind, "message")) {
+                // Configuration passed without workspace or provider; only text is invalid.
+                try std.testing.expectError(error.InvalidMessage, parseForTest(&parser));
+            } else {
+                _ = try parseForTest(&parser);
+            }
+        }
+    }
 }
 
 test "activity search wire validates query and paired backward cursor" {

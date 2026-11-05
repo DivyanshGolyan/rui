@@ -1806,9 +1806,9 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         binding = try snapshot.resolveUnprompted();
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
-        if (!input.reasoning_effort.present) if (model_capability.startEffort(snapshot.defaults.reasoning_effort, binding.model.slice())) |effort| {
-            input.reasoning_effort = .{ .present = true, .value = @tagName(effort) };
-        };
+        if (!input.reasoning_effort.present) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), snapshot.defaults.reasoning_effort);
+        if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), null);
+        if (!input.compaction_trigger.present or input.compaction_trigger.value == null) input.compaction_trigger = .{ .present = true, .value = client.defaultCompactionTrigger(binding.model.slice()) };
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
@@ -1838,6 +1838,20 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     var input = configuration;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
+    if (input.session == .named and ((input.compaction_trigger.present and input.compaction_trigger.value == null) or (input.reasoning_effort.present and input.reasoning_effort.value == null))) {
+        var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
+        if (input.model.present) {
+            try current_model.set(input.model.value);
+        } else {
+            var discard: std.Io.Writer.Discarding = .init(&.{});
+            const observed = try inspectWorkTo(init, requester, input.store, input.session.named, &discard.writer);
+            defer observed.file.close(io);
+            try current_model.set(observed.current.settings.model.slice());
+        }
+        if (input.compaction_trigger.present and input.compaction_trigger.value == null) input.compaction_trigger.value = client.defaultCompactionTrigger(current_model.slice());
+        if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(current_model.slice(), null);
+    }
+
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var sender = requester;
@@ -2322,7 +2336,7 @@ test "/effort and /rename give what their /configure spelling gives" {
         .{ .short = "/effort high", .spelled = "/configure --reasoning-effort high", .option = "reasoning-effort" },
         .{ .short = "/effort \"high\"", .spelled = "/configure --reasoning-effort \"high\"", .option = "reasoning-effort" },
     };
-    for (cases) |case| {
+    inline for (cases) |case| {
         errdefer std.debug.print("short={s}\n", .{case.short});
         var values: [2][]const u8 = undefined;
         var lines: [2][64]u8 = undefined;
@@ -2399,7 +2413,7 @@ fn liveConfigure(init: std.process.Init, requests_context: client.Requests, live
         try std.Io.File.stdout().writeStreamingAll(init.io, typed_usage);
         return false;
     }
-    for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-")) {
+    inline for ([_][]const u8{ "instructions", "output-schema" }) |content| if (std.mem.eql(u8, parsed.get(content) orelse "", "-")) {
         try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: Terminal stdin belongs to this Session. Set instructions separately with rui session configure --instructions -; redirect schema input from a file.\n");
         return false;
     };
@@ -3652,7 +3666,7 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
 
 const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
 
-const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,message_agent,read_transcript,start_agent,web_search|none] [--loaded-tools a,b|none] [--permission-mode " ++ cli_args.live_configure.argumentOf("permission-mode").?.? ++ "] [--reasoning-effort " ++ cli_args.live_configure.argumentOf("reasoning-effort").?.? ++ "] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
+const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,find_tools,message_agent,read_transcript,start_agent,web_search|none] [--loaded-tools a,b|none] [--permission-mode " ++ cli_args.live_configure.argumentOf("permission-mode").?.? ++ "] [--reasoning-effort " ++ cli_args.live_configure.argumentOf("reasoning-effort").?.? ++ "] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
 
 const usage_text =
     \\usage:
@@ -3748,6 +3762,16 @@ fn closeDescriptor(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
 }
 
+test "cli fresh defaults are explicit for known and unknown models" {
+    const known = client.defaultStartEffort("gpt-6.1-sol", null);
+    try std.testing.expect(known.present);
+    try std.testing.expectEqualStrings(@tagName(model_capability.defaultReasoningEffort("gpt-6.1-sol").?), known.value.?);
+    const unknown = client.defaultStartEffort("unlisted-model", null);
+    try std.testing.expect(unknown.present and unknown.value == null);
+    try std.testing.expectEqualStrings("115200", client.defaultCompactionTrigger("unlisted-model"));
+    try std.testing.expectEqual(model_capability.contextWindow("gpt-6.1-sol") * 90 / 100, try std.fmt.parseInt(u64, client.defaultCompactionTrigger("gpt-6.1-sol"), 10));
+}
+
 test "existing explicit captures bypass fresh option choices while new captures refuse" {
     const io = std.Io.Threaded.global_single_threaded.io();
     var tmp = std.testing.tmpDir(.{});
@@ -3832,7 +3856,7 @@ test "a saved rejection code this build does not know keeps the answer and says 
 test "saved CLI rejection goldens preserve JSON and explain permission and incomplete configuration" {
     const cases = [_]struct { code: []const u8, session: []const u8, line: []const u8 }{
         .{ .code = "unsupported_permission_mode", .session = "k7m2qx", .line = "rui session configure: --permission-mode: Rui has no such permission mode. Accepted: ask, bypass. Next: Use one of the accepted values. This rejection was saved and replays as saved; a resend needs a new key. [unsupported_permission_mode]\n" },
-        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --workspace, --provider, --model: An initial configuration needs workspace, provider and model; one or more are missing. Accepted: --workspace ABSOLUTE_DIRECTORY --provider PROVIDER --model MODEL. Next: Supply all three required flags: --workspace, --provider and --model. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
+        .{ .code = "incomplete_initial_configuration", .session = "", .line = "rui session configure: --workspace, --provider, --model: A new Session's spec is missing a required setting. Accepted: model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several. Next: State every required setting; rui session start fills them for you. This rejection was saved and replays as saved; a resend needs a new key. [incomplete_initial_configuration]\n" },
     };
     for (cases) |case| {
         var wire: [1024]u8 = undefined;

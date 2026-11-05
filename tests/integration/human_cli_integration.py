@@ -524,9 +524,11 @@ def compaction_settings_case(home, store, workspace, socket_path):
     body = {"version": host_process.WIRE_VERSION, "kind": "configure", "store": str(store),
             "key": "unknown-compaction-policy", "session": "", "configuration": {
                 **{name: {"state": "value", "value": value} for name, value in
-                   (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"))},
+                   (("workspace", str(workspace)), ("provider", "codex"), ("model", "unknown-compaction-model"),
+                    ("tools", ["bash"]), ("permission_mode", "bypass"), ("compaction_trigger", "115200"))},
+                "reasoning_effort": {"state": "null"},
                 **{name: {"state": "omitted"} for name in
-                   ("instructions", "tools", "permission_mode", "output_schema", "compaction_trigger", "output_reservation")}}}
+                   ("instructions", "output_schema", "output_reservation")}}}
     head, answer = raw_request(socket_path, "/v1/configure", json.dumps(body).encode())
     reply = json.loads(answer)
     assert b" 200 " in head and reply["answer"]["status"] == "accepted" and reply["answer"]["created"], (head, reply)

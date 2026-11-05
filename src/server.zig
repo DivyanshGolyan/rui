@@ -3214,12 +3214,12 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         .{ .call = .{ .position = max, .operation = max, .turn = max, .call_ordinal = max, .action = max, .rejection = Worst.tag(protocol.ProposalRejection), .fields = @splat(field) } },
         .{ .tool_result = .{ .content = reference, .presentation = presentation } },
         .{ .hosted_call = presentation },
-        .{ .turn_ended = .{ .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
+        .{ .turn_ended = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .turn = max, .operation = max, .ending = Worst.tag(protocol.TurnEnding), .code = code, .content = reference } },
         .{ .stop = .{ .key = key, .turn = max, .cutoff = max, .completion = Worst.tag(protocol.SessionStopCompletion) } },
         .{ .sent = .{ .admission = max, .target = peer, .content = reference, .admitted_at = max } },
         .{ .send_failed = .{ .key = key, .target = peer, .code = code } },
         .{ .received = .{ .admission = max, .key = key, .turn = max, .state = Worst.tag(@FieldType(protocol.ActivityItem.Message, "state")), .content = reference, .admitted_at = max, .sender = peer } },
-        .{ .approval_requested = .{ .action = max, .operation = max, .call_ordinal = max } },
+        .{ .approval_requested = .{ .session = .{ .bytes = session.bytes[0..6].*, .len = 6 }, .action = max, .operation = max, .call_ordinal = max } },
         .{ .session_changed = .{ .revision = max, .field = .output_reservation } },
         .{ .compacted = .{ .operation = max, .dropped = max } },
     };
@@ -3759,6 +3759,12 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try configure.configuration.provider.value.set("codex");
         configure.configuration.model.state = .value;
         try configure.configuration.model.value.set("model-a");
+        configure.configuration.tools = try .of(&.{ "bash", "web_search" });
+        configure.configuration.permission_mode.state = .value;
+        try configure.configuration.permission_mode.value.set("bypass");
+        configure.configuration.compaction_trigger.state = .value;
+        try configure.configuration.compaction_trigger.value.set("115200");
+        configure.configuration.reasoning_effort.state = .explicit_null;
         const configured = storage.configure(&configure, .{});
         try std.testing.expect(configured == .accepted);
         const session = configured.accepted.session.slice();
@@ -4061,6 +4067,12 @@ test "only a fresh Message changes its Session's environment; a replay or a reje
     try configure.configuration.provider.value.set("codex");
     configure.configuration.model.state = .value;
     try configure.configuration.model.value.set("model-a");
+    configure.configuration.tools = try .of(&.{ "bash", "web_search" });
+    configure.configuration.permission_mode.state = .value;
+    try configure.configuration.permission_mode.value.set("bypass");
+    configure.configuration.compaction_trigger.state = .value;
+    try configure.configuration.compaction_trigger.value.set("115200");
+    configure.configuration.reasoning_effort.state = .explicit_null;
     const configured = storage.configure(&configure, .{});
     try std.testing.expect(configured == .accepted);
     const session = configured.accepted.session.slice();
