@@ -4624,7 +4624,7 @@ test "arrows move the command list's highlight, and Enter takes it: a word anoth
     // An option that takes a value is added for it, and the next list
     // starts at its top, however far down the highlight was.
     draft = try typeText(&state, "/configure ");
-    state.commands.?.highlight = 3;
+    state.commands.?.highlight = 4;
     try expectEffects(&.{.{ .append = "--label " }}, try submit(&state, draft));
     // A draft too full for the word refuses it and stays as it was; its
     // next frame lists it from the top too.
@@ -4731,9 +4731,9 @@ test "/configure holds start settings for the Session the next Enter starts" {
     try expectScreenLine(&state, 23, " start settings: --model gpt-5.5 --permission-mode ask --label \"la… · esc clear");
 
     var held: StartSettings = .{};
-    try held.put(1, "gpt-5.5");
-    try held.put(4, "ask");
-    try held.put(8, "lane \"five\"");
+    try held.put(startOption("model").?, "gpt-5.5");
+    try held.put(startOption("permission-mode").?, "ask");
+    try held.put(startOption("label").?, "lane \"five\"");
     draft = try typeText(&state, "Run the tests");
     try expectEffects(&.{.{ .start = .{ .settings = &held, .text = "Run the tests" } }}, try submit(&state, draft));
     _ = try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } });
@@ -4767,7 +4767,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
 }
 
 test "start settings are the options session start shares with /configure" {
-    const expected = [_][]const u8{ "provider", "model", "workspace", "tools", "permission-mode", "compaction-trigger", "output-reservation", "reasoning-effort", "label" };
+    const expected = [_][]const u8{ "provider", "model", "workspace", "tools", "loaded-tools", "permission-mode", "compaction-trigger", "output-reservation", "reasoning-effort", "label" };
     try std.testing.expectEqual(expected.len, start_options.len);
     for (expected, start_options) |want, got| try std.testing.expectEqualStrings(want, got);
 }

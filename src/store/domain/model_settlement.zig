@@ -541,7 +541,7 @@ pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: A
 /// Session's permission mode and revision, and the last Conversation
 /// ordinal.
 const success_facts = rsql.Read(.{
-    .sql = "SELECT CASE WHEN r.tool_set_id IS NULL THEN NULL ELSE " ++ tool_set.maskSql("r.tool_set_id") ++ " END AS tools_mask," ++
+    .sql = "SELECT CASE WHEN r.tool_set_id IS NULL THEN NULL ELSE " ++ tool_set.maskSql("coalesce(r.loaded_tool_set_id,r.tool_set_id)") ++ " END AS tools_mask," ++
         tool_set.everMaskSql("o.session_ref", "o.settings_revision") ++ " AS ever_mask,s.permission_mode,s.revision," ++
         "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=o.session_ref),0) AS entry_base " ++
         "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++

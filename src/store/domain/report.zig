@@ -1083,9 +1083,9 @@ const CurrentFacts = struct {
 
 /// The names of the tool set ?1, joined (`tool_set.namesSql`).
 const set_names = rsql.Read(.{
-    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names FROM tool_set s WHERE s.tool_set_id=?1",
-    .Args = struct { set: u64 },
-    .Row = struct { names: ?protocol.Bounded(tool_set.max_names_bytes) },
+    .sql = "SELECT " ++ tool_set.namesSql("s.tool_set_id") ++ " AS names," ++ tool_set.namesSql("?2") ++ " AS loaded_names FROM tool_set s WHERE s.tool_set_id=?1",
+    .Args = struct { set: u64, loaded: u64 },
+    .Row = struct { names: ?protocol.Bounded(tool_set.max_names_bytes), loaded_names: ?protocol.Bounded(tool_set.max_names_bytes) },
     .cardinality = .optional,
 });
 
@@ -1121,7 +1121,7 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
     _ = facts.compaction.queue(a);
     _ = facts.work.queue(a);
     a.read(person_message, .{ .session = session_ref }, &facts.person);
-    a.readInto(set_names, .{ .set = current.tool_set_id }, facts.tools, &facts.tools_found);
+    a.readInto(set_names, .{ .set = current.tool_set_id, .loaded = current.loaded_tool_set_id orelse current.tool_set_id }, facts.tools, &facts.tools_found);
     facts.first.queue(a, session_ref);
     a.readEach(selected_active, .{ .session = session_ref }, 1, &facts.active);
     try runCurrent(a);
@@ -1173,6 +1173,8 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
     try capture.appendFmt(",\"revision\":\"{d}\",\"tools\":", .{current.revision});
     if (!facts.tools_found.get()) return error.CorruptStore;
     try capture.appendTools(if (facts.tools.names) |*names| names.slice() else null);
+    try capture.append(",\"loaded_tools\":");
+    try capture.appendTools(if (facts.tools.loaded_names) |*names| names.slice() else null);
     try capture.append(",\"permission_mode\":");
     try capture.appendPermissionMode(current.permission_mode);
     try capture.append(",\"instructions\":");
@@ -2110,6 +2112,7 @@ const RevisionRow = struct {
     reasoning_effort: ?protocol.ReasoningEffort,
     label: ?protocol.Bounded(protocol.max_label_bytes),
     tools: ?protocol.Bounded(tool_set.max_names_bytes),
+    loaded_tools: ?protocol.Bounded(tool_set.max_names_bytes),
     permission_mode: u8,
     instructions_id: rsql.Positive,
     instructions_length: u64,
@@ -2134,7 +2137,7 @@ pub const full_revisions = rsql.Page(.{
         .on = .{ .primary_key = "session_revision" },
         .alias = "r",
         .columns = "(SELECT max(revision) FROM session_revision WHERE session_ref=?1) AS newest,r.command_key,r.workspace,r.provider,r.model," ++
-            "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label," ++ tool_set.namesSql("r.tool_set_id") ++ " AS tools,r.permission_mode," ++
+            "r.compaction_trigger,r.output_reservation,r.reasoning_effort,r.label," ++ tool_set.namesSql("r.tool_set_id") ++ " AS tools," ++ tool_set.namesSql("coalesce(r.loaded_tool_set_id,r.tool_set_id)") ++ " AS loaded_tools,r.permission_mode," ++
             "r.instructions_content_id AS instructions_id,instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest," ++
             "r.output_schema_content_id AS output_schema_id,output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest," ++
             owner_column("instructions") ++ " AS instructions_owner," ++ owner_column("output_schema") ++ " AS output_schema_owner",
@@ -2295,6 +2298,8 @@ const RevisionChunk = struct {
         } else try capture.append("null");
         try capture.append(",\"tools\":");
         try capture.appendTools(if (row.tools) |*names| names.slice() else null);
+        try capture.append(",\"loaded_tools\":");
+        try capture.appendTools(if (row.loaded_tools) |*names| names.slice() else null);
         try capture.append(",\"permission_mode\":");
         try capture.appendPermissionMode(row.permission_mode);
     }

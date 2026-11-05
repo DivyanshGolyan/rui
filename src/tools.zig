@@ -48,15 +48,35 @@ pub const max_tools = protocol.max_tools;
 /// of its description and input schema. A tool that moves to another
 /// server is another record.
 pub fn recordDigest(member: *const Record) [32]u8 {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hashField(&hash, "rui/tool-record/v1");
-    hashField(&hash, member.name);
-    hashField(&hash, @tagName(member.owner));
-    hashField(&hash, member.server);
-    hash.update(&protocol.contentDigest(member.description));
-    hash.update(&protocol.contentDigest(member.input_schema));
-    return hash.finalResult();
+    return (RecordIdentity{
+        .name = member.name,
+        .owner = member.owner,
+        .server = member.server,
+        .description = protocol.contentDigest(member.description),
+        .input_schema = protocol.contentDigest(member.input_schema),
+    }).digest();
 }
+
+/// A record's identity without its texts: a saved record already holds
+/// their digests, so selecting it never reads or copies those texts.
+pub const RecordIdentity = struct {
+    name: []const u8,
+    owner: Owner,
+    server: []const u8,
+    description: [32]u8,
+    input_schema: [32]u8,
+
+    pub fn digest(self: *const RecordIdentity) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hashField(&hash, "rui/tool-record/v1");
+        hashField(&hash, self.name);
+        hashField(&hash, @tagName(self.owner));
+        hashField(&hash, self.server);
+        hash.update(&self.description);
+        hash.update(&self.input_schema);
+        return hash.finalResult();
+    }
+};
 
 /// The identity of an ordered set of records, which the Store saves once:
 /// its members' `recordDigest`s, in order.
