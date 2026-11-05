@@ -996,6 +996,19 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, faults)));
     }
 
+    /// Loads matching saved tools and resolves the call in one transaction.
+    pub fn findTools(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../core_tools.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
+        return self.queue().write(findToolsHeld, .{ self, binding, arena, words, refusal, faults });
+    }
+
+    fn findToolsHeld(self: *Store, binding: ActionAttemptBinding, arena: std.mem.Allocator, words: *const @import("../core_tools.zig").FindTools, refusal: ?[]const u8, faults: Faults) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, @import("domain/find_tools.zig").run(&access, binding, arena, words, refusal, faults)));
+    }
+
     /// Fails the core tool call `binding` names with `result`, in one
     /// transaction; false when a stop selected its Turn first.
     pub fn failCoreCall(self: *Store, binding: ActionAttemptBinding, result: []const u8, faults: Faults) !bool {
