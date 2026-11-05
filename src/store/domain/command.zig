@@ -498,6 +498,72 @@ pub fn deliverAgentMessage(
     return if (delivered) .delivered else .failed;
 }
 
+fn childEndingKey(buffer: *[protocol.max_key_bytes]u8, turn_id: u64) []const u8 {
+    return std.fmt.bufPrint(buffer, "rui.core/ending/{d}", .{turn_id}) catch unreachable;
+}
+
+/// The owed ending of `turn_id`, its child's Session and its parent's.
+const owed_ending_sessions = rsql.Read(.{
+    .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref FROM session_ending_owed e " ++
+        "JOIN turn t ON t.turn_id=e.turn_id JOIN session child ON child.session_ref=t.session_ref WHERE e.turn_id=?1",
+    .Args = struct { turn_id: u64 },
+    .Row = struct { child: rsql.SessionHead, parent: protocol.Bounded(protocol.session_id_bytes) },
+    .cardinality = .optional,
+});
+
+const settle_owed_ending = rsql.Write(.{
+    .sql = "DELETE FROM session_ending_owed WHERE turn_id=?1",
+    .Args = struct { turn_id: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+/// Delivers the ending of an attached child's Turn `turn_id` to its parent
+/// as a Message from the child (D39), which wakes the parent, and settles
+/// what was owed, in one transaction. With `text` null (an ending its
+/// parent's stop caused, D139) it only settles. False when nothing was
+/// owed any more. A client that already holds the ending's key keeps it,
+/// and nothing is delivered.
+pub fn deliverChildEnding(a: anytype, turn_id: u64, text: ?[]const u8, faults: Faults) !bool {
+    var key_buffer: [protocol.max_key_bytes]u8 = undefined;
+    const key = childEndingKey(&key_buffer, turn_id);
+    var owed: owed_ending_sessions.Result = undefined;
+    a.read(owed_ending_sessions, .{ .turn_id = turn_id }, &owed);
+    var saved: saved_command.Result = undefined;
+    lookupCommand(a, key, &saved);
+    var message: content_domain.Import = .ofBytes(text orelse "", false);
+    if (text != null) content_domain.lookup(a, &message);
+    try a.run();
+    const found = owed orelse {
+        try a.abandon(.{});
+        return false;
+    };
+    var receiver: target_session.Result = null;
+    readTarget(a, found.parent.slice(), &receiver);
+    try a.run();
+    a.write(settle_owed_ending, .{ .turn_id = turn_id });
+    if (faults.content_import) return error.InjectedContentImportFailure;
+    if (text) |bytes| if (saved == null) {
+        const head = (receiver orelse return error.CorruptStore).session;
+        const text_id = try content_domain.importBytes(a, &message, bytes);
+        var digest = std.crypto.hash.sha2.Sha256.init(.{});
+        digest.update("rui/core/child_ending/v1");
+        digest.update(&protocol.contentDigest(bytes));
+        try queueCommand(a, key, .message, found.parent.slice(), &digest.finalResult(), text_id, null, &.{ .accepted = true });
+        a.write(admit_sent_message, .{
+            .admission_id = try a.identity(.admission_id),
+            .session = head,
+            .key = key,
+            .content_id = text_id,
+            .position = try (try a.positions(head)).take(1),
+            .sender = found.child,
+            .sender_position = try (try a.positions(found.child)).take(1),
+        });
+    };
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    return true;
+}
+
 /// What running a `start_agent` call did.
 pub const AgentStart = enum {
     /// The agent's Session was created with the task as its first Message,

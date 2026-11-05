@@ -108,8 +108,8 @@ pub const migrations = [_]Migration{
             "CREATE TABLE host_catalog(\n slot BIGINT NOT NULL,\n tool_set_id BIGINT NOT NULL,\n PRIMARY KEY(slot),\n FOREIGN KEY(tool_set_id) REFERENCES tool_set(tool_set_id),\n CHECK(slot=1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
-    // Schema 53: a Session's parent (D27) and the stops an attached
-    // child owes (D38).
+    // Schema 53: a Session's parent (D27), the stops an attached child
+    // owes (D38), and the endings its parent is owed (D39).
     .{
         .from = 52,
         .sqlite = &.{
@@ -120,11 +120,13 @@ pub const migrations = [_]Migration{
             "CREATE INDEX session_workspace_list ON session(workspace_digest,created_seq)",
             "CREATE TABLE session_stop_owed(\n child_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n cause_ref TEXT NOT NULL REFERENCES session(session_ref),\n cause_position INTEGER NOT NULL CHECK(cause_position>0)\n) STRICT, WITHOUT ROWID",
             "CREATE INDEX session_parent ON session(parent_ref) WHERE parent_ref IS NOT NULL",
+            "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0)\n) STRICT, WITHOUT ROWID",
         },
         .mysql = &.{
             "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
             "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n PRIMARY KEY(child_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE INDEX session_parent ON session(parent_ref)",
+            "CREATE TABLE session_ending_owed(\n turn_id BIGINT NOT NULL,\n PRIMARY KEY(turn_id),\n FOREIGN KEY(turn_id) REFERENCES turn(turn_id),\n CHECK(turn_id>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
 };
@@ -597,6 +599,21 @@ pub const tables = [_]Table{
         .foreign_keys = &.{
             references("child_ref", "session", session_reference),
             references("cause_ref", "session", session_reference),
+        },
+        .without_rowid = true,
+    },
+    .{
+        // An attached child's Turn ended, and its parent is owed a Message
+        // saying how (D39, D139); the Host delivers it, which deletes the
+        // row. Host work, not a Session's state: no reader of a Session
+        // reads it.
+        .name = "session_ending_owed",
+        .columns = &.{
+            .{ .name = "turn_id", .type = .int, .check = "turn_id>0" },
+        },
+        .primary_key = &.{"turn_id"},
+        .foreign_keys = &.{
+            references("turn_id", "turn", &.{"turn_id"}),
         },
         .without_rowid = true,
     },
