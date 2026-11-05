@@ -1839,6 +1839,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
     var input = configuration;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
+    var compaction_buffer: [20]u8 = undefined;
     if (input.session == .named and ((input.compaction_trigger.present and input.compaction_trigger.value == null) or (input.reasoning_effort.present and input.reasoning_effort.value == null))) {
         var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
         var current_provider: protocol.Provider = undefined;
