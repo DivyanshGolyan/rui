@@ -233,11 +233,14 @@ def main():
     hang_root.mkdir(mode=0o700)
     entry = {"name": "slow", "url": f"http://127.0.0.1:{silent.getsockname()[1]}/mcp", "bearerToken": "t", "callTimeoutMs": 1000}
     host = launch(frame(dict(good, store=str(root / "store6"), runtimeDir=str(hang_root), mcpServers=[entry])))
-    time.sleep(1)
+    # The Host has asked the server for its tools and now waits for an answer.
+    silent.settimeout(20)
+    held, _ = silent.accept()
     started = time.monotonic()
     host.stdin.close()
     assert host.wait(timeout=5) == 0, output(host)
     assert time.monotonic() - started < 3
+    held.close()
     silent.close()
     print(f"launch frame: ready, store_locked, runtime_dir_unusable, stdin close stopped the Host in {elapsed:.2f} s, opened paused, four refusals, MCP tools listed, a collision refused, a server down tolerated")
 
