@@ -1171,25 +1171,14 @@ noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) executi
     return .admitted;
 }
 
+/// Delivers an attached child's Turn ending to its parent, or settles one
+/// its parent's stop caused (D39, D139). One Store command does it all.
 noinline fn runOwedEnding(host: *Host, owed: *const store_module.OwedEnding) execution_turn.Admission {
-    deliverOwedEnding(host, owed) catch |err| {
-        if (err != error.OutOfMemory) fenceDispatch(host, "child ending", err);
+    _ = host.store.deliverChildEnding(owed.turn_id, host.hooks.storeFaults(.action_result)) catch |err| {
+        fenceDispatch(host, "child ending", err);
         return .retry_later;
     };
     return .admitted;
-}
-
-fn deliverOwedEnding(host: *Host, owed: *const store_module.OwedEnding) !void {
-    var arena_state: std.heap.ArenaAllocator = .init(host.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const text: ?[]const u8 = if (owed.quiet) null else if (owed.ending == .done) blk: {
-        const reference = owed.answer orelse return error.CorruptStore;
-        const answer = try arena.alloc(u8, std.math.cast(usize, reference.length) orelse return error.OutOfMemory);
-        try host.store.readContent(reference, answer);
-        break :blk try std.fmt.allocPrint(arena, "Agent {s} finished. Its answer:\n\n{s}", .{ owed.child.slice(), answer });
-    } else try std.fmt.allocPrint(arena, "Agent {s} ended: {s}.", .{ owed.child.slice(), @tagName(owed.ending) });
-    _ = try host.store.deliverChildEnding(owed.turn_id, text, host.hooks.storeFaults(.action_result));
 }
 
 noinline fn runMessageAgent(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {

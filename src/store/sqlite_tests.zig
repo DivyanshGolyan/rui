@@ -8802,9 +8802,14 @@ test "child endings deliver once with their answer and sender; standalone ending
     try std.testing.expectEqual(.done, ending.ending);
     try std.testing.expect(!ending.quiet);
     try expectContent(&storage, ending.answer.?, "hello");
-    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, "Agent finished", .{}));
-    try std.testing.expect(!try storage.deliverChildEnding(ending.turn_id, "Agent finished", .{}));
+    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
+    try std.testing.expect(!try storage.deliverChildEnding(ending.turn_id, .{}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND sender_session_ref=?2", .{ parent.slice(), child.slice() }));
+    // The Message is the saved answer itself, not a copy.
+    try std.testing.expectEqual(
+        try store_testing.sqlite_only.queryU64(&storage, "SELECT outcome_content_id FROM turn WHERE turn_id=?1", .{ending.turn_id}),
+        try store_testing.sqlite_only.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{parent.slice()}),
+    );
     try std.testing.expect(try storage.nextCoreWork() == null);
     // A standalone Turn has no parent to notify.
     const solo = try configureTestSession(&storage, "ending-solo");
@@ -8831,7 +8836,7 @@ test "a client stopped child delivers a nonquiet stopped ending" {
     const ending = (try storage.nextCoreWork()).?.ending;
     try std.testing.expectEqual(.stopped, ending.ending);
     try std.testing.expect(!ending.quiet);
-    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, "Agent ended: stopped.", .{}));
+    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1 AND sender_session_ref=?2", .{ parent.slice(), child.slice() }));
 }
 
@@ -8864,7 +8869,7 @@ test "a child's core call selected before its parent stopped runs only after the
     try std.testing.expect(storage.stopOwedSession(&owed_stop, .{}) == .accepted);
     const ending = (try storage.nextCoreWork()).?.ending;
     try std.testing.expect(ending.quiet);
-    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, null, .{}));
+    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
     try std.testing.expect(try storage.nextCoreWork() == null);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code='cancelled'", .{}));
@@ -8904,7 +8909,7 @@ test "an owed stop a client's stop already settled, or a newer one replaced, run
     try std.testing.expect(storage.stopOwedSession(&owed, .{}) == .accepted);
     const ending = (try storage.nextCoreWork()).?.ending;
     try std.testing.expect(ending.quiet);
-    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, null, .{}));
+    try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
     try std.testing.expect(try storage.nextCoreWork() == null);
     try std.testing.expect(!storage.isFenced());
 }

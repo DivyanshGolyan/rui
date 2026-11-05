@@ -150,7 +150,7 @@ pub fn queueCloseOr(a: anytype, positions: *store_access.Positions, turn_id: u64
 /// delivery would wake it again (D139). The Host delivers it
 /// (`Store.nextCoreWork`).
 const owe_ending = rsql.Write(.{
-    .sql = "INSERT INTO session_ending_owed(turn_id) SELECT ?1 FROM session WHERE session_ref=?2 AND parent_ref IS NOT NULL " ++
+    .sql = "INSERT INTO session_ending_owed(turn_id,delivered) SELECT ?1,0 FROM session WHERE session_ref=?2 AND parent_ref IS NOT NULL " ++
         "AND NOT EXISTS(SELECT 1 FROM session_stop_owed WHERE child_ref=?2)",
     .Args = struct { turn_id: u64, session: []const u8 },
     .expect = .{ .at_most = 1 },

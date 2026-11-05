@@ -100,9 +100,9 @@ pub const OwedStop = struct {
 };
 
 /// An attached child's Turn ending its parent is owed as a Message (D39),
-/// as the Host delivers it: with the child's answer when it is done.
-/// `quiet` when the child's parent stopping ended it, which delivers
-/// nothing (D139) and only settles the row.
+/// as `Store.deliverChildEnding` delivers it: the child's saved answer
+/// itself when it is done. `quiet` when the child's parent stopping ended
+/// it, which delivers nothing (D139) and only settles the row.
 pub const OwedEnding = struct {
     turn_id: u64,
     child: protocol.Bounded(protocol.session_id_bytes),
@@ -120,14 +120,17 @@ pub const CoreWork = union(enum) {
     action: CoreActionInput,
 };
 
-/// The oldest owed ending. An owed stop's key starts `rui.core/stop/`,
-/// and the bytewise range finds one on any engine (D139).
+/// Whether a stop selected the owed ending `e`'s Turn, and whether that
+/// stop is one its parent caused: an owed stop's key starts
+/// `rui.core/stop/`, and the bytewise range finds one on any engine (D139).
+pub const ending_stop_sql = "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id) AS stopped," ++
+    "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id AND st.command_key>='rui.core/stop/' AND st.command_key<'rui.core/stop0') AS quiet";
+
+/// The oldest owed ending.
 const owed_ending = rsql.Read(.{
-    .sql = "SELECT e.turn_id,t.session_ref,t.outcome_code,t.outcome_content_id,c.byte_length,c.digest," ++
-        "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id) AS stopped," ++
-        "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id AND st.command_key>='rui.core/stop/' AND st.command_key<'rui.core/stop0') AS quiet " ++
-        "FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id LEFT JOIN content c ON c.content_id=t.outcome_content_id " ++
-        "ORDER BY e.turn_id LIMIT 1",
+    .sql = "SELECT e.turn_id,t.session_ref,t.outcome_code,t.outcome_content_id,c.byte_length,c.digest," ++ ending_stop_sql ++ " " ++
+        "FROM session_ending_owed e @index(session_ending_open) JOIN turn t ON t.turn_id=e.turn_id LEFT JOIN content c ON c.content_id=t.outcome_content_id " ++
+        "WHERE e.delivered=0 ORDER BY e.turn_id LIMIT 1",
     .Args = struct {},
     .Row = struct {
         turn_id: rsql.Positive,

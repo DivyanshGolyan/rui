@@ -556,9 +556,9 @@ A child that owes a stop runs none of its core tool calls; the stop cancels them
 Clients cannot use keys under `rui.core/`, which Rui keeps for its own commands, so an owed stop's key is always free.
 An owed stop whose obligation a client's stop already settled, or a newer one replaced, runs nothing.
 Every attached child Turn ending owes its parent an ordinary Message from the child, waking the parent through normal Message admission (D39, D122).
-The Host delivers done with the whole answer and other endings with their ending tag; this text is prompt text (D161).
+A done ending's Message is the child's saved answer itself, so nothing is copied; any other ending is a short line naming it, which is prompt text (D161).
 An ending caused by the parent's owed stop under `rui.core/stop/` settles quietly without admitting a Message (D139).
-Delivery settles the owed row atomically with admission, so retrying cannot duplicate the Message.
+One Store command delivers it and deletes the owed row, so a retry cannot deliver it twice.
 Dormant peers retain only saved facts.
 
 Peer composition supports one Host, which owns one Store.

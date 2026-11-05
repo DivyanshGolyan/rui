@@ -32,7 +32,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
-    .{ .schema_version = 54, .digest = 0x7661116fe0eaac05 },
+    .{ .schema_version = 54, .digest = 0x6d0030b4a7ff7f9b },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -130,12 +130,14 @@ pub const migrations = [_]Migration{
         .sqlite = &.{
             "CREATE TABLE session_stop_owed(\n child_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n cause_ref TEXT NOT NULL REFERENCES session(session_ref),\n cause_position INTEGER NOT NULL CHECK(cause_position>0)\n) STRICT, WITHOUT ROWID",
             "CREATE INDEX session_parent ON session(parent_ref) WHERE parent_ref IS NOT NULL",
-            "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0)\n) STRICT, WITHOUT ROWID",
+            "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
         },
         .mysql = &.{
             "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n PRIMARY KEY(child_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE INDEX session_parent ON session(parent_ref)",
-            "CREATE TABLE session_ending_owed(\n turn_id BIGINT NOT NULL,\n PRIMARY KEY(turn_id),\n FOREIGN KEY(turn_id) REFERENCES turn(turn_id),\n CHECK(turn_id>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE session_ending_owed(\n turn_id BIGINT NOT NULL,\n delivered BIGINT NOT NULL,\n PRIMARY KEY(turn_id),\n FOREIGN KEY(turn_id) REFERENCES turn(turn_id),\n CHECK(turn_id>0),\n CHECK(delivered BETWEEN 0 AND 1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
         },
     },
 };
@@ -613,12 +615,13 @@ pub const tables = [_]Table{
     },
     .{
         // An attached child's Turn ended, and its parent is owed a Message
-        // saying how (D39, D139); the Host delivers it, which deletes the
-        // row. Host work, not a Session's state: no reader of a Session
-        // reads it.
+        // saying how (D39, D139); the Host delivers it, which marks the row
+        // delivered (the Store never deletes, D202). Host work, not a
+        // Session's state: no reader of a Session reads it.
         .name = "session_ending_owed",
         .columns = &.{
             .{ .name = "turn_id", .type = .int, .check = "turn_id>0" },
+            .{ .name = "delivered", .type = .int, .check = "delivered BETWEEN 0 AND 1" },
         },
         .primary_key = &.{"turn_id"},
         .foreign_keys = &.{
@@ -917,6 +920,8 @@ pub const indexes = [_]Index{
     .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
     .{ .name = "session_stop_turn", .table = "session_stop", .columns = &.{"selected_turn_id"} },
     .{ .name = "session_parent", .table = "session", .columns = &.{"parent_ref"}, .where = "parent_ref IS NOT NULL" },
+    // The Host's next owed ending, among the delivered ones.
+    .{ .name = "session_ending_open", .table = "session_ending_owed", .columns = &.{ "delivered", "turn_id" } },
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
     .{ .name = "action_operation_sender_handle", .table = "action_operation", .columns = &.{"sender_handle"}, .unique = true, .where = "sender_handle IS NOT NULL" },
     .{ .name = "action_operation_acceptance", .table = "action_operation", .columns = &.{ "session_ref", "acceptance_position" } },

@@ -8395,7 +8395,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .revokeActionSender = 2,
     .nextCoreWork = 3,
     .deliverAgentMessage = 3,
-    .deliverChildEnding = 3,
+    .deliverChildEnding = 2,
     .startAgent = 4,
     .stopOwedSession = 2,
     .failCoreCall = 2,
@@ -8744,7 +8744,7 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.stopOwedSession);
             const ending = (try storage.nextCoreWork()).?.ending;
             meter.start();
-            try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, null, .{}));
+            try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
             meter.stop(.deliverChildEnding);
         }
 

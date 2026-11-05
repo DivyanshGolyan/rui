@@ -857,19 +857,18 @@ pub const Store = struct {
 
     /// The core's next work, or null: a stop an attached child owes
     /// (D38), else the next core tool call to run (D24).
-    /// Delivers an owed child ending (D39) as `nextCoreWork` names it,
-    /// with `text` the Message the parent receives, or null to only settle
-    /// it (D139).
-    pub fn deliverChildEnding(self: *Store, turn_id: u64, text: ?[]const u8, faults: Faults) !bool {
-        return self.queue().write(deliverChildEndingHeld, .{ self, turn_id, text, faults });
+    /// Delivers the owed child ending (D39) `nextCoreWork` names, or only
+    /// settles one its parent's stop caused (D139).
+    pub fn deliverChildEnding(self: *Store, turn_id: u64, faults: Faults) !bool {
+        return self.queue().write(deliverChildEndingHeld, .{ self, turn_id, faults });
     }
 
-    fn deliverChildEndingHeld(self: *Store, turn_id: u64, text: ?[]const u8, faults: Faults) !bool {
+    fn deliverChildEndingHeld(self: *Store, turn_id: u64, faults: Faults) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, text, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, faults)));
     }
 
     pub fn nextCoreWork(self: *Store) !?CoreWork {
@@ -1113,14 +1112,8 @@ pub const Store = struct {
     /// Reads a core call's whole arguments into `bytes`, which holds exactly
     /// their length, one content window at a time.
     pub fn readCoreArguments(self: *Store, input: *const CoreActionInput, bytes: []u8) !void {
-        return self.readContent(input.arguments, bytes);
-    }
-
-    /// Reads the content `reference` names whole into `bytes`, which holds
-    /// exactly its length, one content window at a time.
-    pub fn readContent(self: *Store, reference: ContentReference, bytes: []u8) !void {
         var reader: content_domain.ContentReader = undefined;
-        reader.open(try self.openContent(reference));
+        reader.open(try self.openContent(input.arguments));
         defer reader.close();
         var offset: usize = 0;
         while (offset < bytes.len) {
