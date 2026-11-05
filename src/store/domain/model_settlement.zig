@@ -22,6 +22,7 @@ const model_admission_domain = @import("model_admission.zig");
 const sqlite = @import("../sqlite.zig");
 const store_access = @import("../access.zig");
 const turn_domain = @import("turn.zig");
+const failure_class = @import("../../failure_class.zig");
 const c = sqlite.c;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptBinding = store_core.AttemptBinding;
@@ -200,9 +201,12 @@ const attempt_facts = rsql.Read(.{
         "coalesce(o.retry_due_at_ms,0)<>0 AS retry_waiting,o.auth_refresh_claimed AS refresh_claimed," ++
         rsql.session_head_columns ++ "," ++
         "CASE WHEN ?2 THEN EXISTS(SELECT 1 FROM turn t WHERE t.turn_id=o.turn_id AND t.outcome_code IS NULL " ++
-        "AND t.operation_id=o.operation_id) ELSE 0 END AS turn_open " ++
+        "AND t.operation_id=o.operation_id) ELSE 0 END AS turn_open," ++
+        "CASE WHEN ?3 THEN " ++ turn_domain.unowedChildrenSql("o.session_ref") ++ " ELSE 0 END AS unowed_children " ++
         "FROM model_operation o LEFT JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
-    .Args = struct { operation_id: u64, closes: bool },
+    // `context_full`: the settlement may end the Turn out of context,
+    // which stops the Session's attached children (D38).
+    .Args = struct { operation_id: u64, closes: bool, context_full: bool = false },
     .Row = struct {
         turn_id: i64,
         attempt_ordinal: i64,
@@ -214,6 +218,7 @@ const attempt_facts = rsql.Read(.{
         refresh_claimed: bool,
         session: rsql.SessionHead,
         turn_open: bool,
+        unowed_children: u64,
     },
     .cardinality = .optional,
 });
@@ -387,7 +392,8 @@ pub fn settleModelAttemptFailure(
     };
     var facts: attempt_facts.Result = undefined;
     var content: FailureContent = if (resolves) .of(&failure) else .{ .diagnostic = null, .report = null };
-    a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = resolves }, &facts);
+    const context_full = disposition == .context_overflow or failure_class.of(code) == .overflow;
+    a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = resolves, .context_full = resolves and context_full }, &facts);
     content.lookup(a);
     try runOperationRead(a);
     content.found();
@@ -425,7 +431,9 @@ pub fn settleModelAttemptFailure(
                     .code = code,
                     .report = optionalId(report),
                 } };
-                try turn_domain.queueCloseOr(a, try a.positions(session), binding.turn_id, outcome, error.StaleAttemptBinding);
+                const positions = try a.positions(session);
+                try turn_domain.queueCloseOr(a, positions, binding.turn_id, outcome, error.StaleAttemptBinding);
+                if (outcome.ending(false) == .context_full) turn_domain.queueOwedStops(a, &session.ref, positions.head.next_position.get() + positions.taken - 1, row.unowed_children);
             }
         },
         .refreshed => {

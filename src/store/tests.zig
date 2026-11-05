@@ -8305,7 +8305,7 @@ const EntryPoint = enum {
     admitNextActionAttempt,
     readBashExecutionInput,
     revokeActionSender,
-    nextCoreAction,
+    nextCoreWork,
     deliverAgentMessage,
     startAgent,
     failCoreCall,
@@ -8362,7 +8362,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .admitNextActionAttempt = 2,
     .readBashExecutionInput = 2,
     .revokeActionSender = 2,
-    .nextCoreAction = 3,
+    .nextCoreWork = 3,
     .deliverAgentMessage = 3,
     .startAgent = 5,
     .failCoreCall = 2,
@@ -8659,18 +8659,18 @@ test "each Store entry point takes its round budget on its common path" {
             };
             try settleCallsForTesting(storage, tmp, model, "budget-core-calls", &calls);
             meter.start();
-            const core = (try storage.nextCoreAction()).?;
-            meter.stop(.nextCoreAction);
+            const core = (try storage.nextCoreWork()).?.action;
+            meter.stop(.nextCoreWork);
             meter.start();
             try std.testing.expect(try storage.deliverAgentMessage(core.binding, session.slice(), "hi", .{}) == .delivered);
             meter.stop(.deliverAgentMessage);
-            const start = (try storage.nextCoreAction()).?;
+            const start = (try storage.nextCoreWork()).?.action;
             try std.testing.expect(start.tool == .start_agent);
             var spec = try testingAgentSpec(&.{"message_agent"}, "ask");
             meter.start();
             try std.testing.expect(try storage.startAgent(start.binding, session.slice(), "look around", true, &spec, null, .{}) == .started);
             meter.stop(.startAgent);
-            const refused = (try storage.nextCoreAction()).?;
+            const refused = (try storage.nextCoreWork()).?.action;
             meter.start();
             try std.testing.expect(try storage.failCoreCall(refused.binding, "Rui could not start the agent: task is required. Nothing was started.", .{}));
             meter.stop(.failCoreCall);

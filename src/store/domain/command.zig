@@ -649,10 +649,11 @@ pub fn failCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, res
 /// The Session a stop names, and the last Message admitted to it: the
 /// stop excludes every Message up to that one.
 const stop_target = rsql.Read(.{
-    .sql = "SELECT session_ref,workspace_key,next_position,(SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1) AS admission_cutoff " ++
+    .sql = "SELECT session_ref,workspace_key,next_position,(SELECT coalesce(max(admission_id),0) FROM message_admission WHERE session_ref=?1) AS admission_cutoff," ++
+        turn_domain.unowedChildrenSql("?1") ++ " AS unowed_children,EXISTS(SELECT 1 FROM session_stop_owed WHERE child_ref=?1) AS owes " ++
         "FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { session: rsql.SessionHead, admission_cutoff: u64 },
+    .Row = struct { session: rsql.SessionHead, admission_cutoff: u64, unowed_children: u64, owes: bool },
     .cardinality = .optional,
 });
 
@@ -684,6 +685,12 @@ const insert_stop = rsql.Write(.{
     .sql = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) VALUES(?1,@session(?2),?3,?4,?5,@now)",
     .Args = struct { key: []const u8, session: rsql.SessionHead, selected_turn_id: ?u64, admission_cutoff: u64, position: u64 },
     // A replay was classified first, so the key is free.
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+const settle_owed_stop = rsql.Write(.{
+    .sql = "DELETE FROM session_stop_owed WHERE child_ref=?1",
+    .Args = struct { session: []const u8 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -859,7 +866,12 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, faults: F
     const answer: StoredAnswer = .{ .accepted = true };
     try queueCommand(a, key, .session_stop, session, &digest, null, null, &answer);
     const selection = SessionStopSelection{ .selected_turn_id = if (turn) |open| open.turn_id.get() else null, .admission_cutoff = found.admission_cutoff };
-    a.write(insert_stop, .{ .key = key, .session = head, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = try positions.take(1) });
+    const stop_position = try positions.take(1);
+    a.write(insert_stop, .{ .key = key, .session = head, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position });
+    // A stop settles any stop this Session owed, and its attached children
+    // now owe theirs (D38).
+    if (found.owes) a.write(settle_owed_stop, .{ .session = &head.ref });
+    turn_domain.queueOwedStops(a, &head.ref, stop_position, found.unowed_children);
     var completion: protocol.SessionStopCompletion = .completed;
     var interrupted_operation_id: ?u64 = null;
     // The cancellation text's identity: its queued row reads the digest in

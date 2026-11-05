@@ -146,6 +146,27 @@ pub fn queueCloseOr(a: anytype, positions: *store_access.Positions, turn_id: u64
     });
 }
 
+/// How many attached children of the Session the parameter `parent` names
+/// do not owe a stop yet: what `queueOwedStops` inserts.
+pub fn unowedChildrenSql(comptime parent: []const u8) []const u8 {
+    return "(SELECT count(*) FROM session child @index(session_parent) WHERE child.parent_ref=" ++ parent ++
+        " AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=child.session_ref))";
+}
+
+const owe_child_stops = rsql.Write(.{
+    .sql = "INSERT INTO session_stop_owed(child_ref,cause_ref,cause_position) SELECT child.session_ref,?1,?2 FROM session child " ++
+        "WHERE child.parent_ref=?1 AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=child.session_ref)",
+    .Args = struct { parent: []const u8, position: u64 },
+    .expect = .{ .counted = .{ .otherwise = error.CorruptStore } },
+});
+
+/// Queues the stop each of `parent`'s `unowed` attached children owes
+/// (D38), because `parent` stopped or ran out of context at `position`.
+/// The Host runs each as the child's own stop (`Store.nextCoreWork`).
+pub fn queueOwedStops(a: anytype, parent: *const [protocol.session_id_bytes]u8, position: u64, unowed: u64) void {
+    if (unowed != 0) a.writeCount(owe_child_stops, .{ .parent = parent, .position = position }, unowed);
+}
+
 /// After a `stopped_turn` round: cancels the Turn it found ready.
 pub fn queueStopCompletion(a: anytype, ready: stopped_turn.Result, turn_id: u64) !void {
     const row = ready orelse return;

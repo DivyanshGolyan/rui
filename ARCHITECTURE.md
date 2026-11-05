@@ -550,6 +550,8 @@ Sending a report requires an explicit Message admission.
 The receiving Session uses the existing input boundaries, pending-prefix selection, stop exclusions and original-result guarantees.
 There is no separate inbox, callback or resident waiter for a future reply.
 A Session an attached `start_agent` call created records its creator as its **parent** (`session.parent_ref`, never itself); a standalone agent and every other Session has none.
+When a parent stops, or a Turn of it ends out of context, each of its attached children owes a stop (`session_stop_owed`, written in the same transaction, keyed `rui.core/stop/<child>/<parent>/<position>` by the parent position that caused it).
+The Host runs each owed stop before any core tool call, as that child's own ordinary Session stop, which settles the owed row and passes the stop on to the child's own children.
 Dormant peers retain only saved facts.
 
 Peer composition supports one Host, which owns one Store.
