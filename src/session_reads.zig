@@ -774,7 +774,7 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     const file = try tmp.dir.createFile(io, "output", .{ .read = true });
     defer file.close(io);
     var task: Task = .{ .io = io };
-    const outcome: protocol.ActivityItem = .{ .position = 19, .at = 1, .value = .{ .turn_ended = .{ .turn = 1, .operation = 1, .ending = .interrupted, .code = .{}, .content = null } } };
+    const outcome: protocol.ActivityItem = .{ .position = 19, .at = 1, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = .interrupted, .code = .{}, .content = null } } };
     const stop: protocol.ActivityItem = .{ .position = 20, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 5, .completion = .completed } } };
     // Another Session's Message 5 showed as its Admission and has no row:
     // nothing may begin a transcript until the stop answers it.
@@ -1604,7 +1604,7 @@ fn conversationItem(value: protocol.ActivityItem.Value) bool {
 test "a live page's beginning precedes its first item, without repeating or skipping one" {
     const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
     const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .applied, .content = content, .admitted_at = 1 };
-    const outcome: protocol.ActivityItem.TurnEnded = .{ .turn = 1, .operation = 1, .ending = .interrupted, .code = .{}, .content = null };
+    const outcome: protocol.ActivityItem.TurnEnded = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = .interrupted, .code = .{}, .content = null };
     const Case = struct { item: protocol.ActivityItem, cursor: ?protocol_reply.ConversationCursor };
     for ([_]Case{
         .{ .item = .{ .position = 5, .at = 1, .value = .{ .user = message } }, .cursor = .{ .end = 9, .before_position = 5 } },
@@ -1794,7 +1794,7 @@ const FakeHost = struct {
         if (position <= self.history) {
             var code: Bounded(protocol.max_code_bytes) = .{};
             code.set("completed") catch unreachable;
-            return .{ .position = position, .at = 1, .value = .{ .turn_ended = .{ .turn = position, .operation = position, .ending = .done, .code = code, .content = content() } } };
+            return .{ .position = position, .at = 1, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = position, .operation = position, .ending = .done, .code = code, .content = content() } } };
         }
         const tail = self.tail[position - self.history - 1];
         var value = tail.value;

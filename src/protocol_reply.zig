@@ -148,8 +148,8 @@ pub const ActivityPage = struct {
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
         const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
-        const TurnEnded = struct { turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
-        const ApprovalRequested = struct { action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
+        const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
+        const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
@@ -202,10 +202,10 @@ pub const ActivityPage = struct {
             const after = fact.position > position or (ordinal != null and fact.position == position and fact.ordinal > ordinal.?);
             const before = fact.position < position or (ordinal != null and fact.position == position and fact.ordinal < ordinal.?);
             if (fact.position > page.facts.end or (position != 0 and !(if (cursor.direction == .forward) after else before)) or
-                // Only a Tool Result has an ordinal of its own; an approval
-                // request follows its call at ordinal 1.
+                // Tool Results have call ordinals; an own approval follows
+                // its call at ordinal 1, while a forwarded approval uses 0.
                 (switch (item.value) {
-                    .approval_requested => fact.ordinal != 1,
+                    .approval_requested => fact.ordinal > 1,
                     // A revision's changes share its position, one ordinal each.
                     .session_changed => false,
                     else => (item.value == .tool_result) != (fact.ordinal != 0),
@@ -223,7 +223,10 @@ pub const ActivityPage = struct {
                     fact.value = .{ .sent = .{ .admission = try id(sent.admission, false), .admitted_at = try id(sent.admitted_at, false), .target = try sent.target.peer(), .content = try content(sent.content) } };
                     if (fact.at != fact.value.sent.admitted_at) return error.InvalidActivityPage;
                 },
-                .approval_requested => |request| fact.value = .{ .approval_requested = .{ .action = try id(request.action, false), .operation = try id(request.operation, false), .call_ordinal = try id(request.call_ordinal, true) } },
+                .approval_requested => |request| {
+                    if (!protocol.validSessionId(request.session.slice())) return error.InvalidActivityPage;
+                    fact.value = .{ .approval_requested = .{ .action = try id(request.action, false), .operation = try id(request.operation, false), .session = request.session.value, .call_ordinal = try id(request.call_ordinal, true) } };
+                },
                 .session_changed => |change| fact.value = .{ .session_changed = .{ .revision = try id(change.revision, false), .field = change.field } },
                 .compacted => |compacted| fact.value = .{ .compacted = .{ .operation = try id(compacted.operation, false), .dropped = try id(compacted.dropped, true) } },
                 .send_failed => |failed| {
@@ -249,6 +252,7 @@ pub const ActivityPage = struct {
                     fact.value = .{ .call = value };
                 },
                 .turn_ended => |ended| {
+                    if (!protocol.validSessionId(ended.session.slice())) return error.InvalidActivityPage;
                     // A done Turn has its answer and a failed one may have
                     // its report; a stopped or interrupted one has neither,
                     // and each was judged from its own saved code.
@@ -257,7 +261,7 @@ pub const ActivityPage = struct {
                     const cancelled = ending == .stopped or ending == .interrupted;
                     if (ended.code.slice().len == 0 or done != ended.code.eql("completed") or cancelled != ended.code.eql("cancelled") or
                         (done and ended.content == null) or (cancelled and ended.content != null)) return error.InvalidActivityPage;
-                    fact.value = .{ .turn_ended = .{ .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try content(reference) else null } };
+                    fact.value = .{ .turn_ended = .{ .session = ended.session.value, .turn = try id(ended.turn, false), .operation = try id(ended.operation, false), .ending = ending, .code = ended.code.value, .content = if (ended.content) |reference| try content(reference) else null } };
                 },
                 .stop => |stop| {
                     if (stop.turn == null and stop.completion.value == .pending) return error.InvalidActivityPage;
@@ -1884,7 +1888,7 @@ test "a turn_ended row's ending agrees with its saved code and content, and a fi
         try code.set(case.code);
         var facts: protocol.ActivityFacts = .{ .end = 2, .count = 2, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
         facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .assistant = .{ .content = content, .final = case.ending == .done } } };
-        facts.items[1] = .{ .position = 2, .at = 1, .value = .{ .turn_ended = .{ .turn = 1, .operation = 1, .ending = case.ending, .code = code, .content = case.content } } };
+        facts.items[1] = .{ .position = 2, .at = 1, .value = .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = case.ending, .code = code, .content = case.content } } };
         try facts.work.workspace.set("/w");
         var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
@@ -3437,4 +3441,44 @@ test "a hosted call travels as its presentation alone, in the conversation and t
     try facts.writeJson(&writer);
     const activity = try ActivityPage.parse(writer.buffered(), .{});
     try std.testing.expectEqualDeep(presentation, activity.facts.items[0].value.hosted_call);
+}
+
+test "approval activity accepts own and forwarded ordinals and validates child session" {
+    for ([_]u64{ 0, 1, 2 }) |ordinal| {
+        for ([_][]const u8{ "k7m2qx", "BAD" }) |session| {
+            var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+            facts.items[0] = .{ .position = 1, .ordinal = ordinal, .at = 1, .value = .{ .approval_requested = .{ .session = .{}, .action = 1, .operation = 1, .call_ordinal = 0 } } };
+            try facts.items[0].value.approval_requested.session.set(session);
+            try facts.work.workspace.set("/w");
+            var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            try facts.writeJson(&writer);
+            if (ordinal < 2 and protocol.validSessionId(session)) {
+                const page = try ActivityPage.parse(writer.buffered(), .{});
+                try std.testing.expectEqualStrings(session, page.facts.items[0].value.approval_requested.session.slice());
+            } else {
+                try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+            }
+        }
+    }
+}
+
+test "approval and ending activity require a valid explicit child session" {
+    for ([_]protocol.ActivityItem.Value{
+        .{ .approval_requested = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .action = 1, .operation = 1, .call_ordinal = 0 } },
+        .{ .turn_ended = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = .stopped, .code = .{ .bytes = "cancelled".* ++ @as([protocol.max_code_bytes - 9]u8, undefined), .len = 9 }, .content = null } },
+    }) |value| {
+        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        facts.items[0] = .{ .position = 1, .at = 1, .value = value };
+        try facts.work.workspace.set("/w");
+        var buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try facts.writeJson(&writer);
+        _ = try ActivityPage.parse(writer.buffered(), .{});
+        for ([_][]const u8{ "", "\"session\":\"BAD\",", "\"session\":null," }) |replacement| {
+            const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, writer.buffered(), "\"session\":\"k7m2qx\",", replacement);
+            defer std.testing.allocator.free(malformed);
+            try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(malformed, .{}));
+        }
+    }
 }

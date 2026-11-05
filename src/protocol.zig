@@ -827,7 +827,7 @@ pub const ActivityItem = struct {
     pub const Assistant = struct { content: Content, final: bool = false };
     /// `code` is the saved code the ending was judged from; `content` a
     /// done Turn's answer or a failed one's report.
-    pub const TurnEnded = struct { turn: u64, operation: u64, ending: TurnEnding, code: Bounded(max_code_bytes), content: ?Content };
+    pub const TurnEnded = struct { session: Bounded(session_id_bytes), turn: u64, operation: u64, ending: TurnEnding, code: Bounded(max_code_bytes), content: ?Content };
     pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: SessionStopCompletion };
     /// A Message this Session sent: admitted to `target`, or rejected there.
     pub const Sent = struct { admission: u64, target: NamedPeer, content: Content, admitted_at: u64 };
@@ -835,7 +835,7 @@ pub const ActivityItem = struct {
     /// A call that waits on a person's decision because the Session asked
     /// for approval when it was made: `action` is the id a
     /// `permission_decision` names. The row follows its call at ordinal 1.
-    pub const ApprovalRequested = struct { action: u64, operation: u64, call_ordinal: u64 };
+    pub const ApprovalRequested = struct { session: Bounded(session_id_bytes), action: u64, operation: u64, call_ordinal: u64 };
     /// One setting a revision changed, at the position the revision was
     /// accepted; a revision's changes share it, one ordinal each.
     pub const SessionChanged = struct { revision: u64, field: SessionField };
@@ -864,7 +864,7 @@ pub const ActivityItem = struct {
         /// A call the provider ran, shown by its line alone. Hole: presentation.
         pub const hosted_call = .{ "{\"presentation\":", Hole{ .json = ToolPresentation }, "}" };
         /// Holes: turn, operation, ending, code, content.
-        pub const turn_ended = .{ "{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"ending\":\"", Hole{ .tag = TurnEnding }, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
+        pub const turn_ended = .{ "{\"session\":", Hole{ .string = session_id_bytes }, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"ending\":\"", Hole{ .tag = TurnEnding }, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"content\":", Hole{ .optional_json = Content }, "}" };
         /// Holes: key, turn, cutoff, completion.
         pub const stop = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"cutoff\":\"", Hole.decimal, "\",\"completion\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
         /// Holes: admission, admitted at, target, content.
@@ -872,7 +872,7 @@ pub const ActivityItem = struct {
         /// Holes: key, target, code.
         pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = NamedPeer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
         /// Holes: action, operation, call ordinal.
-        pub const approval_requested = .{ "{\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\"}" };
+        pub const approval_requested = .{ "{\"session\":", Hole{ .string = session_id_bytes }, ",\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\"}" };
         /// Holes: revision, field.
         pub const session_changed = .{ "{\"revision\":\"", Hole.decimal, "\",\"field\":\"", Hole{ .tag = SessionField }, "\"}" };
         /// Holes: operation, dropped.
@@ -896,7 +896,7 @@ pub const ActivityItem = struct {
             }),
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
-            .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.action, request.operation, request.call_ordinal }),
+            .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal }),
             .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field }),
             .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
             .assistant => |assistant| try writeShape(out, value_shapes.assistant, .{ assistant.content, assistant.final }),
@@ -908,7 +908,7 @@ pub const ActivityItem = struct {
                 for (call.fields, &fields) |field, *content| content.* = .{ .length = field.length, .digest = field.digest };
                 try writeShape(out, value_shapes.call, .{ call.operation, call.turn, call.call_ordinal, call.action, call.rejection, fields[0], fields[1], fields[2] });
             },
-            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.turn, ended.operation, ended.ending, ended.code.slice(), ended.content }),
+            .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.session.slice(), ended.turn, ended.operation, ended.ending, ended.code.slice(), ended.content }),
             .stop => |stop| try writeShape(out, value_shapes.stop, .{ stop.key.slice(), stop.turn, stop.cutoff, stop.completion }),
         }
         try writeShape(out, tail, .{});

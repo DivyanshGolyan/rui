@@ -11,6 +11,7 @@ const reads_domain = @import("reads.zig");
 const sqlite = @import("../sqlite.zig");
 const store_access = @import("../access.zig");
 const turn_domain = @import("turn.zig");
+const forward_domain = @import("forward.zig");
 const ContentReference = content_domain.ContentReference;
 const Faults = store_core.Faults;
 
@@ -119,10 +120,11 @@ pub const OwedEnding = struct {
 
 /// The core's next piece of work: a stop a child owes comes first, so
 /// none of its calls runs after its parent stopped, then an ending a
-/// parent is owed.
+/// parent is owed, then one ancestor feed hop, before core tool calls.
 pub const CoreWork = union(enum) {
     stop: OwedStop,
     ending: OwedEnding,
+    forward: u64,
     action: CoreActionInput,
 };
 
@@ -170,8 +172,10 @@ pub fn nextCoreWork(a: anytype) !?CoreWork {
     var next: next_core_action.Result = undefined;
     const names: CoreNames = .of();
     var ending: owed_ending.Result = undefined;
+    var forward: forward_domain.next.Result = undefined;
     a.read(owed_stop, .{}, &stop);
     a.read(owed_ending, .{}, &ending);
+    a.read(forward_domain.next, .{}, &forward);
     a.read(next_core_action, .{ .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &next);
     try a.run();
     if (stop) |owed| {
@@ -190,6 +194,7 @@ pub fn nextCoreWork(a: anytype) !?CoreWork {
             .quiet = owed.quiet,
         } };
     }
+    if (forward) |owed| return .{ .forward = owed.forward_id.get() };
     const found = next orelse return null;
     return .{ .action = .{
         .binding = .{ .turn_id = found.turn_id.get(), .parent_operation_id = found.parent_operation_id.get(), .action_id = found.action_id.get() },

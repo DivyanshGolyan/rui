@@ -46,9 +46,12 @@ function narrowed(entry: FeedEntry): void {
 			break;
 		}
 		case "turn_ended": {
+			const sessionId: string = entry.sessionId;
+			// @ts-expect-error The wire session field is exposed as sessionId.
+			void entry.session;
 			const ending: "done" | "context_full" | "provider_refused" | "provider_unavailable" | "stopped" | "interrupted" | "failed" = entry.ending;
 			const content: Schemas["ActivityItemContent"] | null = entry.content;
-			void [ending, content];
+			void [sessionId, ending, content];
 			break;
 		}
 		case "stop": {
@@ -62,11 +65,14 @@ function narrowed(entry: FeedEntry): void {
 			break;
 		}
 		case "approval_requested": {
+			const sessionId: string = entry.sessionId;
+			// @ts-expect-error The wire session field is exposed as sessionId.
+			void entry.session;
 			const action: string = entry.action;
 			const ordinal: string = entry.callOrdinal;
 			// @ts-expect-error Other kinds' fields must not be accepted.
 			void entry.final;
-			void [action, ordinal];
+			void [sessionId, action, ordinal];
 			break;
 		}
 		case "session_changed": {
@@ -94,7 +100,7 @@ test("feed camelCases only row keys, preserving nested wire values and content r
 	const rows = [
 		{ position: "1", ordinal: "0", at: "1", value: { tool_result: { content, presentation } } },
 		{ position: "2", ordinal: "0", at: "1", value: { hosted_call: { presentation } } },
-		{ position: "3", ordinal: "0", at: "1", value: { approval_requested: { action: "8", operation: "9", call_ordinal: "10" } } },
+		{ position: "3", ordinal: "0", at: "1", value: { approval_requested: { session: "ch1ld1", action: "8", operation: "9", call_ordinal: "10" } } },
 	];
 	const link: Link = { exchange: async (path) => path === "/v1/activity-content" ? Buffer.from("ok") : Buffer.from(JSON.stringify({ items: rows, more: false, end: "3" })) };
 	const entries = [];
@@ -108,6 +114,8 @@ test("feed camelCases only row keys, preserving nested wire values and content r
 	assert.deepEqual(entries[1].presentation, presentation);
 	assert.ok(entries[2]?.kind === "approval_requested");
 	assert.equal(entries[2].callOrdinal, "10");
+	assert.equal(entries[2].sessionId, "ch1ld1");
+	assert.equal("session" in entries[2], false);
 	assert.equal("call_ordinal" in entries[2], false);
 });
 

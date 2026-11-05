@@ -62,7 +62,7 @@ export interface ListActivityOptions {
 
 /** Maps only the row's own keys; nested values retain their wire spelling (D128). */
 type CamelKey<Key extends string> = Key extends `${infer Head}_${infer Tail}` ? `${Head}${Capitalize<CamelKey<Tail>>}` : Key;
-type CamelRow<Payload> = { [Key in keyof Payload as Key extends string ? CamelKey<Key> : Key]: Payload[Key] };
+type CamelRow<Payload> = { [Key in keyof Payload as Key extends "session" ? "sessionId" : Key extends string ? CamelKey<Key> : Key]: Payload[Key] };
 
 type EntryText = {
 	/** The row's text, when this kind carries it and it fits inline. */
@@ -94,6 +94,7 @@ export function decodeCursor(cursor: string): { position: string; ordinal: strin
 }
 
 function camel(name: string): string {
+	if (name === "session") return "sessionId";
 	return name.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
 }
 
