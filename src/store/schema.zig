@@ -32,7 +32,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
-    .{ .schema_version = 54, .digest = 0x6ed9b1d6cf75e1cb },
+    .{ .schema_version = 54, .digest = 0x631873025b63f240 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -136,7 +136,8 @@ pub const migrations = [_]Migration{
     .{
         .from = 53,
         .sqlite = &.{
-            "CREATE TABLE session_stop_owed(\n child_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n cause_ref TEXT NOT NULL REFERENCES session(session_ref),\n cause_position INTEGER NOT NULL CHECK(cause_position>0)\n) STRICT, WITHOUT ROWID",
+            "CREATE TABLE session_stop_owed(\n child_ref TEXT NOT NULL REFERENCES session(session_ref),\n cause_ref TEXT NOT NULL REFERENCES session(session_ref),\n cause_position INTEGER NOT NULL CHECK(cause_position>0),\n settled INTEGER NOT NULL CHECK(settled BETWEEN 0 AND 1),\n PRIMARY KEY(child_ref,cause_ref,cause_position)\n) STRICT, WITHOUT ROWID",
+            "CREATE INDEX session_stop_open ON session_stop_owed(settled,child_ref)",
             "CREATE INDEX session_parent ON session(parent_ref) WHERE parent_ref IS NOT NULL",
             "ALTER TABLE store_meta RENAME TO store_meta_before_54",
             "CREATE TABLE store_meta(\n meta_key TEXT PRIMARY KEY NOT NULL CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id')),\n meta_value TEXT NOT NULL\n) STRICT",
@@ -147,7 +148,8 @@ pub const migrations = [_]Migration{
             "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
         },
         .mysql = &.{
-            "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n PRIMARY KEY(child_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n settled BIGINT NOT NULL,\n PRIMARY KEY(child_ref,cause_ref,cause_position),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0),\n CHECK(settled BETWEEN 0 AND 1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE INDEX session_stop_open ON session_stop_owed(settled,child_ref)",
             "CREATE INDEX session_parent ON session(parent_ref)",
             "ALTER TABLE store_meta DROP CHECK store_meta_chk_1, ADD CHECK((meta_key='wire_version' OR meta_key='store_selector' OR meta_key='format' OR meta_key='store_id'))",
             "CREATE TABLE store_owner(\n owner_key BIGINT NOT NULL,\n epoch BIGINT NOT NULL,\n commit_seq BIGINT NOT NULL,\n PRIMARY KEY(owner_key),\n CHECK(owner_key=1),\n CHECK(epoch>=0),\n CHECK(commit_seq>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -677,15 +679,16 @@ pub const tables = [_]Table{
     .{
         // An attached child owes a stop because its parent stopped or ran
         // out of context (D38); the Host runs it as the child's own stop,
-        // which deletes the row. The first cause names the stop's key. Host
+        // which settles the row. The first cause names the stop's key. Host
         // work, not a Session's state: no reader of a Session reads it.
         .name = "session_stop_owed",
         .columns = &.{
             .{ .name = "child_ref", .type = .{ .text = null } },
             .{ .name = "cause_ref", .type = .{ .text = null } },
             .{ .name = "cause_position", .type = .int, .check = "cause_position>0" },
+            .{ .name = "settled", .type = .int, .check = "settled BETWEEN 0 AND 1" },
         },
-        .primary_key = &.{"child_ref"},
+        .primary_key = &.{ "child_ref", "cause_ref", "cause_position" },
         .foreign_keys = &.{
             references("child_ref", "session", session_reference),
             references("cause_ref", "session", session_reference),
@@ -999,6 +1002,8 @@ pub const indexes = [_]Index{
     .{ .name = "session_stop_position", .table = "session_stop", .columns = &.{ "session_ref", "position" } },
     .{ .name = "session_stop_turn", .table = "session_stop", .columns = &.{"selected_turn_id"} },
     .{ .name = "session_parent", .table = "session", .columns = &.{"parent_ref"}, .where = "parent_ref IS NOT NULL" },
+    // The Host's next owed stop, skipping settled rows.
+    .{ .name = "session_stop_open", .table = "session_stop_owed", .columns = &.{ "settled", "child_ref" } },
     // The Host's next owed ending, among the delivered ones.
     .{ .name = "session_ending_open", .table = "session_ending_owed", .columns = &.{ "delivered", "turn_id" } },
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },

@@ -456,7 +456,7 @@ pub fn Read(comptime spec: ReadSpec) type {
 pub fn Write(comptime spec: WriteSpec) type {
     const parsed = comptime accepted(.write, spec.sql, spec.Args, void, false);
     comptime if (expectError(parsed.statement, spec.expect)) |message| @compileError(message ++ ": " ++ spec.sql);
-    comptime if (deleteError(parsed.statement, spec.sql, @import("builtin").is_test)) |message| @compileError(message ++ ": " ++ spec.sql);
+    comptime if (deleteError(parsed.statement, @import("builtin").is_test)) |message| @compileError(message ++ ": " ++ spec.sql);
     return struct {
         pub const kind: StatementKind = .write;
         /// What `isStatement` checks this type was made from.
@@ -548,16 +548,8 @@ fn expectError(comptime statement: Statement, comptime expect: Expect) ?[]const 
 
 /// Why `statement` may not run in a build, or null: the MySQL login has
 /// no DELETE (D202), so only test builds delete.
-/// Runtime DELETEs that predate the D202 gate, each owed a rewrite before
-/// the MySQL engine's live conformance (8d): the list only shrinks.
-const delete_debt = [_][]const u8{
-    // K2 (#926): settling an owed stop. Owner: lane K.
-    "DELETE FROM session_stop_owed WHERE child_ref=?1",
-};
-
-fn deleteError(comptime statement: Statement, comptime sql: []const u8, comptime is_test: bool) ?[]const u8 {
+fn deleteError(comptime statement: Statement, comptime is_test: bool) ?[]const u8 {
     if (statement != .delete or is_test) return null;
-    for (delete_debt) |owed| if (std.mem.eql(u8, owed, sql)) return null;
     return "rsql: the Store's MySQL login may not DELETE (D202); only tests delete";
 }
 
@@ -2933,10 +2925,10 @@ test "MySQL's INSERT leaves out the columns only other engines have, with their 
 
 test "a typed DELETE builds only into tests (D202)" {
     const parsed = comptime accepted(.write, "DELETE FROM content WHERE content_id=?1", struct { content_id: u64 }, void, false);
-    try std.testing.expectEqualStrings("rsql: the Store's MySQL login may not DELETE (D202); only tests delete", comptime deleteError(parsed.statement, "DELETE FROM content WHERE content_id=?1", false).?);
-    try std.testing.expectEqual(@as(?[]const u8, null), comptime deleteError(parsed.statement, "DELETE FROM content WHERE content_id=?1", true));
+    try std.testing.expectEqualStrings("rsql: the Store's MySQL login may not DELETE (D202); only tests delete", comptime deleteError(parsed.statement, false).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime deleteError(parsed.statement, true));
     const update = comptime accepted(.write, "UPDATE content SET private=1 WHERE content_id=?1", struct { content_id: u64 }, void, false);
-    try std.testing.expectEqual(@as(?[]const u8, null), comptime deleteError(update.statement, "UPDATE content SET private=1 WHERE content_id=?1", false));
+    try std.testing.expectEqual(@as(?[]const u8, null), comptime deleteError(update.statement, false));
 }
 
 test "a statement calls only the functions every engine spells, by argument count, and no CAST" {

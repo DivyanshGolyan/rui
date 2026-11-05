@@ -2245,7 +2245,8 @@ fn configure(state: *State, arguments: []const u8) bool {
         return false;
     };
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
-    const parsed = cli_args.live_configure.parse(tokens[0..count], nothing.allocator()) catch {
+    var problem: cli_args.Refusal = undefined;
+    const parsed = cli_args.live_configure.parse(tokens[0..count], nothing.allocator(), &problem) catch {
         state.say(.attention, configure_usage, .{});
         return false;
     };
@@ -4631,11 +4632,11 @@ test "arrows move the command list's highlight, and Enter takes it: a word anoth
     try std.testing.expectEqual(@as(usize, 0), state.commands.?.highlight);
     draft = try typeText(&state, "/configure --permission-mode ");
     const modes = state.commands.?.list;
-    try std.testing.expectEqualStrings("bypass", modes.shown()[0].word);
+    try std.testing.expectEqualStrings("ask", modes.shown()[0].word);
     // A value is whole: Enter holds the setting.
     state.commands.?.highlight = 1;
     try expectEffects(&.{.clear_draft}, try submit(&state, draft));
-    try std.testing.expectEqualStrings("ask", state.settings.get(startOption("permission-mode").?).?);
+    try std.testing.expectEqualStrings("bypass", state.settings.get(startOption("permission-mode").?).?);
 }
 
 test "a short screen lists the commands it has rows for and counts the rest" {

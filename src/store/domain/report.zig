@@ -563,7 +563,7 @@ fn writeToolNames(writer: *std.Io.Writer, names: []const []const u8) std.Io.Writ
     try writer.writeAll("]");
 }
 
-const settings_columns = "s.session_ref,s.workspace,s.provider,s.model," ++ tool_set.namesSql("s.tool_set_id") ++ " AS tools,s.permission_mode,s.label,s.created_at,s.revision,s.next_position," ++
+const settings_columns = "s.session_ref,s.parent_ref,s.workspace,s.provider,s.model," ++ tool_set.namesSql("s.tool_set_id") ++ " AS tools,s.permission_mode,s.label,s.created_at,s.revision,s.next_position," ++
     "(" ++ person_message_sql ++ ") AS from_person_at,";
 
 /// One list row: the Session's settings, its latest Message from no
@@ -589,6 +589,7 @@ const list_row_bare = rsql.Read(.{
 
 const ListRow = struct {
     session_ref: SessionText,
+    parent_ref: ?protocol.Bounded(protocol.session_id_bytes),
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
     provider: protocol.Provider,
     model: protocol.Bounded(protocol.max_model_bytes),
@@ -710,6 +711,7 @@ fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: 
     const peers: protocol.PeerFacts = .{ .from_person_at = optional(row.from_person_at) };
     const fields: protocol.SessionRow.Fields = .{
         .reference = row.session_ref.slice(),
+        .parent = if (row.parent_ref) |*parent| parent.slice() else null,
         .workspace = row.workspace.slice(),
         .provider = row.provider,
         .model = row.model.slice(),
@@ -1148,6 +1150,8 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
 
     try capture.append("{\"reference\":");
     try capture.appendJsonString(session_ref);
+    try capture.append(",\"parent\":");
+    if (current.parent_ref) |*parent| try capture.appendJsonString(parent.slice()) else try capture.append("null");
     try capture.append(",\"workspace\":");
     try capture.appendJsonString(current.workspace.slice());
     try capture.append(",\"provider\":");

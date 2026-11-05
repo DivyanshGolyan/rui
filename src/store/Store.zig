@@ -1267,8 +1267,9 @@ const accepted_settlement_growth = 14352;
 comptime {
     // The settlement batch is 19240 bytes: the original 14480 plus 4760
     // for per-batch call names, membership flags and their lookup visitor.
-    // Configure reads remain 4968 bytes. Keep both sizes explicit.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 4968 or scratch_bytes != 19240)
+    // The configure reads use 4992, including the saved parent reference.
+    // Exact, so a change to either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 4992 or scratch_bytes != 19240)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1278,7 +1279,7 @@ comptime {
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
 /// resident for the Store's life: at most 19240 bytes, a settlement
-/// batch's size, of which a configure writes 4968.
+/// batch's size; a configure uses 4992.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
