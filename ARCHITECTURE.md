@@ -2365,7 +2365,8 @@ Missing or unreadable future defaults do not prevent a Host from serving existin
 A pin with invalid syntax rejects fresh CLI creation before capture rather than falling back to the recommendation.
 
 CLI and TUI clients supply explicit fresh spec values: a saved effort if listed, otherwise the product effort `low` if listed, otherwise the lowest listed effort, otherwise no effort.
-ChatGPT sign-in's default compactAt is the provider fact 244,800 tokens, because ChatGPT serves 272,000 even when models.dev lists 1,050,000.
+ChatGPT sign-in's default compactAt is the smaller of the provider fact 244,800 tokens and 90% of the catalog window, using the unlisted context estimate for a missing or null window.
+This keeps 244,800 tokens for large windows but uses 115,200 for a 128,000-token window such as `gpt-5.3-codex-spark`, including when resetting compactAt to its default.
 Other providers default to 90% of the catalog window, or 115,200 tokens for a missing or null window.
 These client choices do not change existing Sessions, the Host's fixed fallback for stored null thresholds, or frozen Operations.
 

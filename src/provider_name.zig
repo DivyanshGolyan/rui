@@ -76,8 +76,8 @@ pub const Facts = struct {
     sign_in: []const u8,
     credential: Credential,
     model_list: ModelList,
-    /// Client product default, not a model fact or an admission cap. Null
-    /// means the client chooses its usual share of the catalog window.
+    /// Client product default, capped by the client's usual share of the
+    /// catalog window. Null uses that share alone; this is not an admission cap.
     default_compaction_trigger: ?u64 = null,
     /// The tools the provider runs on its side, by the names a `tools` list
     /// gives them. A Session of another provider cannot name them.

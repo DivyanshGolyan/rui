@@ -406,7 +406,8 @@ pub const OptionalFile = struct {
 pub fn defaultCompactionTrigger(provider: @import("provider_name.zig").Provider, model: []const u8) u64 {
     const capability = @import("model_capability.zig");
     const defaults = @import("product_defaults.zig");
-    return provider.facts().default_compaction_trigger orelse capability.contextWindow(model) * defaults.compaction_trigger_percent / 100;
+    const model_trigger = capability.contextWindow(model) * defaults.compaction_trigger_percent / 100;
+    return @min(provider.facts().default_compaction_trigger orelse model_trigger, model_trigger);
 }
 
 pub fn defaultStartEffort(model: []const u8, saved: ?@import("model_capability.zig").ReasoningEffort) OptionalPolicy {
@@ -421,11 +422,16 @@ pub fn defaultStartEffort(model: []const u8, saved: ?@import("model_capability.z
     return .{ .present = true, .value = if (effort) |value| @tagName(value) else null };
 }
 
+test "client compaction defaults fit small ChatGPT model windows" {
+    try std.testing.expectEqual(@as(u64, 115200), defaultCompactionTrigger(.codex, "gpt-5.3-codex-spark"));
+    try std.testing.expectEqual(@as(u64, 115200), defaultCompactionTrigger(.openai, "gpt-5.3-codex-spark"));
+}
+
 test "client defaults use provider compaction facts and listed efforts" {
     try std.testing.expectEqual(@as(u64, 244800), defaultCompactionTrigger(.codex, "gpt-6.1-sol"));
     try std.testing.expectEqual(@as(u64, 945000), defaultCompactionTrigger(.openai, "gpt-6.1-sol"));
     try std.testing.expectEqual(@as(u64, 115200), defaultCompactionTrigger(.openai, "unlisted-model"));
-    try std.testing.expectEqual(@as(u64, 244800), defaultCompactionTrigger(.codex, "unlisted-model"));
+    try std.testing.expectEqual(@as(u64, 115200), defaultCompactionTrigger(.codex, "unlisted-model"));
     try std.testing.expectEqualStrings("max", defaultStartEffort("gpt-6.1-sol", .max).value.?);
     try std.testing.expectEqualStrings("low", defaultStartEffort("gpt-5.5", .max).value.?);
     try std.testing.expectEqualStrings("low", defaultStartEffort("gpt-6-luna", null).value.?);

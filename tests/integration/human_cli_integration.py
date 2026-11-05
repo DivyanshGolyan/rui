@@ -420,6 +420,21 @@ def compiled_model_cases():
 def compaction_settings_case(home, store, workspace, socket_path):
     from control_integration import raw_request
 
+    # Fresh defaults and named resets must both fit the smaller catalog window.
+    small = create_session(home, "--store", store, "--workspace", workspace,
+        "--provider", "codex", "--model", "gpt-5.3-codex-spark")
+    for flags, expected in (((), "115200"),
+                            (("--compaction-trigger", "12345"), "12345"),
+                            (("--compaction-trigger", "default"), "115200")):
+        if flags:
+            reply = json.loads(run(home, "session", "configure", "--store", store,
+                "--session", small, *flags))
+            assert reply["answer"]["status"] == "accepted", reply
+        settings = json.loads(run(home, "session", "inspect", "--store", store,
+            "--session", small))["session"]
+        assert settings["model"] == "gpt-5.3-codex-spark", settings
+        assert settings["compaction_trigger"] == settings["compaction_trigger_override"] == expected, settings
+
     # Pages word-wrap; phrases are checked across their soft breaks.
     flat = lambda text: " ".join(text.split())
     session = create_session(home, "--store", store,
