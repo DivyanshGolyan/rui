@@ -1,5 +1,5 @@
 //! The MySQL wire client against a real MySQL 8.4 server, through the
-//! blocking test driver (src/store/wire/mysql_driver.zig).
+//! Store's blocking connection (src/store/wire/mysql_connection.zig).
 //! mysql_wire_integration.py starts the server and passes its socket, port
 //! and passwords in the environment; this binary fails rather than skips
 //! when they are missing.
@@ -8,15 +8,17 @@
 //! sees the cold-cache logins before any login fills it. Tests run in
 //! declaration order.
 const std = @import("std");
-const mysql_driver = @import("mysql_driver");
-const mysql = mysql_driver.mysql;
-const Driver = mysql_driver.Driver;
+const mysql_connection = @import("mysql_connection");
+const mysql = mysql_connection.mysql;
+const Driver = mysql_connection.Connection;
 
 const Server = struct {
     socket: []const u8,
     port: u16,
     password: []const u8,
     root_password: []const u8,
+    /// The certificate the server presents for 127.0.0.1, its own CA.
+    ca_file: []const u8,
     environ: std.process.Environ.Map,
 
     fn init() !Server {
@@ -27,6 +29,7 @@ const Server = struct {
             .port = try std.fmt.parseInt(u16, environ.get("RUI_MYSQL_PORT") orelse return error.MissingServer, 10),
             .password = environ.get("RUI_MYSQL_PASSWORD") orelse return error.MissingServer,
             .root_password = environ.get("RUI_MYSQL_ROOT_PASSWORD") orelse return error.MissingServer,
+            .ca_file = environ.get("RUI_MYSQL_CA_FILE") orelse return error.MissingServer,
             .environ = environ,
         };
     }
@@ -70,18 +73,21 @@ const Transcript = struct {
 };
 
 const Login = struct {
-    transport: enum { tcp, unix_socket },
+    transport: enum { tcp, tcp_tls, unix_socket },
     user: []const u8 = "rui",
     password: []const u8,
+    /// For `.tcp_tls`: the server's own certificate unless set.
+    trust: ?mysql_connection.tls.Trust = null,
 };
 
 /// Logs in to the database `rui`; a refusal's event goes to `refusal`.
 fn open(driver: *Driver, server: *const Server, login: Login, refusal: *std.Io.Writer) !void {
-    const address: mysql_driver.Address = switch (login.transport) {
+    const address: mysql_connection.Address = switch (login.transport) {
         .unix_socket => .{ .unix_socket = server.socket },
-        .tcp => .{ .tcp = server.port },
+        .tcp => .{ .tcp = .{ .host = "127.0.0.1", .port = server.port } },
+        .tcp_tls => .{ .tcp_tls = .{ .host = "127.0.0.1", .port = server.port, .trust = login.trust orelse .{ .ca_file = server.ca_file } } },
     };
-    try driver.open(std.testing.io, address, .{ .user = login.user, .password = login.password, .database = "rui" }, refusal);
+    try driver.open(.{ .address = address, .user = login.user, .password = login.password, .database = "rui", .deadline_ms = 30_000 }, refusal);
 }
 
 fn openReady(driver: *Driver, server: *const Server, login: Login) !void {
@@ -98,7 +104,7 @@ fn run(driver: *Driver, text: []const u8) !Transcript {
     try driver.query(text);
     var transcript: Transcript = .init();
     errdefer transcript.deinit();
-    while (!driver.client.isReady()) try transcript.add(try driver.next());
+    while (!driver.isReady()) try transcript.add(try driver.next());
     return transcript;
 }
 
@@ -118,7 +124,7 @@ test "logins: plaintext TCP with a cold cache, the full exchange over a Unix soc
     try std.testing.expectStringStartsWith(refusal.written(), "err 1045 28000 Access denied for user 'rui'@'localhost'");
 
     try openReady(driver, &server, .{ .transport = .unix_socket, .password = server.password });
-    try driver.close();
+    driver.close();
 
     // The Unix socket login cached the hash; the scramble alone now suffices.
     try openReady(driver, &server, .{ .transport = .tcp, .password = server.password });
@@ -130,13 +136,13 @@ test "logins: plaintext TCP with a cold cache, the full exchange over a Unix soc
         \\value 5 rui@%
         \\rows_end
     );
-    try driver.close();
+    driver.close();
 
     // FLUSH PRIVILEGES empties the cache, so plaintext TCP is refused again.
     try openReady(driver, &server, .{ .transport = .unix_socket, .user = "root", .password = server.root_password });
     transcript = try run(driver, "FLUSH PRIVILEGES");
     try transcript.expect("ok 0");
-    try driver.close();
+    driver.close();
     try std.testing.expectError(error.AuthMethodRefused, open(driver, &server, .{ .transport = .tcp, .password = server.password }, &refusal.writer));
 }
 
@@ -175,7 +181,7 @@ test "a multi-statement query reports each statement, matched rows and every val
         \\value 1 7
         \\rows_end no_backslash_escapes
     );
-    try driver.close();
+    driver.close();
 }
 
 test "a failing statement ends the query, and the statements after it never run" {
@@ -201,7 +207,7 @@ test "a failing statement ends the query, and the statements after it never run"
         \\value 1 0
         \\rows_end
     );
-    try driver.close();
+    driver.close();
 }
 
 test "OK packets report an open transaction" {
@@ -217,7 +223,7 @@ test "OK packets report an open transaction" {
         \\ok 1 more in_transaction
         \\ok 0
     );
-    try driver.close();
+    driver.close();
 }
 
 test "a value larger than the receive buffer streams through it" {
@@ -239,5 +245,29 @@ test "a value larger than the receive buffer streams through it" {
     const value = text[head.len .. text.len - tail.len];
     try std.testing.expectEqual(len, value.len);
     try std.testing.expectEqual(len, std.mem.count(u8, value, "x"));
-    try driver.close();
+    driver.close();
+}
+
+test "TCP under TLS verifies the server and carries the full password exchange" {
+    var server: Server = try .init();
+    defer server.deinit();
+    const driver = try std.testing.allocator.create(Driver);
+    defer std.testing.allocator.destroy(driver);
+    var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer refusal.deinit();
+
+    // The system's trust does not hold the server's own certificate.
+    try std.testing.expectError(error.UntrustedPeer, open(driver, &server, .{ .transport = .tcp_tls, .password = server.password, .trust = .system }, &refusal.writer));
+
+    // FLUSH PRIVILEGES empties the cache, so this login sends the password itself.
+    try openReady(driver, &server, .{ .transport = .unix_socket, .user = "root", .password = server.root_password });
+    var transcript = try run(driver, "FLUSH PRIVILEGES");
+    try transcript.expect("ok 0");
+    driver.close();
+    try openReady(driver, &server, .{ .transport = .tcp_tls, .password = server.password });
+    // SHOW needs no privilege; its column flags are not this test's subject.
+    var status = try run(driver, "SHOW SESSION STATUS LIKE 'Ssl_version'");
+    defer status.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, status.text.written(), "\nrow\nvalue 11 Ssl_version\nvalue 7 TLSv1.") != null);
+    driver.close();
 }

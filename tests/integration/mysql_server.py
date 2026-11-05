@@ -32,12 +32,13 @@ def socket_path(socket_dir):
     return os.path.join(socket_dir, "mysqld.sock")
 
 
-def start(name, socket_dir, root_password, *arguments):
-    """Starts the image detached; `arguments` go to `docker run` before it."""
+def start(name, socket_dir, root_password, *arguments, command=()):
+    """Starts the image detached; `arguments` go to `docker run` before it,
+    and `command` to mysqld after it."""
     # mysqld in the container runs as its own user and creates the socket here.
     os.chmod(socket_dir, 0o777)
     docker("run", "--detach", "--name", name, "--env", f"MYSQL_ROOT_PASSWORD={root_password}",
-           "--volume", f"{socket_dir}:/var/run/mysqld", *arguments, IMAGE, capture_output=True)
+           "--volume", f"{socket_dir}:/var/run/mysqld", *arguments, IMAGE, *command, capture_output=True)
 
 
 def wait_ready(name):

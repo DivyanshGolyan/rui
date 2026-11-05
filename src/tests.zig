@@ -16,6 +16,8 @@ test {
     _ = @import("openapi.zig");
     _ = @import("http1/Exchange.zig");
     _ = @import("mcp/Call.zig");
+    _ = @import("mcp/result_text.zig");
+    _ = @import("mcp/Running.zig");
     _ = @import("mcp/Listing.zig");
     _ = @import("mcp/offered.zig");
     _ = @import("mcp/Request.zig");
