@@ -6,6 +6,7 @@ const product_defaults = @import("product_defaults.zig");
 const caller_error = @import("caller_error.zig");
 const cli_value = @import("cli_value.zig");
 const provider_name = @import("provider_name.zig");
+const session_id = @import("session_id.zig");
 const retention_capacity = @import("retention_capacity.zig");
 
 pub const Resource = enum { session, request, action, host, defaults, auth };
@@ -390,6 +391,19 @@ pub const Definition = struct {
         return parsed;
     }
 
+    fn selectorPresent(self: Definition, args: []const []const u8, selector: []const u8) bool {
+        var index: usize = 0;
+        while (index < args.len) : (index += 1) {
+            const arg = args[index];
+            if (std.mem.eql(u8, arg, "--")) return false;
+            if (!std.mem.startsWith(u8, arg, "--")) continue;
+            const option = self.optionNamed(arg[2..]) orelse continue;
+            if (std.mem.eql(u8, option.name, selector)) return true;
+            if (option.argument != null) index += 1;
+        }
+        return false;
+    }
+
     /// The shell checks capture existence before applying fresh-invocation
     /// value rules. Existing captures retain their original admission answer.
     pub fn parseSyntax(self: Definition, args: []const []const u8, allocator: std.mem.Allocator, problem: *Refusal) Error!Parsed {
@@ -410,7 +424,15 @@ pub const Definition = struct {
             }
             if (literal or !std.mem.startsWith(u8, arg, "--")) {
                 if (self.positional == null or parsed.positional != null or (!literal and arg.len > 1 and arg[0] == '-')) {
-                    problem.* = .{ .code = if (self.resource == .session and (std.mem.eql(u8, self.name, "start") or std.mem.eql(u8, self.name, "send"))) .message_not_stdin else .positional_unexpected, .token = arg, .option = false };
+                    var code: caller_error.Code = if (self.resource == .session and (std.mem.eql(u8, self.name, "start") or std.mem.eql(u8, self.name, "send"))) .message_not_stdin else .positional_unexpected;
+                    if (self.positional == null and session_id.valid(arg)) {
+                        if (self.indexOf("to") != null and !self.selectorPresent(args, "to")) {
+                            code = .session_id_needs_to;
+                        } else if (self.indexOf("session") != null and !self.selectorPresent(args, "session")) {
+                            code = .session_id_needs_session;
+                        }
+                    }
+                    problem.* = .{ .code = code, .token = arg, .option = false };
                     return error.InvalidArguments;
                 }
                 parsed.positional = arg;
@@ -1076,5 +1098,17 @@ test "conflict golden lines name every incompatible spelling and complete repair
         var out = std.Io.Writer.fixed(&storage);
         try caller_error.writeLine(&out, refusal.code, refusal.held(@tagName(definition.resource), definition.name));
         try std.testing.expectEqualStrings(case.expected, out.buffered());
+    }
+}
+
+test "Session IDs in positional argv name the missing selector flag" {
+    _ = try expectRefusal(.session_send, &.{"v948er"}, .session_id_needs_to, "v948er");
+    _ = try expectRefusal(.session_send, &.{ "v948er", "--store", "/s" }, .session_id_needs_to, "v948er");
+    _ = try expectRefusal(.session_send, &.{ "v948er", "--to", "k7m2qx" }, .message_not_stdin, "v948er");
+    _ = try expectRefusal(.session_send, &.{ "--to", "k7m2qx", "v948er" }, .message_not_stdin, "v948er");
+    _ = try expectRefusal(.session_send, &.{ "--record", "--to", "v948er" }, .session_id_needs_to, "v948er");
+    _ = try expectRefusal(.session_send, &.{"message text"}, .message_not_stdin, "message text");
+    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny }) |command| {
+        _ = try expectRefusal(command, &.{"v948er"}, .session_id_needs_session, "v948er");
     }
 }

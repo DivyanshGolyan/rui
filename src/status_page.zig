@@ -291,8 +291,8 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
         },
         // The bypass default is stated where it is inspected, without alert weight.
         .permissions => try out.writeAll(switch (session.permission) {
-            .bypass => "bypass · Bash runs without asking",
-            .ask => "ask · Bash asks first",
+            .bypass => "bypass · Bash and MCP run without asking",
+            .ask => "ask · Bash and MCP ask first",
         }),
         .tools => try writeTools(out, session.tools),
         .name => if (session.label.len != 0) try writeText(out, session.label.slice()) else try out.writeAll("not set"),
@@ -501,7 +501,7 @@ test "the page shows the approved rows, `›` on the selected one, then the work
         " Status · fix-safari-export · k7m2qx\n" ++
             " This Session\n" ++
             " › Effort          high" ++ grey ++ "Session override" ++ end ++
-            "   Permissions     bypass · Bash runs without asking\n" ++
+            "   Permissions     bypass · Bash and MCP run without asking\n" ++
             "   Tools           bash, web search\n" ++
             "   Name            fix-safari-export\n" ++
             "   Folder          ~/code/rui\n" ++
@@ -592,7 +592,7 @@ test "each value stays on its row and says where it came from" {
     for ([_][]const u8{
         " Status · a\\nb · k7m2qx\n",
         "Effort          unknown  \x1b[90mno catalog value; reasoning omitted",
-        "Permissions     ask · Bash asks first\n",
+        "Permissions     ask · Bash and MCP ask first\n",
         "Tools           bash\n",
         "Compact at      1,234,567 tokens  \x1b[90mSession override",
         "Headroom        999 tokens  \x1b[90mSession override",

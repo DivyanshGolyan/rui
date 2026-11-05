@@ -313,8 +313,8 @@ def managed_descriptor_rejection(store, env, limit):
         resource.setrlimit(resource.RLIMIT_NOFILE, (limit, limit))
     before = time.monotonic()
     failed = run_start(store, env, preexec_fn=limits)
-    assert failed.returncode != 0 and time.monotonic() - before < 5, failed
-    for text in ("DescriptorCapacityInsufficient", "host serve failed: ", "RLIMIT_NOFILE",
+    assert failed.returncode == 1 and time.monotonic() - before < 5, failed
+    for text in ("[internal_unexpected]", "RLIMIT_NOFILE",
                  "minimum intake", "ulimit -Hn", "rui host start"):
         assert text in failed.stderr, (text, failed.stderr)
     line = next(line for line in failed.stderr.splitlines() if "descriptor capacity insufficient:" in line)
@@ -499,8 +499,8 @@ def startup_limits(root, env):
     store = root / "below-minimum"
     before = time.monotonic()
     failed = run_start(store, env, preexec_fn=lower_descriptor_limit)
-    assert failed.returncode != 0 and time.monotonic() - before < 5, failed
-    assert "DescriptorCapacityInsufficient" in failed.stderr and "host serve failed: " in failed.stderr, failed.stderr
+    assert failed.returncode == 1 and time.monotonic() - before < 5, failed
+    assert "[internal_unexpected]" in failed.stderr, failed.stderr
     assert "RLIMIT_NOFILE" in failed.stderr and "minimum intake" in failed.stderr, failed.stderr
     assert not (store / "host.lock").exists()
 
@@ -512,10 +512,10 @@ def startup_limits(root, env):
         connection.execute("PRAGMA user_version=21")
     before = time.monotonic()
     failed = run_start(store, env)
-    assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+    assert failed.returncode == 1 and time.monotonic() - before < 5, failed
     assert str(store.resolve()) in failed.stderr, failed.stderr
     assert "found schema 21" in failed.stderr and f"supports schema {SCHEMA}" in failed.stderr, failed.stderr
-    assert "back up" in failed.stderr and "host serve failed: " in failed.stderr, failed.stderr
+    assert "back up" in failed.stderr and "[internal_unexpected]" in failed.stderr, failed.stderr
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 21
     for wire in (None, "future"):
@@ -527,23 +527,32 @@ def startup_limits(root, env):
         original = hashlib.sha256(database.read_bytes()).digest()
         before = time.monotonic()
         failed = run_start(store, env)
-        assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+        assert failed.returncode == 1 and time.monotonic() - before < 5, failed
         assert "wire metadata" in failed.stderr and f"wire {host_process.WIRE_VERSION}" in failed.stderr, failed.stderr
         assert "unsupported Store format" not in failed.stderr, failed.stderr
         assert str(store) in failed.stderr and "back up" in failed.stderr and "No migration" in failed.stderr, failed.stderr
         assert hashlib.sha256(database.read_bytes()).digest() == original
 
-    # Existing paths may contain controls. Their human presentation must be
-    # safe, complete even beyond stderr.print's 1-KiB buffer, and remain data.
+    # ASCII controls are refused as Store path grammar, before Host startup.
     parent = root / ("\x01" * 150)
     parent.mkdir(mode=0o700)
     hostile = parent / ("\x01" * 150 + "\nforged\x1b[2J\r\u202e\\\"")
     hostile.mkdir(mode=0o700)
-    escaped = (str(hostile).replace("\\", "\\\\").replace('"', '\\"')
-               .replace("\x01", "\\x01").replace("\n", "\\n").replace("\r", "\\r")
-               .replace("\x1b", "\\x1b").replace("\u202e", "\\u202e"))
     failed = run_start(hostile, env, preexec_fn=lower_descriptor_limit)
-    assert failed.returncode != 0 and "DescriptorCapacityInsufficient" in failed.stderr, failed
+    assert failed.returncode == 2 and "[store_path_malformed]" in failed.stderr, failed
+    assert "\\x01" in failed.stderr and "detached Host startup failed" not in failed.stderr, failed.stderr
+    assert str(hostile) not in failed.stderr and "\x1b" not in failed.stderr, failed.stderr
+    # Allowed Unicode paths still need complete, terminal-safe startup
+    # diagnostics beyond stderr.print's 1-KiB buffer. Each component fits the
+    # filesystem's byte limit, and the canonical path fits the Store limit.
+    parent = root / ("\u0080" * 100)
+    parent.mkdir(mode=0o700)
+    hostile = parent / ("\u0080" * 100 + "\u202e\\\"")
+    hostile.mkdir(mode=0o700)
+    escaped = (str(hostile).replace("\\", "\\\\").replace('"', '\\"')
+               .replace("\u0080", "\\u0080").replace("\u202e", "\\u202e"))
+    failed = run_start(hostile, env, preexec_fn=lower_descriptor_limit)
+    assert failed.returncode == 1 and "[internal_unexpected]" in failed.stderr, failed
     assert f"startup failed for Store {escaped}:\n" in failed.stderr, failed.stderr
     assert str(hostile) not in failed.stderr and "\x1b" not in failed.stderr, failed.stderr
     # Clone only the stopped fixture DB. Version validation precedes selector
@@ -561,9 +570,9 @@ def startup_limits(root, env):
         original = hashlib.sha256(hostile_database.read_bytes()).digest()
         before = time.monotonic()
         failed = run_start(hostile, env)
-        assert failed.returncode != 0 and time.monotonic() - before < 5, failed
+        assert failed.returncode == 1 and time.monotonic() - before < 5, failed
         assert f" at {escaped}: found schema {schema}" in failed.stderr, failed.stderr
-        assert "back up" in failed.stderr and "No migration" in failed.stderr and "host serve failed: " in failed.stderr
+        assert "back up" in failed.stderr and "No migration" in failed.stderr and "[internal_unexpected]" in failed.stderr
         assert str(hostile) not in failed.stderr and "\x1b" not in failed.stderr, failed.stderr
         assert hashlib.sha256(hostile_database.read_bytes()).digest() == original
     print("startup limits passed: soft raise, hard-limit minimum boundary, below-minimum and unsupported-version fast failure", flush=True)
@@ -825,8 +834,8 @@ def main():
         rejected = subprocess.run([RUI, "host", "serve", "--store", rejected_store],
             env=clean_env, preexec_fn=lower_descriptor_limit,
             capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
-        assert rejected.returncode != 0, rejected
-        assert "DescriptorCapacityInsufficient" in rejected.stderr, rejected.stderr
+        assert rejected.returncode == 1, rejected
+        assert "[internal_unexpected]" in rejected.stderr, rejected.stderr
         fields = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", rejected.stderr)}
         assert fields["active_capacity"] == DEFAULT_ACTIVE_CAPACITY and fields["soft_limit"] == 64, fields
         assert fields["required"] > fields["soft_limit"], fields
@@ -847,9 +856,9 @@ def main():
             env=clean_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             disconnected.stdout.close()
-            assert disconnected.wait(timeout=COMMAND_TIMEOUT) != 0
+            assert disconnected.wait(timeout=COMMAND_TIMEOUT) == 1
             stderr = disconnected.stderr.read().decode()
-            assert "HostReadinessOutputUnavailable" in stderr, stderr
+            assert "[internal_unexpected]" in stderr, stderr
             records = [json.loads(line) for file in (disconnected_store / "diagnostics").glob("host-*.jsonl")
                 for line in file.read_text().splitlines()]
             assert any(record.get("phase") == "failed" for record in records), records
@@ -940,10 +949,9 @@ def main():
         failed = run_start(failure_store, env, preexec_fn=lower_descriptor_limit)
         elapsed = time.monotonic() - started
         try:
-            assert failed.returncode != 0
+            assert failed.returncode == 1
             assert elapsed < 5, elapsed
-            assert "DescriptorCapacityInsufficient" in failed.stderr, failed.stderr
-            assert "host serve failed: " in failed.stderr, failed.stderr
+            assert "[internal_unexpected]" in failed.stderr, failed.stderr
             assert status(failure_store, env)["status"] == "unavailable"
             assert not credential.exists()
         finally:

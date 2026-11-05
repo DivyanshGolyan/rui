@@ -49,8 +49,10 @@ def content_failure(result):
     return json.loads(result.stderr.splitlines()[0])
 
 
-def expect_fatal(result):
-    assert result.returncode != 0 and "CanonicalStoreFailure" in result.stderr, result
+def expect_fatal(result, status=1):
+    assert result.returncode == status and "[internal_unexpected]" in result.stderr, result
+    if status == 4:
+        assert "[reply_unconfirmed]" in result.stderr, result
     assert "admitted:" not in result.stdout and "replayed:" not in result.stdout, result
     assert "no work was admitted" not in result.stdout, result
 
@@ -109,7 +111,7 @@ def producer_cases(state):
                 if mode == "raw":
                     args += ["--record", record, "--key", key]
                 result = invoke(home, *args, input="original mutation bytes" if kind == "message" else None)
-                expect_fatal(result)
+                expect_fatal(result, status=4)
                 if mode != "raw":
                     key = announced(result)
                     record = home / ".config/rui/requests" / f"{key}.json"
@@ -125,7 +127,7 @@ def producer_cases(state):
                 host = fixture.start_host(store, None, "--fault", "before-commit")
                 try:
                     recovered = invoke(home, "request", "recover", key)
-                    expect_fatal(recovered)
+                    expect_fatal(recovered, status=4)
                     expect_mutation_error(recovered, json.loads(original))
                     assert record.read_bytes() == original, recovered
                 finally:
@@ -133,7 +135,7 @@ def producer_cases(state):
             host = fixture.start_host(store, None, "--fault", "before-commit")
             try:
                 retried = invoke(home, "request", "recover", "--store", store, "--record", record, "--kind", kind)
-                expect_fatal(retried)
+                expect_fatal(retried, status=4)
                 expect_mutation_error(retried, json.loads(original))
                 assert record.read_bytes() == original, retried
             finally:
@@ -287,7 +289,8 @@ def binding_cases(state, null_code=False):
                 proxy = ReplyProxy(host, route, rewrite)
                 try:
                     result = invoke(home, *args, input="a\nµ" if kind == "message" else None)
-                    assert result.returncode != 0 and reason in result.stderr, result
+                    assert result.returncode == 4 and "[reply_unconfirmed]" in result.stderr, result
+                    assert "(internal_unexpected)" in result.stderr, result
                     assert "admitted:" not in result.stdout and "replayed:" not in result.stdout, result
                 finally:
                     proxy.close()
@@ -304,7 +307,8 @@ def binding_cases(state, null_code=False):
                     proxy = ReplyProxy(host, route, rewrite)
                     try:
                         failed = invoke(home, *recovery)
-                        assert failed.returncode != 0 and reason in failed.stderr, failed
+                        assert failed.returncode == 4 and "[reply_unconfirmed]" in failed.stderr, failed
+                        assert "(internal_unexpected)" in failed.stderr, failed
                     finally:
                         proxy.close()
                     expect_mutation_error(failed, saved, status=200, reason=reason, diagnostic=None)
@@ -338,7 +342,7 @@ def committed_cases(state):
         try:
             result = invoke(home, "session", "send", "--store", store, "--to", session,
                 input="original committed bytes")
-            expect_fatal(result)
+            expect_fatal(result, status=4)
         finally:
             proxy.close()
         request, reply = proxy.exchanges[0]
@@ -563,7 +567,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     started = json.loads(proxy.exchanges[0][0])["key"]
                     assert f"Check with: rui request recover {started}" in errors, errors
                 if not binding:
-                    assert "CanonicalStoreFailure" in errors, errors
+                    assert "[internal_unexpected]" in errors, errors
                 elif route == "/v1/configure":
                     # The in-screen command showed its own diagnostic; exit
                     # prints only command output that was never shown.
@@ -673,7 +677,7 @@ def permission_read_cases(state):
                         raise AssertionError("failed permission read did not exit") from error
                     raise
                 errors = errors.decode()
-                assert caller.returncode != 0 and expected in errors, (expected, errors)
+                assert caller.returncode == 1 and "[internal_unexpected]" in errors, (expected, errors)
                 if expected == "CanonicalStoreFailure":
                     assert "rui: Read failed: HTTP 500; type: invocation_error; code: canonical_store_failure\n" in errors, errors
                 elif expected == "ActionReadFailed":
@@ -856,7 +860,7 @@ def keyed_observation_cases(state, only="keyed"):
                 for args in (["request", "inspect", "--store", store, "--key", key], ["request", "inspect", key]):
                     result = invoke(home, *args)
                     if omitted:
-                        assert result.returncode != 0 and "InvalidObservation" in result.stderr, ("omitted processing binding was confirmed", result)
+                        assert result.returncode == 1 and "[internal_unexpected]" in result.stderr, ("omitted processing binding was confirmed", result)
                         assert not result.stdout, result
                     else:
                         assert result.returncode == 0 and "must-not-be-presented" not in result.stdout, ("unknown DOM leaked", result)

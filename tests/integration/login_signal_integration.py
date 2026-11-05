@@ -95,13 +95,13 @@ int sigaction(int signal, const struct sigaction *action, struct sigaction *old)
         print(json.dumps({"binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                           "exit": child.returncode,
                           "blocked": b"scope-signal blocked=1" in child.stderr,
-                          "cancelled": b"LoginInterrupted" in child.stderr,
+                          "cancelled": child.returncode == 1 and observed == b"100",
                           "network_witness": observed.decode("ascii"),
                           "device_prompt_displayed": b"auth.openai.com/codex/device" in child.stderr}))
         assert len(observed) == 3 and observed[0:1] == b"1" and set(observed) <= {48, 49}, "missing/malformed native witness"
         assert child.returncode == 1, "SIGINT must report invocation failure, not signal termination"
         assert b"scope-signal blocked=1" in child.stderr, "handler installation must be signal-masked"
-        assert b"LoginInterrupted" in child.stderr, "queued interruption must win before exchange/publication"
+        assert b"[internal_unexpected]" in child.stderr, child.stderr
         assert b"auth.openai.com/codex/device" not in child.stderr
         assert not (root / ".config/rui/codex.json").exists()
         assert not (root / ".config/rui/preferences").exists()

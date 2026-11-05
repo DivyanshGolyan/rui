@@ -540,7 +540,24 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         error.FileNotFound => .unavailable,
         else => .access_failure,
     };
-    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .access_failure;
+    return switch (lockState(io, &paths)) {
+        .free => .unavailable,
+        .held => readHostInfo(io, &paths, deadline),
+        .failure => .access_failure,
+    };
+}
+
+pub const HostLockState = enum { free, held, failure };
+
+/// Probe without contacting the Host; a failed probe proves neither absence
+/// nor ownership and must not be treated as a held lock by diagnostic callers.
+pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
+    const paths = platform.resolveClientPaths(io, store_path) catch |err| return if (err == error.FileNotFound) .free else .failure;
+    return lockState(io, &paths);
+}
+
+fn lockState(io: std.Io, paths: *const platform.Paths) HostLockState {
+    var store_dir = std.Io.Dir.cwd().openDir(io, paths.store.slice(), .{}) catch return .failure;
     defer store_dir.close(io);
     // A replaced lock node may be a FIFO: open must not wait for a writer
     // before the nonblocking lock probe can classify the selected Store.
@@ -550,17 +567,17 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         .NOFOLLOW = true,
         .CLOEXEC = true,
     }, 0) catch |err| return switch (err) {
-        error.FileNotFound => .unavailable,
-        else => .access_failure,
+        error.FileNotFound => .free,
+        else => .failure,
     };
     const lock_file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
     defer lock_file.close(io);
-    const stat = lock_file.stat(io) catch return .access_failure;
-    if (stat.kind != .file) return .access_failure;
+    const stat = lock_file.stat(io) catch return .failure;
+    if (stat.kind != .file) return .failure;
     return switch (std.posix.errno(std.posix.system.flock(fd, std.posix.LOCK.SH | std.posix.LOCK.NB))) {
-        .SUCCESS => .unavailable,
-        .AGAIN => readHostInfo(io, &paths, deadline),
-        else => .access_failure,
+        .SUCCESS => .free,
+        .AGAIN => .held,
+        else => .failure,
     };
 }
 

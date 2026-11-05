@@ -43,7 +43,7 @@ pub const State = struct {
     /// moves the key. Retry admission is due by time instead and keeps its
     /// own poll.
     idle_admission: ?AdmissionKey = null,
-    /// The commit generation of the last core tool scan that found nothing.
+    /// The commit generation of the last slot-free core work scan that found nothing.
     idle_core_generation: ?u64 = null,
     retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
     capacity_was_full: bool = false,
@@ -104,8 +104,8 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
     };
     const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
     var found_nothing = true;
-    // A core tool call takes no slot: it runs as one Store command (D24),
-    // so its scan reruns only once a commit moves the generation.
+    // Core calls, owed stops and the interim MCP resolver take no slot.
+    // Their shared empty scan reruns only once a commit moves the generation.
     if (state.idle_core_generation != admission_key.generation) switch (context.runCoreAction()) {
         .admitted => {
             state.idle_core_generation = null;
@@ -214,6 +214,8 @@ const Recording = struct {
     observed_slots: ?SlotFacts = null,
     transport: bool = false,
     bash: bool = false,
+    mcp_available: bool = false,
+    mcp_runs: usize = 0,
     recover_action: bool = false,
     recover_retry: bool = false,
     recover_action_fence: bool = false,
@@ -353,6 +355,11 @@ const Recording = struct {
     }
 
     fn runCoreAction(self: *Recording) Admission {
+        if (self.mcp_available) {
+            self.mcp_available = false;
+            self.mcp_runs += 1;
+            return .admitted;
+        }
         self.record(.run_core);
         return self.core_admission;
     }
@@ -842,4 +849,40 @@ test "retry admission keeps its own poll while the commit-gated scans wait" {
     try std.testing.expectEqual(@as(usize, 2), context.count(.recover_retry));
     try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
     try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+}
+
+test "MCP resolution runs before execution slot admission even at capacity" {
+    var state: State = .{};
+    var context: Recording = .{ .free = 0, .provider = false, .mcp_available = true };
+    const outcome = run(&state, &context);
+    try std.testing.expect(outcome == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+}
+
+test "MCP and core calls both run at capacity through shared core work" {
+    var state: State = .{};
+    var context: Recording = .{ .free = 0, .provider = false, .mcp_available = true, .core_admission = .admitted };
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
+}
+
+test "an empty MCP core work scan waits for a commit before admission resumes" {
+    var context = Recording{ .free = 0, .provider = false, .generation_advance = 0, .auto_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
+    context.mcp_available = true;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
+    try std.testing.expectEqual(@as(usize, 0), context.mcp_runs);
+    context.generation += 1;
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+    // Success does not retain the empty-scan gate, even at this generation.
+    context.mcp_available = true;
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 2), context.mcp_runs);
 }

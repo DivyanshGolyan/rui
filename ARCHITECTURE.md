@@ -1930,14 +1930,19 @@ Reject unknown options, duplicate singleton options even when equal, conflicting
 An option value spelling `--help` remains data.
 Domain validation and saved rejection stay with the existing owners.
 
-Mutation input failures report their actual stage and cause, including stdin read, input parsing, content-file read, capture, Store resolution, endpoint construction, connect, upload and admission-response validation.
+CLI failures cross one catalog boundary and render a stable code with accepted inputs and a concrete repair when their cause is mapped.
+Unmapped legacy failures remain on an explicit shrink-only pending inventory, render `internal_unexpected` without a raw Zig name and exit 1.
+The detection owner distinguishes malformed Store paths (exit 2), unusable Store directories (exit 6) and a Store with no serving Host (`host_not_serving`, exit 6); the latter prints the exact `rui host start --store PATH` command.
+An unreachable Host is absent only when the Store lock is free; a missing or refused control socket while that lock is held is `host_stopping` (exit 5), with advice to wait for shutdown before restarting and retrying.
+Other transport failures while the lock is held, or a failed lock probe, do not establish either condition and retain their original classification.
 Missing input or endpoint paths never imply that no Host serves the selected Store.
 Failure after upload begins leaves admission unconfirmed; inspection or recovery must retain the original identity.
 
 #### Help and prerequisites
 
 Root help (`rui --help` or `rui -h`), resource help and operation help succeed with useful stdout and zero exit without a Host, credentials, preferences, TTY or state changes.
-Invalid fresh invocation exits 2 with a stderr diagnostic and relevant help path.
+Invalid fresh invocation exits 2 with a catalog stderr diagnostic naming the relevant flag or field, accepted inputs and repair.
+A positional Session ID on a command whose selector is a flag names `--to ID` or `--session ID` rather than mistaking the ID for Message text.
 
 The CLI derives exit status from admission certainty and the catalog remedy, not the rejection code alone:
 
@@ -1948,7 +1953,7 @@ The CLI derives exit status from admission certainty and the catalog remedy, not
 | 2 | Invalid fresh invocation; nothing was sent. Fix the invocation. |
 | 3 | Rui answered with a saved refusal. Correct the request; a resend needs a new key. |
 | 4 | Admission unconfirmed. Run `rui request recover HANDLE` (or the printed explicit-record recovery); never resubmit with a new key. |
-| 5 | Retry the same request unchanged later (Host busy or result not ready). |
+| 5 | Retry the same request unchanged later (Host busy, Host stopping or result not ready). |
 | 6 | Repair the environment, then retry unchanged (known stopped/unreachable Host, sign-in required or locked Store). |
 
 An error enters 2-6 only once its cause is mapped; every other failure stays exit 1 until it is.
@@ -2214,7 +2219,8 @@ No nested conversation login owner is retained.
 
 Interactive input uses the single conversation-first frontend described under [staged persistent input](#staged-persistent-input).
 It captures each exact Message before transmission and observes Host activity without a separate per-prompt follow loop or follow reminders.
-Permission presents one exact Action's description and complete decoded Bash command above an Allow once / Deny choice that a fresh Enter confirms; queued chat, typeahead and marked paste authorize nothing.
+Permission presents one exact Action above an Allow once / Deny choice that a fresh Enter confirms: Bash keeps its description and complete decoded command; MCP shows its frozen tool name and server, its call description when present, and the original JSON arguments.
+Queued chat, typeahead and marked paste authorize nothing.
 The durable decision retains that exact target for Host revalidation.
 One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal; `/inspect-action` also prints executable `rui action allow`/`deny` commands.
 `/configure` changes settings for this Session (including its immutable Workspace check).
@@ -2757,7 +2763,7 @@ The Store assigns admission IDs in Session position order, so a page that ends b
 
 The composer uses the same `› ` marker as submitted User messages.
 The input keeps the bottom rows of the screen in a conversation and in the overview: a rule, then the draft, which grows to ten rows or a third of the screen, whichever is fewer, and then scrolls inside itself, keeping the same text first until its caret leaves the shown lines.
-The row under the draft is the overview's key hints and the conversation's Session line: `Name · model · effort · N% left`, quiet, with `asks before Bash` added when the permission mode is `ask`.
+The row under the draft is the overview's key hints and the conversation's Session line: `Name · model · effort · N% left`, quiet, with `asks before Bash/MCP` added when the permission mode is `ask`.
 The Session line shows the `ctrl+x stop` hint only while there is work to stop (Divyansh approved this on 2026-10-31, front-end plan PR 5).
 It shows while Ctrl-X would ask to stop the work the conversation shows, so not while a stop of that work is open.
 The name is the Label, else the first line of the first Message, else the reference, as in overview rows.
@@ -2808,14 +2814,23 @@ Generated commands use printable hex Store selectors and bare six-character Sess
 Raw export streams the exact content without presentation.
 There is no history cache or new Host route.
 
-When Current exposes an actionable permission, the frontend automatically reads one exact Action's complete arguments and displays `? <description>`, then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one.
+When Current exposes an actionable permission, the frontend reads the selected call's identity from that capture before its complete arguments replace scratch.
+The runner is derived from the name and owner in the Operation's frozen offer, never from argument shape or the Session's latest catalog.
+Current includes the frozen `server` only for unresolved MCP calls; legacy built-in rows omit it.
+Bash displays `? <description>`, then the decoded `$` command through terminal escaping, then `Time limit` only for an explicit timeout and `stdin:` only when the call has one.
+MCP displays `? <rui_call_description>` (at most 200 decoded bytes), `Tool`, `Server` and the original `Arguments` JSON.
+A missing, non-string or oversized description falls back to the tool name with those arguments, not a Bash parse.
+The client extracts the label with bounded streaming scratch; it does not interpret the server's schema.
+`/inspect-action` shares this MCP presentation; raw one-shot inspection stays exact.
 A whole Action ends right above the rule; a taller one pages from its top.
-The description is the model's label, never a substitute for the command.
+Bash and MCP use the same 256 KiB viewport bound: an oversized Action file is a preview and cannot be approved.
+The description is the model's label, never a substitute for the command or MCP arguments.
 Every later line of the command, and every line of stdin, starts with the content mark `│`, and every row such a line, the `?` line or the `$` line wraps onto starts with `┆`, so description, command or stdin text can never pass for the `$`, `Time limit` or `stdin:` lines and a wrapped row never reads as a new line.
+Every line of MCP arguments starts with the same content mark and uses terminal escaping, so JSON cannot impersonate the Tool or Server labels.
 The input row becomes an Allow once / Deny choice with Allow once highlighted.
 One rule decides when it acts.
-Each frame records the option Enter would decide on it: the highlighted option its choice shows, Deny when it shows the draft beside the Action as a reason and the line under the draft says `enter denies the command and sends this`, or none.
-A notice that takes that line without saying so offers nothing; the refusal of an early Enter there says it: `! Not ready; nothing denied · enter denies the command and sends this`.
+Each frame records the option Enter would decide on it: the highlighted option its choice shows, Deny when it shows the draft beside the Action as a reason and the line under the draft says `enter denies the call and sends this`, or none.
+A notice that takes that line without saying so offers nothing; the refusal of an early Enter there says it: `! Not ready; nothing denied · enter denies the call and sends this`.
 Once that frame is delivered and input is then serviced empty, with no key since it was issued, no pending decoder state, no command and nothing left to draw, that frame is offered; this is the only place an offer is made.
 The offer is the decision that frame showed: it stands while nothing has changed since and every later frame shows that same decision.
 A redraw that leaves the choice as it was, such as the clock's minute, keeps it, since the key was sent at the choice it still shows.
@@ -2827,10 +2842,10 @@ A page, resize, width change, completed reading, or a withdrawn, successor or re
 The run loop does that for every frame it draws, so a quick second Enter after a refused one may decide.
 Spending never revokes or forces a frame, so a paste costs no frame per byte.
 There are no letter shortcuts.
-Typing or pasting beside the Action moves the input row to the retained draft, and the line under it says `enter denies the command and sends this · esc back to the choice`.
-Typing a message denies the command and sends the reason to the agent: Enter there, under the same offer rule, sends the draft as a Message and then denies the Action.
+Typing or pasting beside the Action moves the input row to the retained draft, and the line under it says `enter denies the call and sends this · esc back to the choice`.
+Typing a message denies the call and sends the reason to the agent: Enter there, under the same offer rule, sends the draft as a Message and then denies the Action.
 A slash command runs as anywhere else and denies nothing.
-A draft that is exactly one of `a`, `d`, `y` or `n` in either case, ignoring surrounding whitespace, is a keystroke meant for some other prompt, not a reason: its Enter is refused with `! Use ←→ and Enter to choose; a message denies the command.` and decides nothing.
+A draft that is exactly one of `a`, `d`, `y` or `n` in either case, ignoring surrounding whitespace, is a keystroke meant for some other prompt, not a reason: its Enter is refused with `! Use ←→ and Enter to choose; a message denies the call.` and decides nothing.
 While a command runs, or while a page hides the Action, the draft is no reason and its Enter decides nothing.
 The input row belongs to the waiting Action: Esc, Ctrl-G, Ctrl-End, or End on an empty draft returns it to the choice, and a slash command, which empties the draft, keeps it at the draft.
 An Action that arrives while the draft holds text keeps the draft as its input row, so an Enter meant for that line can never approve; once a frame shows the Action and the reason line, it denies the Action and sends the line.
@@ -2840,7 +2855,7 @@ Queued chat, chords and marked paste grant no authority and do not repeat the co
 The draft retains its bytes, grapheme cursor and pending paste decoder custody.
 The request block and choice follow the front-end plan's PR 4 row (plan GdWXmymnhM6zDEcd64xPMs, mock CFWmXwCYELhK15T7LnR6ZF), which Divyansh approved on 2026-10-31, Allow once highlighted by default.
 He chose on 2026-11-01 that typing while the choice shows pauses it and the text goes to the draft.
-The same approved row says "Typing a message denies the command and sends the reason to the agent."
+The same approved row says "Typing a message denies the call and sends the reason to the agent."
 A fragmented pre-prompt paste must finish under the existing incomplete-input deadline before any offer.
 Complete framing and argument validation precede any offer; no successful partial proposal is possible.
 
@@ -3276,8 +3291,8 @@ Nonzero never proves noncommit.
 Exact nonzero numbers are not another state protocol.
 
 Conversation entry is quiet, without configuration banners or routine IDs.
-Bash and `bypass`, the default, stay quiet: no notice or banner announces them, and the Session line says `asks before Bash` only in `ask` mode.
-`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash runs without asking` or `ask · Bash asks first`, `session list` JSON shows it, and `/help` describes the Session line.
+Bash and `bypass`, the default, stay quiet: no notice or banner announces them, and the Session line says `asks before Bash/MCP` only in `ask` mode.
+`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash and MCP run without asking` or `ask · Bash and MCP ask first`, `session list` JSON shows it, and `/help` describes the Session line.
 Existing Sessions preserve their saved mode.
 User submissions are `›` blocks with their admission time and assistant prose has no role labels; concise tool outcomes stay quiet and the live line ends the conversation only while work is under way.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).

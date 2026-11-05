@@ -50,6 +50,33 @@ pub const CoreNames = struct {
     }
 };
 
+/// Whether the Action's call belongs to MCP in its Operation's frozen offer,
+/// never the current catalog. The call is point-seeked by parent and ordinal;
+/// accepted tool names fit the inline content payload and compare exactly.
+pub fn mcpCallSql(comptime action_alias: []const u8, comptime operation_alias: []const u8) []const u8 {
+    return "EXISTS(" ++ mcpCallSelectSql(action_alias, operation_alias, "1") ++ ")";
+}
+
+/// The frozen MCP server for an Action, or SQL NULL for a built-in call.
+pub fn mcpServerSql(comptime action_alias: []const u8, comptime operation_alias: []const u8) []const u8 {
+    return "(" ++ mcpCallSelectSql(action_alias, operation_alias, "tool.server") ++ ")";
+}
+
+fn mcpCallSelectSql(comptime action_alias: []const u8, comptime operation_alias: []const u8, comptime selected: []const u8) []const u8 {
+    return "SELECT " ++ selected ++ " FROM model_tool_call tool_call " ++
+        "JOIN content name ON name.content_id=tool_call.name_content_id " ++
+        "JOIN session_revision revision ON revision.session_ref=" ++ operation_alias ++ ".session_ref AND revision.revision=" ++ operation_alias ++ ".settings_revision " ++
+        "JOIN tool_set_member member ON member.tool_set_id=coalesce(revision.loaded_tool_set_id,revision.tool_set_id) " ++
+        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "WHERE tool_call.operation_id=" ++ action_alias ++ ".parent_operation_id AND tool_call.call_ordinal=" ++ action_alias ++ ".call_ordinal " ++
+        "AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp'";
+}
+
+/// Calls that must never enter Bash's Attempt path.
+fn nonBashCallSql(comptime first: u8) []const u8 {
+    return "(" ++ coreCallSql(first) ++ " OR " ++ mcpCallSql("action", "operation") ++ ")";
+}
+
 /// The next Action ready for an Attempt, with its Session. Reads only
 /// `action_operation_executable`, so an Action waiting for permission costs
 /// admission nothing.
@@ -60,7 +87,7 @@ const next_action_attempt = rsql.Read(.{
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
         "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
-        "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND NOT " ++ coreCallSql(1) ++ " " ++
+        "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND NOT " ++ nonBashCallSql(1) ++ " " ++
         "ORDER BY action.action_id LIMIT 1",
     .Args = struct { message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8 },
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, bash_timeout_override_ms: ?rsql.Positive, session: rsql.SessionHead },
@@ -126,6 +153,7 @@ pub const CoreWork = union(enum) {
     ending: OwedEnding,
     forward: u64,
     action: CoreActionInput,
+    mcp: McpAction,
 };
 
 /// Whether a stop selected the owed ending `e`'s Turn, and whether that
@@ -170,10 +198,12 @@ pub fn owedStopKey(buffer: []u8, child: []const u8, cause: []const u8, position:
 pub fn nextCoreWork(a: anytype) !?CoreWork {
     var stop: owed_stop.Result = undefined;
     var next: next_core_action.Result = undefined;
+    var mcp: next_mcp_action.Result = undefined;
     const names: CoreNames = .of();
     var ending: owed_ending.Result = undefined;
     var forward: forward_domain.next.Result = undefined;
     a.read(owed_stop, .{}, &stop);
+    a.read(next_mcp_action, .{}, &mcp);
     a.read(owed_ending, .{}, &ending);
     a.read(forward_domain.next, .{}, &forward);
     a.read(next_core_action, .{ .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &next);
@@ -195,6 +225,11 @@ pub fn nextCoreWork(a: anytype) !?CoreWork {
         } };
     }
     if (forward) |owed| return .{ .forward = owed.forward_id.get() };
+    // After owed stops and endings, service both slot-free runners in Action order.
+    if (mcp) |call| {
+        if (next == null or call.action_id.get() < next.?.action_id.get())
+            return .{ .mcp = .{ .action_id = call.action_id.get() } };
+    }
     const found = next orelse return null;
     return .{ .action = .{
         .binding = .{ .turn_id = found.turn_id.get(), .parent_operation_id = found.parent_operation_id.get(), .action_id = found.action_id.get() },
@@ -392,7 +427,7 @@ const resolve_core_action = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Resolves the core tool call `binding` names with its result, at its
+/// Resolves an unattempted core or MCP call `binding` names, at its
 /// Session's next position, and lets its Turn continue.
 pub fn queueCoreResolution(a: anytype, binding: ActionAttemptBinding, session: rsql.SessionHead, code: ActionResolutionCode, content_id: u64) !void {
     a.write(resolve_core_action, .{
@@ -617,4 +652,67 @@ pub fn recoverOneUncertainAction(candidate: anytype, a: anytype, active: ActiveO
     turn_domain.queueContinuation(a, turn_id, found.session);
     try a.commit();
     return true;
+}
+
+const mcp_facts_sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position " ++
+    "FROM action_operation action @index(action_operation_executable) " ++
+    "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+    "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
+    "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+    "AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0) " ++
+    "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ mcpCallSql("action", "operation");
+const McpFacts = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: rsql.SessionHead };
+// Start with open Turns' frozen MCP offers, not executable Actions. Bash-only
+// offers never open their call ranges; candidate calls seek their Action by
+// parent and ordinal. CROSS JOIN keeps that bound before the Action lookup.
+const next_mcp_action = rsql.Read(.{
+    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position " ++
+        "FROM turn active @index(turn_one_active_per_session) " ++
+        "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
+        "CROSS JOIN session_revision revision ON revision.session_ref=operation.session_ref AND revision.revision=operation.settings_revision " ++
+        "CROSS JOIN tool_set_member member ON member.tool_set_id=coalesce(revision.loaded_tool_set_id,revision.tool_set_id) " ++
+        "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' " ++
+        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
+        "CROSS JOIN content name ON name.content_id=tool_call.name_content_id AND @payload(name)=@bytes(tool.name) " ++
+        "CROSS JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+        "JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE active.outcome_code IS NULL AND action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+        "AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0) " ++
+        "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
+        "ORDER BY action.action_id LIMIT 1",
+    .Args = struct {},
+    .Row = McpFacts,
+    .cardinality = .optional,
+});
+pub const next_mcp_action_sql = next_mcp_action.sql;
+pub const McpAction = struct { action_id: u64 };
+pub fn nextMcpAction(a: anytype) !?McpAction {
+    var row: next_mcp_action.Result = undefined;
+    a.read(next_mcp_action, .{}, &row);
+    try a.run();
+    return .{ .action_id = (row orelse return null).action_id.get() };
+}
+const mcp_facts = rsql.Read(.{
+    .sql = mcp_facts_sql ++ " AND action.action_id=?1",
+    .Args = struct { action_id: u64 },
+    .Row = McpFacts,
+    .cardinality = .optional,
+});
+pub fn resolveMcpAction(a: anytype, action_id: u64, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
+    var facts: mcp_facts.Result = undefined;
+    var content: content_domain.Import = .ofBytes(text, false);
+    a.read(mcp_facts, .{ .action_id = action_id }, &facts);
+    content_domain.lookup(a, &content);
+    try a.run();
+    const found = facts orelse {
+        // A stop or permission decision may win after selection. No effect
+        // was dispatched, so there is nothing left for this Host to resolve.
+        try a.commit();
+        return;
+    };
+    if (faults.content_import) return error.InjectedContentImportFailure;
+    const content_id = try content_domain.importBytes(a, &content, text);
+    try queueCoreResolution(a, .{ .action_id = action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() }, found.session, code, content_id);
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
 }
