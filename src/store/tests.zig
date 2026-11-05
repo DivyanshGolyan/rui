@@ -10458,3 +10458,75 @@ test "loaded tools preserve and intersect a saved subset through the catalog" {
         }
     }.run);
 }
+
+test "loaded tools select saved records even after the Host catalog changes or removes them" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var records = [_]tool_catalog.Record{
+                tool_catalog.bash_record,
+                .{ .name = "fetch_page", .owner = .mcp, .server = "original", .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "find_tools", .owner = .rui },
+                tool_catalog.message_agent_record,
+                .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
+                tool_catalog.start_agent_record,
+                tool_catalog.web_search_record,
+            };
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const original: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            try storage.saveCatalog(&original);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("loaded-records-create", "", workspace, "model-a");
+            create.configuration.tools = try .of(&.{ "fetch_page", "find_tools", "other_page" });
+            create.configuration.loaded_tools = try .of(&.{"find_tools"});
+            const first = storage.configure(&create, .{}).accepted.session;
+            try create.key.set("loaded-records-second");
+            const second = storage.configure(&create, .{}).accepted.session;
+            const saved_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.tool_set_id " ++
+                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
+
+            var changed_records = records;
+            changed_records[1] = .{ .name = "fetch_page", .owner = .mcp, .server = "replacement", .description = "New page", .input_schema = "{\"type\":\"object\",\"additionalProperties\":false}" };
+            var changed_digests = digests;
+            changed_digests[1] = tool_catalog.recordDigest(&changed_records[1]);
+            const changed: tool_catalog.Catalog = .{ .records = &changed_records, .digests = &changed_digests };
+            try storage.saveCatalog(&changed);
+            var update: protocol.ConfigureCommand = .{};
+            try update.key.set("loaded-records-reworded");
+            update.session = first;
+            update.configuration.loaded_tools = try .of(&.{ "fetch_page", "find_tools" });
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            const loaded_record = try store_testing.queryU64(&storage, "SELECT t.tool_record_id FROM session s JOIN tool_set_member m ON m.tool_set_id=s.loaded_tool_set_id " ++
+                "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name='fetch_page'", .{first.slice()});
+            try std.testing.expectEqual(saved_record, loaded_record);
+
+            var removed_records: [records.len - 1]tool_catalog.Record = undefined;
+            removed_records[0] = records[0];
+            @memcpy(removed_records[1..], records[2..]);
+            var removed_digests: [removed_records.len][32]u8 = undefined;
+            for (&removed_records, &removed_digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const removed: tool_catalog.Catalog = .{ .records = &removed_records, .digests = &removed_digests };
+            try storage.saveCatalog(&removed);
+            try update.key.set("loaded-records-removed");
+            update.session = second;
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            // Both configurations select the original records and intern
+            // the very same loaded set despite today's catalog contents.
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(DISTINCT loaded_tool_set_id) FROM session WHERE session_ref=?1 OR session_ref=?2", .{ first.slice(), second.slice() }));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+// Engine transcripts and content boundary tests remain part of the native suite.
+test {
+    _ = @import("engine/Mysql.zig");
+    _ = @import("engine/mysql_content.zig");
+    _ = @import("mysql_testing.zig");
+}
