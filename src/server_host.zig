@@ -290,6 +290,8 @@ pub const Host = struct {
     /// then starts from the Host facts alone.
     environments: ?*SessionEnvironments = null,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
+    /// Launch-frame configuration, owned and wiped after execution joins.
+    mcp_servers: @import("mcp/servers.zig").Servers = .{},
     retention: *output_retention.Queue = undefined,
     /// The Store directory for optional failed-response records; null in
     /// owner tests that have no lease.
