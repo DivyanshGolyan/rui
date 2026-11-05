@@ -69,6 +69,11 @@ const session = await rui.sessions.create({
 await session.update({ compactAt: 200000 });
 ```
 
+`await session.status()` reads the Current report: work `state` and `since`, `turn`, `operation`, `pendingMessages`, `label`, `model`, `effort`, `tools`, `permissionMode` and `latestOutcome`.
+Counts, times and IDs stay decimal strings; absent targets and outcomes are `null`.
+Parent and a separate ending are not in the report, so status does not invent them.
+`interrupt()` uses this status snapshot to select its exact model target.
+
 Presets are complete agent specs passed at connect and kept only in Host memory.
 Creation copies the preset, with every supplied field (including `null`) overriding it.
 

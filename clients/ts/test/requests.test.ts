@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { FEED_KINDS } from "../src/feed.ts";
 import { Session, Sessions, type SessionSpec, type SessionUpdate, type Link } from "../src/sessions.ts";
 import type { components } from "../src/wire.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
+import { RuiRequestError } from "../src/errors.ts";
 
 test("configuration preserves omitted, null and value states and normalizes tools", async () => {
 	const requests: components["schemas"]["ConfigureRequest"][] = [];
@@ -40,18 +40,78 @@ test("configuration preserves omitted, null and value states and normalizes tool
 	for (const field of Object.values(third.configuration)) assert.deepEqual(field, { state: "omitted" });
 });
 
-test("interrupt requests every feed kind", async () => {
+type CurrentReport = Extract<components["schemas"]["InspectSessionReply"], { profile: "current"; work: unknown }>;
+
+function report(work: CurrentReport["work"]): CurrentReport {
+	return {
+		version: WIRE_VERSION, type: "session_report", profile: "current",
+		session: {
+			reference: "abc123", workspace: "/work", provider: "openai", model: "model-a", revision: "1",
+			tools: ["bash"], permission_mode: "ask", label: "Review", created_at: "1",
+			instructions: { bytes: "0", sha256: "0".repeat(64) }, output_schema: null,
+			compaction_trigger: "100000", context_estimate: null, output_reservation: "0",
+			compaction_trigger_override: null, output_reservation_override: null,
+			reasoning_effort: "high", reasoning_effort_override: null,
+		},
+		pending_messages: "9007199254740993", work,
+		peers: { from_person_at: null }, first_message: null, selected_message: null,
+		recent_messages: [], actions: { count: "0", unresolved: [], resolved: [] },
+		rejected_calls: { count: "0", items: [] }, actionable_permissions: [],
+		execution: { status: "partial", dispatch_fenced: false, custody_occupied: "0", scratch_used_bytes: "0", unavailable: ["structured_output"] },
+	};
+}
+
+const idleWork: CurrentReport["work"] = {
+	state: { kind: "idle", since: "9007199254740993" }, turn: null, operation: null, first_action: null, latest_outcome: null,
+};
+
+test("status requests the Current profile and maps only reported facts losslessly", async () => {
+	const latestOutcome = { code: "failed_saved", content: { bytes: "7", sha256: "a".repeat(64) } };
 	const link: Link = {
 		async exchange(path, build) {
-			assert.equal(path, "/v1/activity-page");
-			assert.deepEqual(JSON.parse(build("store")), {
-				version: WIRE_VERSION, kind: "activity_page", store: "store", session: "session",
-				end: null, position: "0", ordinal: null, direction: "backward", kinds: [...FEED_KINDS], limit: "1",
+			assert.equal(path, "/v1/inspect-session");
+			assert.deepEqual(JSON.parse(build('store"\n')), {
+				version: WIRE_VERSION, kind: "inspect_session", store: 'store"\n', session: 'session"\n',
 			});
-			return Buffer.from(JSON.stringify({ work: { turn: null, operation: null, state: { kind: "idle" } } }));
+			return Buffer.from(JSON.stringify(report({ ...idleWork, latest_outcome: latestOutcome })));
 		},
 	};
+	assert.deepEqual(await new Session(link, 'session"\n').status(), {
+		state: "idle", since: "9007199254740993", turn: null, operation: null, pendingMessages: "9007199254740993",
+		label: "Review", model: "model-a", effort: "high", tools: ["bash"], permissionMode: "ask", latestOutcome,
+	});
+});
+
+test("status reports a missing Session as a request error", async () => {
+	const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ session: null })) };
+	await assert.rejects(new Session(link, "absent").status(), (error: unknown) => error instanceof RuiRequestError && error.code === "session_not_found");
+});
+
+test("interrupt selects its exact target from status and ignores non-model work", async () => {
+	for (const state of ["idle", "approval", "bash", "working", "retrying", "pending"] as const) {
+		const paths: string[] = [];
+		const link: Link = {
+			async exchange(path, build) {
+				paths.push(path);
+				if (path === "/v1/inspect-session") return Buffer.from(JSON.stringify(report({
+					...idleWork, state: { kind: state, since: "1" }, turn: "7", operation: "19",
+				})));
+				assert.equal(path, "/v1/control/model-interruption");
+				const body = JSON.parse(build("store"));
+				assert.deepEqual(body.target, { session: "session", turn: "7", operation: "19" });
+				assert.equal(body.kind, "model_interruption");
+				assert.equal(typeof body.key, "string");
+				return Buffer.from(JSON.stringify({ answer: { status: "accepted" } }));
+			},
+		};
+		await new Session(link, "session").interrupt();
+		assert.deepEqual(paths, ["working", "retrying", "pending"].includes(state)
+			? ["/v1/inspect-session", "/v1/control/model-interruption"] : ["/v1/inspect-session"]);
+	}
+	let calls = 0;
+	const link: Link = { exchange: async () => { calls++; return Buffer.from(JSON.stringify(report(idleWork))); } };
 	await new Session(link, "session").interrupt();
+	assert.equal(calls, 1);
 });
 
 
