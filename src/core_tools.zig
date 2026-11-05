@@ -16,8 +16,9 @@ pub const message_agent_schema = "{\"type\":\"object\",\"properties\":{" ++
     "},\"required\":[\"id\",\"text\"],\"additionalProperties\":false}";
 
 /// The most bytes a `start_agent` call's arguments take: its task, at most
-/// `message_agent_max_text_bytes`, and its spec.
-pub const start_agent_max_argument_bytes = message_agent_max_text_bytes + 16 * 1024;
+/// `message_agent_max_text_bytes` once decoded and six times that escaped
+/// (`\u0001` for each byte), and its spec.
+pub const start_agent_max_argument_bytes = 6 * message_agent_max_text_bytes + 16 * 1024;
 
 // Prompt text: written here, and given no tests (D141).
 pub const start_agent_description = "Start another Rui agent on a task. It creates the agent's Session, gives it the task as its first Message and returns the agent's ID at once, before any answer. " ++
@@ -469,5 +470,26 @@ test "a start_agent call's arguments carry a task and a whole spec, never a Work
             try std.testing.expectEqualStrings("bash start_agent", start.configuration.tools.names.slice());
             try std.testing.expect(start.configuration.workspace.state != .value and start.configuration.provider.state != .value and start.configuration.label.state != .value);
         }
+    }
+}
+
+test "a start_agent task at its bound is accepted however it is escaped, and one byte more is the task's refusal" {
+    const spec = ",\"attached\":false,\"spec\":{\"model\":\"gpt-6.1-sol\",\"effort\":\"low\",\"compactAt\":100000,\"tools\":[],\"permissionMode\":\"ask\",\"label\":null}}";
+    for ([_]usize{ message_agent_max_text_bytes, message_agent_max_text_bytes + 1 }) |length| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var arguments: std.ArrayList(u8) = .empty;
+        try arguments.appendSlice(arena.allocator(), "{\"task\":\"");
+        // Every byte takes the longest escape.
+        for (0..length) |_| try arguments.appendSlice(arena.allocator(), "\\u0001");
+        try arguments.appendSlice(arena.allocator(), "\"" ++ spec);
+        try std.testing.expect(arguments.items.len <= start_agent_max_argument_bytes);
+        const start = try arena.allocator().create(StartAgent);
+        const check = try checkStartAgent(arena.allocator(), arguments.items, start);
+        if (length == message_agent_max_text_bytes) {
+            try std.testing.expect(check == .accepted);
+            try std.testing.expectEqual(length, start.task.len);
+            for (start.task) |byte| try std.testing.expectEqual(@as(u8, 1), byte);
+        } else try std.testing.expectEqualStrings("task must be nonempty UTF-8 text, at most 65536 bytes", check.rejected);
     }
 }
