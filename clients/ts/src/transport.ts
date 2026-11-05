@@ -3,7 +3,7 @@
 // (D19).
 import { request } from "node:http";
 
-import { RuiRequestError } from "./errors.ts";
+import { RuiRequestError, type RequestAnswer } from "./errors.ts";
 import type { components } from "./wire.ts";
 
 /** The wire version openapi.json describes. A test keeps the two equal. */
@@ -96,7 +96,7 @@ export function post(call: Post): Promise<Buffer> {
 }
 
 function refusal(status: number | undefined, reply: Buffer): Error {
-	let parsed: (components["schemas"]["ErrorReply"] & { answer?: { status?: unknown; code?: unknown } }) | undefined;
+	let parsed: (components["schemas"]["ErrorReply"] & { answer?: Partial<Extract<RequestAnswer, { code: string }>> }) | undefined;
 	try {
 		parsed = JSON.parse(reply.toString("utf8"));
 	} catch {

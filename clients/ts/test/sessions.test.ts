@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Rui, RuiRequestError } from "../src/index.ts";
+import { Rui, RuiRequestError, type AgentSpec } from "../src/index.ts";
 
 const binary = process.env.RUI_BINARY;
 const skip = binary ? false : "set RUI_BINARY to a built rui";
@@ -19,7 +19,7 @@ async function connect(): Promise<Rui> {
 	});
 }
 
-const spec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
+const spec: AgentSpec = { workspace: tmpdir(), provider: "openai", model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: ["bash" as const], permissionMode: "ask" as const, label: "first" };
 
 test("create, list, send, update, interrupt and stop a Session", { skip }, async () => {
 	const rui = await connect();
@@ -75,6 +75,31 @@ test("models lists each provider's models", { skip }, async () => {
 	try {
 		const models = await rui.models();
 		assert.ok(models.some((model) => model.provider === "openai" && model.id === "gpt-6.1-sol" && model.known), JSON.stringify(models));
+	} finally {
+		await rui.close();
+	}
+});
+
+test("status reflects an idle Session and paused queued work", { skip }, async () => {
+	const rui = await connect();
+	try {
+		await rui.pause();
+		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:status" });
+		const idle = await session.status();
+		assert.deepEqual(idle, {
+			state: "idle", since: idle.since, turn: null, operation: null, pendingMessages: "0",
+			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], permissionMode: "ask", latestOutcome: null,
+		});
+		assert.match(idle.since, /^[1-9][0-9]*$/);
+		await session.send("queued", { idempotencyKey: "status:message" });
+		await session.update({ label: "Queued work", effort: "high" });
+		const queued = await session.status();
+		assert.deepEqual(queued, {
+			...idle, state: "pending", since: queued.since, pendingMessages: "1", label: "Queued work", effort: "high",
+		});
+		assert.match(queued.since, /^[1-9][0-9]*$/);
+		await session.interrupt(); // Queued input has no model target.
+		assert.equal((await session.status()).pendingMessages, "1");
 	} finally {
 		await rui.close();
 	}
