@@ -53,7 +53,7 @@ pub fn main(init: std.process.Init) !void {
     run(init) catch |err| {
         if (err == error.EmptyMessageInput) {
             @import("stderr.zig").print("Standard input was empty; provide Message text. Nothing was sent.\n", .{});
-        } else if (err != error.HostStopped and !stderr.hasDiagnostic()) stderr.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
+        } else if (err != error.Reported) stderr.diagnostic("error: {s} (exit status 1)\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }
@@ -71,13 +71,13 @@ fn run(init: std.process.Init) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
         return std.Io.File.stdout().writeStreamingAll(init.io, version_text);
     }
-    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] });
+    if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) error.Reported else err;
     if (cli_args.retired(args[1])) |replacement| {
         const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
         stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n", .{ args[1], replacement, replacement_resource });
-        return error.InvalidArguments;
+        return error.Reported;
     }
-    const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return @call(.never_inline, newSession, .{ init, args[1..] });
+    const resource = std.meta.stringToEnum(cli_args.Resource, args[1]) orelse return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) error.Reported else err;
     if (args.len == 2 or (args.len == 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h")))) {
         return printHelp(init.io, .{ .resource = resource });
     }
@@ -85,38 +85,45 @@ fn run(init: std.process.Init) !void {
         var operation: [64]u8 = undefined;
         if (std.fmt.bufPrint(&operation, "{s} {s}", .{ @tagName(resource), args[2] }) catch null) |name| if (cli_args.retired(name)) |replacement| {
             stderr.diagnostic("rui: `{s}` is now `rui {s}`; see rui {s} --help. Nothing was captured or sent.\n", .{ name, replacement, @tagName(resource) });
-            return error.InvalidArguments;
+            return error.Reported;
         };
         stderr.diagnostic("rui: unknown {s} operation; use rui {s} --help.\n", .{ @tagName(resource), @tagName(resource) });
-        return error.InvalidArguments;
+        return error.Reported;
     };
     const definition = command.definition();
     // The arena outlives this invocation, so decoded identities do too.
     var problem: cli_args.Problem = undefined;
-    const parsed = definition.parse(args[3..], init.arena.allocator(), &problem) catch |err| {
+    const parsed = definition.parse(args[3..], init.arena.allocator(), &problem) catch {
         reportParseProblem(problem, @tagName(resource), definition.name, null);
-        return err;
+        return error.Reported;
     };
     if (parsed.help) return printHelp(init.io, .{ .command = definition });
-    if (parsed.missing()) |group| return reportMissing(resource, definition, group);
+    if (parsed.missing()) |group| {
+        reportMissing(resource, definition, group) catch {};
+        return error.Reported;
+    }
     dispatching = true;
     dispatch(init, command, &parsed, args) catch |err| {
         if (err == error.InvalidArguments) {
             stderr.diagnostic("rui: {s} {s}: invalid arguments. Usage: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @tagName(resource), definition.name });
-            return err;
+            return error.Reported;
         }
-        // Model rejection already names the ID, supported IDs and repair;
-        // Pre-admission refusals have one diagnostic, with no recovery handle.
-        // A saved rejection or conflict already named its replay.
-        // A stopped Host already said how to start it and resume.
-        if (err == error.InvalidModel or err == error.EmptyMessageInput or err == error.MutationNotAccepted or err == error.HostStopped) return err;
+        if (err == error.EmptyMessageInput) return err;
+        if (reportedByOwner(err)) return error.Reported;
         if (err == error.EnvironmentTooLarge) reportEnvironmentTooLarge(.{ .map = init.environ_map });
-        // Until every owner reports its own cause, this line carries it, since
-        // the footer is suppressed once any diagnostic has been printed.
+        // Until every owner reports its own cause, this line carries it.
         stderr.diagnostic("rui: {s} {s} failed: {s}. Syntax and recovery: rui {s} {s} --help\n", .{ @tagName(resource), definition.name, @errorName(err), @tagName(resource), definition.name });
-        return err;
+        return error.Reported;
     };
     try postCommandHold(init);
+}
+
+/// Owners that print their own diagnostic before returning these errors:
+/// model rejection names the ID, supported IDs and repair; a saved rejection
+/// or conflict names its replay; a stopped Host says how to start it.
+/// `error.Reported` tells main the caller has already been told.
+fn reportedByOwner(err: anyerror) bool {
+    return err == error.InvalidModel or err == error.MutationNotAccepted or err == error.HostStopped;
 }
 
 // `run` stays under the Host for its whole life, so client-only buffers
