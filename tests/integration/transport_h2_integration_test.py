@@ -607,17 +607,16 @@ class OpenAiBaseUrlCleanupTests(unittest.TestCase):
                 host_models[socket] = listed
             return host, {"socket": socket}
 
-        def model_list(socket, *args):
-            return host_models[socket] if endpoint.models_release.is_set() else pending
-
         def message(*args):
             if fail_body:
                 raise primary
 
-        def model_list(*args):
+        def model_list(socket, *args):
             if endpoint.models_release.is_set():
                 requests.append(requests[0].copy())  # A model-list request refreshes again.
-                return listed
+                # Reply for the addressed Host, including the restarted Host's
+                # failed fetch; never reuse the first Host's live list.
+                return host_models[socket]
             return pending
 
         with tempfile.TemporaryDirectory() as parent, contextlib.ExitStack() as stack:
