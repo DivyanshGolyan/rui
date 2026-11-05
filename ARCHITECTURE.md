@@ -2350,7 +2350,9 @@ The Host does not check the saved future-Session model default at startup: any p
 Missing or unreadable future defaults do not prevent a Host from serving existing saved work.
 A pin with invalid syntax rejects fresh CLI creation before capture rather than falling back to the recommendation.
 
-The only live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); there is no model-list command, other network discovery or cache across Host runs, and help and CLI configuration read the compiled table.
+The only provider live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity).
+The Host also refreshes the models.dev fact catalog and saves it across Host runs; help, CLI configuration and Session admission/compaction still read the compiled table in this step.
+There is no model-list command.
 Help needs no Host or credentials.
 Clients do not read credentials for peer configuration.
 Persisted model syntax and transport encoding remain independent of the compiled list, so inspection, original-request recovery and existing Session work preserve exact saved bindings.
@@ -3007,9 +3009,26 @@ Query work may grow with history; item bounds do not promise traversal latency.
 `POST /v1/model-list` takes `kind:"model_list"` and returns `providers`: for each provider the Host serves, in Provider order, its `provider`, `source` and `models`, each an `id` with `known`, whether Rui's model table knows its facts.
 A model the table does not list runs with default limits (see compaction).
 ChatGPT has no public list, so its `source` is always `table` and its models are the table's.
-For an OpenAI key the execution owner's HTTP/2 Client fetches `GET BASE/models` once as the Host starts, on a stream of its own beyond Active Capacity, so it never waits for a model request or makes one wait, and keeps the IDs (at most 512, 16 KiB together) in memory until it stops; the key never changes while it runs, so the list is never fetched again.
+At Host start and on every model-list request, the execution owner's HTTP/2 Client starts both an OpenAI key's `GET BASE/models` (when served) and an unauthenticated `GET https://models.dev/api.json`, unless that fetch is already in flight.
+Each has its own endpoint and stream beyond Active Capacity, including a catalog-only Host with no model slots.
+Neither fetch waits behind or reserves a model slot.
+The provider IDs (at most 512, 16 KiB together) stay in Host memory and are replaced on refresh.
 While that fetch runs the source is `pending` with the table's models; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `table_fallback` with the table's models when it failed, answered with something else or listed more than that bound.
-The reply reads Host memory only, never SQLite or the network.
+A refresh keeps the previous provider source while in flight; the initial provider fetch alone starts `pending`.
+The reply only signals refresh and reads known Host memory: it waits for neither SQLite nor the network.
+
+The models.dev GET asks for identity encoding and sends `If-None-Match` with the saved ETag when present.
+A 304 leaves the saved generation untouched.
+Its page-allocated body is capped at 16 MiB and released immediately after the token-walk parser slims it in a scratch arena off the Host stack.
+Transport, status, parse and size failures print one stderr line and keep the saved catalog.
+The Host retains no in-memory fact catalog.
+The Store saves `model_fact(model_id,context_window,efforts,openai,generation)` and one `model_catalog_source(slot=1,etag,generation,fetched_at)` row.
+Bounded SQL batches share one queued write transaction, with source publication last: because `model_id` is the primary key, separately committed upsert batches would erase old facts before publication.
+Readers therefore see the old or new catalog whole.
+Removed IDs retain their older rows but current-generation reads ignore them; runtime SQL never deletes them.
+ETags are nullable and bounded to 512 bytes; an oversized or duplicate response ETag refuses that refresh.
+Queued reads expose one model's current facts and the current OpenAI IDs for later catalog consumers.
+In this step these reads are only exercised by tests; Session admission, effort validation and compaction are unchanged.
 
 Each row has position/ordinal, `at`, and one closed tagged `value`.
 `at` is the Host Unix second the row's owning fact committed: the admission for Message admission and sent Message rows, which is the same time on both rows of one Message; the Conversation entry for User and assistant rows; the producing Operation's resolution for a Tool Call; the group's last acceptance, the one at its greatest position, for a Tool Result (an Action's resolution, or the producing Operation's for a rejected call); and the fact itself for a Turn outcome, Session stop and refused send.

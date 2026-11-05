@@ -839,8 +839,7 @@ fn setNonblocking(fd: std.posix.fd_t) !void {
 }
 
 fn descriptorTransport(served: *const providers.Providers) descriptor_capacity.Transport {
-    if (!served.any()) return .none;
-    return if (served.modelListKey() != null) .requests_and_model_list else .requests;
+    return if (served.modelListKey() != null) .listings else .catalog;
 }
 
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
@@ -1612,7 +1611,10 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         },
         // Host memory only: never SQLite or the network.
         // Sized as written: the bound is tens of KiB, a reply mostly far less.
-        .model_list => try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host}),
+        .model_list => {
+            host.listings_requested.store(true, .release);
+            try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host});
+        },
     }
 }
 

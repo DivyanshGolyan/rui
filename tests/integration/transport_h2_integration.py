@@ -53,6 +53,8 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.answers = {}
         # The body a GET of a model list is answered with; None answers 404.
         self.models = None
+        self.catalog = None
+        self.catalog_etag = '"catalog-v1"'
         # Set: a model list GET waits unanswered until the event is set.
         self.models_release = None
         # Set: each connection allows this many concurrent streams.
@@ -240,15 +242,24 @@ class StreamHandler(socketserver.BaseRequestHandler):
         outgoing_bodies = {}
         held_bodies = {}
         held_models = []
+        get_headers = {}
 
         def answer_models(stream_id):
-            models = self.server.models
-            payload = models if models is not None else b"{}"
-            conn.send_headers(stream_id, [
-                (":status", "200" if models is not None else "404"),
-                ("content-type", "application/json"), ("content-length", str(len(payload))),
-            ])
-            outgoing_bodies[stream_id] = payload
+            headers = get_headers.pop(stream_id)
+            is_catalog = headers[b":path"] == b"/api.json"
+            models = self.server.catalog if is_catalog else self.server.models
+            etag = self.server.catalog_etag if is_catalog else None
+            unchanged = etag is not None and headers.get(b"if-none-match") == etag.encode()
+            payload = b"" if unchanged else models if models is not None else b"{}"
+            status = "304" if unchanged else "200" if models is not None else "404"
+            fields = [(":status", status), ("content-type", "application/json")]
+            if etag is not None:
+                fields.append(("etag", etag))
+            if not unchanged:
+                fields.append(("content-length", str(len(payload))))
+            conn.send_headers(stream_id, fields, end_stream=not payload)
+            if payload:
+                outgoing_bodies[stream_id] = payload
         with self.server.lock:
             self.server.connections.append(self.client_address)
         while True:
@@ -286,7 +297,8 @@ class StreamHandler(socketserver.BaseRequestHandler):
                         conn.update_settings({h2.settings.SettingCodes.INITIAL_WINDOW_SIZE: 65535})
                         continue
                     if dict(event.headers)[b":method"] == b"GET":
-                        # A model list: it has no body and is not a model request.
+                        # A listing: it has no body and is not a model request.
+                        get_headers[event.stream_id] = dict(event.headers)
                         release = self.server.models_release
                         if release is not None and not release.is_set():
                             held_models.append(event.stream_id)

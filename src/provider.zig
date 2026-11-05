@@ -106,17 +106,17 @@ pub const Options = struct {
     scratch_path: []const u8,
     /// The scratch account every request and response of this Host charges.
     budget: ScratchBudget,
-    /// Where `startModelList` sends its GET, if anywhere.
-    model_list_url: ?[]const u8 = null,
+    /// Independent discovery endpoints, if configured.
+    listing_urls: std.EnumArray(ListingKind, ?[]const u8) = .initFill(null),
 };
 
-/// The one request a Reactor makes besides model Transfers: an OpenAI key's
-/// model list, once at Host start. Its answer lands in its owner's buffer,
-/// with no scratch file or budget charge, and it holds a stream, and so
-/// at most one connection, beyond the Transfers' capacity until it ends.
-pub const ModelListFetch = struct {
+/// Independent discovery streams beyond Active Capacity. Each has one owner,
+/// no response file or request scratch charge, and at most one live GET.
+pub const ListingKind = enum { provider, catalog };
+pub const ListingFetch = struct {
     stream: h2.Stream,
     finished: bool,
+    etag: ?protocol.Bounded(512) = null,
 };
 
 /// Per-launch fault hooks, each through a production path.
@@ -240,8 +240,8 @@ pub const Reactor = struct {
     scratch_path: []const u8,
     budget: ScratchBudget,
     credentials: Credentials,
-    model_list_endpoint: ?h2.Endpoint,
-    model_list: ?*ModelListFetch,
+    listing_endpoints: std.EnumArray(ListingKind, ?h2.Endpoint),
+    listings: std.EnumArray(ListingKind, ?*ListingFetch),
 
     /// In final storage: h2's Client is pointer-stable. Host startup has
     /// already run `checkLibraries` and `validateEndpoint`.
@@ -259,13 +259,13 @@ pub const Reactor = struct {
             .scratch_path = options.scratch_path,
             .budget = options.budget,
             .credentials = .{ .allocator = allocator },
-            .model_list_endpoint = null,
-            .model_list = null,
+            .listing_endpoints = .initFill(null),
+            .listings = .initFill(null),
         };
-        // The model list holds a stream of its own, so it never waits
-        // behind a model request or makes one wait behind it.
-        const streams = std.math.add(usize, options.capacity, @intFromBool(options.model_list_url != null)) catch
-            return error.TransportCapacityTooLarge;
+        var streams = options.capacity;
+        for (options.listing_urls.values) |url| {
+            streams = std.math.add(usize, streams, @intFromBool(url != null)) catch return error.TransportCapacityTooLarge;
+        }
         try self.client.init(allocator, io, .{
             .stream_capacity = std.math.cast(u32, streams) orelse return error.TransportCapacityTooLarge,
             .inactivity_ns = interval_ns,
@@ -277,47 +277,45 @@ pub const Reactor = struct {
         for (options.endpoints.values, &self.endpoints.values) |url, *endpoint| {
             if (url) |value| endpoint.* = try self.client.addEndpoint(value);
         }
-        if (options.model_list_url) |url| self.model_list_endpoint = try self.client.addEndpoint(url);
+        for (options.listing_urls.values, &self.listing_endpoints.values) |url, *endpoint| {
+            if (url) |value| endpoint.* = try self.client.addEndpoint(value);
+        }
     }
 
-    /// Launches the model list GET with `fields`, which `prepare` copies
-    /// except borrowed ones; `response` is borrowed until it ends.
-    pub fn startModelList(self: *Reactor, fetch: *ModelListFetch, fields: []const h2.Field, response: []u8) !void {
-        std.debug.assert(self.model_list == null);
+    /// Fields are copied by prepare; response is borrowed until endListing.
+    pub fn startListing(self: *Reactor, kind: ListingKind, fetch: *ListingFetch, fields: []const h2.Field, response: []u8) !void {
+        std.debug.assert(self.listings.get(kind) == null);
         fetch.* = .{ .stream = .idle, .finished = false };
         try self.client.prepare(&fetch.stream, .{
-            .endpoint = self.model_list_endpoint.?,
+            .endpoint = self.listing_endpoints.get(kind).?,
             .method = .get,
             .fields = fields,
             .body = .{ .bytes = "" },
             .sink = .{ .buffer = response },
         });
-        self.model_list = fetch;
+        self.listings.set(kind, fetch);
         self.client.launch(&fetch.stream);
     }
 
-    /// The model list once its stream has ended, handed over once: its
-    /// owner reads the answer, then calls `endModelList`.
-    pub fn finishedModelList(self: *Reactor) ?*ModelListFetch {
-        const fetch = self.model_list orelse return null;
+    pub fn finishedListing(self: *Reactor, kind: ListingKind) ?*ListingFetch {
+        const fetch = self.listings.get(kind) orelse return null;
         return if (fetch.finished) fetch else null;
     }
 
-    /// Whether the model list still holds a stream.
-    pub fn modelListPending(self: *const Reactor) bool {
-        return self.model_list != null;
+    pub fn listingPending(self: *const Reactor) bool {
+        for (self.listings.values) |fetch| if (fetch != null) return true;
+        return false;
     }
 
-    /// Cancels the model list if it is live and releases its stream.
-    pub fn endModelList(self: *Reactor) void {
-        const fetch = self.model_list orelse return;
+    pub fn endListing(self: *Reactor, kind: ListingKind) void {
+        const fetch = self.listings.get(kind) orelse return;
         self.client.cancel(&fetch.stream);
         fetch.stream.deinit();
-        self.model_list = null;
+        self.listings.set(kind, null);
     }
 
     pub fn deinit(self: *Reactor) void {
-        std.debug.assert(self.credentials.head == null and self.model_list == null);
+        std.debug.assert(self.credentials.head == null and !self.listingPending());
         self.client.deinit();
         self.* = undefined;
     }
@@ -350,11 +348,15 @@ pub const Reactor = struct {
     /// A finished stream with an impossible status is an error: the
     /// caller fences, since no settlement can be derived from it.
     pub fn nextCompletion(self: *Reactor, fail_seal: bool) error{InvalidHttpEvidence}!?Completion {
-        var stream = self.client.nextFinished() orelse return null;
-        if (self.model_list) |fetch| if (stream == &fetch.stream) {
-            fetch.finished = true;
-            stream = self.client.nextFinished() orelse return null;
-        };
+        const stream = next: while (self.client.nextFinished()) |stream| {
+            for (self.listings.values) |listing| {
+                if (listing) |fetch| if (stream == &fetch.stream) {
+                    fetch.finished = true;
+                    continue :next;
+                };
+            }
+            break :next stream;
+        } else return null;
         const transfer: *Transfer = @fieldParentPtr("stream", stream);
         var outcome = try transfer.outcome();
         switch (outcome) {
@@ -370,8 +372,21 @@ pub const Reactor = struct {
 
     /// h2's receiver, inside `drive` on the execution thread.
     pub fn observe(self: *Reactor, stream: *h2.Stream, event: h2.Event) h2.Verdict {
-        // The model list's buffer bounds its body; it observes no header.
-        if (self.model_list) |fetch| if (stream == &fetch.stream) return .accept;
+        for (self.listings.values, std.enums.values(ListingKind)) |listing, kind| {
+            if (listing) |fetch| if (stream == &fetch.stream) {
+                if (kind == .catalog and event == .head and event.head.kind == .final) {
+                    for (event.head.fields) |field| {
+                        if (std.mem.eql(u8, field.name, "etag")) {
+                            if (fetch.etag != null) return .refuse;
+                            var etag: protocol.Bounded(512) = .{};
+                            etag.set(field.value) catch return .refuse;
+                            fetch.etag = etag;
+                        }
+                    }
+                }
+                return .accept;
+            };
+        }
         const transfer: *Transfer = @fieldParentPtr("stream", stream);
         switch (event) {
             .head => |head| {
@@ -1040,3 +1055,30 @@ const TurnStateRecord = struct {
         self.value.set(value) catch unreachable;
     }
 };
+
+test "catalog listing captures a bounded ETag and rejects duplicates without observing provider headers" {
+    var reactor: Reactor = undefined;
+    reactor.listings = .initFill(null);
+    var fetch: ListingFetch = .{ .stream = .idle, .finished = false };
+    reactor.listings.set(.catalog, &fetch);
+    const head: h2.Event = .{ .head = .{
+        .kind = .final,
+        .status = 200,
+        .fields = &.{.{ .name = "etag", .value = "W/\"catalog\"" }},
+    } };
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&fetch.stream, head));
+    try std.testing.expectEqualStrings("W/\"catalog\"", fetch.etag.?.slice());
+    try std.testing.expectEqual(h2.Verdict.refuse, reactor.observe(&fetch.stream, head));
+    fetch.etag = null;
+    const oversized: [513]u8 = @splat('x');
+    try std.testing.expectEqual(h2.Verdict.refuse, reactor.observe(&fetch.stream, .{ .head = .{
+        .kind = .final,
+        .status = 200,
+        .fields = &.{.{ .name = "etag", .value = &oversized }},
+    } }));
+    try std.testing.expect(fetch.etag == null);
+    reactor.listings.set(.catalog, null);
+    reactor.listings.set(.provider, &fetch);
+    try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&fetch.stream, head));
+    try std.testing.expect(fetch.etag == null);
+}

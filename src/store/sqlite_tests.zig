@@ -9266,3 +9266,31 @@ test "a record names a server exactly when an MCP server owns it" {
     moved.server = "wiki";
     try std.testing.expect(!std.mem.eql(u8, &tool_catalog.recordDigest(&mcp_record), &tool_catalog.recordDigest(&moved)));
 }
+
+test "a failed model fact batch rolls back overwritten rows and source together" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/facts.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    {
+        defer storage.close() catch unreachable;
+        try storage.saveModelFacts(&.{.{ .id = "kept", .context_window = 100, .efforts = .{}, .openai = true }}, "\"old\"");
+        // The first row is overwritten and stepped before the second row's
+        // constraint fails. Neither that overwrite nor publication may stick.
+        try std.testing.expectError(error.StatementFailed, storage.saveModelFacts(&.{
+            .{ .id = "kept", .context_window = 200, .efforts = .{}, .openai = false },
+            .{ .id = "", .context_window = null, .efforts = .{}, .openai = false },
+        }, "\"new\""));
+        try std.testing.expect(storage.isFenced());
+    }
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(?u32, 100), (try storage.modelFact("kept")).?.context_window);
+    const source = (try storage.readModelCatalogSource()).?;
+    try std.testing.expectEqual(@as(u64, 1), source.generation);
+    try std.testing.expectEqualStrings("\"old\"", source.etag.?.slice());
+}

@@ -6,6 +6,7 @@ const failure_class = @import("failure_class.zig");
 const execution_turn = @import("execution_turn.zig");
 const failed_responses = @import("failed_responses.zig");
 const model_adapter = @import("model_adapter.zig");
+const models_dev = @import("models_dev.zig");
 const model_list = @import("model_list.zig");
 const named_scratch = @import("named_scratch.zig");
 const output_decode = @import("output_decode.zig");
@@ -387,14 +388,14 @@ const Workspace = struct {
     /// An HTTP error body's classification, live while it is classified.
     decode: output_decode.Decode,
     settlement: store_module.ValidatedOutput,
-    /// The OpenAI key's model list while its one GET is live.
-    model_list: ModelListWork,
+    /// Independent provider-list and catalog GET ownership.
+    listings: std.EnumArray(provider.ListingKind, ListingWork),
 };
 
-/// The model list GET's own parts: the Reactor holds its stream, and these
-/// its credential use and answer buffer until it ends. Zero bytes are none.
-const ModelListWork = struct {
-    fetch: provider.ModelListFetch,
+/// A listing GET's parts: the Reactor holds its stream, and these its
+/// optional credential use and answer buffer until it ends. Zero bytes are none.
+const ListingWork = struct {
+    fetch: provider.ListingFetch,
     credential: ?*provider.SharedCredential,
     response: ?[]u8,
 };
@@ -480,14 +481,16 @@ pub fn executionMain(host: *Host) void {
         if (host.hooks.fails(.request_scratch_acquire)) 0 else host.limits.request_scratch_limit_bytes,
     );
     const model_list_url: ?[]const u8 = if (host.providers.modelListKey()) |served|
-        std.fmt.allocPrint(host.allocator, "{s}/models", .{providers.responsesBase(served.endpoint).?}) catch null
+        std.fmt.allocPrint(host.allocator, "{s}/models", .{providers.responsesBase(served.endpoint).?}) catch |err| failed: {
+            host.model_lists.publish(err);
+            break :failed null;
+        }
     else
         null;
     defer if (model_list_url) |url| host.allocator.free(url);
     var reactor_storage: provider.Reactor = undefined;
-    // With no slots no Transfer can start, so a zero-capacity Host runs no
-    // transport (h2 requires a positive stream capacity).
-    const reactor: ?*provider.Reactor = if (slots.len != 0 and host.providers.any()) reactor: {
+    // Listings have their own capacity even when no model can run.
+    const reactor: ?*provider.Reactor = reactor: {
         var endpoints: std.EnumArray(protocol.Provider, ?[]const u8) = .initFill(null);
         for (host.providers.table.values, &endpoints.values) |served, *endpoint| {
             if (served) |value| endpoint.* = value.endpoint;
@@ -503,19 +506,18 @@ pub fn executionMain(host: *Host) void {
             },
             .scratch_path = host.lease.paths.scratch.slice(),
             .budget = budget,
-            .model_list_url = model_list_url,
+            .listing_urls = .init(.{ .provider = model_list_url, .catalog = host.hooks.models_dev_url orelse "https://models.dev/api.json" }),
         }) catch |err| {
             fenceDispatch(host, "transport reactor initialization", err);
             return;
         };
         break :reactor &reactor_storage;
-    } else null;
+    };
     defer if (reactor) |active| active.deinit();
-    if (reactor) |active| startModelList(host, active, &workspace.model_list) else if (host.providers.modelListKey() != null) {
-        // No slot can run, so nothing is fetched: the table stands.
-        host.model_lists.set(.table);
-    }
-    defer if (reactor) |active| endModelList(active, &workspace.model_list);
+    if (reactor) |active| startListings(host, active, &workspace.listings);
+    defer if (reactor) |active| {
+        for (std.enums.values(provider.ListingKind)) |kind| endListing(active, kind, workspace.listings.getPtr(kind));
+    };
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
     defer shutdownExecution(host, slots, workspace);
@@ -581,6 +583,9 @@ const NativeTurn = struct {
     }
 
     pub fn noteLifecycleOpportunity(self: *NativeTurn) void {
+        if (self.host.listings_requested.swap(false, .acq_rel)) {
+            if (self.reactor) |reactor| startListings(self.host, reactor, &self.workspace.listings);
+        }
         const observed = self.now();
         if (self.measurement.last_service_at) |last| {
             traceServiceBoundary(
@@ -671,7 +676,7 @@ const NativeTurn = struct {
     pub fn hasTransport(self: *const NativeTurn) bool {
         if (slotsHaveTransport(self.slots)) return true;
         const reactor = self.reactor orelse return false;
-        return reactor.hasConnections() or reactor.modelListPending();
+        return reactor.hasConnections() or reactor.listingPending();
     }
 
     pub fn hasBash(self: *const NativeTurn) bool {
@@ -789,11 +794,15 @@ const NativeTurn = struct {
 
     pub fn serviceOneCompletion(self: *NativeTurn) bool {
         if (callServiceOneCompletion(self.host, self.reactor, self.slots, self.workspace)) return true;
-        // The model list ends inside `nextCompletion`, which skips it.
+        // nextCompletion marks discovery streams finished without casting
+        // them to model Transfers. Publish one answer per service turn.
         const reactor = self.reactor orelse return false;
-        if (reactor.finishedModelList() == null) return false;
-        finishModelList(self.host, reactor, &self.workspace.model_list);
-        return true;
+        for (std.enums.values(provider.ListingKind)) |kind| {
+            if (reactor.finishedListing(kind) == null) continue;
+            finishListing(self.host, reactor, kind, self.workspace.listings.getPtr(kind));
+            return true;
+        }
+        return false;
     }
 
     pub fn modelPreparationAllowance(self: *const NativeTurn) execution_turn.Allowance {
@@ -815,43 +824,81 @@ const NativeTurn = struct {
     }
 };
 
-/// Launches the OpenAI key's model list on the Reactor, with the key's
-/// own request fields and endpoint rule. One that cannot start leaves the
-/// table, and says why.
-noinline fn startModelList(host: *Host, reactor: *provider.Reactor, work: *ModelListWork) void {
-    const served = host.providers.modelListKey() orelse return;
-    if (reactor.model_list_endpoint == null) return host.model_lists.publish(error.OutOfMemory);
+const max_catalog_response_bytes = 16 * 1024 * 1024;
+
+/// Both discovery GETs share capacity, buffer and completion ownership.
+noinline fn startListings(host: *Host, reactor: *provider.Reactor, works: *std.EnumArray(provider.ListingKind, ListingWork)) void {
+    for (std.enums.values(provider.ListingKind)) |kind| {
+        if (reactor.listings.get(kind) != null or reactor.listing_endpoints.get(kind) == null) continue;
+        startListing(host, reactor, kind, works.getPtr(kind)) catch |err| {
+            endListing(reactor, kind, works.getPtr(kind));
+            listingFailed(host, kind, err);
+        };
+    }
+}
+
+noinline fn startListing(host: *Host, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork) !void {
     var headers: providers.Headers = .{};
-    served.credential.fields(served.endpoint, host.providers.ca_file, null, &reactor.credentials, &headers) catch |err|
-        return host.model_lists.publish(err);
-    work.credential = headers.takeCredential();
     defer headers.deinit();
-    work.response = std.heap.page_allocator.alloc(u8, model_list.max_response_bytes) catch |err| {
-        endModelList(reactor, work);
-        return host.model_lists.publish(err);
+    var source: ?store_module.ModelCatalogSource = null;
+    var fields: [1]@import("h2").Field = undefined;
+    const request_fields: []const @import("h2").Field = switch (kind) {
+        .provider => fields: {
+            const served = host.providers.modelListKey() orelse return;
+            try served.credential.fields(served.endpoint, host.providers.ca_file, null, &reactor.credentials, &headers);
+            work.credential = headers.takeCredential();
+            break :fields headers.fields();
+        },
+        .catalog => fields: {
+            source = try host.store.readModelCatalogSource();
+            if (source) |*saved| if (saved.etag) |*etag| {
+                fields[0] = .{ .name = "if-none-match", .value = etag.slice() };
+                break :fields &fields;
+            };
+            break :fields &.{};
+        },
     };
-    reactor.startModelList(&work.fetch, headers.fields(), work.response.?) catch |err| {
-        endModelList(reactor, work);
-        return host.model_lists.publish(err);
-    };
+    work.response = try std.heap.page_allocator.alloc(u8, switch (kind) {
+        .provider => model_list.max_response_bytes,
+        .catalog => max_catalog_response_bytes,
+    });
+    try reactor.startListing(kind, &work.fetch, request_fields, work.response.?);
 }
 
-/// Publishes the ended GET's answer, then releases it.
-noinline fn finishModelList(host: *Host, reactor: *provider.Reactor, work: *ModelListWork) void {
-    const stream = &reactor.finishedModelList().?.stream;
-    const body: anyerror![]const u8 = if (stream.end().?.cause != .complete)
-        error.ModelListTransportFailed
-    else if (stream.status() != 200)
-        error.ModelListRefused
-    else
-        work.response.?[0..@intCast(stream.responseLength())];
-    host.model_lists.publish(body);
-    endModelList(reactor, work);
+fn listingFailed(host: *Host, kind: provider.ListingKind, err: anyerror) void {
+    switch (kind) {
+        .provider => host.model_lists.publish(err),
+        .catalog => stderr.print("rui: models.dev catalog unavailable ({s}); the saved catalog stands\n", .{@errorName(err)}),
+    }
 }
 
-/// Cancels a live GET and releases its stream, credential use and buffer.
-fn endModelList(reactor: *provider.Reactor, work: *ModelListWork) void {
-    reactor.endModelList();
+noinline fn finishListing(host: *Host, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork) void {
+    defer endListing(reactor, kind, work);
+    const stream = &reactor.finishedListing(kind).?.stream;
+    if (stream.end().?.cause != .complete) return listingFailed(host, kind, error.ListingTransportFailed);
+    if (stream.status() != 200 and !(kind == .catalog and stream.status() == 304)) return listingFailed(host, kind, error.ListingRefused);
+    const body = work.response.?[0..@intCast(stream.responseLength())];
+    switch (kind) {
+        .provider => host.model_lists.publish(body),
+        .catalog => saveCatalogAnswer(host.store, work, stream.status().?, body) catch |err| listingFailed(host, kind, err),
+    }
+}
+
+/// Scratch and the 16 MiB body live off the Host stack. Release the raw
+/// response as soon as it has been slimmed, before entering the Store queue.
+noinline fn saveCatalogAnswer(store: *store_module.Store, work: *ListingWork, status: u16, body: []const u8) !void {
+    if (status == 304) return;
+    std.debug.assert(status == 200);
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const entries = try models_dev.parse(arena.allocator(), body);
+    std.heap.page_allocator.free(work.response.?);
+    work.response = null;
+    try store.saveModelFacts(entries, if (work.fetch.etag) |*etag| etag.slice() else null);
+}
+
+fn endListing(reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork) void {
+    reactor.endListing(kind);
     if (work.credential) |shared| reactor.credentials.release(shared);
     work.credential = null;
     if (work.response) |response| std.heap.page_allocator.free(response);
@@ -3890,4 +3937,34 @@ test "a Session the register does not hold launches with the system PATH and the
     const held = (try launchBase(&environments, "n3w5es", std.testing.allocator)).?;
     defer std.testing.allocator.free(held);
     try std.testing.expectEqualStrings("PATH=/client/bin\x00HOME=/client\x00", held);
+}
+
+test "catalog answer slims saves and a 304 keeps its generation and facts" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/catalog.sqlite3", .{root});
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    const fixture = "{\"openai\":{\"models\":{\"catalog-test\":{\"limit\":{\"context\":123}}}}}";
+    var work: ListingWork = .{ .fetch = .{ .stream = .idle, .finished = true }, .credential = null, .response = try std.heap.page_allocator.dupe(u8, fixture) };
+    defer if (work.response) |bytes| std.heap.page_allocator.free(bytes);
+    work.fetch.etag = .{};
+    try work.fetch.etag.?.set("\"saved\"");
+    try saveCatalogAnswer(&storage, &work, 200, work.response.?);
+    try std.testing.expect(work.response == null);
+    try std.testing.expectEqual(@as(?u32, 123), (try storage.modelFact("catalog-test")).?.context_window);
+    const first = (try storage.readModelCatalogSource()).?;
+    try saveCatalogAnswer(&storage, &work, 304, "not JSON, deliberately unread");
+    const unchanged = (try storage.readModelCatalogSource()).?;
+    try std.testing.expectEqual(first.generation, unchanged.generation);
+    try std.testing.expectEqual(first.fetched_at, unchanged.fetched_at);
+    try std.testing.expectEqualStrings("\"saved\"", unchanged.etag.?.slice());
+    try std.testing.expectEqual(@as(?u32, 123), (try storage.modelFact("catalog-test")).?.context_window);
+    work.response = try std.heap.page_allocator.dupe(u8, "not JSON");
+    try std.testing.expectError(error.InvalidCatalog, saveCatalogAnswer(&storage, &work, 200, work.response.?));
+    try std.testing.expectEqual(first.generation, (try storage.readModelCatalogSource()).?.generation);
 }

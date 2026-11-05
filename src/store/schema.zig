@@ -32,7 +32,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
-    .{ .schema_version = 54, .digest = 0x6ed9b1d6cf75e1cb },
+    .{ .schema_version = 54, .digest = 0xa752286dae87d540 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -145,6 +145,8 @@ pub const migrations = [_]Migration{
             "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id',lower(hex(randomblob(16))))",
             "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1)\n) STRICT, WITHOUT ROWID",
             "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
+            "CREATE TABLE model_fact(\n model_id TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(model_id AS BLOB)) BETWEEN 1 AND 256),\n context_window INTEGER,\n efforts INTEGER NOT NULL,\n openai INTEGER NOT NULL CHECK(openai IN (0,1)),\n generation INTEGER NOT NULL\n) STRICT",
+            "CREATE TABLE model_catalog_source(\n slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1),\n etag TEXT CHECK(etag IS NULL OR length(CAST(etag AS BLOB))<=512),\n generation INTEGER NOT NULL,\n fetched_at INTEGER NOT NULL\n) STRICT",
         },
         .mysql = &.{
             "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n PRIMARY KEY(child_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -165,6 +167,8 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session DROP INDEX session_parent, ADD INDEX session_parent(session_parent_lead)",
             "CREATE TABLE session_ending_owed(\n turn_id BIGINT NOT NULL,\n delivered BIGINT NOT NULL,\n PRIMARY KEY(turn_id),\n FOREIGN KEY(turn_id) REFERENCES turn(turn_id),\n CHECK(turn_id>0),\n CHECK(delivered BETWEEN 0 AND 1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
+            "CREATE TABLE model_fact(\n model_id VARCHAR(256) NOT NULL,\n context_window BIGINT,\n efforts BIGINT NOT NULL,\n openai BIGINT NOT NULL,\n generation BIGINT NOT NULL,\n PRIMARY KEY(model_id),\n CHECK(OCTET_LENGTH(model_id) BETWEEN 1 AND 256),\n CHECK(openai IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE model_catalog_source(\n slot BIGINT NOT NULL,\n etag VARCHAR(512),\n generation BIGINT NOT NULL,\n fetched_at BIGINT NOT NULL,\n PRIMARY KEY(slot),\n CHECK(slot=1),\n CHECK(etag IS NULL OR OCTET_LENGTH(etag)<=512)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
 };
@@ -464,6 +468,28 @@ pub const tables = [_]Table{
         .foreign_keys = &.{
             references("tool_set_id", "tool_set", &.{"tool_set_id"}),
         },
+    },
+    // models.dev facts are published with their source generation atomically.
+    .{
+        .name = "model_fact",
+        .columns = &.{
+            .{ .name = "model_id", .type = .{ .text = .{ .min = 1, .max = 256 } } },
+            .{ .name = "context_window", .type = .int, .nullable = true },
+            .{ .name = "efforts", .type = .int },
+            .{ .name = "openai", .type = .flag },
+            .{ .name = "generation", .type = .int },
+        },
+        .primary_key = &.{"model_id"},
+    },
+    .{
+        .name = "model_catalog_source",
+        .columns = &.{
+            .{ .name = "slot", .type = .int, .check = "slot=1" },
+            .{ .name = "etag", .type = .{ .text = .{ .min = 0, .max = 512 } }, .nullable = true },
+            .{ .name = "generation", .type = .int },
+            .{ .name = "fetched_at", .type = .int },
+        },
+        .primary_key = &.{"slot"},
     },
     .{
         .name = "session",
@@ -1042,9 +1068,16 @@ pub const indexes = [_]Index{
 /// unknown target is recorded with its rejection). The tests' touch oracle
 /// watches exactly these tables.
 pub fn carriesSessions(comptime table: []const u8) bool {
-    @setEvalBranchQuota(2000);
-    return tableCarriesSessions(tables[tablePosition(&tables, table)]);
+    return comptime session_ownership.get(table) orelse @compileError("schema: no table named " ++ table);
 }
+
+// Compute once, rather than rescanning every table for every touch-oracle
+// assertion as the schema grows. This map is used only at comptime.
+const session_ownership = std.StaticStringMap(bool).initComptime(blk: {
+    var entries: [tables.len]struct { []const u8, bool } = undefined;
+    for (tables, &entries) |table, *entry| entry.* = .{ table.name, tableCarriesSessions(table) };
+    break :blk entries;
+});
 
 /// The columns that name a Session, in the order `sessionColumns` lists them.
 pub const session_column_names = [_][]const u8{ "session_ref", "sender_session_ref" };

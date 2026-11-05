@@ -64,7 +64,9 @@ pub fn parse(scratch: std.mem.Allocator, body: []const u8) Error![]catalog.Entry
     const entries = try scratch.alloc(catalog.Entry, models.count());
     var values = models.valueIterator();
     for (entries) |*entry| entry.* = values.next().?.*;
-    std.mem.sort(catalog.Entry, entries, {}, lessThan);
+    // IDs are unique: stability adds nothing. Block sort keeps a 16 KiB
+    // temporary on the execution stack; pdqsort uses bounded small frames.
+    std.mem.sortUnstable(catalog.Entry, entries, {}, lessThan);
     return entries;
 }
 

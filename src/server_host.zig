@@ -43,6 +43,7 @@ pub const Limits = struct {
 /// them at named points, and the owner views below say which failures reach
 /// which owner, so no work site copies them field by field.
 pub const Hooks = struct {
+    models_dev_url: ?[]const u8 = null,
     failures: std.EnumSet(Failure) = .empty,
     bash_lifecycle: bash.LifecycleFault = .none,
     pauses: std.EnumArray(std.meta.Tag(Pause), Hold) = .initFill(.{}),
@@ -265,6 +266,7 @@ pub const Host = struct {
     providers: *const providers_module.Providers = &providers_module.none,
     /// The OpenAI API key's model list, fetched once at start.
     model_lists: ModelLists = .{},
+    listings_requested: std.atomic.Value(bool) = .init(false),
     auth_worker: ?*AuthWorker = null,
     /// The scratch account every request and response of this Host
     /// charges; set by the execution owner when a provider is configured.
@@ -347,10 +349,8 @@ pub const Host = struct {
 };
 
 /// The live model list of the provider whose list is live
-/// (`Facts.model_list`): the execution owner fetches it once as the Host
-/// starts and publishes it here, where it stays until the Host stops. The
-/// key is read once at start, so the list never needs fetching again. Every
-/// other provider's list is always the table.
+/// (`Facts.model_list`): execution refreshes at Host start and on each
+/// model-list request. Intake only signals refresh and renders known IDs.
 pub const ModelLists = struct {
     io: std.Io = undefined,
     allocator: std.mem.Allocator = undefined,
@@ -372,7 +372,10 @@ pub const ModelLists = struct {
     pub fn set(self: *ModelLists, list: model_list.List) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        std.debug.assert(self.live == .pending);
+        switch (self.live) {
+            .live => |ids| self.allocator.free(ids.bytes),
+            else => {},
+        }
         self.live = list;
     }
 

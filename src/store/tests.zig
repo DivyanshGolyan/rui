@@ -2362,6 +2362,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/historical.zig"),
         @embedFile("domain/history_floor.zig"),
         @embedFile("domain/model_admission.zig"),
+        @embedFile("domain/model_facts.zig"),
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
@@ -8312,6 +8313,10 @@ test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
 /// gives it (less the `Held` of a body an entry point queues).
 const EntryPoint = enum {
     saveCatalog,
+    saveModelFacts,
+    readModelCatalogSource,
+    modelFact,
+    readOpenAiModelIds,
     readCatalogSet,
     readCatalogRecords,
     readCatalogText,
@@ -8426,7 +8431,11 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readDeclaredTool = 1,
     .readProviderTool = 1,
     .checkAttempt = 1,
-    // A Host's catalog is saved once; each later open finds it.
+    .saveModelFacts = 3,
+    .readModelCatalogSource = 1,
+    .modelFact = 1,
+    .readOpenAiModelIds = 1,
+    // A Host's tool catalog is saved once; each later open finds it.
     .saveCatalog = 1,
     .readCatalogSet = 1,
     .readCatalogRecords = 1,
@@ -8467,6 +8476,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/historical.zig"),
         @embedFile("domain/history_floor.zig"),
         @embedFile("domain/model_admission.zig"),
+        @embedFile("domain/model_facts.zig"),
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
@@ -8575,6 +8585,22 @@ test "each Store entry point takes its round budget on its common path" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             var meter: RoundMeter = .{ .storage = &storage };
+            meter.start();
+            try storage.saveModelFacts(&.{.{ .id = "catalog-budget", .context_window = null, .efforts = .{}, .openai = true }}, null);
+            meter.stop(.saveModelFacts);
+            meter.start();
+            _ = try storage.readModelCatalogSource();
+            meter.stop(.readModelCatalogSource);
+            meter.start();
+            _ = try storage.modelFact("catalog-budget");
+            meter.stop(.modelFact);
+            meter.start();
+            const model_ids = try storage.readOpenAiModelIds(std.testing.allocator);
+            defer {
+                for (model_ids) |id| std.testing.allocator.free(id);
+                std.testing.allocator.free(model_ids);
+            }
+            meter.stop(.readOpenAiModelIds);
             meter.start();
             try storage.saveCatalog(&tool_catalog.built_in);
             meter.stop(.saveCatalog);
@@ -9894,6 +9920,58 @@ test "each compaction that succeeds is one compacted row, with the entries its f
                 try std.testing.expectEqual(@as(u64, 0), item.ordinal);
             }
             try std.testing.expect(page.items[0].position < page.items[1].position);
+        }
+    }.run);
+}
+
+test "saved model facts replace generations and hide removed ids" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const allocator = std.testing.allocator;
+            var arena: std.heap.ArenaAllocator = .init(allocator);
+            defer arena.deinit();
+            const first = try @import("../models_dev.zig").parse(arena.allocator(),
+                \\{"openai":{"models":{"a":{"limit":{"context":100},"reasoning_options":[{"type":"effort","values":["low","high"]}]},"b":{}}},"other":{"models":{"c":{}}}}
+            );
+            try std.testing.expect(try storage.readModelCatalogSource() == null);
+            try storage.saveModelFacts(first, "\"one\"");
+            const source = (try storage.readModelCatalogSource()).?;
+            try std.testing.expectEqual(@as(u64, 1), source.generation);
+            try std.testing.expectEqualStrings("\"one\"", source.etag.?.slice());
+            try std.testing.expect(source.fetched_at > 0);
+            const a = (try storage.modelFact("a")).?;
+            try std.testing.expectEqual(@as(?u32, 100), a.context_window);
+            try std.testing.expectEqual(@as(u8, @intCast(first[0].efforts.bits.mask)), a.efforts);
+            try std.testing.expect(a.openai);
+            const ids = try storage.readOpenAiModelIds(allocator);
+            defer {
+                for (ids) |id| allocator.free(id);
+                allocator.free(ids);
+            }
+            try std.testing.expectEqual(@as(usize, 2), ids.len);
+            try std.testing.expectEqualStrings("a", ids[0]);
+            try std.testing.expectEqualStrings("b", ids[1]);
+            const second = try @import("../models_dev.zig").parse(arena.allocator(),
+                \\{"openai":{"models":{"b":{"limit":{"context":200}}}}}
+            );
+            try storage.saveModelFacts(second, null);
+            try std.testing.expectEqual(@as(u64, 2), (try storage.readModelCatalogSource()).?.generation);
+            try std.testing.expect(try storage.modelFact("a") == null);
+            try std.testing.expect(try storage.modelFact("c") == null);
+            try std.testing.expectEqual(@as(?u32, 200), (try storage.modelFact("b")).?.context_window);
+            try std.testing.expect((try storage.readModelCatalogSource()).?.etag == null);
+            const current_ids = try storage.readOpenAiModelIds(allocator);
+            defer {
+                for (current_ids) |id| allocator.free(id);
+                allocator.free(current_ids);
+            }
+            try std.testing.expectEqual(@as(usize, 1), current_ids.len);
+            try std.testing.expectEqualStrings("b", current_ids[0]);
         }
     }.run);
 }
