@@ -54,10 +54,11 @@ var done: struct {
     probes: u32 = 0,
     /// Migration tests whose migrated database matched a fresh one.
     migrations: u32 = 0,
+    conformance: u32 = 0,
 
     pub fn format(counts: @This(), w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try w.print("ddl={d} ddl_refused={d} prepares={d} prepare_refused={d} probes={d} migrations={d}\n", .{
-            counts.ddl, counts.ddl_refused, counts.prepares, counts.prepare_refused, counts.probes, counts.migrations,
+        try w.print("ddl={d} ddl_refused={d} prepares={d} prepare_refused={d} probes={d} migrations={d} conformance={d}\n", .{
+            counts.ddl, counts.ddl_refused, counts.prepares, counts.prepare_refused, counts.probes, counts.migrations, counts.conformance,
         });
     }
 } = .{};
@@ -467,5 +468,15 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     try expectCatalog(fresh_database);
     try expectCatalog(migrated_database);
     done.migrations += 1;
+    writeRecord();
+}
+
+/// A live Store conformance body completed successfully.
+pub fn conformancePassed() void {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse @panic("conformance ran without MySQL dialect connection");
+    done.conformance += 1;
     writeRecord();
 }

@@ -57,4 +57,6 @@ def verify_mysql(environ):
         return f"{path} counts no PREPARE: the live dialect check checked nothing"
     if counts.get("migrations", 0) == 0:
         return f"{path} counts no passed migration test: the MySQL migration gate did not run or failed"
+    if counts.get("conformance", 0) == 0:
+        return f"{path} counts no passed conformance test: the MySQL Store gate did not run or failed"
     return None
