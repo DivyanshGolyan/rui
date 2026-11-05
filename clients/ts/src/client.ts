@@ -308,7 +308,8 @@ export function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 		...(options.activeCapacity === undefined ? {} : { activeCapacity: options.activeCapacity }),
 		...(options.paused ? { paused: true } : {}),
 		provider: { kind: "openai_key", baseUrl: options.provider.baseUrl, key: options.provider.key },
-		...(options.tools?.length ? { mcpServers: options.tools.map(({ name, url, bearerToken, callTimeoutMs }) => ({ name, url, bearerToken, callTimeoutMs })) } : {}),
+		// Only the Host's fields are copied: it refuses unknown ones.
+		mcpServers: (options.tools ?? []).map(({ name, url, bearerToken, callTimeoutMs }) => ({ name, url, bearerToken, callTimeoutMs })),
 	};
 	// The child gets only what it needs to find programs and its home (D185).
 	const env: NodeJS.ProcessEnv = {};
