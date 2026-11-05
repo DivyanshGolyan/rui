@@ -4074,6 +4074,7 @@ test "SessionRow borrowed fields preserve offered tool names" {
         .model = "model",
         .tools = "[\"bash\",\"offered_tool\"]",
         .permission_mode = .ask,
+        .parent = null,
         .label = null,
         .created_at = 0,
         .revision = 0,
