@@ -39,6 +39,9 @@ pub const Model = struct {
 pub const models = [_]Model{
     .{ .id = "gpt-6-luna", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
     .{ .id = "gpt-6.1-sol", .default_effort = .low, .max_effort = true, .context_window = 272000 },
+    // From Codex 5c0b1ac71f2f04016abdfcf43bee7e0c96867f0e models-manager/models.json,
+    // until the shipped catalog (C1) replaces this table.
+    .{ .id = "gpt-6.1-terra", .default_effort = .low, .max_effort = true, .context_window = 500000 },
     .{ .id = "gpt-6-sol", .default_effort = .medium, .max_effort = true, .context_window = 272000 },
     .{ .id = "gpt-6-astra", .default_effort = .low, .max_effort = true, .context_window = 272000 },
     .{ .id = "gpt-5.6-sol", .default_effort = .low, .max_effort = true, .context_window = 272000 },
