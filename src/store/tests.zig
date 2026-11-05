@@ -2367,6 +2367,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("engine/mysql_open.zig"),
         @embedFile("engine/mysql_refusal.zig"),
         @embedFile("domain/action.zig"),
+        @embedFile("domain/forward.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
         @embedFile("domain/content.zig"),
@@ -8565,6 +8566,7 @@ const EntryPoint = enum {
     nextCoreWork,
     deliverAgentMessage,
     deliverChildEnding,
+    deliverSessionForward,
     startAgent,
     findTools,
     stopOwedSession,
@@ -8627,6 +8629,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .nextCoreWork = 3,
     .deliverAgentMessage = 3,
     .deliverChildEnding = 2,
+    .deliverSessionForward = 2,
     .startAgent = 4,
     .findTools = 5,
     .stopOwedSession = 2,
@@ -8696,6 +8699,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("engine/mysql_open.zig"),
         @embedFile("engine/mysql_refusal.zig"),
         @embedFile("domain/action.zig"),
+        @embedFile("domain/forward.zig"),
         @embedFile("domain/command.zig"),
         @embedFile("domain/configuration.zig"),
         @embedFile("domain/content.zig"),
@@ -9096,6 +9100,10 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try std.testing.expect(try storage.deliverChildEnding(ending.turn_id, .{}));
             meter.stop(.deliverChildEnding);
+            const forward = (try storage.nextCoreWork()).?.forward;
+            meter.start();
+            try std.testing.expect(try storage.deliverSessionForward(forward, .{}));
+            meter.stop(.deliverSessionForward);
         }
 
         /// Two Bash calls under ask: one allowed, run and settled, one

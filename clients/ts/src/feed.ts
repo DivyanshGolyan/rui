@@ -60,6 +60,8 @@ export interface ListActivityOptions {
  */
 export interface FeedEntry {
 	kind: FeedKind;
+	/** Session whose approval or ending this entry describes. */
+	sessionId?: string;
 	/** Pass as `after` to continue after this entry. */
 	cursor: string;
 	position: string;
@@ -86,6 +88,7 @@ export function decodeCursor(cursor: string): { position: string; ordinal: strin
 }
 
 function camel(name: string): string {
+	if (name === "session") return "sessionId";
 	return name.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
 }
 

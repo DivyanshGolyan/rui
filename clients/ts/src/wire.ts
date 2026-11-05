@@ -444,6 +444,7 @@ export interface components {
             at: components["schemas"]["Decimal"];
             value: {
                 turn_ended: {
+                    session: string;
                     turn: components["schemas"]["Decimal"];
                     operation: components["schemas"]["Decimal"];
                     /** @enum {string} */
@@ -510,6 +511,7 @@ export interface components {
             at: components["schemas"]["Decimal"];
             value: {
                 approval_requested: {
+                    session: string;
                     action: components["schemas"]["Decimal"];
                     operation: components["schemas"]["Decimal"];
                     call_ordinal: components["schemas"]["Decimal"];

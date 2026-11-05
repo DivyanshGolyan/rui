@@ -1146,6 +1146,7 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
     return switch (work) {
         .stop => |*owed| runOwedStop(host, owed),
         .ending => |*owed| runOwedEnding(host, owed),
+        .forward => |id| runSessionForward(host, id),
         .action => |*input| switch (input.tool) {
             .find_tools => runFindTools(host, input),
             .message_agent => runMessageAgent(host, input),
@@ -1178,6 +1179,14 @@ noinline fn runOwedStop(host: *Host, owed: *const store_module.OwedStop) executi
 noinline fn runOwedEnding(host: *Host, owed: *const store_module.OwedEnding) execution_turn.Admission {
     _ = host.store.deliverChildEnding(owed.turn_id, host.hooks.storeFaults(.action_result)) catch |err| {
         fenceDispatch(host, "child ending", err);
+        return .retry_later;
+    };
+    return .admitted;
+}
+
+noinline fn runSessionForward(host: *Host, forward_id: u64) execution_turn.Admission {
+    _ = host.store.deliverSessionForward(forward_id, host.hooks.storeFaults(.action_result)) catch |err| {
+        fenceDispatch(host, "session forward", err);
         return .retry_later;
     };
     return .admitted;
