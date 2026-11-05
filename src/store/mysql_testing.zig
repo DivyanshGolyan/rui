@@ -229,8 +229,16 @@ fn globalValue(comptime name: []const u8) !protocol.Bounded(32) {
 fn setGlobal(comptime name: []const u8, value: []const u8) !void {
     // Values come only from this server's own numeric/enum variables, or
     // the fixed probes below, not from test/user SQL.
+    // A boolean variable such as read_only takes 1 or 0 but refuses the
+    // string '1' (error 1231), so numbers go unquoted.
+    const numeric = value.len != 0 and for (value) |c| {
+        if (!std.ascii.isDigit(c)) break false;
+    } else true;
     var buffer: [160]u8 = undefined;
-    try run(try std.fmt.bufPrint(&buffer, "SET GLOBAL " ++ name ++ "='{s}'", .{value}));
+    try run(if (numeric)
+        try std.fmt.bufPrint(&buffer, "SET GLOBAL " ++ name ++ "={s}", .{value})
+    else
+        try std.fmt.bufPrint(&buffer, "SET GLOBAL " ++ name ++ "='{s}'", .{value}));
 }
 
 /// The mutex spans mutation, refusal and restoration. A failed assertion
@@ -377,6 +385,35 @@ test "store.mysql live first Access guard survives a later duplicate and keeps f
     try access.abandon(.{});
     try std.testing.expect(!storage.engine.inTransaction());
     try std.testing.expect(storage.engine.mysql.state.connection.isReady());
+    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "store.mysql live abandoning an Access drains an already-sent large content chunk" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+    defer access.deinit();
+    const bytes = try std.testing.allocator.alloc(u8, 32 * 1024);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'x');
+    access.write(live_insert, .{ .id = 9000030, .digest = protocol.contentDigest(bytes), .length = bytes.len });
+    try access.run();
+    access.writeContent(9000030, bytes);
+    // No pass after writeContent: bind has already sent the oversized query,
+    // but Access has not read its response when the caller abandons the work.
+    try std.testing.expect(storage.engine.mysql.state.long_query);
+    try std.testing.expect(!storage.engine.mysql.state.connection.isReady());
+    try access.abandon(.{});
+    try std.testing.expect(!storage.engine.inTransaction());
+    try std.testing.expect(storage.engine.mysql.state.connection.isReady());
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000030", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=9000030", .{}));
     try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
     try std.testing.expect(!storage.isFenced());
 }
