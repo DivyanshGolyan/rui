@@ -125,3 +125,39 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 	assert.equal(bodies.length, 2);
 	assert.match(bodies[1] as string, /"position":"9","ordinal":null/);
 });
+
+test("activity search follows an empty budget page's next and preserves snippets", async () => {
+	const { searchActivity, encodeCursor } = await import("../src/feed.ts");
+	const requests: Record<string, unknown>[] = [];
+	const hit = { snippet: "Start_Agent", offset: "0", length: "11" };
+	const link: Link = { exchange: async (path, body) => {
+		assert.equal(path, "/v1/activity-search");
+		requests.push(JSON.parse(body("store")));
+		return Buffer.from(JSON.stringify(requests.length === 1
+			? { items: [], next: { position: "9", ordinal: "2" } }
+			: { items: [{ position: "8", ordinal: "1", kind: "call", hits: [hit] }], next: null }));
+	} };
+	const entries = [];
+	for await (const entry of searchActivity(link, "session", "start_agent", { kinds: ["call"], limit: 1 })) entries.push(entry);
+	assert.deepEqual(entries, [{ position: "8", ordinal: "1", kind: "call", hits: [hit], cursor: encodeCursor("8", "1") }]);
+	assert.equal(requests.length, 2);
+	assert.deepEqual(requests[0], { version: WIRE_VERSION, kind: "activity_search", store: "store", session: "session", query: "start_agent", kinds: ["call"], before_position: null, before_ordinal: null, limit: "1" });
+	assert.equal(requests[1]?.before_position, "9");
+	assert.equal(requests[1]?.before_ordinal, "2");
+});
+
+test("activity search validates UTF-8 byte bounds and cancels between hits", async () => {
+	const { searchActivity } = await import("../src/feed.ts");
+	let calls = 0;
+	const link: Link = { exchange: async () => {
+		calls++;
+		return Buffer.from(JSON.stringify({ items: [{ position: "1", ordinal: "0", kind: "user", hits: [] }, { position: "1", ordinal: "1", kind: "user", hits: [] }], next: null }));
+	} };
+	for (const query of ["", "é".repeat(129), "\ud800"]) await assert.rejects(searchActivity(link, "s", query).next(), RangeError);
+	assert.equal(calls, 0);
+	const controller = new AbortController();
+	const iterator = searchActivity(link, "s", "é".repeat(128), { signal: controller.signal });
+	assert.equal((await iterator.next()).done, false);
+	controller.abort();
+	assert.equal((await iterator.next()).done, true);
+});

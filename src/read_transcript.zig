@@ -47,7 +47,31 @@ fn render(store: *storage.Store, arena: std.mem.Allocator, session: []const u8, 
     const page = try arena.create(protocol.ActivityFacts);
     var output: std.Io.Writer.Allocating = .init(arena);
     const out = &output.writer;
-    if (arguments.full) |address| {
+    if (arguments.query) |query| {
+        const search = try arena.create(protocol.ActivitySearch);
+        search.* = .{ .query = query, .kinds = arguments.kinds, .limit = arguments.limit };
+        try search.session.set(session);
+        if (arguments.before) |before| {
+            search.before_position = before.position;
+            search.before_ordinal = before.ordinal;
+        }
+        const facts = try arena.create(protocol.ActivitySearchFacts);
+        try store.searchActivity(search, facts);
+        try out.print("Session {s}, newest first: search matches.\n", .{session});
+        for (facts.items[0..facts.count]) |*match| {
+            const item = try findEntry(store, page, request, .{ .position = match.position, .ordinal = match.ordinal });
+            try outline(store, arena, session, item, out);
+            for (match.hits[0..match.count]) |*hit| {
+                try std.json.Stringify.value(hit.snippet.slice(), .{}, out);
+                try out.writeByte('\n');
+            }
+        }
+        if (facts.next) |next| {
+            try out.writeAll("More: call read_transcript with query ");
+            try std.json.Stringify.value(query.slice(), .{}, out);
+            try out.print(" before \"{d}.{d}\".\n", .{ next.position, next.ordinal });
+        } else try out.writeAll("Start of the Session.\n");
+    } else if (arguments.full) |address| {
         const item = try findEntry(store, page, request, address);
         try full(store, arena, session, item, arguments.offset, out);
     } else {

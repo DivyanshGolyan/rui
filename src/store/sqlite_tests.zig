@@ -9141,6 +9141,8 @@ test "read_transcript core runner reads other Session outlines before full windo
         "{\"limit\":0}",
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"999999.0\"}}", .{other.slice()}),
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":16384}}", .{ other.slice(), middle }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"query\":\"MESSAGE\",\"kinds\":[\"admission\"],\"limit\":1}}", .{other.slice()}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"query\":\"MESSAGE\",\"before\":\"{d}.0\"}}", .{ other.slice(), newest }),
     };
     var calls: [args.len]TestingCall = undefined;
     for (&calls, args, 0..) |*call, arguments, index| {
@@ -9153,7 +9155,7 @@ test "read_transcript core runner reads other Session outlines before full windo
     try std.testing.expectEqual(@as(u64, args.len), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND approval_position IS NULL", .{}));
     try std.testing.expect(try storage.admitNextActionAttempt(300_000, .{}) == null);
     const note = try std.fmt.allocPrint(arena, "Read {s}'s transcript", .{other.slice()});
-    try std.testing.expectEqual(@as(u64, 6), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{note}));
+    try std.testing.expectEqual(@as(u64, 8), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description=?1", .{note}));
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description='Read own transcript'", .{}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE description='Read zzzzzz''s transcript'", .{}));
 
@@ -9168,7 +9170,7 @@ test "read_transcript core runner reads other Session outlines before full windo
         reader.open(try storage.openContent(reference));
         defer reader.close();
         try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
-        const succeeded = index < 4 or index == 5;
+        const succeeded = index < 4 or index == 5 or index >= 9;
         try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ work.binding.action_id, if (succeeded) "succeeded" else "failed" }));
         switch (index) {
             0 => {
@@ -9205,6 +9207,19 @@ test "read_transcript core runner reads other Session outlines before full windo
             6 => try std.testing.expectEqualStrings("Rui could not read the transcript: limit must be 1 to 16.", bytes),
             7 => try std.testing.expectEqualStrings("Rui could not read the transcript: full names no public entry.", bytes),
             8 => try std.testing.expect(std.mem.indexOf(u8, bytes, "offset must be within the entry and on a UTF-8 character boundary") != null),
+            9 => {
+                const expected = try std.fmt.allocPrint(arena, "{d}.0 admission person", .{newest});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, expected) != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "\"new message\"\n\"new message\"\n") != null);
+                const more = try std.fmt.allocPrint(arena, "More: call read_transcript with query \"MESSAGE\" before \"{d}.0\".", .{newest});
+                try std.testing.expect(std.mem.indexOf(u8, bytes, more) != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "old message") == null);
+            },
+            10 => {
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "\"old message\"\n\"old message\"\n") != null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "new message") == null);
+                try std.testing.expect(std.mem.indexOf(u8, bytes, "Start of the Session.") != null);
+            },
             else => unreachable,
         }
     }
@@ -9471,4 +9486,256 @@ test "a record names a server exactly when an MCP server owns it" {
     var moved = mcp_record;
     moved.server = "wiki";
     try std.testing.expect(!std.mem.eql(u8, &tool_catalog.recordDigest(&mcp_record), &tool_catalog.recordDigest(&moved)));
+}
+
+test "searchActivity streams window edges filters kinds and pages newest first" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try configureTestSession(&storage, "search-config");
+    try submitTestMessage(&storage, &tmp, "search-old", "search-old", session.slice(), "needle old");
+    const text = try arena.alloc(u8, 64 * 1024 + 300);
+    @memset(text, 'x');
+    @memcpy(text[65534..][0..6], "NeEdLe");
+    try submitTestMessage(&storage, &tmp, "search-edge", "search-edge", session.slice(), text);
+    try submitTestMessage(&storage, &tmp, "search-new", "search-new", session.slice(), "needle new");
+    // More than one candidate batch of nonmatching entries must not end
+    // the search before its first match.
+    for (0..18) |i| {
+        const key = try std.fmt.allocPrint(arena, "search-miss-{d}", .{i});
+        try submitTestMessage(&storage, &tmp, key, key, session.slice(), "unrelated");
+    }
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.admission), .limit = 1 };
+    try request.query.set("NEEDLE");
+    var previous: u64 = std.math.maxInt(u64);
+    for (0..3) |i| {
+        try storage.searchActivity(&request, result);
+        try std.testing.expectEqual(@as(usize, 1), result.count);
+        const item = &result.items[0];
+        try std.testing.expect(item.position < previous);
+        previous = item.position;
+        try std.testing.expectEqual(protocol.ActivityItem.Kind.admission, item.kind);
+        try std.testing.expectEqual(@as(usize, 1), item.count);
+        const hit = &item.hits[0];
+        try std.testing.expect(hit.snippet.len <= 160);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(hit.snippet.slice()));
+        try std.testing.expectEqualStrings(if (i == 1) "NeEdLe" else "needle", hit.snippet.slice()[hit.offset..][0..hit.length]);
+        if (i != 2) {
+            const next = result.next.?;
+            try std.testing.expectEqual(item.position, next.position);
+            request.before_position = next.position;
+            request.before_ordinal = next.ordinal;
+        } else try std.testing.expect(result.next == null);
+    }
+    request.before_position = null;
+    request.before_ordinal = null;
+    request.kinds = .initOne(.assistant);
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try std.testing.expect(result.next == null);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "searchActivity budget returns an empty page with a usable next cursor" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try configureTestSession(&storage, "search-budget");
+    try submitTestMessage(&storage, &tmp, "budget-old", "budget-old", session.slice(), "needle");
+    const text = try arena.alloc(u8, reads_domain.activity_search_budget + 32);
+    @memset(text, 'x');
+    @memcpy(text[text.len - 6 ..], "needle");
+    try submitTestMessage(&storage, &tmp, "budget-large", "budget-large", session.slice(), text);
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.admission), .limit = 1 };
+    try request.query.set("needle");
+    const before = storage.testing_content_work.read.load(.monotonic);
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try std.testing.expectEqual(@as(u64, reads_domain.activity_search_budget), storage.testing_content_work.read.load(.monotonic) - before);
+    request.before_position = result.next.?.position;
+    request.before_ordinal = result.next.?.ordinal;
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expect(result.items[0].position < request.before_position.?);
+    try std.testing.expect(result.next == null);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "searchActivity never searches private provider extras" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try configureTestSession(&storage, "search-private");
+    try submitTestMessage(&storage, &tmp, "search-task", "search-task", session.slice(), "public task");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try settleItemsForTesting(&storage, &tmp, binding, &.{"{\"type\":\"message\",\"id\":\"private-marker\",\"role\":\"assistant\",\"secret\":\"private-marker\",\"content\":[{\"type\":\"output_text\",\"text\":\"public answer\"}]}"}, "public answer");
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT bag.private FROM model_output_item item JOIN content bag ON bag.content_id=item.extras_content_id WHERE item.item_kind=2", .{}));
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session };
+    try request.query.set("private-marker");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try std.testing.expect(result.next == null);
+    try request.query.set("public answer");
+    try storage.searchActivity(&request, result);
+    try std.testing.expect(result.count >= 1);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "searchActivity fences private content substituted into a public message" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const session = try configureTestSession(&storage, "search-corruption");
+    try submitTestMessage(&storage, &tmp, "search-corrupt-message", "search-corrupt-message", session.slice(), "secret");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-corrupt-message')", .{});
+    const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session };
+    try request.query.set("secret");
+    try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "searchActivity verifies canonical content even when its text does not match" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const session = try configureTestSession(&storage, "search-digest");
+    try submitTestMessage(&storage, &tmp, "search-digest-message", "search-digest-message", session.slice(), "correct");
+    try store_testing.sqlite_only.exec(&storage, "UPDATE content SET payload=CAST('damaged' AS BLOB) WHERE content_id=(SELECT content_id FROM message_admission WHERE command_key='search-digest-message')", .{});
+    const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session };
+    try request.query.set("absent");
+    try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "searchActivity exhausted exact-budget entry has no continuation" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const session = try configureTestSession(&storage, "search-exact-budget");
+    const text = try arena.alloc(u8, reads_domain.activity_search_budget);
+    @memset(text, 'x');
+    try submitTestMessage(&storage, &tmp, "budget-exact", "budget-exact", session.slice(), text);
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.admission) };
+    try request.query.set("absent");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try std.testing.expect(result.next == null);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "searchActivity fences missing assistant entries only in its scanned range" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const missing = try testingPublicProjection(&storage, &tmp, &.{.{ .encoded = "lost answer", .decoded = "lost answer" }});
+    try submitTestMessage(&storage, &tmp, "after-missing", "after-missing", missing.session.slice(), "later match");
+    try store_testing.sqlite_only.exec(&storage, "DELETE FROM conversation_entry WHERE entry_kind=3", .{});
+    const result = try arena_state.allocator().create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = missing.session, .limit = 1 };
+    try request.query.set("later match");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try std.testing.expect(!storage.isFenced());
+    const next = result.next.?;
+    request.before_position = next.position;
+    request.before_ordinal = next.ordinal;
+    try std.testing.expectError(error.CorruptStore, storage.searchActivity(&request, result));
+    try std.testing.expect(storage.isFenced());
+}
+
+test "searchActivity finds start_agent call names and stored JSON arguments not call IDs" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+    var command = try completeConfiguration("search-calls", "", workspace, "model-a");
+    command.configuration.tools = try .of(&.{ "read_transcript", "start_agent" });
+    const session = storage.configure(&command, .{}).accepted.session;
+    try submitTestMessage(&storage, &tmp, "search-call-task", "search-call-task", session.slice(), "make calls");
+    const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    const arguments = "{\"text\":\"find\\nthis\"}";
+    const quoted = try std.json.Stringify.valueAlloc(arena, arguments, .{});
+    const query_args = "{\"kinds\":[\"call\"],\"query\":\"START_AGENT\"}";
+    const query_quoted = try std.json.Stringify.valueAlloc(arena, query_args, .{});
+    try settleCallsForTesting(&storage, &tmp, model, "search-call-metadata", &.{
+        .{ .item_id = "start", .name = "start_agent", .encoded_call_id = "hidden-call-identity", .decoded_call_id = "hidden-call-identity", .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = arguments },
+        .{ .item_id = "read", .name = "read_transcript", .encoded_call_id = "read", .decoded_call_id = "read", .encoded_arguments = query_quoted[1 .. query_quoted.len - 1], .decoded_arguments = query_args },
+    });
+    const result = try arena.create(protocol.ActivitySearchFacts);
+    var request: protocol.ActivitySearch = .{ .session = session, .kinds = .initOne(.call) };
+    try request.query.set("start_agent");
+    try storage.searchActivity(&request, result);
+    // The reader's own query also names start_agent in its arguments JSON.
+    try std.testing.expectEqual(@as(usize, 2), result.count);
+    try std.testing.expectEqualStrings("start_agent\n{\"text\":\"find\\nthis\"}", result.items[1].hits[0].snippet.slice());
+    try request.query.set("find\\nthis");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 1), result.count);
+    try request.query.set("find\nthis");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    try request.query.set("hidden-call-identity");
+    try storage.searchActivity(&request, result);
+    try std.testing.expectEqual(@as(usize, 0), result.count);
+    // Settle the earlier invalid start call at its owner boundary, then run
+    // read_transcript against the same public call inventory (D163).
+    const start = (try storage.nextCoreWork()).?.action;
+    try std.testing.expect(start.tool == .start_agent);
+    _ = try storage.failCoreCall(start.binding, "invalid start arguments", .{});
+    const read = (try storage.nextCoreWork()).?.action;
+    try @import("../read_transcript.zig").run(&storage, arena, &read, .{});
+    const id = try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{read.binding.action_id});
+    const reference = try testingContentReference(&storage, id);
+    const bytes = try arena.alloc(u8, @intCast(reference.length));
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openContent(reference));
+    defer reader.close();
+    try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "call start_agent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"start_agent\\n") != null);
+    try std.testing.expect(!storage.isFenced());
 }

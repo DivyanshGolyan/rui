@@ -276,6 +276,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/activity-search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Search public Session activity newest first with bounded snippets. */
+        post: operations["activitySearch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/activity-page": {
         parameters: {
             query?: never;
@@ -333,7 +350,7 @@ export interface components {
     schemas: {
         ActivityContentRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "activity_content";
             store: string;
@@ -526,7 +543,7 @@ export interface components {
         };
         ActivityPageReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "activity_page";
             end: components["schemas"]["Decimal"];
@@ -540,7 +557,7 @@ export interface components {
         };
         ActivityPageRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "activity_page";
             store: string;
@@ -552,6 +569,44 @@ export interface components {
             direction: "forward" | "backward";
             /** @description Each at most once, in the order the enum lists them. */
             kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
+            limit: components["schemas"]["Decimal"];
+        };
+        ActivitySearchFactsCursor: {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+        };
+        ActivitySearchFactsHit: {
+            snippet: string;
+            offset: components["schemas"]["Decimal"];
+            length: components["schemas"]["Decimal"];
+        };
+        ActivitySearchItem: {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            /** @enum {string} */
+            kind: "admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted";
+            hits: components["schemas"]["ActivitySearchFactsHit"][];
+        };
+        ActivitySearchReply: {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            type: "activity_search";
+            items: components["schemas"]["ActivitySearchItem"][];
+            next: components["schemas"]["ActivitySearchFactsCursor"] | null;
+        };
+        ActivitySearchRequest: {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            kind: "activity_search";
+            store: string;
+            session: string;
+            query: string;
+            /** @description Each at most once, in the order the enum lists them. */
+            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
+            before_position: components["schemas"]["Decimal"] | null;
+            before_ordinal: components["schemas"]["Decimal"] | null;
             limit: components["schemas"]["Decimal"];
         };
         CallActivity: {
@@ -672,7 +727,7 @@ export interface components {
         };
         ConfigureConflictReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -693,7 +748,7 @@ export interface components {
         };
         ConfigureReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -712,7 +767,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "configuration_reply";
             answer: {
@@ -732,7 +787,7 @@ export interface components {
         };
         ConfigureRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "configure";
             store: string;
@@ -741,7 +796,7 @@ export interface components {
             configuration: components["schemas"]["Configuration"];
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "configure";
             store: string;
@@ -753,7 +808,7 @@ export interface components {
         };
         ConversationContentRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "conversation_content";
             store: string;
@@ -767,7 +822,7 @@ export interface components {
         };
         ConversationPageReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "conversation_page";
             /** @constant */
@@ -847,7 +902,7 @@ export interface components {
             more: false;
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "conversation_page";
             /** @constant */
@@ -930,7 +985,7 @@ export interface components {
         };
         ConversationPageRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "conversation_page";
             store: string;
@@ -943,7 +998,7 @@ export interface components {
         Decimal: string;
         ErrorReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @enum {string} */
             type: "invocation_error" | "observation_error" | "busy" | "unsupported" | "host_unavailable" | "result_unavailable" | "action_unavailable" | "conversation_unavailable" | "activity_unavailable" | "failed_response_unavailable";
             code: string;
@@ -957,7 +1012,7 @@ export interface components {
         };
         HostInfoReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "host_info";
             store: string;
@@ -981,21 +1036,21 @@ export interface components {
         };
         HostInfoRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "host_info";
             store: string;
         };
         HostPauseReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "host_pause_reply";
             paused: boolean;
         };
         HostPauseRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "host_pause";
             store: string;
@@ -1003,7 +1058,7 @@ export interface components {
         };
         HostStopReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "host_stop_reply";
             /** @constant */
@@ -1011,21 +1066,21 @@ export interface components {
         };
         HostStopRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "host_stop";
             store: string;
         };
         InspectSessionRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "inspect_session";
             store: string;
             session: string;
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "inspect_session";
             store: string;
@@ -1034,7 +1089,7 @@ export interface components {
             profile: "full";
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "inspect_session";
             store: string;
@@ -1046,7 +1101,7 @@ export interface components {
         };
         ListSessionsReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1059,7 +1114,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1072,7 +1127,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "session_list";
             sessions: components["schemas"]["SessionRow"][];
@@ -1083,7 +1138,7 @@ export interface components {
         };
         ListSessionsRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "list_sessions";
             store: string;
@@ -1092,7 +1147,7 @@ export interface components {
             ceiling: components["schemas"]["Decimal"];
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "list_sessions";
             store: string;
@@ -1102,7 +1157,7 @@ export interface components {
             since: string;
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "list_sessions";
             store: string;
@@ -1213,7 +1268,7 @@ export interface components {
         };
         MessageConflictReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1232,7 +1287,7 @@ export interface components {
         };
         MessageReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1259,7 +1314,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "message_reply";
             answer: {
@@ -1283,7 +1338,7 @@ export interface components {
         };
         MessageRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "message";
             store: string;
@@ -1299,7 +1354,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "message";
             store: string;
@@ -1318,7 +1373,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "message";
             store: string;
@@ -1335,7 +1390,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "message";
             store: string;
@@ -1355,7 +1410,7 @@ export interface components {
         };
         ModelInterruptionConflictReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -1374,7 +1429,7 @@ export interface components {
         };
         ModelInterruptionReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -1389,7 +1444,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "model_interruption_reply";
             answer: {
@@ -1407,7 +1462,7 @@ export interface components {
         };
         ModelInterruptionRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "model_interruption";
             store: string;
@@ -1430,14 +1485,14 @@ export interface components {
         };
         ModelListReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "model_list";
             providers: components["schemas"]["ModelListEntry"][];
         };
         ModelListRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "model_list";
             store: string;
@@ -1448,7 +1503,7 @@ export interface components {
         };
         ObserveCommandReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -1458,7 +1513,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -1495,7 +1550,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -1940,7 +1995,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -1989,7 +2044,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2032,7 +2087,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "command_observation";
             key: string;
@@ -2076,7 +2131,7 @@ export interface components {
         };
         ObserveCommandRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "observe_command";
             store: string;
@@ -2098,7 +2153,7 @@ export interface components {
         };
         PermissionDecisionConflictReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2116,7 +2171,7 @@ export interface components {
         };
         PermissionDecisionReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2130,7 +2185,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "permission_decision_reply";
             answer: {
@@ -2147,7 +2202,7 @@ export interface components {
         };
         PermissionDecisionRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "permission_decision";
             store: string;
@@ -2165,7 +2220,7 @@ export interface components {
         };
         ReadActionArgumentsRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "read_action_arguments";
             store: string;
@@ -2174,7 +2229,7 @@ export interface components {
         };
         ReadActionCallIdRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "read_action_call_id";
             store: string;
@@ -2183,7 +2238,7 @@ export interface components {
         };
         ReadResultRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "read_result";
             store: string;
@@ -2209,7 +2264,7 @@ export interface components {
         };
         SessionStopConflictReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -2228,7 +2283,7 @@ export interface components {
         };
         SessionStopReply: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -2247,7 +2302,7 @@ export interface components {
             };
         } | {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             type: "session_stop_reply";
             answer: {
@@ -2265,7 +2320,7 @@ export interface components {
         };
         SessionStopRequest: {
             /** @constant */
-            version: "8";
+            version: "9";
             /** @constant */
             kind: "session_stop";
             store: string;
@@ -2327,7 +2382,7 @@ export interface components {
     responses: never;
     parameters: {
         /** @description The wire version this document describes. Any other version is refused. */
-        WireVersion: "8";
+        WireVersion: "9";
         /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
         HostInstance: string;
         /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it, and a request without it is refused. */
@@ -2984,6 +3039,44 @@ export interface operations {
                 };
                 content: {
                     "application/octet-stream": string;
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    activitySearch: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ActivitySearchRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivitySearchReply"];
                 };
             };
             /** @description A refusal or failure. */
