@@ -69,6 +69,26 @@ fn endChunk(connection: *wire.Connection, observer: Observer) Failure!u64 {
 /// Called after the engine has flushed its deferred control and content row.
 pub fn openSink(mysql: anytype, id: u64, length: u64, observer: Observer) Failure!ContentSink {
     try mysql.check();
+    // Taking an identity does not insert its row. Validate before handing out
+    // a sink, including for empty content or a caller that never writes.
+    var buffer: [96]u8 = undefined;
+    const sql = std.fmt.bufPrint(&buffer, "SELECT 1 FROM content WHERE content_id={d}", .{id}) catch unreachable;
+    observer.content_query(observer.context);
+    mysql.state.connection.query(sql) catch return error.StoreConnectionLost;
+    var found = false;
+    var failure: ?Failure = null;
+    while (!mysql.state.connection.isReady()) {
+        switch (try mysql.next()) {
+            .row => found = true,
+            .err => |err| {
+                observer.report(err.code);
+                failure = serverFailure(err.code);
+            },
+            else => {},
+        }
+    }
+    if (failure) |err| return err;
+    if (!found) return error.ContentWriteFailed;
     return mysql.state.sink.open(&mysql.state.connection, &mysql.state.failure, &mysql.state.changes, id, length, observer);
 }
 

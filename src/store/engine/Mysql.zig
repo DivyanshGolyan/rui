@@ -239,7 +239,12 @@ pub fn finishPass(self: *Mysql) Failure!void {
     try self.check();
     if (prior) |err| return err;
 }
-pub fn discardBatch(self: *Mysql) void {
+pub fn discardBatch(self: *Mysql) Failure!void {
+    if (self.state.long_query) self.finishPass() catch |err| {
+        // The discarded statement's ordinary failure must not block rollback,
+        // but an unresolved connection/ownership failure cannot be discarded.
+        if (fences(err)) return err;
+    };
     // Revert only controls appended but never sent. In particular, an older
     // server-side savepoint must not be mistaken for the dropped new one.
     if (self.state.savepoint_queued) self.state.pending_savepoint = true;
@@ -324,6 +329,7 @@ pub fn control(self: *Mysql, comptime which: engine.Control) Failure!void {
             self.state.failure = null;
         }
         self.state.pass_failure = null;
+        try self.discardBatch();
     } else try self.check();
     switch (which) {
         .begin => {
@@ -338,7 +344,6 @@ pub fn control(self: *Mysql, comptime which: engine.Control) Failure!void {
         },
         .release => return,
         .rollback => if (!self.state.begin_sent) {
-            self.discardBatch();
             self.state.pending_begin = false;
             self.state.pending_savepoint = false;
             self.state.transaction = false;
@@ -346,7 +351,6 @@ pub fn control(self: *Mysql, comptime which: engine.Control) Failure!void {
             return;
         },
         .rollback_to => if (!self.state.savepoint_sent or self.state.pending_savepoint or self.state.savepoint_queued) {
-            self.discardBatch();
             self.state.pending_savepoint = false;
             return;
         },
@@ -397,7 +401,10 @@ pub fn readRaw(self: *Mysql, id: u64, offset: u64, destination: []u8) Failure!vo
     };
 }
 pub fn openSink(self: *Mysql, id: u64, length: u64) Failure!ContentSink {
-    return content.openSink(self, id, length, self.contentObserver());
+    return content.openSink(self, id, length, self.contentObserver()) catch |err| {
+        if (err == error.StoreConnectionLost) self.state.failure = err;
+        return err;
+    };
 }
 pub fn writePayload(self: *Mysql, id: u64, bytes: []const u8) Failure!void {
     try self.check();
@@ -489,11 +496,22 @@ test "MySQL discarding an unsent replacement savepoint does not rollback an olde
     state.* = .{ .connection = undefined, .transaction = true, .begin_sent = true, .savepoint_sent = true, .savepoint_queued = true };
     state.connection.writer.end = 20;
     var mysql: Mysql = .{ .state = state };
-    mysql.discardBatch();
+    try mysql.discardBatch();
     try std.testing.expect(state.pending_savepoint);
     try mysql.control(.rollback_to);
     try std.testing.expect(mysql.inTransaction());
     try std.testing.expectEqual(@as(usize, 0), state.connection.writer.end);
+}
+
+test "MySQL discarding a sent long query propagates and latches connection loss" {
+    const state = try std.testing.allocator.create(State);
+    defer std.testing.allocator.destroy(state);
+    state.* = .{ .connection = undefined, .long_query = true };
+    state.connection.lost = true;
+    var mysql: Mysql = .{ .state = state };
+    try std.testing.expectError(error.StoreConnectionLost, mysql.discardBatch());
+    try std.testing.expectError(error.StoreConnectionLost, mysql.check());
+    try std.testing.expectError(error.StoreConnectionLost, mysql.control(.rollback));
 }
 
 test "MySQL content observer shares transaction error transitions" {

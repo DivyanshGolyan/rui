@@ -33,9 +33,12 @@ fn connection() !*wire.Connection {
     return &root;
 }
 
-fn drain() !void {
+fn drain(source: anytype, changes: ?*i64) !void {
     var failed = false;
-    while (!root.isReady()) switch (try root.next()) {
+    while (!source.isReady()) switch (try source.next()) {
+        .ok => |ok| if (changes) |count| {
+            count.* +|= @intCast(@min(ok.affected_rows, std.math.maxInt(i64)));
+        },
         .err => |err| {
             std.debug.print("MySQL fixture error {d}: {s}\n", .{ err.code, err.message });
             failed = true;
@@ -47,7 +50,7 @@ fn drain() !void {
 
 fn run(sql: []const u8) !void {
     try root.query(sql);
-    try drain();
+    try drain(&root, null);
 }
 
 fn database(storage: *Store) []const u8 {
@@ -142,7 +145,10 @@ pub fn exec(storage: *Store, comptime sql: []const u8, args: anytype) !void {
     defer mutex.unlock(std.testing.io);
     try use(storage);
     try send(sql, args);
-    try drain();
+    // SQLite fixtures write through the Store connection, so totalChanges
+    // sees them. Attribute this fixture's write OKs to the target Store too,
+    // including writes preceding a later ERR; setup/control queries stay out.
+    try drain(&root, &storage.engine.mysql.state.changes);
 }
 
 pub fn queryU64(storage: *Store, comptime sql: []const u8, args: anytype) !u64 {
@@ -229,8 +235,16 @@ fn globalValue(comptime name: []const u8) !protocol.Bounded(32) {
 fn setGlobal(comptime name: []const u8, value: []const u8) !void {
     // Values come only from this server's own numeric/enum variables, or
     // the fixed probes below, not from test/user SQL.
+    // A boolean variable such as read_only takes 1 or 0 but refuses the
+    // string '1' (error 1231), so numbers go unquoted.
+    const numeric = value.len != 0 and for (value) |c| {
+        if (!std.ascii.isDigit(c)) break false;
+    } else true;
     var buffer: [160]u8 = undefined;
-    try run(try std.fmt.bufPrint(&buffer, "SET GLOBAL " ++ name ++ "='{s}'", .{value}));
+    try run(if (numeric)
+        try std.fmt.bufPrint(&buffer, "SET GLOBAL " ++ name ++ "={s}", .{value})
+    else
+        try std.fmt.bufPrint(&buffer, "SET GLOBAL " ++ name ++ "='{s}'", .{value}));
 }
 
 /// The mutex spans mutation, refusal and restoration. A failed assertion
@@ -259,6 +273,56 @@ fn refusesGlobal(comptime name: []const u8, bad: []const u8, expected: anyerror)
     try probe.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = "mysql" }, &refusal.writer);
     defer probe.close();
     try std.testing.expectError(expected, @import("engine/mysql_open.zig").open(probe, std.testing.io, .{ .database = "mysql" }, "/mysql-refusal-probe"));
+}
+
+test "store.mysql fixture drain attributes write OKs even before failure" {
+    const Script = struct {
+        events: []const wire.mysql.Event,
+        at: usize = 0,
+
+        fn isReady(self: *const @This()) bool {
+            return self.at == self.events.len;
+        }
+
+        fn next(self: *@This()) error{ConnectionLost}!wire.mysql.Event {
+            const event = self.events[self.at];
+            self.at += 1;
+            return event;
+        }
+    };
+    const status: wire.mysql.Status = @bitCast(@as(u16, 0));
+    var changes: i64 = 10;
+    var success: Script = .{ .events = &.{
+        .{ .ok = .{ .affected_rows = 0, .status = status } },
+        .{ .ok = .{ .affected_rows = 2, .status = status } },
+        .{ .rows_end = status },
+        .{ .ok = .{ .affected_rows = 3, .status = status } },
+        .ready,
+    } };
+    try drain(&success, &changes);
+    try std.testing.expectEqual(@as(i64, 15), changes);
+    try std.testing.expect(success.isReady());
+
+    var failure: Script = .{ .events = &.{
+        .{ .ok = .{ .affected_rows = 4, .status = status } },
+        .{ .err = .{ .code = 1062, .sql_state = "23000".*, .message = "expected duplicate" } },
+        .ready,
+    } };
+    try std.testing.expectError(error.MysqlFixtureFailed, drain(&failure, &changes));
+    try std.testing.expectEqual(@as(i64, 19), changes);
+    try std.testing.expect(failure.isReady());
+
+    var uncounted = success;
+    uncounted.at = 0;
+    try drain(&uncounted, null);
+    try std.testing.expectEqual(@as(i64, 19), changes);
+
+    var overflow: Script = .{ .events = &.{
+        .{ .ok = .{ .affected_rows = std.math.maxInt(u64), .status = status } },
+        .{ .ok = .{ .affected_rows = 1, .status = status } },
+    } };
+    try drain(&overflow, &changes);
+    try std.testing.expectEqual(std.math.maxInt(i64), changes);
 }
 
 test "store.mysql live admission refuses read_only" {
@@ -379,6 +443,43 @@ test "store.mysql live first Access guard survives a later duplicate and keeps f
     try std.testing.expect(storage.engine.mysql.state.connection.isReady());
     try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
     try std.testing.expect(!storage.isFenced());
+}
+
+test "store.mysql live abandoning an Access drains an already-sent large content chunk" {
+    for ([_]bool{ false, true }) |duplicate| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try openLive(&storage, &tmp);
+        defer storage.close() catch unreachable;
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+        defer access.deinit();
+        const bytes = try std.testing.allocator.alloc(u8, 32 * 1024);
+        defer std.testing.allocator.free(bytes);
+        @memset(bytes, 'x');
+        access.write(live_insert, .{ .id = 9000030, .digest = protocol.contentDigest(bytes), .length = bytes.len });
+        try access.run();
+        access.writeContent(9000030, bytes);
+        if (duplicate) {
+            // Resolve the first insert, then leave a duplicate-key ERR unread.
+            // Discarding that ordinary statement error must still allow rollback.
+            try access.run();
+            access.writeContent(9000030, bytes);
+        }
+        // No pass after writeContent: bind has already sent the oversized query,
+        // but Access has not read its response when the caller abandons the work.
+        try std.testing.expect(storage.engine.mysql.state.long_query);
+        try std.testing.expect(!storage.engine.mysql.state.connection.isReady());
+        try access.abandon(.{});
+        try std.testing.expect(!storage.engine.inTransaction());
+        try std.testing.expect(storage.engine.mysql.state.connection.isReady());
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000030", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=9000030", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
+        try std.testing.expect(!storage.isFenced());
+    }
 }
 
 test "store.mysql live midchunk stop pads its frame and rollback leaves connection usable" {
@@ -507,8 +608,10 @@ const LinuxMemory = struct {
         var buffer: [8192]u8 = undefined;
         var filled: usize = 0;
         while (filled < buffer.len) {
-            const n = try file.readStreaming(std.testing.io, &.{buffer[filled..]});
-            if (n == 0) return parse(buffer[0..filled]);
+            const n = file.readStreaming(std.testing.io, &.{buffer[filled..]}) catch |err| switch (err) {
+                error.EndOfStream => return parse(buffer[0..filled]),
+                else => return err,
+            };
             filled += n;
         }
         return error.SmapsRollupTooLarge;
@@ -580,6 +683,12 @@ test "store.mysql live Linux unit process idle and fixed workload private memory
             rep + 1, queries, dirty_delta, @divTrunc(dirty_delta * 1024, queries),
         });
     }
+}
+
+test "store.mysql Linux memory observation reads proc without a database" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const sample = try LinuxMemory.read();
+    try std.testing.expect(sample.rss_kib > 0);
 }
 
 test "Linux memory observation parses all four exact KiB counters" {
