@@ -207,9 +207,7 @@ pub fn resolveClientPaths(io: std.Io, supplied_path: []const u8) !Paths {
 
 /// Store ids are distinct from SQLite's canonical absolute paths.
 pub fn isOpaqueStoreId(text: []const u8) bool {
-    if (text.len != 32) return false;
-    for (text) |byte| if (!std.ascii.isDigit(byte) and (byte < 'a' or byte > 'f')) return false;
-    return true;
+    return @import("store_id.zig").valid(text);
 }
 
 /// Without this explicit non-secret hint, a relative SQLite directory whose

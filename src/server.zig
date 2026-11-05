@@ -630,13 +630,6 @@ const Intake = struct {
             // readable, so the bounded poll below cannot sleep past it.
             var bytes: [256]u8 = undefined;
             while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
-            if (self.launched and self.host.store.engine == .mysql and self.host.store.isFenced() and (failure == null or failure.? != error.StoreFenced)) {
-                // Publish the named exit before any drain can reach the
-                // launched Host's hard shutdown deadline (D211).
-                launch_frame.writeRefusal(self.host.io, .{ .code = .store_fenced, .message = "the MySQL Store lost ownership or its connection; restart the Host" });
-                failure = error.StoreFenced;
-                _ = self.host.advance(.stopping);
-            }
             if (self.host.stopping()) {
                 self.armShutdownDeadline();
                 for (self.exchanges.items) |exchange| exchange.retireUnhanded();
@@ -1005,7 +998,56 @@ pub fn serve(
     var storage: store_module.Store = undefined;
     try openStoreForHost(io, &storage, &lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null);
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
-    if (mcp_servers.len != 0) try offerMcpTools(io, catalog_memory.allocator(), allocator, &storage, mcp_servers, if (launch) |value| value.stdin else null);
+    return finishServing(io, &storage, launch != null, serveOpened(
+        io,
+        allocator,
+        &storage,
+        &lease,
+        active_capacity,
+        limits,
+        hooks,
+        served,
+        bash_path,
+        bash_timeout_ms,
+        home,
+        launch,
+        &catalog_memory,
+        mcp_servers,
+        intake_capacity,
+        descriptor_requirement.total,
+        descriptor_observation.soft_limit,
+        descriptor_limit_text,
+        &diagnostics,
+        diagnostic_open_error,
+        &readiness_owned,
+    ));
+}
+
+/// All serving owners drain before the Store's shutdown result is decided.
+fn serveOpened(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    storage: *store_module.Store,
+    lease: *platform.StoreLease,
+    active_capacity: usize,
+    limits: Limits,
+    hooks: Hooks,
+    served: *const providers.Providers,
+    bash_path: []const u8,
+    bash_timeout_ms: u64,
+    home: ?[]const u8,
+    launch: ?Launch,
+    catalog_memory: *std.heap.ArenaAllocator,
+    mcp_servers: []const launch_frame.Frame.McpServer,
+    intake_capacity: usize,
+    descriptor_requirement: usize,
+    descriptor_soft_limit: ?usize,
+    descriptor_limit_text: []const u8,
+    diagnostics: *?HostDiagnostics,
+    diagnostic_open_error: ?anyerror,
+    readiness_owned: *bool,
+) !void {
+    if (mcp_servers.len != 0) try offerMcpTools(io, catalog_memory.allocator(), allocator, storage, mcp_servers, if (launch) |value| value.stdin else null);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
@@ -1043,9 +1085,9 @@ pub fn serve(
         .io = io,
         .allocator = allocator,
         .intake_capacity = intake_capacity,
-        .descriptor_soft_limit = descriptor_observation.soft_limit,
-        .lease = &lease,
-        .store = &storage,
+        .descriptor_soft_limit = descriptor_soft_limit,
+        .lease = lease,
+        .store = storage,
         .hooks = hooks,
         .limits = limits,
         .providers = served,
@@ -1113,19 +1155,29 @@ pub fn serve(
         _ = host.advance(.draining);
         execution_thread.join();
     }
-    try writeReadiness(&lease.paths, active_capacity, intake_capacity, descriptor_requirement.total, descriptor_limit_text, retention_entries.len, served.any());
+    try writeReadiness(&lease.paths, active_capacity, intake_capacity, descriptor_requirement, descriptor_limit_text, retention_entries.len, served.any());
     stderr.release();
-    readiness_owned = false;
+    readiness_owned.* = false;
     if (diagnostic_open_error) |err|
         stderr.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
-    if (diagnostics) |*writer| {
+    if (diagnostics.*) |*writer| {
         if (writer.failure != null) writer.reportFailure();
         writer.record("ready", "serving");
         writer.close();
-        diagnostics = null;
+        diagnostics.* = null;
     }
 
     return intake.run(&listener, &listener_open, &socket_owned);
+}
+
+fn finishServing(io: std.Io, storage: *const store_module.Store, launched: bool, result: anyerror!void) !void {
+    // This is the sole decision and publication site, after intake, workers
+    // and execution have drained. A fence wins over every serving outcome.
+    if (launched and storage.engine == .mysql and storage.isFenced()) {
+        launch_frame.writeRefusal(io, .{ .code = .store_fenced, .message = "the MySQL Store lost ownership or its connection; restart the Host" });
+        return error.StoreFenced;
+    }
+    return result;
 }
 
 // serve's frame stays resident for the Host's life, so each startup-only
@@ -3678,6 +3730,90 @@ test "intake accepts and physically retires a hundred incomplete exchanges" {
     for (sockets) |pair| {
         try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(pair[0], std.c.F.GETFL));
         try std.testing.expectEqual(std.posix.E.BADF, std.posix.errno(@as(c_int, -1)));
+    }
+}
+
+test "launch frame fenced MySQL shutdown is decided once at the return boundary without clients" {
+    const Probe = struct {
+        var storage: *store_module.Store = undefined;
+        var fence_on_delete: bool = false;
+        var output: [1024]u8 = undefined;
+        var used: usize = 0;
+
+        fn delete(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8) std.Io.Dir.DeleteFileError!void {
+            // Listener retirement is after the old loop-top fence check.
+            // Emulate execution fencing in that window, without a thread.
+            if (fence_on_delete) storage.fenced.store(true, .release);
+            return std.testing.io.vtable.dirDeleteFile(userdata, dir, path);
+        }
+
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming and operation.file_write_streaming.file.handle == 1) {
+                const write = operation.file_write_streaming;
+                var out = std.Io.Writer.fixed(output[used..]);
+                out.writeAll(write.header) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                for (write.data, 0..) |part, index| {
+                    const repeats = if (index == write.data.len - 1) write.splat else 1;
+                    for (0..repeats) |_| out.writeAll(part) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                }
+                used += out.buffered().len;
+                return .{ .file_write_streaming = out.buffered().len };
+            }
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/host.sock", .{root[0..root_len]});
+    var vtable = std.testing.io.vtable.*;
+    vtable.dirDeleteFile = Probe.delete;
+    vtable.operate = Probe.operate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    for ([_]struct { mysql: bool, launched: bool, early: bool, late: bool }{
+        .{ .mysql = true, .launched = true, .early = false, .late = true },
+        .{ .mysql = true, .launched = true, .early = true, .late = false },
+        .{ .mysql = true, .launched = true, .early = false, .late = false },
+        .{ .mysql = true, .launched = false, .early = false, .late = true },
+        .{ .mysql = false, .launched = true, .early = false, .late = true },
+    }) |case| {
+        var storage: store_module.Store = .{ .io = io, .engine = undefined, .selector = .{}, .changes = undefined };
+        // No engine operation occurs: only its tag and atomic fence are read.
+        storage.engine = if (case.mysql) .{ .mysql = undefined } else .{ .sqlite = undefined };
+        storage.fenced.store(case.early, .release);
+        Probe.storage = &storage;
+        Probe.fence_on_delete = case.late;
+        Probe.used = 0;
+        var lease: platform.StoreLease = undefined;
+        lease.paths = .{};
+        try lease.paths.socket.set(path);
+        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .phase = .init(.stopping) };
+        var intake: Intake = .{ .host = &host, .launched = case.launched, .deadline_armed = true };
+        // Reuse the real intake owner, with idle workers but no worker threads.
+        for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &intake.wake));
+        try setNonblocking(intake.wake[0]);
+        defer intake.deinit();
+        var stdin: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&stdin));
+        defer _ = std.c.close(stdin[0]);
+        _ = std.c.close(stdin[1]);
+        intake.stdin = stdin[0]; // EOF makes poll ready without a sleep.
+        const address = try std.Io.net.UnixAddress.init(path);
+        var listener = try address.listen(io, .{ .kernel_backlog = 8 });
+        var open = true;
+        var owned = true;
+        defer if (open) listener.deinit(io);
+        const outcome = finishServing(io, &storage, case.launched, intake.run(&listener, &open, &owned));
+        const fenced = case.mysql and case.launched and (case.early or case.late);
+        try std.testing.expectError(if (fenced) error.StoreFenced else error.EffectAwareShutdown, outcome);
+        try std.testing.expectEqualStrings(if (fenced)
+            "{\"rui_start_error\":{\"code\":\"store_fenced\",\"message\":\"the MySQL Store lost ownership or its connection; restart the Host\"}}\n"
+        else
+            "", Probe.output[0..Probe.used]);
+        try std.testing.expectEqual(@as(usize, 0), intake.exchanges.items.len);
     }
 }
 

@@ -5,7 +5,7 @@ const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const named_scratch = @import("named_scratch.zig");
-const store_schema = @import("store/schema.zig");
+const store_id = @import("store_id.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "8";
@@ -109,7 +109,7 @@ pub const Address = struct {
     pub fn validate(self: Address) !void {
         const path = self.store.slice();
         if (!validSessionId(self.session.slice())) return error.InvalidRuiAddress;
-        if (store_schema.isStoreId(path)) return;
+        if (store_id.valid(path)) return;
         if (path.len == 0 or path[0] != '/' or
             !std.unicode.utf8ValidateSlice(path)) return error.InvalidRuiAddress;
         for (path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidRuiAddress;
