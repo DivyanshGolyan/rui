@@ -526,12 +526,6 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
     };
 }
 
-/// Whether a Host holds the Store's lock, without asking it anything: a
-/// failed request uses this to tell a stopped Host from a serving one.
-pub fn hostAbsent(io: std.Io, store_path: []const u8) bool {
-    return hostLockState(io, store_path) == .free;
-}
-
 pub const HostLockState = enum { free, held, failure };
 
 /// Probe without contacting the Host; a failed probe proves neither absence
