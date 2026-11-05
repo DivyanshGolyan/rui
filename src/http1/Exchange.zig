@@ -257,6 +257,8 @@ const TestServer = struct {
     /// Answer once the head is in, without reading the body, then wait for
     /// the client to close, as a server rejecting an upload may.
     answer_early: bool = false,
+    /// Keep the upload blocked until the client has consumed the early answer.
+    drain_released: std.Io.Event = .unset,
 
     fn start(self: *TestServer) !void {
         self.listener = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
@@ -299,6 +301,9 @@ const TestServer = struct {
             }
         }
         if (!self.answer_early) return;
+        // Draining now could let the whole upload finish before the client
+        // reads our answer, depending on either backend's speed.
+        self.drain_released.waitUncancelable(std.testing.io);
         var drain: [4096]u8 = undefined;
         while (std.c.recv(fd, &drain, drain.len, 0) > 0) {}
     }
@@ -314,6 +319,7 @@ const TestServer = struct {
     }
 
     fn stop(self: *TestServer) void {
+        self.drain_released.set(std.testing.io);
         self.join();
         _ = std.c.close(self.listener);
     }
