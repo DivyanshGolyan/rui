@@ -307,10 +307,12 @@ pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *B
 }
 
 /// The core tool call `binding` names while it waits to run: its Session
-/// and whether a stop selected its Turn.
+/// and whether a stop selected its Turn, or its Session owes one (D38),
+/// which runs first and resolves the call.
 pub const core_facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position," ++
-        "EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) AS stopped " ++
+        "(EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) " ++
+        "OR EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref)) AS stopped " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 " ++
