@@ -99,8 +99,9 @@ fn run(case: Case) !void {
     script.* = .{ .reply = reply, .more = if (case == .serial) &.{reply} else &.{}, .hold_reply = case == .timeout or case == .stop or case == .shutdown or case == .concurrent };
     if (case != .down) try script.start();
     defer if (case != .down) script.stop();
-    // A bound, non-listening endpoint guarantees connection refusal without
-    // relying on a globally chosen unused port.
+    // Keep the unavailable port ours without relying on a globally chosen
+    // unused port. A bound, non-listening TCP socket need not refuse promptly:
+    // Darwin tcp_input drops SYNs for a TCPS_CLOSED PCB without a reset.
     const down_fd = if (case == .down) std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0) else -1;
     defer if (down_fd >= 0) {
         _ = std.c.close(down_fd);
@@ -125,7 +126,15 @@ fn run(case: Case) !void {
     defer if (case == .concurrent) other_script.stop();
     var other_url_buffer: [128]u8 = undefined;
     const other_url = try std.fmt.bufPrint(&other_url_buffer, "http://127.0.0.1:{d}/mcp", .{if (case == .concurrent) other_script.port else @as(u16, 1)});
-    var servers = [_]mcp.Server{ .{ .name = @constCast("docs"), .url = url, .token = @constCast("secret"), .target = try @import("http1/request.zig").parseTarget(url), .timeout_ms = if (case == .timeout) 50 else if (case == .success) @import("mcp/servers.zig").default_timeout_ms else 5_000 }, .{ .name = @constCast("other"), .url = other_url, .token = @constCast("other-secret"), .target = try @import("http1/request.zig").parseTarget(other_url), .timeout_ms = 5_000 } };
+    // Both an unanswered connect and an unanswered sent request must expire
+    // inside the five-second test watchdog. In particular, do not race the
+    // unavailable call's deadline against Context.done's identical deadline.
+    const timeout_ms: u64 = switch (case) {
+        .timeout, .down => 50,
+        .success => @import("mcp/servers.zig").default_timeout_ms,
+        else => 5_000,
+    };
+    var servers = [_]mcp.Server{ .{ .name = @constCast("docs"), .url = url, .token = @constCast("secret"), .target = try @import("http1/request.zig").parseTarget(url), .timeout_ms = timeout_ms }, .{ .name = @constCast("other"), .url = other_url, .token = @constCast("other-secret"), .target = try @import("http1/request.zig").parseTarget(other_url), .timeout_ms = 5_000 } };
     var custody: [1]execution.CustodyRecord = @splat(.{});
     const host = try allocator.create(Host);
     defer allocator.destroy(host);
