@@ -10,7 +10,7 @@ const TestHold = struct {
     var before_sealed_loss: ?*const fn () void = null;
 };
 
-pub const Plan = enum { control, control_peers, status, stop, list, transport, dispatch, interrupt, recovery, managed, bash_cleanup, bash_pipes, execution, sqlite };
+pub const Plan = enum { control, control_peers, status, stop, list, transport, dispatch, interrupt, recovery, managed, bash_cleanup, bash_pipes, execution, sqlite, request_wait };
 pub const record_bytes = 512; // POSIX minimum atomic pipe-write size.
 const header_bytes = 28;
 // Fixture-owned unlinked backing. Fixture mutation is only atomic admission
@@ -199,6 +199,9 @@ pub const Publication = struct {
 };
 
 fn selected(self: *Self, phase: []const u8, subject: ?[]const u8) bool {
+    if (self.plan == .request_wait) return std.mem.eql(u8, phase, "request_observation_full") or
+        std.mem.eql(u8, phase, "request_observation_tier1") or
+        std.mem.eql(u8, phase, "request_observation_tier2");
     if (self.plan == .sqlite) return std.mem.eql(u8, phase, "sqlite_diagnostic");
     if (self.plan == .execution) {
         // Every service boundary and every interval endpoint: gaps are derived
@@ -398,7 +401,7 @@ test "private owner observations remain bounded under full and closed credit" {
 }
 
 test "private owner observations preserve selected custody through SIGKILL" {
-    inline for (comptime std.meta.tags(Plan)) |plan| {
+    for (std.meta.tags(Plan)) |plan| {
         const phase = switch (plan) {
             .control, .control_peers => "cleanup_completed",
             .bash_cleanup => "cleanup_release_observed",
@@ -409,6 +412,7 @@ test "private owner observations preserve selected custody through SIGKILL" {
             .managed => "codex_transfer",
             .execution => "settlement_complete",
             .sqlite => "sqlite_diagnostic",
+            .request_wait => "request_observation_tier2",
             .list, .transport, .status, .stop => "connection_resources_released",
         };
         for ([_]bool{ false, true }) |selected_kill| {
@@ -468,7 +472,7 @@ test "private owner observations seal admission without forgiving held or late p
             if (c.read(release, &byte, 1) != 1) c._exit(92);
         }
     };
-    inline for (comptime std.meta.tags(Plan)) |plan| {
+    for (std.meta.tags(Plan)) |plan| {
         const phase = switch (plan) {
             .control, .control_peers => "cleanup_completed",
             .bash_cleanup => "cleanup_release_observed",
@@ -479,6 +483,7 @@ test "private owner observations seal admission without forgiving held or late p
             .managed => "codex_transfer",
             .execution => "settlement_complete",
             .sqlite => "sqlite_diagnostic",
+            .request_wait => "request_observation_tier2",
             .list, .transport, .status, .stop => "connection_resources_released",
         };
         for (0..3) |kind| {

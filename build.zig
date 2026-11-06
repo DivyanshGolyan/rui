@@ -311,6 +311,11 @@ pub fn build(b: *std.Build) void {
     current_facts_integration.addFileArg(ci.path(release_safe));
     b.step("current-facts-integration", "Run the real Current producer/consumer observation oracle").dependOn(&current_facts_integration.step);
 
+    const request_wait_integration = b.addSystemCommand(&.{"python3"});
+    request_wait_integration.addFileArg(b.path("tests/integration/request_wait_integration.py"));
+    request_wait_integration.addFileArg(ci.path(release_safe));
+    b.step("request-wait-integration", "Run request wait completion, recovery and conditional polling witnesses").dependOn(&request_wait_integration.step);
+
     const canonical_failure_integration = b.addSystemCommand(&.{"python3"});
     canonical_failure_integration.addFileArg(b.path("tests/integration/canonical_failure_integration.py"));
     canonical_failure_integration.addFileArg(ci.path(release_safe));

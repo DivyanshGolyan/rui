@@ -272,6 +272,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .session_read_conversation => try readConversation(init, parsed),
         .session_resume => try resumeSession(init, parsed),
         .request_inspect => try observe(init, parsed),
+        .request_wait => try waitRequest(init, parsed),
         .request_recover => try recover(init, parsed),
         .request_read_result => try readResult(init, parsed),
         .request_list => try requests(init),
@@ -2786,15 +2787,89 @@ fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var reply_buffer: client.ObservationBuffer = .{};
     const reply = client.observeCommand(io, identity.store.slice(), target, null, &reply_buffer) catch |err| return readTransportFailure(io, identity.store.slice(), err);
     const observation = try checkedObservation(io, reply, target);
+    try writeObservation(io, &observation, observationTime(io));
+}
+
+fn observationTime(io: std.Io) u64 {
+    return @intCast(@max(0, @divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_s)));
+}
+
+fn writeObservation(io: std.Io, observation: *const protocol_reply.CommandObservation, as_of: u64) !void {
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":");
     try std.json.Stringify.value(observation.key.slice(), .{}, writer);
-    const as_of = @divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_s);
     try writer.print(",\"as_of\":\"{d}\",\"observation\":", .{as_of});
     try observation.writeJson(writer);
     try writer.writeAll("}\n");
     try output.finish();
+}
+
+// These handlers belong only to request wait. No thread, capture descriptor or
+// Host connection survives between polls; the signal handler only sets a flag.
+var wait_cancellation: client.Cancellation = .{};
+
+const WaitInterrupt = struct {
+    previous: [2]std.posix.Sigaction,
+    const signals = .{ std.posix.SIG.INT, std.posix.SIG.TERM };
+
+    fn init() WaitInterrupt {
+        var blocked = std.posix.sigemptyset();
+        inline for (signals) |signal| std.posix.sigaddset(&blocked, signal);
+        var previous_mask: std.posix.sigset_t = undefined;
+        std.posix.sigprocmask(std.posix.SIG.BLOCK, &blocked, &previous_mask);
+        defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous_mask, null);
+        wait_cancellation.stopped.store(false, .release);
+        const action: std.posix.Sigaction = .{ .handler = .{ .handler = onWaitInterrupt }, .mask = std.posix.sigemptyset(), .flags = 0 };
+        var scope: WaitInterrupt = undefined;
+        inline for (signals, 0..) |signal, i| std.posix.sigaction(signal, &action, &scope.previous[i]);
+        return scope;
+    }
+
+    fn deinit(scope: *WaitInterrupt) void {
+        inline for (signals, 0..) |signal, i| std.posix.sigaction(signal, &scope.previous[i], null);
+    }
+};
+
+fn onWaitInterrupt(_: std.posix.SIG) callconv(.c) void {
+    wait_cancellation.requestStop();
+}
+
+fn waitRequest(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    // requestIdentity closes the capture before polling begins, just as inspect.
+    const identity = try requestIdentity(init, parsed);
+    var interrupt = WaitInterrupt.init();
+    defer interrupt.deinit();
+    const result = client.waitCommand(init.io, identity.store.slice(), identity.key.slice(), (try parsed.number(u32, "timeout-seconds")) orelse @import("request_wait.zig").default_timeout_seconds, &wait_cancellation) catch |err| {
+        const failure = readTransportFailure(init.io, identity.store.slice(), err);
+        if (client.hostUnreachable(err)) {
+            var read_failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+            try read_failure.diagnostic.type.set("invocation_error");
+            try read_failure.diagnostic.code.set(@tagName(caller_error.of(failure)));
+            try writeReadFailure(init.io, read_failure, identity.key.slice(), .stdout);
+        }
+        return failure;
+    };
+    switch (result) {
+        .failure => |failure| {
+            try writeReadFailure(init.io, failure, identity.key.slice(), .stdout);
+            return readFailureError(failure);
+        },
+        .observed => |observed| {
+            if (observed.observation) |*observation| try writeObservation(init.io, observation, observationTime(init.io));
+            switch (observed.disposition) {
+                .done => {},
+                .later => {
+                    reportCallerCode(.wait_timed_out);
+                    return error.CallerFailure;
+                },
+                .absent => {
+                    reportCallerCode(.request_absent);
+                    return error.CallerFailure;
+                },
+            }
+        },
+    }
 }
 
 fn inspect(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -3006,7 +3081,7 @@ fn announceCapture(io: std.Io, captured: *const client.CapturedRecord) !void {
     // durable capture, but cannot submit unannounced work. stdout stays one
     // complete JSON receipt.
     var line: [64 + 3 * protocol.max_key_bytes]u8 = undefined;
-    try std.Io.File.stderr().writeStreamingAll(io, try std.fmt.bufPrint(&line, "request: {s} (inspect: rui request inspect {s}; if unconfirmed: rui request recover {s})\n", .{ handle, handle, handle }));
+    try std.Io.File.stderr().writeStreamingAll(io, try std.fmt.bufPrint(&line, "request: {s} (wait: rui request wait {s}; if unconfirmed: rui request recover {s})\n", .{ handle, handle, handle }));
 }
 
 fn testGate(io: std.Io, name: [*:0]const u8) !void {
@@ -3796,7 +3871,8 @@ const usage_text =
     \\session send addresses an existing ID. Both read exact Message text from stdin
     \\and return on admission, not completion. Set instructions separately using
     \\session configure --instructions - with instructions on stdin.
-    \\Reads observe once; request read-result streams only the original saved answer.
+    \\Reads observe once; request wait polls the original request until ended or needing
+    \\permission; request read-result streams only the original saved answer.
     \\Mutation receipts and metadata are JSON. Diagnostics use stderr.
     \\Non-interactive calls never implicitly start a Host or sign in. Administration is explicit.
     \\After uncertainty, inspect or recover the original handle or record, never a new key.

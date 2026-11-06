@@ -108,6 +108,8 @@ pub const Code = enum {
     sign_in_required,
     store_locked,
     reply_unconfirmed,
+    wait_timed_out,
+    request_absent,
 };
 
 /// Transitional inventory. An entry is an unclassified internal failure,
@@ -492,6 +494,8 @@ pub fn facts(code: Code) Facts {
         .host_unreachable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host cannot be reached.", .next = "Start or repair this Store's Host, then retry the same saved request unchanged." },
         .sign_in_required => .{ .act = .operate, .input = null, .accepted = .none, .says = "Provider sign-in is required.", .next = "Run rui auth login for the selected provider, then retry unchanged." },
         .store_locked => .{ .act = .operate, .input = null, .accepted = .none, .says = "Another Host owns this Store.", .next = "Use that Host, or pause it with rui host pause before starting again." },
+        .wait_timed_out => .{ .act = .wait, .input = null, .accepted = .none, .says = "The wait ended while the request was still pending.", .next = "Run rui request wait with the same HANDLE again; never resubmit with a new key." },
+        .request_absent => .{ .act = .recover, .input = null, .accepted = .none, .says = "The Store has no such request; admission is not confirmed.", .next = "Run rui request recover with the original HANDLE or record; never resubmit with a new key." },
         .reply_unconfirmed => .{ .act = .recover, .input = null, .accepted = .none, .says = "Admission is not confirmed.", .next = "Run rui request recover with the original HANDLE or record; never resubmit with a new key." },
         .memory_exhausted => .{ .act = .operate, .input = null, .accepted = .none, .says = "Memory was exhausted while reading the arguments.", .next = "Free memory and try the same invocation again." },
         .rejection_unrecognized => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui saved a rejection whose code this rui build does not know; the code is in the JSON answer on stdout.", .next = "Use a rui build that matches the Host, then recover the same saved request to read it." },
@@ -649,6 +653,8 @@ fn renderLine(out: *std.Io.Writer, code: Code, held: Held, saved: bool) error{Wr
 test "caller error goldens describe choice handle conflict and malformed ID" {
     const Case = struct { code: Code, held: Held, expected: []const u8 };
     const cases = [_]Case{
+        .{ .code = .wait_timed_out, .held = .{ .resource = "request", .operation = "wait", .not_sent = false }, .expected = "rui request wait: The wait ended while the request was still pending. Next: Run rui request wait with the same HANDLE again; never resubmit with a new key. [wait_timed_out]\n" },
+        .{ .code = .request_absent, .held = .{ .resource = "request", .operation = "wait", .not_sent = false }, .expected = "rui request wait: The Store has no such request; admission is not confirmed. Next: Run rui request recover with the original HANDLE or record; never resubmit with a new key. [request_absent]\n" },
         .{ .code = .choice_unsupported, .held = .{ .resource = "session", .operation = "start", .spelling = "permission-mode", .value = "auto", .accepted = .{ .closed = &.{ "ask", "bypass" } } }, .expected = "rui session start: --permission-mode auto: That value is not supported. Accepted: ask, bypass. Next: Use one of the accepted values. Nothing was captured or sent. [choice_unsupported]\n" },
         .{ .code = .handle_names_store_and_key, .held = .{ .resource = "request", .operation = "inspect", .spelling = "store", .other = "HANDLE" }, .expected = "rui request inspect: --store with HANDLE: A saved HANDLE already names its Store and key. Accepted: HANDLE alone, or (--store PATH or --store-hex HEX) with (--key KEY or --key-hex HEX). Next: Keep one of the two. Nothing was captured or sent. [handle_names_store_and_key]\n" },
         .{ .code = .id_malformed, .held = .{ .resource = "session", .operation = "interrupt-model", .spelling = "turn", .value = "12x" }, .expected = "rui session interrupt-model: --turn 12x: That is not an ID. Accepted: a decimal from 1 to 9223372036854775807. Next: Copy the ID from rui session inspect. Nothing was captured or sent. [id_malformed]\n" },

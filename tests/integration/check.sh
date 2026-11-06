@@ -55,6 +55,7 @@ cases() {
         run_case callers terminal-restoration env RUI_TEST_TERMINAL_NOTICE="$terminal_notice" python3 "$directory/terminal_restoration_integration.py" "$release_safe"
         run_case callers canonical-failure env RUI_TEST_TERMINAL_NOTICE="$terminal_notice" python3 "$directory/canonical_failure_integration.py" "$release_safe"
     fi
+    run_case callers request-wait python3 "$directory/request_wait_integration.py" "$release_safe"
     run_case callers preference-policy python3 "$directory/preference_policy_integration.py" "$preference_policy_actor"
     run_case execution bash-lifecycle python3 "$directory/bash_lifecycle_integration.py" "$release_safe"
     run_case execution bash-recovery python3 "$directory/bash_recovery_integration.py" "$release_safe"

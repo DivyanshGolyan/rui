@@ -66,6 +66,17 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_request_wait_selects_its_native_oracle_and_portable_core(self):
+        for path in ("src/client.zig", "src/cli_args.zig", "src/server.zig",
+                     "src/TestObservation.zig", "tests/integration/request_wait_integration.py",
+                     "tests/integration/model_fixture.py", "tests/integration/host_process.py",
+                     "tests/integration/bash_integration.py", "tests/integration/bash_recovery_integration.py"):
+            selected = set(select([path], "review", AVAILABLE)["targets"])
+            self.assertTrue(covered("request-wait-integration", selected), (path, selected))
+        core = select(["src/request_wait.zig"], "review", AVAILABLE)["targets"]
+        self.assertIn("test-logic", core)
+        self.assertIn("request-wait-integration", core)
+
     def test_catalog_sources_select_the_portable_catalog_tests(self):
         for path in ("src/models_dev.zig", "src/model_catalog.zig",
                      "src/model_catalog_main.zig", "src/model_catalog_snapshot.zig"):
@@ -1381,6 +1392,7 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
             "peer_integration.py release", "bash_environment_integration.py release",
             "sender_identity_integration.py release",
             "human_cli_integration.py release", "preference_policy_integration.py preferences",
+            "request_wait_integration.py release",
             "bash_lifecycle_integration.py release", "bash_recovery_integration.py release",
             "codex_integration.py release", "control_integration.py release",
             "session_list_integration.py release", "conversation_page_integration.py release",
