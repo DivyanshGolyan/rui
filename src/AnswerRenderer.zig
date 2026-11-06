@@ -1,5 +1,6 @@
 const std = @import("std");
 const TerminalText = @import("TerminalText.zig");
+const Fence = @import("markdown_prefix.zig").Fence;
 const Renderer = @This();
 
 // A complete bounded fenced block may hide its delimiters. Unclosed or
@@ -57,9 +58,7 @@ boundary: Boundary = .prose,
 fence_len: usize = 0,
 fence_body_start: usize = 0,
 fence_line_start: usize = 0,
-fence_closer_possible: bool = true,
-fence_closer_indent: u2 = 0,
-fence_closer_ticks: u2 = 0,
+fence_closer: Fence.Closer = .{},
 line_style: bool = false,
 active_style: Style = .{},
 line_start: bool = true,
@@ -78,8 +77,8 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
                 self.prefix_len += 1;
                 // The longest accepted ordered marker needs three spaces,
                 // five digits, a dot and its following space.
-                if (self.prefix_len < 10 or (self.prefix_len < prefix_limit and fenceCandidate(self.prefix[0..self.prefix_len]))) continue;
-                if (self.prefix_len == prefix_limit and fenceCandidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
+                if (self.prefix_len < 10 or (self.prefix_len < prefix_limit and Fence.candidate(self.prefix[0..self.prefix_len]))) continue;
+                if (self.prefix_len == prefix_limit and Fence.candidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
                 try self.flushPrefix();
                 continue;
             }
@@ -110,11 +109,11 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
 pub fn finish(self: *Renderer) !void {
     if (self.line_start and self.prefix_len != 0) {
         // A delimiter without its line ending is not a complete block marker.
-        if (fenceCandidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
+        if (Fence.candidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
         try self.flushPrefix();
     }
     if (self.fence_pending and !self.fence_literal) {
-        if (closingFence(self.held[self.fence_line_start..self.fence_len])) {
+        if (Fence.closing(self.held[self.fence_line_start..self.fence_len])) {
             try self.literalBlock(self.held[self.fence_body_start..self.fence_line_start]);
         } else try self.literalBlock(self.held[0..self.fence_len]);
     }
@@ -129,10 +128,8 @@ fn flushPrefix(self: *Renderer) !void {
     self.line_start = false;
     const prefix = self.prefix[0..self.prefix_len];
     self.prefix_len = 0;
-    var fence_indent: usize = 0;
-    while (fence_indent < prefix.len and fence_indent < 3 and prefix[fence_indent] == ' ') : (fence_indent += 1) {}
-    if (std.mem.startsWith(u8, prefix[fence_indent..], "```")) {
-        if (!self.literal_line and openingFence(prefix)) {
+    if (Fence.candidate(prefix)) {
+        if (!self.literal_line and Fence.opening(prefix)) {
             @memcpy(self.held[0..prefix.len], prefix);
             self.fence_len = prefix.len;
             self.fence_pending = true;
@@ -169,31 +166,6 @@ fn flushPrefix(self: *Renderer) !void {
     }
     // Unsupported block syntax has no special interpretation.
     try self.proseSlice(prefix);
-}
-
-fn fenceCandidate(prefix: []const u8) bool {
-    var indent: usize = 0;
-    while (indent < prefix.len and indent < 3 and prefix[indent] == ' ') : (indent += 1) {}
-    return std.mem.startsWith(u8, prefix[indent..], "```");
-}
-
-fn openingFence(line: []const u8) bool {
-    var indent: usize = 0;
-    while (indent < line.len and indent < 3 and line[indent] == ' ') : (indent += 1) {}
-    return std.mem.startsWith(u8, line[indent..], "```") and fenceInfo(line[indent + 3 ..]);
-}
-
-fn fenceInfo(info: []const u8) bool {
-    for (info) |byte| {
-        if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-' and byte != '+') return false;
-    }
-    return true;
-}
-
-fn closingFence(line: []const u8) bool {
-    var indent: usize = 0;
-    while (indent < line.len and indent < 3 and line[indent] == ' ') : (indent += 1) {}
-    return std.mem.eql(u8, line[indent..], "```");
 }
 
 /// Finds an answer's last complete fenced code block as its bytes pass,
@@ -237,10 +209,10 @@ pub const LastCode = struct {
         if (self.line_len >= prefix_limit) return;
         const line = self.line[0..self.line_len];
         if (self.body) |start| {
-            if (!closingFence(line)) return;
+            if (!Fence.closing(line)) return;
             self.last = .{ .start = start, .length = (self.line_start - start) -| 1 };
             self.body = null;
-        } else if (opens and openingFence(line)) self.body = self.offset;
+        } else if (opens and Fence.opening(line)) self.body = self.offset;
     }
 };
 
@@ -250,45 +222,32 @@ fn fencedByte(self: *Renderer, byte: u8) !void {
         // syntax and keep subsequent bytes literal until this block ends.
         try self.literalBlock(self.held[0..self.fence_len]);
         self.fence_literal = true;
-        self.fence_closer_possible = true;
-        self.fence_closer_indent = 0;
-        self.fence_closer_ticks = 0;
-        for (self.held[self.fence_line_start..self.fence_len]) |line_byte| self.fenceCloserByte(line_byte);
+        self.fence_closer = .{};
+        for (self.held[self.fence_line_start..self.fence_len]) |line_byte| self.fence_closer.feed(line_byte);
         self.fence_len = 0;
     }
     if (self.fence_literal) {
         try self.literalBlock(&.{byte});
         if (byte == '\n') {
-            if (self.fence_closer_possible and self.fence_closer_ticks == 3) {
+            if (self.fence_closer.matches()) {
                 self.fence_pending = false;
                 self.fence_literal = false;
                 self.fence_body_start = 0;
             }
-            self.fence_closer_possible = true;
-            self.fence_closer_indent = 0;
-            self.fence_closer_ticks = 0;
-        } else self.fenceCloserByte(byte);
+            self.fence_closer = .{};
+        } else self.fence_closer.feed(byte);
         return;
     }
     self.held[self.fence_len] = byte;
     self.fence_len += 1;
     if (byte == '\n') {
-        if (closingFence(self.held[self.fence_line_start .. self.fence_len - 1])) {
+        if (Fence.closing(self.held[self.fence_line_start .. self.fence_len - 1])) {
             try self.literalBlock(self.held[self.fence_body_start..self.fence_line_start]);
             self.fence_pending = false;
             self.fence_len = 0;
             self.fence_body_start = 0;
         } else self.fence_line_start = self.fence_len;
     }
-}
-
-fn fenceCloserByte(self: *Renderer, byte: u8) void {
-    if (!self.fence_closer_possible) return;
-    if (self.fence_closer_ticks == 0 and self.fence_closer_indent < 3 and byte == ' ') {
-        self.fence_closer_indent += 1;
-    } else if (byte == '`' and self.fence_closer_ticks < 3) {
-        self.fence_closer_ticks += 1;
-    } else self.fence_closer_possible = false;
 }
 
 fn literalBlock(self: *Renderer, bytes: []const u8) !void {
@@ -1417,6 +1376,9 @@ test "the last code block is the last complete fenced block" {
         .{ "  ```zig\n  code\n   ```\n", "  code" },
         .{ "```\n```\n", "" },
         .{ "```", null },
+        .{ "```sh\r\ncode\r\n```\r\n", null },
+        .{ "```\ncode\n```\r\n", null },
+        .{ "```\ncode\r\n```", "code\r" },
         .{ "````\nx\n````\n", null },
         .{ "```a b\nx\n```\n", null },
         .{ "```\nx\n```  \ny\n```\n", "x\n```  \ny" },
@@ -1424,12 +1386,11 @@ test "the last code block is the last complete fenced block" {
         .{ long_opener[0 .. prefix_limit - 1] ++ "\nx\n```\n", "x" },
     };
     for (cases) |case| {
-        // Whole, and a byte at a time: where a window ends never matters.
-        for ([_]bool{ false, true }) |bytewise| {
+        // Every split, then a byte at a time: source windows cannot end a line.
+        for (0..case[0].len + 1) |split| {
             var code: LastCode = .{};
-            if (bytewise) {
-                for (0..case[0].len) |index| code.feed(case[0][index..][0..1]);
-            } else code.feed(case[0]);
+            code.feed(case[0][0..split]);
+            for (case[0][split..]) |byte| code.feed(&.{byte});
             const found = code.finish();
             if (case[1]) |expected| {
                 const range = found.?;
@@ -1606,4 +1567,27 @@ test "local path filename suffixes survive trimming the sentence semicolon" {
 
 test "a lone slash or tilde slash is not a local path link" {
     try expectRenderedHome("/ ~/ /; ~/;", "/ ~/ /; ~/;", "/home/test");
+}
+
+test "fence lexical delegation preserves rendered bytes and LastCode at every split" {
+    const cases = [_]struct { raw: []const u8, rendered: []const u8, code: ?[]const u8 }{
+        .{ .raw = "```sh\n*x*\n```\n", .rendered = "*x*\n", .code = "*x*" },
+        .{ .raw = "   ```c++\n  code\n   ```", .rendered = "  code\n", .code = "  code" },
+        .{ .raw = "```\n```\n", .rendered = "", .code = "" },
+        .{ .raw = "```sh\nunclosed\n", .rendered = "```sh\nunclosed\n", .code = null },
+        .{ .raw = "```bad info\nplain\n", .rendered = "```bad info\nplain\n", .code = null },
+        .{ .raw = "```\nx\n``` \ny\n```\n", .rendered = "x\n``` \ny\n", .code = "x\n``` \ny" },
+    };
+    for (cases) |case| {
+        try expectRendered(case.raw, case.rendered);
+        for (0..case.raw.len + 1) |split| {
+            var code: LastCode = .{};
+            code.feed(case.raw[0..split]);
+            code.feed(case.raw[split..]);
+            if (case.code) |expected| {
+                const found = code.finish().?;
+                try std.testing.expectEqualStrings(expected, case.raw[@intCast(found.start)..][0..@intCast(found.length)]);
+            } else try std.testing.expect(code.finish() == null);
+        }
+    }
 }
