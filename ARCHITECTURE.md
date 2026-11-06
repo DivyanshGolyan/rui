@@ -2754,22 +2754,15 @@ Each call receives one permanent contextual outcome, with its unchanged label wh
 Settled calls retain their observed outcome in the live region until permanent presentation succeeds.
 Full-group Tool Result publication and original call order remain unchanged, so a settled sibling can remain visible while another is unresolved.
 Reopening reconstructs presentation from saved facts; call identity, not matching description text, correlates updates.
-Redraw preserves the draft and cursor, exact Workspace and command consent, warnings, uncertainty, and `/details` access.
+Redraw preserves the draft and cursor, exact Workspace and command consent, canonical outcomes, uncertainty, and `/details` access.
 
 Consecutive successful tool outcomes occupy adjacent rows in normal conversation, including across Activity reads.
-A warning stays attached to its heading and ends the compact group.
 Other visible messages, failures and detailed inspection retain block separation.
-Failure headings keep their explicit outcome beside the marker; their summaries omit the matching repeated Bash outcome prefix while retaining exit codes, signals and other diagnostic text.
-Full `/details` and history presentation retain their existing spacing and saved text.
-
-Routine internal success diagnostics stay out of normal tool presentation, including the first occurrence and reopening.
-Bash results no longer contain a confirmed-retirement note; one saved by an earlier build is shown as ordinary metadata.
-Concise presentation suppresses only recognized complete routine lines and matching outcome prefixes, not warning prefixes or all metadata on success.
-Unknown metadata, actual signaling failures, incomplete capture and uncertain outcomes remain visible.
-
+Normal opening, live and historical Tool Results show only their saved description, canonical outcome and optional numeric failed exit in the heading.
+They show no stdout/stderr snippets, warning body lines, omission/export notices or automatic `/details` hints, including after success, timeout or failure.
+Capture and cleanup warnings remain in the unchanged saved result, available in the retained details suffix or full raw export.
 
 Live and historical content share streaming hanging indentation for multiline fields; libvaxis wraps at draw time, so resize reflows without rereading.
-A failed Tool Result shows its exit and the last three stderr lines (stdout when stderr is empty) in quiet style, escaped, adding `/details for full output.` only when shortened.
 Intentional permission denial is a neutral settled outcome, not a failed Bash execution or a reason to inspect nonexistent output.
 Explicit details label saved Tool Results independently of whether a command executed.
 
@@ -2817,31 +2810,33 @@ Bare links omit trailing sentence punctuation, including `;` and unmatched final
 Other link targets (including Markdown file targets), links inside code or emphasis, Markdown link titles and complete addresses longer than 2,048 bytes after local expansion and encoding stay literal, and `/copy` still sends the original Markdown with every address.
 The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
 A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.
-Normal tool presentation shows the canonical outcome header, omitting routine zero exit codes and stdout/stderr tails.
-It retains failure, indeterminate outcomes and capture or cleanup warnings even after a successful exit.
-The public result's tail delimiters control display only, never execution, permission or outcome classification.
-The output summary uses one fixed 256-byte line buffer.
-A longer line receives shortening and `/details` guidance; subsequent metadata lines remain visible until the first output-tail delimiter.
-The remaining stream drains without retention.
+Normal tool presentation shows only the canonical outcome heading, including an optional numeric failed exit.
+A fixed 64-byte first-line scan derives the exit from a complete matching Bash outcome line; it retains no output excerpt, warnings or hints.
+The full stream still drains and authenticates before the heading is shown.
 Tool Result streams validate even when their bytes are not displayed; label-only observation uses admission-certified metadata under the public Session activity contract.
 Fresh Action inspection authenticates all three complete proposal fields.
 Complete Action arguments remain available through fresh inspection; one-shot inspection also exposes the call ID.
-`/details` shows the latest Conversation page with full saved Tool Results through the same bounded history owner, without moving the older-navigation or live Activity cursor.
-Older results remain available through `/history`; oversized items retain exact raw export.
+`/details` shows the latest Conversation page through the same bounded history owner, without moving the older-navigation or live Activity cursor.
+Each Tool Result shows its last min(raw length, 8,192) raw bytes through terminal-safe escaping, with `Earlier output omitted` before a shortened suffix and a full canonical raw export command.
+The raw suffix boundary is not adjusted for UTF-8 or lines.
+Older outcome headings remain available through `/history`; oversized non-tool items retain their omission and exact raw export.
 Opening and live user and assistant content are never subject to the historical omission limit.
 Stream framing, expected length, domain digest and physical EOF must validate before the final content window is delivered.
 A late content, integrity or rendering failure after visible opening/live output is fatal after terminal restoration, without retry or rollback.
 Failure abandons retained renderer text and pending writer bytes; synchronous keyed-result output attempts only an ANSI reset before diagnostics, preserving the original error rather than finishing incomplete content.
 
 `/history` uses existing public Conversation reads, independently of Admission.
-It prepares one page atomically in unlinked scratch: at most 16 included items of at most 8,192 raw bytes each, with a 128-KiB raw-content ceiling.
+It prepares one page atomically in unlinked scratch: at most 16 retained spans of at most 8,192 raw bytes each, with a 128-KiB raw-content ceiling.
+Every Tool Result authenticates its entire canonical stream, including discarded prefixes, while only its certified-length suffix is staged.
+An independent hash of the received suffix authenticates its reread staged bytes; whole non-tool spans retain their canonical digest check.
 Metadata continuation, complete received bytes and reread staged bytes validate before output.
+Preparation retains explicit whole, tool-suffix, omitted non-tool or no-content authority per item; unstaged content has no readable scratch offset.
 Ordinary preparation failure exposes no page content and retains the older cursor and draft for an explicit retry.
 Rendering I/O or integrity failure is fatal.
 Local command cancellation after the first nonempty output window is also fatal, preventing replay of an incomplete prefix within this invocation.
 Only a successful joined render advances the older cursor.
-Oversized bodies are omitted with their exact position, ordinal, raw-byte count and executable `rui session read-conversation` command.
-Tool Results retain their saved description and outcome heading before that notice in both `/history` and `/details`.
+Oversized non-tool bodies are omitted with their exact position, ordinal, raw-byte count and executable `rui session read-conversation` command.
+Hidden tool output never creates a historical omission notice; normal history remains header-only regardless of tool-result size.
 Generated commands use printable hex Store selectors and bare six-character Session IDs without terminal or shell interpretation; decoded Store values retain the existing bounds and validation.
 Raw export streams the exact content without presentation.
 There is no history cache or new Host route.
@@ -2921,8 +2916,8 @@ A read that would hide or withdraw the Action waits for a sequence the choice is
 Text typed beside the Action is the draft's and outlives it: once the Action leaves it is an ordinary draft, and beside a next Action it denies that Action only once a frame showing both is offered.
 A definite stale-target rejection remains the original until explicit `/discard`; a subsequent distinct Action receives its own fresh presentation.
 The next draft and cursor survive choice and recovery.
-`/details` and `/history` return to the same choice without moving its target; saved tool output remains available there.
-Failed outcomes retain `/details for output.` guidance; successful outcomes omit routine zero exit codes and output but retain cleanup warnings.
+`/details` and `/history` return to the same choice without moving its target.
+All normal tool outcomes remain header-only; explicit `/details` retains bounded raw tool suffixes and full raw export.
 
 `/inspect-action` freshly inspects the first actionable exact Action through the existing CLI diagnostics path, shown as an inspection page.
 It sends no decision.
