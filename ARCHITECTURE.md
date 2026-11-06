@@ -1322,8 +1322,8 @@ The step to 52 lets tool records name an MCP server and keeps the Host's catalog
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
-The step to 54 also adds the bounded outcome-unknown Message recovery index and moves saved wire 8 metadata to wire 9.
 The step to 55 adds the saved model facts and their catalog source.
+The step to 56 adds the bounded outcome-unknown Message recovery index and moves saved wire 8 metadata to wire 9.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.

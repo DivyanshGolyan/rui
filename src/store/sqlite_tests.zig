@@ -10749,7 +10749,7 @@ test "K4 malformed delivered approval forwards fence page cursor and direct hydr
     }
 }
 
-test "schema 53 migrates recovery index and wire 8 together through schema 54 to current wire 9" {
+test "schema 55 migrates recovery index and wire 8 together to schema 56 wire 9" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -10763,11 +10763,12 @@ test "schema 53 migrates recovery index and wire 8 together through schema 54 to
         try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
         try sqlite.exec(raw, store_testing.baseline_rows);
         for (store_schema.migrations) |step| {
-            if (step.from >= 53) break;
+            if (step.from >= 55) break;
             for (step.sqlite) |statement| try sqlite.exec(raw, statement);
         }
-        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=53", .{store_schema.application_id}));
-        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('store_selector',?1),('format','53')");
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM sqlite_schema WHERE name='action_operation_indeterminate'", .{}));
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=55", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('store_selector',?1),('format','55')");
         defer _ = c.sqlite3_finalize(meta);
         try sqlite.bindText(meta, 1, root);
         try sqlite.expectDone(meta);
@@ -10775,7 +10776,8 @@ test "schema 53 migrates recovery index and wire 8 together through schema 54 to
     var storage: Store = undefined;
     try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value='56'", .{}));
+    try std.testing.expectEqual(@as(u32, 56), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='9'", .{}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='action_operation_indeterminate'", .{}));
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));

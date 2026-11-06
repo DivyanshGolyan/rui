@@ -471,7 +471,7 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     writeRecord();
 }
 
-test "schema 53 migrates recovery index and wire 8 together to schema 54 wire 9 on MySQL" {
+test "schema 55 migrates recovery index and wire 8 together to schema 56 wire 9" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
@@ -481,19 +481,14 @@ test "schema 53 migrates recovery index and wire 8 together to schema 54 wire 9 
     try load(migrated_database, store_testing.baseline_mysql_ddl, false);
     try load(migrated_database, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| {
-        if (step.from < 53) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        if (step.from < 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
     }
-    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('format','53')", false);
-    try load(migrated_database, schema.mysqlMigration(53), false);
+    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('format','55')", false);
+    try load(migrated_database, schema.mysqlMigration(55), false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
     try std.testing.expectEqualStrings("\n 1:9", result.written());
-    // Check wire 9 at step 54 before taking the catalog step to the current
-    // format. The complete catalog includes recovery and model facts.
-    inline for (schema.migrations) |step| {
-        if (step.from >= 54) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
     try expectCatalog(migrated_database);
     done.migrations += 1;
     writeRecord();
