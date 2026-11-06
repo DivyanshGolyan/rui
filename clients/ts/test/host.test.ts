@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { Rui, RuiStartError, RuiUnavailableError, type ConnectOptions, type ExitEvent } from "../src/index.ts";
+import { WIRE_VERSION } from "../src/transport.ts";
 
 const binary = process.env.RUI_BINARY;
 const skip = binary ? false : "set RUI_BINARY to a built rui";
@@ -33,7 +34,7 @@ function runtimeDirs(): Set<string> {
 }
 
 async function hostInfo(rui: Rui) {
-	const body = `{"version":"8","kind":"host_info","store":${JSON.stringify(rui.hostInfo?.store)}}`;
+	const body = JSON.stringify({ version: WIRE_VERSION, kind: "host_info", store: rui.hostInfo?.store });
 	return JSON.parse((await rui.call("/v1/host-info", body)).toString("utf8"));
 }
 
@@ -187,6 +188,19 @@ test("a refused frame is a RuiStartError", { skip }, async () => {
 	});
 });
 
+test("invalid provider CA paths are refused with the launch frame", { skip }, async () => {
+	for (const caFile of ["", "/tmp/ca.pem\0ignored"]) {
+		await assert.rejects(Rui.connect(options(newStore(), {
+			provider: { baseUrl: "https://example.com/v1", key, caFile },
+		})), (error: unknown) => {
+			assert.ok(error instanceof RuiStartError);
+			assert.equal(error.code, "launch_frame_invalid");
+			assert.match(error.message, /provider\.caFile/);
+			return true;
+		});
+	}
+});
+
 test("an invalid MCP server is a RuiStartError", { skip }, async () => {
 	const token = "mcp-secret-test";
 	const tools = [{ name: "drift", url: "https://example.com/mcp", bearerToken: token, callTimeoutMs: 1000 }];
@@ -226,7 +240,7 @@ process.stdin.on("data", chunk => {
       if (Buffer.byteLength(input.slice(end + 4)) < length) return;
       const request = JSON.parse(input.slice(end + 4));
       if (request.store !== "" && request.store !== id) process.exit(3);
-      const body = JSON.stringify({version:"8",type:"host_info",store:id,instance:"a".repeat(32),active_capacity:"2",intake_capacity:"100",descriptor_limit:"1024",started_at:"1792918800",custody_occupied:"0",paused:false,innodb_doublewrite:"OFF",capabilities:{bash:true,providers:{codex:"unserved",openai:"key_file"}}});
+      const body = JSON.stringify({version:${JSON.stringify(WIRE_VERSION)},type:"host_info",store:id,instance:"a".repeat(32),active_capacity:"2",intake_capacity:"100",descriptor_limit:"1024",started_at:"1792918800",custody_occupied:"0",paused:false,innodb_doublewrite:"OFF",capabilities:{bash:true,providers:{codex:"unserved",openai:"key_file"}}});
       socket.end("HTTP/1.1 200 OK\r\nContent-Length: " + Buffer.byteLength(body) + "\r\n\r\n" + body);
     });
   }).listen(require("node:path").join(frame.runtimeDir, "rui.sock"));
@@ -242,7 +256,7 @@ process.stdin.on("end", () => server ? server.close(() => process.exit(0)) : pro
 		assert.equal(rui.hostInfo.innodb_doublewrite, "OFF");
 		await rui.exchange("/v1/host-info", store => {
 			assert.equal(store, id);
-			return JSON.stringify({ version: "8", kind: "host_info", store });
+			return JSON.stringify({ version: WIRE_VERSION, kind: "host_info", store });
 		});
 	} finally {
 		await rui?.close();

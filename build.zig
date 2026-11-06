@@ -2,6 +2,9 @@ const std = @import("std");
 const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
+    // PR fixtures need ReleaseSafe checks, not shipped LLVM code generation.
+    // Qualification/release and ordinary local builds keep the production backend.
+    const pr_ci = b.option(bool, "pr-ci", "Use the Linux x86_64 PR-only integration artifact") orelse false;
     const ci_targets = b.option([]const u8, "ci-targets", "Comma-separated CI targets to compile");
     const ci_part = b.option(CiPart, "ci-part", "Which selected CI compiles this producer emits") orelse .all;
     const ci: CiArtifacts = .{ .b = b, .directory = b.option([]const u8, "ci-artifacts", "Verified native CI executables") };
@@ -11,6 +14,8 @@ pub fn build(b: *std.Build) void {
     const ci_query: std.Target.Query = .{ .cpu_model = .baseline };
     const target = b.standardTargetOptions(.{ .default_target = if (ci_mode) ci_query else .{} });
     const optimize = b.standardOptimizeOption(.{});
+    if (pr_ci and (target.result.cpu.arch != .x86_64 or target.result.os.tag != .linux))
+        @panic("The fast PR artifact is qualified only for x86_64 Linux");
     if (ci_mode and (!target.query.eql(ci_query) or optimize != .debug))
         @panic("CI artifacts require the native platform, baseline CPU and default optimization");
     const ci_cpu = std.json.Stringify.valueAlloc(b.allocator, .{
@@ -60,7 +65,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
     // Selection pairs test-full with check or check-full, which already run every
     // other native test, so this binary contains only the real-time witness.
+    // Like the unit binary, these test-only roots keep safety checks but avoid
+    // LLVM optimization. Their measured runtimes remain well inside the deadlines.
     const deadline_witness = b.addTest(.{
+        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
         .name = "deadline-witness",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tests.zig"),
@@ -82,6 +90,7 @@ pub fn build(b: *std.Build) void {
     full_test_step.dependOn(&run_full_tests.step);
 
     const logic_tests = b.addTest(.{
+        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/logic_tests.zig"),
             .target = target,
@@ -186,7 +195,9 @@ pub fn build(b: *std.Build) void {
     signal_stack_probe.has_side_effects = true;
     test_step.dependOn(&signal_stack_probe.step);
 
-    const release_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
+    const production_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
+    const release_safe = if (pr_ci) addRui(b, target, .ReleaseSafe, "rui-pr-check", pinned_transport) else production_safe;
+    if (pr_ci) release_safe.use_llvm = false;
     const terminal_restoration = b.addSystemCommand(&.{"env"});
     terminal_restoration.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
     terminal_restoration.addArg("python3");
@@ -251,6 +262,11 @@ pub fn build(b: *std.Build) void {
     });
     configurePosix(b, read_client);
     session_list_client.root_module.addImport("rui_client", read_client);
+    const session_list_integration = b.addSystemCommand(&.{"python3"});
+    session_list_integration.addFileArg(b.path("tests/integration/session_list_integration.py"));
+    session_list_integration.addFileArg(ci.path(release_safe));
+    session_list_integration.addFileArg(ci.path(session_list_client));
+    b.step("session-list-integration", "Run native Session listing and idle Host resource checks").dependOn(&session_list_integration.step);
     const activity_client = b.addExecutable(.{
         .name = "rui-activity-client-test",
         .use_llvm = test_actor_llvm,
@@ -598,7 +614,8 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addFileArg(ci.path(preference_policy_actor));
     fast_integrations.addFileArg(ci.path(terminal_notice));
     fast_integrations.step.dependOn(&format.step);
-    fast_integrations.addFileInput(ci.path(release_small));
+    // Release compilation coverage stays in qualification, not PR fixture startup.
+    if (!pr_ci) fast_integrations.addFileInput(ci.path(release_small));
     fast_integrations.step.dependOn(&run_renderer_allocation.step);
     fast_integrations.step.dependOn(&signal_stack_probe.step);
     check_step.dependOn(&fast_integrations.step);
@@ -610,11 +627,14 @@ pub fn build(b: *std.Build) void {
     if (target.result.cpu.arch == .x86_64 and target.result.os.tag == .linux) {
         const stack_frames = b.addSystemCommand(&.{ "python3", "-B" });
         stack_frames.addFileArg(b.path("tests/ci/stack_frames.py"));
-        stack_frames.addFileArg(ci.path(release_safe));
+        // This is a production-codegen oracle, never a gate on the PR backend.
+        stack_frames.addFileArg(ci.path(production_safe));
         stack_frames.addFileArg(b.path("tests/ci/stack_frames.json"));
         stack_frames_step.dependOn(&stack_frames.step);
     }
-    check_step.dependOn(stack_frames_step);
+    // Selected PRs run this unchanged LLVM oracle in a separate required job,
+    // so its compile cannot hold every integration shard behind it.
+    if (!pr_ci) check_step.dependOn(stack_frames_step);
 
     const full_check_step = b.step(
         "check-full",
@@ -640,7 +660,7 @@ pub fn build(b: *std.Build) void {
         process_integrations.step.dependOn(h2_test_step);
         process_integrations.step.dependOn(pg_test_step);
     }
-    process_integrations.addFileInput(ci.path(release_small));
+    if (!pr_ci) process_integrations.addFileInput(ci.path(release_small));
     full_check_step.dependOn(&process_integrations.step);
 
     const measurement_tests = b.addSystemCommand(&.{

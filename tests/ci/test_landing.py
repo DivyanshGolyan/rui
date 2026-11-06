@@ -533,7 +533,8 @@ class LandingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             (root / 'tests').symlink_to(Path('tests').resolve(), target_is_directory=True)
-            for path in ('README.md', 'tests/qualification/model-output/main.go', 'src/store.zig'):
+            for path in ('README.md', 'tests/qualification/model-output/main.go', 'src/store.zig', 'build.zig', 'src/server.zig',
+                         'tests/ci/stack_frames.py'):
                 selection = select([path], 'review', available)
                 for event, stable in (('workflow_dispatch', True), ('pull_request', False)):
                     with self.subTest(path=path, event=event, stable=stable):
@@ -545,6 +546,9 @@ class LandingTest(unittest.TestCase):
                                      GITHUB_OUTPUT=str(root / 'output'),
                                      GITHUB_STEP_SUMMARY=str(root / 'summary')))
                         outputs = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
+                        codegen = event == 'pull_request' and bool({'check', 'stack-frames'} & set(selection['targets']))
+                        self.assertEqual(outputs['linux_codegen'], str(codegen).lower())
+                        expected_targets = [t for t in selection['targets'] if not (codegen and t == 'stack-frames')]
                         if stable:
                             expected = sorted((set(selection['native_targets']) - CHECK_COVERS)
                                               | {'check', 'admission-debug-integration'})
@@ -555,10 +559,10 @@ class LandingTest(unittest.TestCase):
                             self.assertTrue(json.loads(outputs['macos_matrix'])['include'])
                         elif event == 'pull_request' and selection['mac_required']:
                             # test_platform_boundary owns which PR paths run Mac.
-                            self.assertEqual(json.loads(outputs['targets']), selection['targets'])
+                            self.assertEqual(json.loads(outputs['targets']), expected_targets)
                             self.assertEqual(json.loads(outputs['native_targets']), selection['native_targets'])
                         else:
-                            self.assertEqual(json.loads(outputs['targets']), selection['targets'])
+                            self.assertEqual(json.loads(outputs['targets']), expected_targets)
                             self.assertEqual(json.loads(outputs['native_targets']), [])
                             self.assertEqual(outputs['native'], 'false')
 
@@ -742,7 +746,7 @@ test "$n" -gt "$FAILS"
         for aggregate in ('linux', 'macos'):
             job = re.search(rf'(?ms)^  {aggregate}:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
             self.assertNotIn('cache_execution', job, 'cache proof is not gating')
-        for build in ('linux_build', 'macos_build'):
+        for build in ('linux_build', 'linux_build_unit', 'macos_build', 'macos_build_unit'):
             job = re.search(rf'(?ms)^  {build}:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
             self.assertNotIn('cache_execution.py', job)
 

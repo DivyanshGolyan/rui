@@ -10,17 +10,20 @@ const window_bytes = 16 * 1024;
 /// A read has no durable effect until its one resolution commits. In particular,
 /// retries after a crash simply read the public feed again.
 pub fn run(store: *storage.Store, arena: std.mem.Allocator, input: *const storage.CoreActionInput, faults: storage.Faults) !void {
-    var arguments: core.ReadTranscript = .{};
+    // Store reads can drain queued writes on this stack. Keep bounded
+    // argument scratch in the same arena as the feed windows.
+    const arguments = try arena.create(core.ReadTranscript);
+    arguments.* = .{};
     const check: core.ReadTranscriptCheck = if (input.arguments.length > core.read_transcript_max_argument_bytes)
         .{ .rejected = "the arguments take more than 4096 bytes" }
     else check: {
         const bytes = try arena.alloc(u8, @intCast(input.arguments.length));
         try store.readCoreArguments(input, bytes);
-        break :check try core.checkReadTranscript(arena, bytes, &arguments);
+        break :check try core.checkReadTranscript(arena, bytes, arguments);
     };
     if (check == .rejected) return fail(store, arena, input, check.rejected, faults);
     const session = if (arguments.id) |id| id.slice() else input.session.slice();
-    const result = render(store, arena, session, &arguments) catch |err| switch (err) {
+    const result = render(store, arena, session, arguments) catch |err| switch (err) {
         error.SessionNotFound => return fail(store, arena, input, "id names an unknown Session", faults),
         error.EntryNotFound, error.ContentNotFound => return fail(store, arena, input, "full names no public entry", faults),
         error.InvalidCursor => return fail(store, arena, input, if (arguments.full != null) "full names no public entry" else "before must name a public entry or position in this Session", faults),

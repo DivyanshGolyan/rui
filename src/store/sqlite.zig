@@ -101,6 +101,27 @@ pub const StatementCache = struct {
         self.slots = slots;
     }
 
+    /// Evict one idle prepared form without breaking an open-addressed
+    /// probe chain. Reinsert the following cluster in place; no allocation.
+    pub fn remove(self: *StatementCache, sql: [*:0]const u8) void {
+        if (self.slots.len == 0) return;
+        const slot = probe(self.slots, sql);
+        const statement = slot.statement orelse return;
+        std.debug.assert(c.sqlite3_stmt_busy(statement) == 0);
+        _ = c.sqlite3_finalize(statement);
+        const mask = self.slots.len - 1;
+        var index = (@intFromPtr(slot) - @intFromPtr(self.slots.ptr)) / @sizeOf(Slot);
+        slot.* = .{};
+        self.count -= 1;
+        index = (index + 1) & mask;
+        while (self.slots[index].sql) |key| {
+            const displaced = self.slots[index];
+            self.slots[index] = .{};
+            probe(self.slots, key).* = displaced;
+            index = (index + 1) & mask;
+        }
+    }
+
     /// Test aid: every entry point reset each statement it stepped.
     pub fn assertIdle(self: *const StatementCache) void {
         for (self.slots) |slot| {

@@ -7,6 +7,7 @@ import subprocess
 import time
 
 from select_tests import execution_batches
+from build_artifact import pr_ci
 
 # Marks a batch's retry in the job log; report_issue.py files the failure before it.
 RETRIED = "one automatic retry"
@@ -52,7 +53,8 @@ def execute(batch, ci_artifacts):
     start = time.monotonic()
     artifacts = ["-Dci-artifacts=" + ci_artifacts] if ci_artifacts else []
     # Fixtures copy their own retained diagnostics; this only runs the gate.
-    returncode = subprocess.run(["zig", "build", *batch, *artifacts, "--summary", "all",
+    mode = ["-Dpr-ci=true"] if pr_ci() else []
+    returncode = subprocess.run(["zig", "build", *batch, *mode, *artifacts, "--summary", "all",
                                  "--test-timeout", TEST_TIMEOUT]).returncode
     print(f"Completed {' '.join(batch)}: {time.monotonic() - start:.3f}s; exit {returncode}", flush=True)
     return returncode

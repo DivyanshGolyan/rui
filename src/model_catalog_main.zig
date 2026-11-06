@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
             first = false;
         }
         if (!first) try out.writeByte(' ');
-        try out.print("}}), .openai = {} }},\n", .{entry.openai});
+        try out.print("}}), .openai_listed = {} }},\n", .{entry.openai_listed});
     }
     try out.writeAll("    };\n}\n");
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[1], .data = output.written() });

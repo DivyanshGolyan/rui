@@ -242,6 +242,7 @@ const endpoint_conflicts = &[_]Conflict{
 /// Host fault injection and observation, consumed only by host serve.
 const serve_test = &[_]Option{
     .{ .name = "fault", .argument = "VALUE", .hidden = true, .repeated = true },
+    hiddenValue("test-models-dev-url"),
     hiddenValue("test-codex-fixture-endpoint"),
     hiddenValue("test-openai-fixture-endpoint"),
     hiddenNumber("test-bash-scratch-limit-bytes", 0, std.math.maxInt(u64)),

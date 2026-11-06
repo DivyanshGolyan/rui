@@ -34,7 +34,12 @@ export interface ConnectOptions {
 	/** The Store: a SQLite directory or a mysql:// URL, sent only in the stdin launch frame. */
 	database: string;
 	/** The OpenAI-compatible provider. Only the key Adapter is offered to a launched Host (D149). */
-	provider: { baseUrl: string; key: string };
+	provider: {
+		baseUrl: string;
+		key: string;
+		/** Trust only this PEM file for this provider, instead of system CAs. Sent in the launch frame. */
+		caFile?: string;
+	};
 	/** How many Turns may run at once. Left out, the Host picks its default. */
 	activeCapacity?: number;
 	/** Named creation specs, held only by this Host. No default preset is selected. */
@@ -316,7 +321,10 @@ export function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 		...(options.presets === undefined ? {} : {
 			presets: Object.fromEntries(Object.entries(options.presets).map(([name, spec]) => [name, presetFor(spec)])),
 		}),
-		provider: { kind: "openai_key", baseUrl: options.provider.baseUrl, key: options.provider.key },
+		provider: {
+			kind: "openai_key", baseUrl: options.provider.baseUrl, key: options.provider.key,
+			...(options.provider.caFile === undefined ? {} : { caFile: options.provider.caFile }),
+		},
 		// Only the Host's fields are copied: it refuses unknown ones.
 		mcpServers: (options.tools ?? []).map(({ name, url, bearerToken, callTimeoutMs }) => ({ name, url, bearerToken, callTimeoutMs })),
 	} satisfies Schemas["LaunchFrame"];

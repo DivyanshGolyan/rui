@@ -3,6 +3,7 @@
 
 import fcntl
 import hashlib
+import http.server
 import json
 import os
 import pathlib
@@ -15,7 +16,7 @@ import threading
 import time
 
 import host_process
-from host_process import HostDiagnostics, canonical_fixture_root, is_peer_disconnect, start_ready_process, stop_process, wait_for
+from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, is_peer_disconnect, start_ready_process, stop_process, wait_for
 import os_semantics
 
 
@@ -99,7 +100,6 @@ def start(store, capacity, *options):
         required_fields={"active_capacity": str(capacity)},
         observations="status" if "--test-phase-trace" in options else None,
     )
-
 
 def socket_path(store):
     digest = hashlib.sha256(str(store.resolve()).encode()).hexdigest()[:32]

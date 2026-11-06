@@ -502,6 +502,13 @@ pub const Client = extern struct {
         return Engine.ofConst(self).finished_count;
     }
 
+    /// Retire this endpoint's pooled connections. Idle ones close now; a
+    /// connection shared with other streams drains without interrupting them.
+    /// Later requests may establish a fresh connection to the same endpoint.
+    pub fn retireConnections(self: *Client, endpoint: Endpoint) void {
+        Engine.of(self).retireConnections(endpoint);
+    }
+
     /// True while any connection exists, open or opening, even with no
     /// stream left. Keep driving until it is false: a cancel's RST_STREAM,
     /// PING answers and the idle close all go out only from `drive`.

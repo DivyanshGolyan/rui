@@ -16,12 +16,11 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 54;
-/// `digest()` of each schema_version, oldest first. A change to what
-/// `bootstrap` executes changes the last row's digest: in place while that
-/// version is unreleased, so concurrent PRs share it, and as a new row and
-/// schema_version once it has shipped. tests/ci/test_store_schema_version.py
-/// refuses an edited released row and a second unreleased number.
+pub const schema_version: u32 = 56;
+/// `digest()` of each schema_version, oldest first. Each format PR appends
+/// its own version and forward step (D226); main's digests and steps are
+/// immutable even before release. tests/ci/test_store_schema_version.py
+/// checks both main's prefix and every released format.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
     .{ .schema_version = 46, .digest = 0xf3129842e4a7d447 },
@@ -32,7 +31,9 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
-    .{ .schema_version = 54, .digest = 0x1093a2102a263fe3 },
+    .{ .schema_version = 54, .digest = 0xae916e0373329df9 },
+    .{ .schema_version = 55, .digest = 0x4acf921dca365b6e },
+    .{ .schema_version = 56, .digest = 0xbdf9ac7b6016b1da },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -44,7 +45,7 @@ comptime {
         .{ schema_version, digest() },
     ));
     if (current.digest != digest()) @compileError(std.fmt.comptimePrint(
-        "the Store's bootstrap changed: set the last row's digest to 0x{x:0>16} if schema_version is unreleased, else bump it and append a row",
+        "the Store's bootstrap changed: the new format's digest is 0x{x:0>16}; append a version and step instead of changing main's rows (D226)",
         .{digest()},
     ));
 }
@@ -80,7 +81,7 @@ pub const Migration = struct {
 
 /// Every step from `migration_baseline` to `schema_version`, oldest first.
 /// The baseline snapshots (migration_baseline.*.sql) never change; the
-/// chain grows. Only a step past the released schema_version may change.
+/// chain grows; steps already on main or released never change (D226).
 pub const migrations = [_]Migration{
     // 52 (T1e): MCP tool records name their server, host_catalog names the
     // Host's catalog set, and a catalog set holds up to
@@ -123,7 +124,6 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
         },
     },
-    // Schema 54 also adds bounded outcome-unknown Message recovery and wire 9.
     // Schema 54: the stops an attached child owes (D38) and the endings
     // its parent is owed (D39), and independently loaded tools (T4a):
     // NULL loaded_tool_set_id keeps the full configured set.
@@ -166,8 +166,6 @@ pub const migrations = [_]Migration{
             "CREATE TABLE session_forward(\n forward_id INTEGER PRIMARY KEY NOT NULL CHECK(forward_id>0),\n target_ref TEXT NOT NULL REFERENCES session(session_ref),\n child_ref TEXT NOT NULL REFERENCES session(session_ref),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 2),\n source_id INTEGER NOT NULL CHECK(source_id>0),\n position INTEGER CHECK(position IS NULL OR position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal=0),\n delivered_at INTEGER CHECK(delivered_at IS NULL OR delivered_at>0),\n UNIQUE(target_ref,kind,source_id),\n CHECK((position IS NULL)=(delivered_at IS NULL)),\n CHECK(target_ref<>child_ref)\n) STRICT",
             "CREATE INDEX session_forward_open ON session_forward(forward_id) WHERE position IS NULL",
             "CREATE INDEX session_forward_feed ON session_forward(target_ref,position)",
-            "CREATE INDEX action_operation_indeterminate ON action_operation(session_ref,parent_operation_id,call_ordinal) WHERE resolution_code='indeterminate'",
-            "UPDATE store_meta SET meta_value='9' WHERE meta_key='wire_version' AND meta_value='8'",
         },
         .mysql = &.{
             "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n settled BIGINT NOT NULL,\n PRIMARY KEY(child_ref,cause_ref,cause_position),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0),\n CHECK(settled BETWEEN 0 AND 1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -195,6 +193,29 @@ pub const migrations = [_]Migration{
             "CREATE TABLE session_forward(\n forward_id BIGINT NOT NULL,\n target_ref VARCHAR(6) NOT NULL,\n child_ref VARCHAR(6) NOT NULL,\n kind BIGINT NOT NULL,\n source_id BIGINT NOT NULL,\n position BIGINT,\n ordinal BIGINT NOT NULL,\n delivered_at BIGINT,\n session_forward_open_lead BIGINT GENERATED ALWAYS AS (CASE WHEN position IS NULL THEN forward_id END) STORED,\n PRIMARY KEY(forward_id),\n UNIQUE(target_ref,kind,source_id),\n FOREIGN KEY(target_ref) REFERENCES session(session_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n CHECK(forward_id>0),\n CHECK(kind BETWEEN 1 AND 2),\n CHECK(source_id>0),\n CHECK(position IS NULL OR position>0),\n CHECK(ordinal=0),\n CHECK(delivered_at IS NULL OR delivered_at>0),\n CHECK((position IS NULL)=(delivered_at IS NULL)),\n CHECK(target_ref<>child_ref)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE INDEX session_forward_open ON session_forward(session_forward_open_lead)",
             "CREATE INDEX session_forward_feed ON session_forward(target_ref,position)",
+        },
+    },
+    // Schema 55 (C2a, D226): saved model facts and their publication source.
+    // Both tables start empty until the first successful catalog refresh.
+    .{
+        .from = 54,
+        .sqlite = &.{
+            "CREATE TABLE model_fact(\n model_id TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(model_id AS BLOB)) BETWEEN 1 AND 256),\n context_window INTEGER,\n efforts INTEGER NOT NULL CHECK(efforts BETWEEN 0 AND 63),\n openai_listed INTEGER NOT NULL CHECK(openai_listed IN (0,1)),\n generation INTEGER NOT NULL\n) STRICT",
+            "CREATE TABLE model_catalog_source(\n slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1),\n etag TEXT CHECK(etag IS NULL OR length(CAST(etag AS BLOB))<=512),\n generation INTEGER NOT NULL,\n fetched_at INTEGER NOT NULL\n) STRICT",
+        },
+        .mysql = &.{
+            "CREATE TABLE model_fact(\n model_id VARCHAR(256) NOT NULL,\n context_window BIGINT,\n efforts BIGINT NOT NULL,\n openai_listed TINYINT NOT NULL,\n generation BIGINT NOT NULL,\n PRIMARY KEY(model_id),\n CHECK(OCTET_LENGTH(model_id) BETWEEN 1 AND 256),\n CHECK(efforts BETWEEN 0 AND 63),\n CHECK(openai_listed IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE model_catalog_source(\n slot BIGINT NOT NULL,\n etag TEXT,\n generation BIGINT NOT NULL,\n fetched_at BIGINT NOT NULL,\n PRIMARY KEY(slot),\n CHECK(slot=1),\n CHECK(etag IS NULL OR OCTET_LENGTH(etag)<=512)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
+    // Schema 56: bounded outcome-unknown Message recovery and wire 9.
+    .{
+        .from = 55,
+        .sqlite = &.{
+            "CREATE INDEX action_operation_indeterminate ON action_operation(session_ref,parent_operation_id,call_ordinal) WHERE resolution_code='indeterminate'",
+            "UPDATE store_meta SET meta_value='9' WHERE meta_key='wire_version' AND meta_value='8'",
+        },
+        .mysql = &.{
             "ALTER TABLE action_operation ADD COLUMN action_operation_indeterminate_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN resolution_code='indeterminate' THEN session_ref END) STORED, ADD INDEX action_operation_indeterminate(action_operation_indeterminate_lead,parent_operation_id,call_ordinal)",
             "UPDATE store_meta SET meta_value='9' WHERE meta_key='wire_version' AND meta_value='8'",
         },
@@ -496,6 +517,28 @@ pub const tables = [_]Table{
         .foreign_keys = &.{
             references("tool_set_id", "tool_set", &.{"tool_set_id"}),
         },
+    },
+    // models.dev facts are published with their source generation atomically.
+    .{
+        .name = "model_fact",
+        .columns = &.{
+            .{ .name = "model_id", .type = .{ .text = .{ .min = 1, .max = 256 } } },
+            .{ .name = "context_window", .type = .int, .nullable = true },
+            .{ .name = "efforts", .type = .int, .check = "efforts BETWEEN 0 AND 63" },
+            .{ .name = "openai_listed", .type = .flag },
+            .{ .name = "generation", .type = .int },
+        },
+        .primary_key = &.{"model_id"},
+    },
+    .{
+        .name = "model_catalog_source",
+        .columns = &.{
+            .{ .name = "slot", .type = .int, .check = "slot=1" },
+            .{ .name = "etag", .type = .{ .text = .{ .min = 0, .max = 512 } }, .nullable = true },
+            .{ .name = "generation", .type = .int },
+            .{ .name = "fetched_at", .type = .int },
+        },
+        .primary_key = &.{"slot"},
     },
     .{
         .name = "session",
@@ -1106,9 +1149,16 @@ pub const indexes = [_]Index{
 /// unknown target is recorded with its rejection). The tests' touch oracle
 /// watches exactly these tables.
 pub fn carriesSessions(comptime table: []const u8) bool {
-    @setEvalBranchQuota(2000);
-    return tableCarriesSessions(tables[tablePosition(&tables, table)]);
+    return comptime session_ownership.get(table) orelse @compileError("schema: no table named " ++ table);
 }
+
+// Compute once, rather than rescanning every table for every touch-oracle
+// assertion as the schema grows. This map is used only at comptime.
+const session_ownership = std.StaticStringMap(bool).initComptime(blk: {
+    var entries: [tables.len]struct { []const u8, bool } = undefined;
+    for (tables, &entries) |table, *entry| entry.* = .{ table.name, tableCarriesSessions(table) };
+    break :blk entries;
+});
 
 /// The columns that name a Session, in the order `sessionColumns` lists them.
 pub const session_column_names = [_][]const u8{ "session_ref", "sender_session_ref" };

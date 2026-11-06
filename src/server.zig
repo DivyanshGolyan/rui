@@ -842,8 +842,7 @@ fn setNonblocking(fd: std.posix.fd_t) !void {
 }
 
 fn descriptorTransport(served: *const providers.Providers) descriptor_capacity.Transport {
-    if (!served.any()) return .none;
-    return if (served.modelListKey() != null) .requests_and_model_list else .requests;
+    return if (served.modelListKey() != null) .listings else .catalog;
 }
 
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
@@ -996,13 +995,7 @@ pub fn serve(
     };
     defer if (diagnostics) |*writer| writer.close();
     if (diagnostics) |*writer| writer.record("begin", "lease_acquired");
-    if (diagnostics) |*writer| {
-        var detail: [256]u8 = undefined;
-        writer.record("capacity", try std.fmt.bufPrint(&detail, "ordinary_intake={d} default_intake={d} minimum_intake={d} descriptor_requirement={d} descriptor_limit={s}", .{
-            intake_capacity,              product_defaults.intake_capacity, descriptor_capacity.minimum_intake,
-            descriptor_requirement.total, descriptor_limit_text,
-        }));
-    }
+    if (diagnostics) |*writer| try recordCapacity(writer, intake_capacity, descriptor_requirement.total, descriptor_limit_text);
     errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");
     // The catalog's records point into this arena, and the Store keeps the
     // catalog for its life, so it outlives the Store.
@@ -1198,6 +1191,14 @@ fn finishServing(io: std.Io, storage: *const store_module.Store, launched: bool,
 
 // serve's frame stays resident for the Host's life, so each startup-only
 // buffer lives in a noinline function of its own.
+
+noinline fn recordCapacity(writer: *HostDiagnostics, intake_capacity: usize, descriptor_requirement: usize, descriptor_limit_text: []const u8) !void {
+    var detail: [256]u8 = undefined;
+    writer.record("capacity", try std.fmt.bufPrint(&detail, "ordinary_intake={d} default_intake={d} minimum_intake={d} descriptor_requirement={d} descriptor_limit={s}", .{
+        intake_capacity,        product_defaults.intake_capacity, descriptor_capacity.minimum_intake,
+        descriptor_requirement, descriptor_limit_text,
+    }));
+}
 
 /// Admission's options and login framing are startup scratch, not part of
 /// serve's resident frame on either engine. The caller provides both owners.
@@ -1775,7 +1776,10 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         },
         // Host memory only: never SQLite or the network.
         // Sized as written: the bound is tens of KiB, a reply mostly far less.
-        .model_list => try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host}),
+        .model_list => {
+            host.listings_requested.store(true, .release);
+            try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host});
+        },
     }
 }
 

@@ -194,6 +194,15 @@ pub const Engine = union(Kind) {
         }
     }
 
+    /// Bulk work must not leave its pager working set resident. This is a
+    /// best-effort cache hint, not a change to durable state or an error edge.
+    pub inline fn releaseUnusedMemory(e: *Engine, comptime statements: anytype) void {
+        switch (e.*) {
+            .sqlite => |*s| s.releaseUnusedMemory(statements),
+            .mysql => {},
+        }
+    }
+
     pub inline fn close(e: *Engine) error{StoreCloseFailed}!void {
         return switch (e.*) {
             .sqlite => |*s| s.close(),
