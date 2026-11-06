@@ -130,12 +130,16 @@ pub fn finish(self: *Renderer) !void {
     try self.finishLegacy();
 }
 
-fn finishLegacy(self: *Renderer) !void {
+fn finishPrefix(self: *Renderer) !void {
     if (self.line_start and self.prefix_len != 0) {
         // A delimiter without its line ending is not a complete block marker.
         if (Fence.candidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
         try self.flushPrefix();
     }
+}
+
+fn finishLegacy(self: *Renderer) !void {
+    try self.finishPrefix();
     if (self.fence_pending and !self.fence_literal) {
         if (Fence.closing(self.held[self.fence_line_start..self.fence_len])) {
             try self.literalBlock(self.held[self.fence_body_start..self.fence_line_start]);
@@ -218,7 +222,7 @@ fn resolveHead(self: *Renderer, ending: Markdown.HeadEnding) !bool {
         try self.endTable();
         // Broader opacity closers NEVER broaden legacy stripping or copy-code.
         // If strict legacy effects still own the block, remain ineligible.
-        const opening = previous == .plain and decision.next == .fence;
+        const opening = previous == .plain and decision.next == .fence and Fence.candidate(head[0..length]);
         if (decision.projection.mode == .@"opaque" and !self.fence_pending and (!opening or decision.projection.quote != null)) self.literal_line = true;
         if (!self.fence_pending) if (decision.projection.quote) |quote| {
             self.block_quote = try self.blocks.?.send(.{ .quote = quote });
@@ -292,9 +296,11 @@ fn endTable(self: *Renderer) !void {
 }
 fn endQuote(self: *Renderer) !void {
     if (self.block_quote) {
-        // Settle inline/output buffers before ending the synchronous scope.
+        // The final line may still live in the renderer prefix, not Writer.
+        try self.finishPrefix();
         try self.endLink();
         try self.flushSpan();
+        try self.terminal_text.finish(self.out);
         _ = try self.blocks.?.send(.{ .quote = null });
         self.block_quote = false;
     }
@@ -1771,6 +1777,15 @@ test "fence lexical delegation preserves rendered bytes and LastCode at every sp
     for (cases) |case| {
         try expectRendered(case.raw, case.rendered);
         for (0..case.raw.len + 1) |split| {
+            var storage: [1024]u8 = undefined;
+            var out = std.Io.Writer.fixed(&storage);
+            var record: BlockRecorder = .{ .out = &out };
+            var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+            try renderer.feed(case.raw[0..split]);
+            for (case.raw[split..]) |byte| try renderer.feed(&.{byte});
+            try renderer.finish();
+            try std.testing.expectEqualStrings(case.rendered, out.buffered());
+            try std.testing.expectEqual(@as(u6, 0), record.marks.count);
             var code: LastCode = .{};
             code.feed(case.raw[0..split]);
             code.feed(case.raw[split..]);
@@ -1989,4 +2004,92 @@ test "typed table admission shares row grammar for CRLF escaped pipes code and e
         try std.testing.expectEqual(case.columns, record.marks.items[0].data.table.count);
         try std.testing.expectEqual(@as(u64, case.source.len), record.marks.items[0].complete_end);
     };
+}
+
+test "typed quote scope contains pending EOF prefix inline links and terminal escapes" {
+    const cases = [_][]const u8{ ">", "> ", "> x", "> **x**", "> *x*", "> `x`", "> [x](https://example.test)", "> https://example.test", "> > **x**", "> \x1b[31m", "> \xc3" };
+    for (cases) |source| for ([_][]const u8{ "", "\n" }) |ending| {
+        var input: [256]u8 = undefined;
+        @memcpy(input[0..source.len], source);
+        @memcpy(input[source.len..][0..ending.len], ending);
+        const raw = input[0 .. source.len + ending.len];
+        var expected_storage: [1024]u8 = undefined;
+        var expected = std.Io.Writer.fixed(&expected_storage);
+        var legacy: Renderer = .{ .out = &expected };
+        try legacy.feed(raw);
+        try legacy.finish();
+        for (0..raw.len + 1) |split| {
+            var storage: [1024]u8 = undefined;
+            var out = std.Io.Writer.fixed(&storage);
+            var record: BlockRecorder = .{ .out = &out };
+            var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+            try renderer.feed(raw[0..split]);
+            for (raw[split..]) |byte| try renderer.feed(&.{byte});
+            try renderer.finish();
+            try std.testing.expectEqualStrings(expected.buffered(), out.buffered());
+            try std.testing.expectEqual(@as(u6, 1), record.marks.count);
+            try std.testing.expectEqual(@as(u64, 0), record.marks.items[0].start);
+            try std.testing.expectEqual(@as(u64, out.end), record.marks.items[0].end);
+            try std.testing.expect(record.active == null);
+        }
+    };
+}
+
+test "typed opacity-only opener info remains safe literal at every split and ending" {
+    const cases = [_][]const u8{ "~~~ **x**", "~~~~ [x](https://example.test)", "~~~ \x1b[31m\xff", "~~~ `x`", "~~~ \xe2\x80\xae", "~~~", "  ~~~ **x**", "```` **x**", "``` [x](https://example.test)", "```` \x1b[31m" };
+    for (cases) |source| for ([_][]const u8{ "", "\n> code\n~~~\n" }) |ending| {
+        var input: [256]u8 = undefined;
+        @memcpy(input[0..source.len], source);
+        @memcpy(input[source.len..][0..ending.len], ending);
+        const raw = input[0 .. source.len + ending.len];
+        var expected_storage: [1024]u8 = undefined;
+        var expected = std.Io.Writer.fixed(&expected_storage);
+        var safe_text: TerminalText = .{ .mode = .multiline };
+        try safe_text.feed(&expected, raw);
+        try safe_text.finish(&expected);
+        for (0..raw.len + 1) |split| {
+            var storage: [1024]u8 = undefined;
+            var out = std.Io.Writer.fixed(&storage);
+            var record: BlockRecorder = .{ .out = &out };
+            var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+            try renderer.feed(raw[0..split]);
+            for (raw[split..]) |byte| try renderer.feed(&.{byte});
+            try renderer.finish();
+            try std.testing.expectEqualStrings(expected.buffered(), out.buffered());
+            try std.testing.expectEqual(@as(u6, 0), record.marks.count);
+        }
+    };
+}
+
+test "typed quoted fence EOF scopes keep exact outer depth and literal source" {
+    for ([_][]const u8{ "", "\n" }) |ending| {
+        const source = "> > ```zig\n> > **literal**\n> > ```";
+        var input: [128]u8 = undefined;
+        @memcpy(input[0..source.len], source);
+        @memcpy(input[source.len..][0..ending.len], ending);
+        const raw = input[0 .. source.len + ending.len];
+        for (0..raw.len + 1) |split| {
+            var storage: [1024]u8 = undefined;
+            var out = std.Io.Writer.fixed(&storage);
+            var record: BlockRecorder = .{ .out = &out };
+            var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+            try renderer.feed(raw[0..split]);
+            try renderer.feed(raw[split..]);
+            try renderer.finish();
+            try std.testing.expectEqualStrings(raw, out.buffered());
+            try std.testing.expectEqual(@as(u6, 3), record.marks.count);
+            var start: u64 = 0;
+            for (record.marks.slice()) |mark| {
+                try std.testing.expectEqual(start, mark.start);
+                try std.testing.expectEqual(@as(u4, 2), mark.data.quote.depth);
+                start = mark.end;
+            }
+            try std.testing.expectEqual(@as(u64, out.end), start);
+        }
+    }
+}
+
+test "null capability retains legacy tilde info formatting" {
+    try expectRendered("~~~ **x**\n> code\n~~~\n", "~~~ \x1b[1mx\x1b[0m\n> code\n~~~\n");
+    try expectRendered("~~~ [x](https://example.test)", comptime "~~~ " ++ linked("https://example.test", "x"));
 }

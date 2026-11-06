@@ -386,6 +386,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return limit - if (semantic) (@as(usize, self.blocks.count) + self.reservation) * @sizeOf(OutputBlocks.Span(u32)) else 0;
         }
 
+        fn plannedRoom(self: *const Self, length: usize, planned: *const OutputBlocks.Retained) ?usize {
+            const credit = (@as(usize, planned.count) + self.reservation) * @sizeOf(OutputBlocks.Span(u32));
+            if (length > limit or credit > limit - length) return null;
+            return limit - length - credit;
+        }
+
         /// Only trusted prose may supply a grapheme boundary. Opaque source
         /// may contain invalid UTF-8; losing its head downgrades its same slot.
         fn eviction(self: *const Self, wanted: usize) usize {
@@ -882,7 +888,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         pub fn appendRetained(self: *Self, source: *const Self, start: usize) usize {
             std.debug.assert(styled and start <= source.length);
             const suffix = source.length - start;
-            var count = @min(suffix, self.available() - self.length);
+            var count = @min(suffix, std.math.sub(usize, self.available(), self.length) catch return 0);
             var planned: OutputBlocks.Retained = .{};
             while (true) {
                 if (count < suffix) count = if (std.mem.lastIndexOfScalar(u8, source.bytes[start..][0..count], '\n')) |line| line + 1 else 0;
@@ -910,16 +916,19 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 planned.copy(&source.blocks, source.bytes[0..source.length], start, start + count, self.length) catch {
                     // Slot pressure ends before the first unadmitted block,
                     // never after silently dropping its raw provenance.
+                    if (count == 0) return 0;
                     const admitted = OutputBlocks.limit - self.blocks.count;
                     var seen: usize = 0;
+                    var permitted: usize = 0;
                     for (source.blocks.slice()) |block| {
                         if (block.end <= start or block.start >= start + count) continue;
                         if (seen == admitted) {
-                            count = @min(count, block.start -| start);
+                            permitted = block.start -| start;
                             break;
                         }
                         seen += 1;
                     }
+                    count = @min(count - 1, permitted);
                     continue;
                 };
                 if (continuation) |joined| {
@@ -939,7 +948,13 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                         }
                     }
                 }
-                const room = limit - self.length - @as(usize, planned.count) * @sizeOf(OutputBlocks.Span(u32));
+                const room = self.plannedRoom(self.length, &planned) orelse {
+                    // The copied descriptor itself may not fit. Retry empty;
+                    // pinned bytes never leave to make room for a suffix.
+                    if (count == 0) return 0;
+                    count = 0;
+                    continue;
+                };
                 if (count > room) {
                     count = room;
                     continue;
@@ -970,10 +985,15 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 planned = if (older.retainedBlocks()) |marks| marks.* else .{};
                 planned.copy(&blocks, self.bytes[0..self.length], 0, keep, older.length) catch {
                     const admitted = OutputBlocks.limit - if (older.retainedBlocks()) |marks| marks.count else @as(usize, 0);
-                    keep = @min(keep, blocks.items[admitted].start);
+                    if (keep == 0) return error.BlockCapacity;
+                    keep = @min(keep - 1, blocks.items[admitted].start);
                     continue;
                 };
-                const room = limit - older.length - @as(usize, planned.count) * @sizeOf(OutputBlocks.Span(u32));
+                const room = self.plannedRoom(older.length, &planned) orelse {
+                    if (keep == 0) return error.BlockCapacity;
+                    keep = 0;
+                    continue;
+                };
                 if (keep > room) {
                     keep = room;
                     continue;
@@ -2075,4 +2095,100 @@ test "typed pending tail cannot outrun its complete admitted proof in one source
     try std.testing.expectEqual(@as(u32, 12), text.blocks.items[0].complete_end);
     try std.testing.expectEqual(@as(u32, source.len), text.blocks.items[0].end);
     try std.testing.expectEqualStrings(source, text.text());
+}
+
+test "typed retained credit refuses new descriptors without moving pinned bytes" {
+    const filler: [capacity]u8 = @splat('a');
+    var source: Document = .{};
+    const raw = "x|y\n";
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .data = .literal_raw };
+    var admission: Document.Admission = .{};
+    try source.appendPrepared(raw, 0, &span, &admission);
+    for ([_]u1{ 0, 1 }) |pending| {
+        for ([_]usize{ 0, 1, 8, 31, 32, 33, 35, 36, 37, 63, 64, 67, 68 }) |free| {
+            if (free < @as(usize, pending) * @sizeOf(OutputBlocks.Span(u32))) continue;
+            var dest: Document = .{};
+            try dest.append(filler[0 .. capacity - free]);
+            dest.reservation = pending;
+            const before = dest.length;
+            const expected: usize = if (free >= raw.len + (1 + @as(usize, pending)) * @sizeOf(OutputBlocks.Span(u32))) raw.len else 0;
+            try std.testing.expectEqual(expected, dest.appendRetained(&source, 0));
+            try std.testing.expectEqual(@as(u64, 0), dest.origin);
+            try std.testing.expectEqualStrings(filler[0..before], dest.text()[0..before]);
+            try std.testing.expectEqual(before + expected, dest.length);
+            try std.testing.expectEqual(@as(u6, @intFromBool(expected != 0)), dest.blocks.count);
+            try std.testing.expect(dest.length <= dest.available());
+        }
+    }
+}
+
+test "typed prepend credit trims newer bytes before descriptor subtraction" {
+    const filler: [capacity]u8 = @splat('a');
+    const raw = "x|y\n";
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .data = .literal_raw };
+    for ([_]u1{ 0, 1 }) |pending| {
+        for ([_]usize{ 0, 1, 8, 31, 32, 33, 35, 36, 37, 63, 64, 67, 68 }) |free| {
+            var older: Document = .{};
+            try older.append(filler[0 .. capacity - free]);
+            var dest: Document = .{};
+            var admission: Document.Admission = .{};
+            try dest.appendPrepared(raw, 0, &span, &admission);
+            dest.reservation = pending;
+            if (free < @as(usize, pending) * @sizeOf(OutputBlocks.Span(u32))) {
+                try std.testing.expectError(error.BlockCapacity, dest.prepend(&older));
+                try std.testing.expectEqualStrings(raw, dest.text());
+                continue;
+            }
+            const expected: usize = if (free >= raw.len + (1 + @as(usize, pending)) * @sizeOf(OutputBlocks.Span(u32))) raw.len else 0;
+            try std.testing.expectEqual(expected == 0, try dest.prepend(&older));
+            try std.testing.expectEqualStrings(filler[0..older.length], dest.text()[0..older.length]);
+            try std.testing.expectEqual(older.length + expected, dest.length);
+            try std.testing.expectEqual(@as(u6, @intFromBool(expected != 0)), dest.blocks.count);
+            try std.testing.expect(dest.length <= dest.available());
+        }
+    }
+}
+
+test "typed planned credit preserves header downgrade and bounded shared slot progress" {
+    const filler: [capacity]u8 = @splat('a');
+    const raw = "h|x\n---|---\nr|s\n";
+    var source: Document = .{};
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try source.appendPrepared(raw, 0, &span, &admission);
+    for ([_]usize{ 32, 36, 44, 48 }) |free| {
+        const expected = free - @sizeOf(OutputBlocks.Span(u32));
+        var dest: Document = .{};
+        try dest.append(filler[0 .. capacity - free]);
+        try std.testing.expectEqual(expected, dest.appendRetained(&source, 0));
+        if (expected != 0) {
+            try std.testing.expectEqual(@as(u6, 1), dest.blocks.count);
+            try std.testing.expect((dest.blocks.items[0].data == .literal_raw) == (expected < 12));
+            if (expected >= 12) try std.testing.expectEqual(@as(u32, @intCast(dest.length)), dest.blocks.items[0].complete_end);
+        }
+        var older: Document = .{};
+        try older.append(filler[0 .. capacity - free]);
+        dest = source;
+        try std.testing.expectEqual(expected != raw.len, try dest.prepend(&older));
+        try std.testing.expectEqual(older.length + expected, dest.length);
+        if (expected != 0) try std.testing.expect((dest.blocks.items[0].data == .literal_raw) == (expected < 12));
+    }
+    for ([_]usize{ OutputBlocks.limit - 1, OutputBlocks.limit }) |used| {
+        var dest: Document = .{};
+        for (0..used) |index| {
+            const entry: OutputBlocks.Span(u64) = .{ .start = index * 4, .end = index * 4 + 4, .data = .literal_raw };
+            admission = .{};
+            try dest.appendPrepared("a|b\n", entry.start, &entry, &admission);
+        }
+        const older = dest;
+        const before = dest.length;
+        const admitted = dest.appendRetained(&source, 0);
+        try std.testing.expectEqual(if (used == OutputBlocks.limit) @as(usize, 0) else raw.len, admitted);
+        try std.testing.expectEqual(before + admitted, dest.length);
+        try std.testing.expectEqual(@as(u6, OutputBlocks.limit), dest.blocks.count);
+        var newer = source;
+        try std.testing.expectEqual(used == OutputBlocks.limit, try newer.prepend(&older));
+        try std.testing.expectEqual(older.length + admitted, newer.length);
+        try std.testing.expectEqual(@as(u6, OutputBlocks.limit), newer.blocks.count);
+    }
 }

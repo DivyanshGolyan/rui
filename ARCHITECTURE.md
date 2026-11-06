@@ -2912,6 +2912,8 @@ Prepared typed output has an explicit capability path that remains inactive in p
 The concrete gate is capability injection: live `Taking.blocks` defaults to null, history calls the untyped `Prepared.render` wrapper, and seam listings call untyped `message`; only focused tests currently supply capture capabilities.
 `AnswerRenderer` owns its single pre-inline quote/fence opacity and table admission traversal; the existing 4,096-byte held storage is shared with legacy links and fences, not duplicated.
 The opacity context never expands strict legacy delimiter stripping or LastCode/copy-code credit; while legacy fence effects still own bytes, prose/table admission remains ineligible even if a broader opacity closer was recognized.
+Only a shared backtick candidate may reach the strict legacy opener owner; opacity-only tilde opener info remains safe literal source.
+An accepted quote scope settles pending renderer prefix, inline/link and terminal-text bytes before its synchronous end callback, including short canonical EOF lines.
 A candidate can hold one header and its delimiter within the same 4,096-source-byte credit; rejection and overflow replay through the existing inline engine with a monotone value cursor that cannot overwrite unread held bytes.
 Only assistant preparation and original UserBody quote annotations receive this capability; UserBody continues through terminal escaping and collapse, without assistant inline parsing.
 Tool, peer, inspection, Action and ordinary CLI paths have no semantic authority.
@@ -2923,6 +2925,8 @@ Document edits carry bytes, styles and clipped/rebased marks through normalizati
 Header loss downgrades surviving raw source in its existing slot; tail loss keeps only the last actual complete boundary, while a clipped quote marker loses annotation but retains escaped prose and links.
 Opaque bytes never enter the trusted ANSI parser or global Unicode normalization; their literal measurement and paint use the same replayable safety projection, borrowing retained clusters or immutable TerminalText escape spellings through encoding.
 Metadata-only promotion or downgrade advances the existing Document generation, not a separate cache key.
+Retained append and prepend plan descriptor plus pending credit before subtracting source room; retries strictly reduce copied bytes, and pinned append never evicts its existing prefix.
+Prepend trims newer text at complete line boundaries or refuses an unaffordable pending reservation before copying, preserving the existing retention fact.
 Each body's logical credit is source bytes plus used descriptors and pending reservation within 256 KiB; physically resident arrays, worker/rewrite stack and the backend's separate 32 MiB charged budget are accounted independently.
 The custody checkpoint adds no assistant table/quote presentation, output layout cache, row index or canonical source/copy mutation.
 
