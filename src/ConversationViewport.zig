@@ -1131,7 +1131,17 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         pub const Drawn = struct { rows: usize, next: Position };
 
+        // Rich alignment needs every horizontal cell before clipping. Public
+        // panes are x=0/rail-fit and translate only y; vertical clipping is OK.
+        fn checkPaintWindow(self: *const Self, window: vaxis.Window, commit: bool) !void {
+            if (semantic and commit) {
+                if (self.blocks.count != 0 and (window.x_off < 0 or window.parent_x_off < 0 or
+                    @as(i32, window.x_off) + window.width > window.screen.width)) return error.HorizontalRichPaintClipped;
+            }
+        }
+
         pub fn draw(self: *const Self, window: vaxis.Window, from: Position, commit: bool, colour: bool, plain: vaxis.Style, paint: Paint) !Drawn {
+            try self.checkPaintWindow(window, commit);
             if (self.text().len == 0) return .{ .rows = 0, .next = .end };
             var row: i32 = -@as(i32, from.row);
             var units = Units.forward(self, from.offset);
@@ -1396,6 +1406,7 @@ pub const TextRows = struct {
     }
 
     pub fn paint(self: TextRows, scroll: *vaxis.widgets.ScrollView, parent: vaxis.Window, colour: bool, scratch: std.mem.Allocator) !void {
+        try self.text.checkPaintWindow(parent, true);
         if (self.total == 0) return;
         const bounds = scroll.bounds(parent);
         const first = self.position(bounds.y1);
@@ -2908,4 +2919,51 @@ test "typed incomplete tail and ragged rows remain literal even beside complete 
             try std.testing.expectEqualStrings("a          b", pixels.row(1, &storage));
         }
     }
+}
+
+test "typed rich paint refuses horizontal clipping before any grid source or geometry change" {
+    const prefix = "before\n";
+    const raw = "|h|\n|---:|\n|x|\n";
+    var document: Document = .{};
+    try document.append(prefix);
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 11, .complete_end = raw.len, .data = .{ .table = .{ .count = 1, .alignment = @splat(.right) } } };
+    var admission: Document.Admission = .{};
+    try document.appendPrepared(raw, 0, &span, &admission);
+    try document.prepare();
+    const generation = document.generation;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var pixels: TestScreen = undefined;
+    const root = pixels.window(12, 6);
+    root.fill(.{ .char = .{ .grapheme = "*", .width = 1 }, .style = .{ .bg = .{ .index = 4 } }, .link = .{ .uri = "https://unchanged.test" } });
+    const grid = pixels.cells;
+    var translated = root;
+    translated.x_off = 4;
+    const unsupported = [_]vaxis.Window{
+        root.child(.{ .x_off = -2, .width = 10 }),
+        // Positive global x does not undo a negative ancestor's clipping.
+        root.child(.{ .x_off = 5, .width = 7 }).child(.{ .x_off = -2, .width = 8 }),
+        // Child clamps to its parent, not the global screen's right edge.
+        translated.child(.{ .width = 10 }),
+    };
+    for (unsupported) |window| {
+        const layout: Layout = .{ .width = window.width, .method = .unicode };
+        const projection = TextRows.init(&document, layout);
+        try std.testing.expectEqual(@as(usize, 3), projection.total);
+        const measured = try document.draw(window, .{}, false, false, .{}, .{});
+        try std.testing.expectEqual(projection.total, measured.rows);
+        try std.testing.expectError(error.HorizontalRichPaintClipped, document.draw(window, .{}, true, false, .{}, .{ .scratch = arena.allocator() }));
+        var scroll: vaxis.widgets.ScrollView = .{ .vertical_scrollbar = null };
+        try std.testing.expectError(error.HorizontalRichPaintClipped, projection.paint(&scroll, window, false, arena.allocator()));
+        try std.testing.expectEqualDeep(grid, pixels.cells);
+        try std.testing.expectEqual(projection.total, document.rowCount(layout));
+        try std.testing.expectEqual(generation, document.generation);
+        try std.testing.expectEqualStrings(prefix ++ raw, document.text());
+    }
+    // A fully visible translated window is supported. Its reported narrower
+    // width, like an ordinary child clamp, is the shared source geometry.
+    _ = try document.draw(root.child(.{ .x_off = 2, .width = 10 }), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
+    try std.testing.expectEqualStrings("x", pixels.screen.readCell(11, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("*", pixels.screen.readCell(1, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings(prefix ++ raw, document.text());
 }

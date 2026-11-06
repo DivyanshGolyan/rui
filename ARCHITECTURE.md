@@ -2940,6 +2940,9 @@ Narrow, malformed, incomplete or over-output-limit units use the same lossless t
 Committed generated cell bytes/styles live in charged backend scratch through encoding.
 ASCII alphanumeric/space-only identity cells borrow immutable source; other cells use the same bounded inline/normalization owner.
 Alignment only shifts already-painted complete cells within a cleared cell rectangle, never determines source positions, extent or retention from grid contents.
+Committed typed rich paint requires a horizontally whole Window: nonnegative global and ancestor x offsets, with its full reported width inside the global screen.
+Both paint entries refuse unsupported horizontal clipping before any source unit or prefix is painted; measurement and source geometry do not change or select a different commit-only fallback.
+Current public conversation panes are x=0 with a fitting rail and only y translation; vertical clipping remains supported.
 Authoritative quote annotations retain original first-row markers and trusted styles/links, with a static ASCII gutter on soft continuations.
 The whole logical line falls back when its prefix bisects a grapheme, lacks two body cells, or any body cluster is wider than the body.
 Sidenotes and collapsed user summaries keep their existing geometry.
