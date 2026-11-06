@@ -1415,7 +1415,7 @@ def overview_cases():
         caller = subprocess.Popen([str(fixture.RUI)], cwd=workspace, env=env,
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         # An empty Store shows the composer and a hint.
-        empty = overview_frame(master, lambda frame: "No Sessions yet. Type a task below." in frame)
+        empty = overview_frame(master, lambda frame: "No unarchived Sessions. /sessions archived shows the archive." in frame)
         assert "Type a task to start a Session" in empty and not records.exists(), empty
         held = overview_frame(master, lambda frame: "--permission-mode ask" in frame,
             keys=b'/configure --permission-mode ask --label "lane four"\n')
@@ -4779,7 +4779,7 @@ def renderer_cases():
         print("renderer: an Action decided by another client leaves the choice and shows its outcome without a key; a draft begun beside it stays the draft", flush=True)
 
         # Typing beside one Action never decides the next: `/` at the first
-        # of two, decided elsewhere, then `a` + Enter is the command `/a`.
+        # of two, decided elsewhere, then `not-a-command` + Enter stays an unknown command.
         # The line outlives the command until Esc, and the second Action is
         # decided only at its own choice once input is fresh again.
         session = configure("ask")
@@ -4801,7 +4801,7 @@ def renderer_cases():
                 records = set((home / ".config/rui/requests").glob("*.json"))
                 # The typed line outlives the first Action and its command, so
                 # the second waits beside it with no prompt until Esc.
-                tty.send("a\r", "! Unknown command /a · /help")
+                tty.send("not-a-command\r", "! Unknown command /not-a-command · /help")
                 assert CHOICE not in tty.capture.completed, tty.capture.completed
                 tty.send("\x07", CHOICE)
                 assert [item["action"] for item in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]] == [second]
@@ -4873,9 +4873,8 @@ def renderer_cases():
         print("renderer: a page opening mid-sequence beside the Action keeps that sequence in the draft", flush=True)
 
         # A slash command begun while reading a tall Action stays a command:
-        # `/`, the final page, then `a` + Enter runs `/a` and authorizes
-        # nothing. Esc returns to the choice, which decides once input is
-        # fresh.
+        # `/`, the final page, then `not-a-command` + Enter authorizes nothing.
+        # Esc returns to the choice, which decides once input is fresh.
         session = configure("ask")
         command = "\n".join(f"# reading line {index}" for index in range(100)) + "\nprintf allowed > renderer-reading-effect"
         endpoint.responses.append(fixture.sse_tool_calls("renderer-reading", [
@@ -4895,7 +4894,7 @@ def renderer_cases():
                     raise AssertionError("tall Action never became ready after paging")
                 assert tty.capture.draft("/", 3), tty.capture.completed
                 records = set((home / ".config/rui/requests").glob("*.json"))
-                tty.send("a\r", "! Unknown command /a · /help")
+                tty.send("not-a-command\r", "! Unknown command /not-a-command · /help")
                 assert CHOICE not in tty.capture.completed, tty.capture.completed
                 tty.send("\x07", CHOICE)
                 assert set((home / ".config/rui/requests").glob("*.json")) == records

@@ -158,7 +158,7 @@ pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: 
 /// What a key does in the overview. `clear` empties the draft, else the
 /// held start settings. `select_*` choose a Session even while the picker
 /// shows; `previous` and `next` move the picker's highlight there.
-pub const Action = enum { previous, next, select_previous, select_next, first, last, clear, exit, stop };
+pub const Action = enum { previous, next, select_previous, select_next, first, last, clear, exit, stop, archive };
 
 /// The one key table.
 pub const keys: keymap.Keymap(Action) = .init(.{
@@ -171,6 +171,7 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_p = null,
     .ctrl_r = null,
     .ctrl_x = .stop,
+    .alt_a = .archive,
     .up = .previous,
     .down = .next,
     .shift_up = .select_previous,
@@ -448,7 +449,7 @@ pub const Panel = union(enum) {
 /// What /help shows under its heading: the overview's keys, then its
 /// commands, which its table lists.
 const help_text = "Up/Down select · Shift-Up/Down always · Home/End first/last on empty draft\n" ++
-    "Enter opens selected · Ctrl-X twice stops · Type a task to start\n" ++
+    "Enter opens · Alt-A archives · Ctrl-X twice stops · Type a task to start\n" ++
     "/ lists commands · Up/Down choose · Tab or Enter takes it\n" ++
     "Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves\n" ++
     "\n" ++ std.mem.trimEnd(u8, commands.help, "\n");
@@ -519,7 +520,8 @@ pub const Observed = struct { reference: Reference, work: session_work.Work, nam
 /// An input in the open conversation of `reference`, whose work it shows as
 /// `work`: Ctrl-X there asks for and confirms a stop as Ctrl-X on the
 /// Session's row does, and any other input cancels the prompt.
-pub const Conversed = struct { reference: Reference, work: Kind, stop: bool };
+pub const ConversationInput = union(enum) { other, stop, archive: ArchiveState, confirm_archive };
+pub const Conversed = struct { reference: Reference, work: Kind, input: ConversationInput };
 
 pub const Read = struct { reference: Reference, position: u64, admission: u64 };
 pub const Reads = struct {
@@ -750,33 +752,36 @@ pub const OwnedStart = struct {
     }
 };
 
-pub const Prompt = struct { stop: Reference, action: enum { stop, archive } = .stop };
+pub const Prompt = struct {
+    pub const Action = enum { stop, archive };
+    stop: Reference,
+    action: Prompt.Action = .stop,
+};
 const archive_prompt = "Stop and archive {s}? enter yes {s} esc no";
 
 /// What both screens say while a stop waits for its second Ctrl-X: the
 /// Session's reference and a separator dot.
 const stop_prompt = "Stop {s}? ctrl+x yes {s} esc no";
 
-/// The bytes the conversation's stop prompt takes.
-pub const max_prompt_bytes = stop_prompt.len - 2 * "{s}".len + @typeInfo(Reference).array.len + "·".len;
+/// Room for either conversation confirmation prompt.
+pub const max_prompt_bytes = @max(stop_prompt.len, archive_prompt.len) - 2 * "{s}".len + @typeInfo(Reference).array.len + "·".len;
 
-/// What the overview says under the input of the conversation of `ref`,
-/// whose work shows as `work`: its stop prompt for that Session, else its
-/// notice, and whether Ctrl-X would ask to stop the work.
+/// The exact conversation's prompt or notice, and whether Ctrl-X asks to stop.
 pub const Said = struct {
     /// Null when the overview says nothing; the conversation's own notice
     /// then shows.
     text: ?[]const u8,
-    /// The text is the stop prompt, which Esc or Ctrl-G only cancels.
-    asking: bool,
+    /// The confirmation shown; Esc or Ctrl-G only cancels.
+    asking: ?Prompt.Action,
     stoppable: bool,
 };
 
 pub fn conversation(state: *const State, ref: Reference, work: Kind, buffer: *[max_prompt_bytes]u8) Said {
-    const asking = if (state.prompt) |open| open.action == .stop and std.mem.eql(u8, &open.stop, &ref) else false;
-    const text: ?[]const u8 = if (asking)
-        std.fmt.bufPrint(buffer, stop_prompt, .{ &ref, "·" }) catch unreachable
-    else if (state.notice) |*notice| notice.text() else null;
+    const asking: ?Prompt.Action = if (state.prompt) |open| (if (std.mem.eql(u8, &open.stop, &ref)) open.action else null) else null;
+    const text: ?[]const u8 = if (asking) |action| switch (action) {
+        .stop => std.fmt.bufPrint(buffer, stop_prompt, .{ &ref, "·" }) catch unreachable,
+        .archive => std.fmt.bufPrint(buffer, archive_prompt, .{ &ref, "·" }) catch unreachable,
+    } else if (state.notice) |*notice| notice.text() else null;
     return .{ .text = text, .asking = asking, .stoppable = stoppable(state, ref, work) };
 }
 
@@ -1471,7 +1476,14 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             state.notice = null;
             const prompt = state.prompt;
             state.prompt = null;
-            if (input.stop) stopKey(state, prompt, input.reference, input.work, &effects);
+            switch (input.input) {
+                .other => {},
+                .stop => stopKey(state, prompt, input.reference, input.work, &effects),
+                .archive => |archive| askArchive(state, input.reference, input.work, archive, .keep, &effects),
+                .confirm_archive => if (prompt) |open| {
+                    if (open.action == .archive and std.mem.eql(u8, &open.stop, &input.reference)) archiveSession(state, .{ .reference = open.stop }, &effects);
+                },
+            }
         },
         .archive => |result| {
             const kind: @FieldType(Request, "kind") = if (result.request.archived) .archive else .unarchive;
@@ -2028,7 +2040,7 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
     retitle(state, row, was);
 }
 
-/// Any input clears the notice and cancels a stop prompt. Ctrl-X confirms
+/// Any input clears the notice and cancels a prompt. Ctrl-X confirms
 /// the prompt and Esc only cancels it. Keys act on the picker only while
 /// the screen shows it. A key that acts on a Session closes a panel, so it
 /// acts where the Sessions show.
@@ -2036,6 +2048,13 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
     state.notice = null;
     const prompt = state.prompt;
     state.prompt = null;
+    if (prompt != null and prompt.?.action == .archive) {
+        const confirms = switch (value.input) {
+            .choice => |choice| choice == .enter,
+            .composer => |outcome| outcome == .submit,
+        };
+        if (confirms) return archiveSession(state, .{ .reference = prompt.?.stop }, effects);
+    }
     const mode = state.inputMode();
     const outcome: keymap.Outcome(Action) = switch (value.input) {
         .choice => |choice| choice: {
@@ -2085,6 +2104,11 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
                 state.settings = .{};
             },
             .exit => effects.add(.exit),
+            .archive => {
+                state.closePanel();
+                const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
+                askArchive(state, row.reference, row.state.asOf(state.now_ms), row.archive_state, .keep, effects);
+            },
             .stop => {
                 state.closePanel();
                 const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
@@ -2095,9 +2119,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
         // Enter in a list the latest frame drew takes the highlighted
         // entry: it runs the command that entry completes, or adds the word
         // another follows. A screen too short for the list shows none.
-        .submit => if (prompt != null and prompt.?.action == .archive and std.mem.trim(u8, value.draft.bytes, " \t\r\n").len == 0) {
-            archiveSession(state, .{ .reference = prompt.?.stop }, effects);
-        } else if (picker != null) pick(state, effects) else if (shownCommands(state, value.draft)) |shown| {
+        .submit => if (picker != null) pick(state, effects) else if (shownCommands(state, value.draft)) |shown| {
             const taken = shown.list.enter(shown.highlight);
             if (taken.runs and value.draft.bytes.len + taken.rest.len <= draft_capacity) {
                 var line: [draft_capacity]u8 = undefined;
@@ -2200,12 +2222,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         .archive => {
             state.closePanel();
             const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-            if (row.archive_state == .archiving) return state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&row.reference});
-            if (row.archive_state == .archived) return state.say(.quiet, "{s} is already archived. /unarchive restores it.", .{&row.reference});
-            effects.add(.clear_draft);
-            if (groups.get(rules.get(row.state).group).under_way or row.state == .approval) {
-                state.prompt = .{ .stop = row.reference, .action = .archive };
-            } else archiveSession(state, .{ .reference = row.reference }, effects);
+            askArchive(state, row.reference, row.state.asOf(state.now_ms), row.archive_state, .submitted, effects);
         },
         .unarchive => {
             state.closePanel();
@@ -2256,6 +2273,22 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         },
         .setup => try requestCommand(state, .setup, null, text, effects),
     }
+}
+
+/// Slash commands consume their submitted line; a key leaves its draft alone.
+fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, draft: enum { keep, submitted }, effects: *Effects) void {
+    if (archive == .archiving) {
+        state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref});
+        return;
+    }
+    if (archive == .archived) {
+        state.say(.quiet, "{s} is already archived. /unarchive restores it.", .{&ref});
+        return;
+    }
+    if (draft == .submitted) effects.add(.clear_draft);
+    if (groups.get(rules.get(work).group).under_way or work == .approval) {
+        state.prompt = .{ .stop = ref, .action = .archive };
+    } else archiveSession(state, .{ .reference = ref }, effects);
 }
 
 fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) void {
@@ -4518,7 +4551,7 @@ test "ctrl-x asks to stop only a row its rule lets it stop, and a second ctrl-x 
 fn expectSaid(text: ?[]const u8, asking: bool, stoppable_: bool, said: Said) !void {
     try std.testing.expectEqualStrings(text orelse "", said.text orelse "");
     try std.testing.expectEqual(text == null, said.text == null);
-    try std.testing.expectEqual(asking, said.asking);
+    try std.testing.expectEqual(if (asking) @as(?Prompt.Action, .stop) else null, said.asking);
     try std.testing.expectEqual(stoppable_, said.stoppable);
 }
 
@@ -4526,15 +4559,15 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     var state = try testState();
     defer state.deinit();
     const ref = "k7m2qx".*;
-    const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .stop = true };
+    const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .input = .stop };
     var buffer: [max_prompt_bytes]u8 = undefined;
     try expectSaid(null, false, true, conversation(&state, ref, .working, &buffer));
     try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
     try expectSaid("Stop k7m2qx? ctrl+x yes · esc no", true, true, conversation(&state, ref, .working, &buffer));
     // Another Session's conversation does not show the prompt.
-    try std.testing.expect(!conversation(&state, "b4n8wd".*, .working, &buffer).asking);
+    try std.testing.expect(conversation(&state, "b4n8wd".*, .working, &buffer).asking == null);
     // Any other input there cancels, and the next ctrl-x asks afresh.
-    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .stop = false } }));
+    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .other } }));
     try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working, &buffer).text);
     try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
     try expectEffects(&.{.{ .stop = ref }}, try step(&state, .{ .conversed = ctrl_x }));
@@ -4547,7 +4580,7 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     try expectNoticeWithData(&state, "! k7m2qx not stopped: session_not_found");
     // Ended work takes no stop.
     try std.testing.expect(conversation(&state, ref, .working, &buffer).stoppable and !conversation(&state, ref, .finished, &buffer).stoppable);
-    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .stop = true } }));
+    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .input = .stop } }));
     try expectNotice(&state, "k7m2qx is already finished.");
 }
 
@@ -7379,7 +7412,7 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
     try std.testing.expectEqual(@as(usize, 79), top.len);
     for ([_][]const u8{
         " Up/Down select · Shift-Up/Down always · Home/End first/last on empty draft",
-        " Enter opens selected · Ctrl-X twice stops · Type a task to start",
+        " Enter opens · Alt-A archives · Ctrl-X twice stops · Type a task to start",
         " / lists commands · Up/Down choose · Tab or Enter takes it",
         " Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves",
         "",
@@ -7724,4 +7757,65 @@ test "archive traversal stays invalid after switching away and back before not_m
     _ = try respond(&state, .full, testToken(2), &.{row});
     try std.testing.expect(state.find(row.reference) != null);
     try std.testing.expectEqual(testToken(2), state.token.?);
+}
+
+test "Alt-A archive keeps the draft and confirms its captured row before draft or picker Enter" {
+    const a = session("aaaaaa", .{ .working = ago(1) }, .{});
+    const b = session("bbbbbb", .{ .idle = ago(2) }, .{});
+    const draft: Draft = .{ .bytes = "/rename unfinished", .cursor = 4, .edits = 17 };
+    for ([_]bool{ false, true }) |choice| {
+        var state = try opened(&.{ a, b });
+        defer state.deinit();
+        state.selected = a.reference;
+        try expectEffects(&.{}, try step(&state, .{ .composed = .{ .draft = draft, .input = .{ .composer = .{ .action = .archive } } } }));
+        try std.testing.expectEqual(Prompt.Action.archive, state.prompt.?.action);
+        state.selected = b.reference;
+        // Listing/selection changes do not retarget the captured confirmation.
+        const input: Input = if (choice) .{ .choice = .enter } else .{ .composer = .submit };
+        try expectEffects(&.{.{ .archive = .{ .reference = a.reference } }}, try step(&state, .{ .composed = .{ .draft = draft, .input = input } }));
+        try std.testing.expectEqual(ArchiveState.active, state.find(a.reference).?.archive_state);
+        try std.testing.expectEqualStrings(&b.reference, &state.selected.?);
+        _ = try step(&state, .{ .archive = .{ .request = .{ .reference = a.reference }, .outcome = .{ .failed = "archive_pending" } } });
+        try std.testing.expect(state.find(a.reference) != null);
+    }
+}
+
+test "Alt-A conversation archive uses exact unlisted Session and shares guards ledger and cancellation" {
+    const ref = "k7m2qx".*;
+    for ([_]Kind{ .idle, .working, .approval }) |work| {
+        var state = try testState();
+        defer state.deinit();
+        const ask: Event = .{ .conversed = .{ .reference = ref, .work = work, .input = .{ .archive = .active } } };
+        const confirm: Event = .{ .conversed = .{ .reference = ref, .work = work, .input = .confirm_archive } };
+        if (work != .idle) {
+            try expectEffects(&.{}, try step(&state, ask));
+            var buffer: [max_prompt_bytes]u8 = undefined;
+            const said = conversation(&state, ref, work, &buffer);
+            try std.testing.expectEqual(Prompt.Action.archive, said.asking.?);
+            try std.testing.expectEqualStrings("Stop and archive k7m2qx? enter yes · esc no", said.text.?);
+            try std.testing.expect(conversation(&state, "aaaaaa".*, work, &buffer).asking == null);
+            try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = work, .input = .other } }));
+            try expectEffects(&.{}, try step(&state, confirm));
+            try expectEffects(&.{}, try step(&state, ask));
+            // A different open conversation cannot approve the captured target.
+            try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = "aaaaaa".*, .work = work, .input = .confirm_archive } }));
+            try expectEffects(&.{}, try step(&state, ask));
+            try expectEffects(&.{.{ .archive = .{ .reference = ref } }}, try step(&state, confirm));
+        } else try expectEffects(&.{.{ .archive = .{ .reference = ref } }}, try step(&state, ask));
+        _ = try step(&state, ask);
+        try expectEffects(&.{}, try step(&state, confirm));
+        try std.testing.expectEqual(@as(usize, 1), state.request_count);
+        _ = try step(&state, .{ .archive = .{ .request = .{ .reference = ref }, .outcome = .{ .unconfirmed = "saved-handle" } } });
+        _ = try step(&state, ask);
+        try expectEffects(&.{}, try step(&state, confirm));
+        try std.testing.expectEqual(@as(usize, 1), state.request_count);
+    }
+    for ([_]ArchiveState{ .archived, .archiving }) |archive| {
+        var state = try testState();
+        defer state.deinit();
+        try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .{ .archive = archive } } }));
+        try std.testing.expect(state.prompt == null);
+        try std.testing.expect(state.notice != null);
+        try std.testing.expectEqual(@as(usize, 0), state.request_count);
+    }
 }

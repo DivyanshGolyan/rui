@@ -256,6 +256,7 @@ const line_keys: keymap.Keymap(enum { interrupt, eof }) = .init(.{
     .ctrl_p = null,
     .ctrl_r = null,
     .ctrl_x = null,
+    .alt_a = null,
     .up = null,
     .down = null,
     .shift_up = null,
@@ -352,6 +353,17 @@ pub fn Selection(comptime A: type) type {
     return union(enum) { none, action: A, left, right, enter, text, refused };
 }
 
+/// Unpasted Enter uses the composer's key semantics, including LF under ICRNL.
+pub fn plainEnter(decoded: Input.Decoded) bool {
+    return switch (decoded) {
+        .event => |value| !value.pasted and switch (value.event) {
+            .key_press => |pressed| classify(pressed) == .enter,
+            else => false,
+        },
+        else => false,
+    };
+}
+
 pub fn select(comptime keys: anytype, decoded: Input.Decoded) Selection(@TypeOf(keys).Action) {
     const value = switch (decoded) {
         .none, .report => return .none,
@@ -396,7 +408,10 @@ test "a choice takes its arrows and Enter, the screen's keys and typing, and ref
         .{ .bytes = "/", .expected = .text },
         .{ .bytes = "\xc3\xa9", .expected = .text },
         .{ .bytes = "\x1b[200~", .expected = .text },
-        .{ .bytes = "\x1ba", .expected = .refused },
+        .{ .bytes = "\x1ba", .expected = .{ .action = .alt_a } },
+        .{ .bytes = "\x1b[97;3u", .expected = .{ .action = .alt_a } },
+        .{ .bytes = "\x1b[27;3;97~", .expected = .{ .action = .alt_a } },
+        .{ .bytes = "\x1bu", .expected = .refused },
         .{ .bytes = "\x1c", .expected = .refused },
         .{ .bytes = "\x1b[113;5u", .expected = .refused },
         // The draft's other edit keys have no use at a choice; a chord
@@ -490,6 +505,7 @@ const chords = std.enums.EnumArray(Key, []const Chord).init(.{
     .ctrl_p = &.{.{ .code = 'p', .mods = .{ .ctrl = true } }},
     .ctrl_r = &.{.{ .code = 'r', .mods = .{ .ctrl = true } }},
     .ctrl_x = &.{.{ .code = 'x', .mods = .{ .ctrl = true } }},
+    .alt_a = &.{.{ .code = 'a', .mods = .{ .alt = true } }},
     // Terminals in the alternate screen also deliver mouse wheel and
     // trackpad scrolling as these arrow keys.
     .up = &.{.{ .code = vaxis.Key.up }},
@@ -522,7 +538,7 @@ fn edit(self: *Editor, key_name: Key) ?KeyOutcome {
         .home => if (self.length == 0) null else self.move(self.lineStart()),
         .end => if (self.length == 0) null else self.move(self.lineEnd()),
         .ctrl_d => if (self.length == 0) null else self.deleteNext(),
-        .escape, .ctrl_c, .ctrl_g, .ctrl_n, .ctrl_o, .ctrl_p, .ctrl_r, .ctrl_x, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
+        .escape, .ctrl_c, .ctrl_g, .ctrl_n, .ctrl_o, .ctrl_p, .ctrl_r, .ctrl_x, .alt_a, .shift_up, .shift_down, .page_up, .page_down, .ctrl_end => null,
     };
 }
 
@@ -1301,7 +1317,7 @@ test "Ctrl-D exits only on an empty draft and otherwise deletes forward" {
 test "a key no table binds neither edits nor rejects the line" {
     const nothing = comptime keymap.Keymap(void){ .meanings = .initFill(null) };
     var storage: [16]u8 = undefined;
-    for ([_][]const u8{ "\x18", "\x1b[120;5u", "\x12", "\x1b[27;5;114~", "\x07", "\x1b[27u", "\x1b[5~", "\x1b[A", "\x1b[1;5F" }) |key_bytes| {
+    for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~", "\x18", "\x1b[120;5u", "\x12", "\x1b[27;5;114~", "\x07", "\x1b[27u", "\x1b[5~", "\x1b[A", "\x1b[1;5F" }) |key_bytes| {
         var editor: Editor = .{ .buffer = &storage };
         var stream: Input = .{};
         for ("ok") |byte| _ = editor.feed(&stream, byte);
@@ -1410,5 +1426,27 @@ test "Shift held with a binding's key is never that binding, whatever text the k
         // Shift-Enter is the one bound Shift chord here: it adds a line.
         const expected: []const u8 = if (std.mem.eql(u8, chord, "\x1b[13;2;13u")) "ok\n" else "ok";
         try std.testing.expectEqualStrings(expected, storage[0..editor.length]);
+    }
+}
+
+test "archive confirmation accepts normalized CR LF and encoded Enter but not modified Enter or paste" {
+    for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[27;1;13~", "\x1b[106;5u", "\x1b[27;5;106~" }) |wire| {
+        var input: Input = .{};
+        var confirmed: usize = 0;
+        for (wire) |byte| {
+            var decoded = input.feed(byte, 0);
+            while (decoded != .none) : (decoded = input.next()) if (plainEnter(decoded)) {
+                confirmed += 1;
+            };
+        }
+        errdefer std.debug.print("confirmation wire={any}\n", .{wire});
+        try std.testing.expectEqual(@as(usize, 1), confirmed);
+    }
+    for ([_][]const u8{ "\x1b[13;2u", "\x1b[13;3u", "\x1b[13;5u", "\x1b[27;2;13~", "\x1b[27;3;13~", "\x1b[27;5;13~", "\x1b\r", "\x1b\n", "\x1b[200~\r\x1b[201~", "\x1b[200~\n\x1b[201~" }) |wire| {
+        var input: Input = .{};
+        for (wire) |byte| {
+            var decoded = input.feed(byte, 0);
+            while (decoded != .none) : (decoded = input.next()) try std.testing.expect(!plainEnter(decoded));
+        }
     }
 }

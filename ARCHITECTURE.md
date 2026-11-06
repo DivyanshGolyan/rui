@@ -2155,12 +2155,15 @@ A ready existing Host retains its actual capacity/capabilities; no model capabil
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 `/sessions unarchived`, `/sessions archived`, and `/sessions all` choose the server-side archive filter.
 The header names the view; changing it clears the previous traversal.
-`/archive` puts away the selected Session, with a Stop and archive confirmation while it has work.
+`/archive` or Alt-A puts away the selected Session, with a Stop and archive confirmation while it has work.
 `/unarchive` restores the selected Session.
 `/undo` restores the last Session explicitly archived from this overview.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
-Conversations also expose `/archive` and `/unarchive`.
+Conversations also expose `/archive` and `/unarchive`; Alt-A archives the exact open Session even when it is absent from the listing.
+Alt-A leaves the draft, caret and retained original unchanged.
+The shared Stop and archive prompt captures its Session reference; unpasted, unmodified Enter confirms it before any draft, picker or permission choice, and Esc cancels it without clearing or sending the draft.
+Archive confirmation spends any permission offer without deciding the Action.
 While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
 Marks hold still: `●` active, `◌` queued, `○` idle or waiting on approval, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
 Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.

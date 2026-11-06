@@ -4348,7 +4348,7 @@ test "conversation archive bridge captures the real command before cancelled tra
         .{ .text = "/archive", .archived = true },
         .{ .text = "/unarchive", .archived = false },
     }) |case| {
-        var tmp = std.testing.tmpDir(.{});
+        var tmp = std.testing.tmpDir(.{ .iterate = true });
         defer tmp.cleanup();
         try tmp.dir.setPermissions(io, .fromMode(0o700));
         var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;

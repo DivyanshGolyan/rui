@@ -14,6 +14,7 @@ const Screen = @import("SessionScreen.zig");
 const Frame = @import("TerminalFrame.zig");
 const Editor = @import("TerminalEditor.zig");
 const keymap = @import("keymap.zig");
+const overview_view = @import("overview_view.zig");
 const test_poll = @import("test_poll");
 const View = @import("session_view.zig");
 const departure = @import("session_departure.zig");
@@ -238,14 +239,13 @@ fn launch(self: *Self, job: *const Job, worker: Task.Run) !void {
     try self.reader.start(self.init.io, &self.job, worker);
 }
 
-/// The overview that lent the terminal decides what Ctrl-X does here and
+/// The overview that lent the terminal decides stop and archive intents and
 /// sends the stop, so a conversation stops its Session exactly as the
 /// Session's row does. Each call names the work the conversation shows.
 pub const Lender = struct {
     context: *anyopaque,
-    /// Steps the overview with an input here: Ctrl-X when `ctrl_x`, else
-    /// any other, which clears its notice and cancels its prompt.
-    step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, ctrl_x: bool) anyerror!void,
+    /// Steps the overview with semantic input for this exact conversation.
+    step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) anyerror!void,
     /// Runs the overview between the conversation's frames, without the
     /// screen or input: answers its finished job, keeps its listing going,
     /// so another Session's news still notifies, and starts its next stop
@@ -261,10 +261,10 @@ pub const Lender = struct {
     observed: *const fn (context: *anyopaque, work: protocol.session_work.Work, name: []const u8, opening: bool) anyerror!void,
 
     pub const Said = struct {
-        /// The stop prompt, or the overview's notice; null for neither.
+        /// The prompt or overview notice; null for neither.
         text: ?[]const u8 = null,
-        /// The text is the stop prompt, which Esc or Ctrl-G only cancels.
-        asking: bool = false,
+        /// The confirmation shown; Esc or Ctrl-G only cancels.
+        asking: ?overview_view.Prompt.Action = null,
         /// Ctrl-X would ask to stop the work.
         stoppable: bool = false,
     };
@@ -1239,6 +1239,7 @@ const ConversationAction = enum {
     recover,
     /// Asks to stop the Session, and stops it at a second press.
     stop,
+    archive,
 };
 
 /// The conversation's one key table.
@@ -1253,6 +1254,7 @@ const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
     .ctrl_p = .older,
     .ctrl_r = .recover,
     .ctrl_x = .stop,
+    .alt_a = .archive,
     .up = .previous,
     .down = .next,
     .shift_up = .scroll_up,
@@ -1282,7 +1284,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
         },
         .latest, .back, .close => {
             // Esc and Ctrl-G only cancel a stop prompt, as on the overview.
-            if (action == .close and self.overviewSays().asking) return;
+            if (action == .close and self.overviewSays().asking != null) return;
             // Esc closes only a list the person saw.
             if (action == .close and screen.inputRow() == .draft) if (self.shownCommands()) |shown| {
                 shown.close();
@@ -1323,14 +1325,17 @@ fn perform(self: *Self, action: ConversationAction) !void {
         // Until the opening read the Session's work is unknown.
         .stop => if (self.reading.opening) {
             self.notice = "Ctrl-X stops the Session once it opens.";
-        } else try self.converse(true),
+        } else try self.converse(.stop),
+        .archive => if (self.reading.opening) {
+            self.notice = "Alt-A archives the Session once it opens.";
+        } else try self.converse(.{ .archive = self.line.archive_state }),
     }
     self.dirty = true;
 }
 
 /// Steps the overview with an input here, Ctrl-X or another.
-fn converse(self: *Self, ctrl_x: bool) !void {
-    try self.lender.step(self.lender.context, self.shownWork(), ctrl_x);
+fn converse(self: *Self, input: overview_view.ConversationInput) !void {
+    try self.lender.step(self.lender.context, self.shownWork(), input);
 }
 
 fn overviewSays(self: *const Self) Lender.Said {
@@ -1489,15 +1494,24 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
 /// the Action, may use it. The input row the latest frame shows takes the
 /// input.
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
-    // As on the overview, every input clears the core's notice and cancels
-    // its stop prompt. An open prompt is cancelled after the input instead,
-    // so Ctrl-X can confirm it and Esc can see it.
+    // Ordinary input cancels after routing so Esc can still see the prompt.
     const asked = self.overviewSays().asking;
-    if (!asked) try self.converse(false);
+    if (asked == null) try self.converse(.other);
     const screen = self.terminal.screen;
     const offer = screen.spendOffer();
+    const selected = Editor.select(conversation_keys, decoded);
+    const stepped_prompt = !self.reading.opening and switch (selected) {
+        .action => |action| action == .stop or action == .archive,
+        else => false,
+    };
+    if (asked == .archive and selected == .enter) {
+        try self.converse(if (Editor.plainEnter(decoded)) .confirm_archive else .other);
+        self.dirty = true;
+        return;
+    }
     if (screen.inputRow() == .selector) try self.choiceEvent(decoded, offer) else try self.draftEvent(decoded, offer);
-    if (asked and self.overviewSays().asking) try self.converse(false);
+    // Stop/archive already consumed the old prompt; keep the core's replacement.
+    if (asked != null and !stepped_prompt and self.overviewSays().asking != null) try self.converse(.other);
     if (self.leaving != null) screen.interruptConsent();
 }
 
@@ -3635,7 +3649,7 @@ test "choice readiness: a key with no use at the choice spends it, so the Enter 
 
 /// An overview that lent the terminal and says nothing under its input.
 const quiet_overview: Lender = .{ .context = undefined, .step = struct {
-    fn step(_: *anyopaque, _: protocol.session_work.Kind, _: bool) !void {}
+    fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !void {}
 }.step, .service = struct {
     fn service(_: *anyopaque) !bool {
         return false;
@@ -3656,12 +3670,12 @@ const FakeOverview = struct {
     stops: usize = 0,
     notice: ?[]const u8 = null,
 
-    fn step(raw: *anyopaque, work: protocol.session_work.Kind, ctrl_x: bool) !void {
+    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !void {
         const fake: *FakeOverview = @ptrCast(@alignCast(raw));
         const asked = fake.asking;
         fake.asking = false;
         fake.notice = null;
-        if (!ctrl_x) return;
+        if (input != .stop) return;
         if (fake.stopping or work != .working) {
             fake.notice = "unused: Stopping";
         } else if (asked) {
@@ -3676,7 +3690,7 @@ const FakeOverview = struct {
 
     fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
         const fake: *FakeOverview = @ptrCast(@alignCast(raw));
-        return .{ .text = if (fake.asking) "Stop unused? ctrl+x yes · esc no" else fake.notice, .asking = fake.asking, .stoppable = work == .working and !fake.stopping };
+        return .{ .text = if (fake.asking) "Stop unused? ctrl+x yes · esc no" else fake.notice, .asking = if (fake.asking) .stop else null, .stoppable = work == .working and !fake.stopping };
     }
 
     fn lender(fake: *FakeOverview) Lender {
@@ -3924,4 +3938,194 @@ test "a change run from the /status page replies under the page, which shows the
             try std.testing.expect(rowWith(held.screen, " Name ", &storage) == null);
         }
     }
+}
+
+const ArchiveOverview = struct {
+    state: overview_view.State,
+    prompt: [overview_view.max_prompt_bytes]u8 = undefined,
+    archives: usize = 0,
+    stops: usize = 0,
+    archived: ?overview_view.Reference = null,
+
+    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !void {
+        const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
+        const effects = try overview_view.step(&self.state, .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = input } });
+        for (effects.slice()) |effect| switch (effect) {
+            .archive => |request| {
+                self.archives += 1;
+                self.archived = request.reference;
+            },
+            .stop => self.stops += 1,
+            else => return error.TestUnexpectedEffect,
+        };
+    }
+
+    fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
+        const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
+        const said = overview_view.conversation(&self.state, "k7m2qx".*, work, &self.prompt);
+        return .{ .text = said.text, .asking = said.asking, .stoppable = said.stoppable };
+    }
+
+    fn lender(self: *ArchiveOverview) Lender {
+        return .{ .context = self, .step = ArchiveOverview.step, .line = ArchiveOverview.line, .service = quiet_overview.service, .observed = quiet_overview.observed };
+    }
+};
+
+test "Alt-A archives the open conversation without submitting or changing its draft or retained original" {
+    for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" }) |chord| for ([_]bool{ false, true }) |original| for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[27;1;13~" }) |confirmation| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        held.self.lender = overview.lender();
+        held.self.live.work.state = .{ .working = .{ .since = 1 } };
+        const ticket: ?Input.Ticket = if (original) held.self.input.submitText("retained original") else null;
+        try sendKeys(&held.self, "/rename unfinished\x1b[D\x1b[D");
+        const before = held.self.input.composition();
+        const revision = held.self.input.revision;
+        try sendKeys(&held.self, chord);
+        try std.testing.expectEqual(overview_view.Prompt.Action.archive, held.self.overviewSays().asking.?);
+        try std.testing.expectEqualStrings("Stop and archive k7m2qx? enter yes · esc no", held.self.overviewSays().text.?);
+        try sendKeys(&held.self, "\x07");
+        try std.testing.expect(held.self.overviewSays().asking == null);
+        try std.testing.expect(held.self.leaving == null);
+        try std.testing.expectEqual(@as(usize, 0), overview.archives);
+        try sendKeys(&held.self, chord);
+        try sendKeys(&held.self, confirmation);
+        try std.testing.expectEqual(@as(usize, 1), overview.archives);
+        try std.testing.expectEqualStrings("k7m2qx", &overview.archived.?);
+        _ = try overview_view.step(&overview.state, .{ .archive = .{ .request = .{ .reference = "k7m2qx".* }, .outcome = .{ .failed = "archive_pending" } } });
+        try std.testing.expectEqualStrings("/rename unfinished", held.self.input.composition().bytes);
+        try std.testing.expectEqual(before.cursor, held.self.input.composition().cursor);
+        try std.testing.expectEqual(revision, held.self.input.revision);
+        try std.testing.expect(held.self.input.queuedCommand() == null);
+        try std.testing.expect(held.self.submission.view() == null);
+        if (original) try std.testing.expectEqualStrings("retained original", try held.self.input.message(ticket.?));
+    };
+}
+
+test "Alt-A confirmation precedes an offered approval and spends its offer without deciding or sending" {
+    for ([_]bool{ false, true }) |draft| for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[27;1;13~" }) |confirmation| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        errdefer std.debug.print("archive approval draft={} archives={} offered={} submission={} row={s}\n", .{ draft, overview.archives, held.screen.offered() != null, held.self.submission.view() != null, @tagName(held.screen.inputRow()) });
+        held.self.lender = overview.lender();
+        held.self.live.work.state = .{ .approval = .{ .since = 1 } };
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        try held.settle();
+        if (draft) {
+            try sendKeys(&held.self, "permission reason\x1b[D");
+            try held.settle();
+        }
+        const before = held.self.input.composition();
+        const revision = held.self.input.revision;
+        const consent = held.screen.consent.?;
+        try sendKeys(&held.self, "\x1ba\x07");
+        try std.testing.expect(held.self.overviewSays().asking == null);
+        try std.testing.expectEqual(consent, held.screen.consent.?);
+        try sendKeys(&held.self, "\x1ba");
+        try held.settle();
+        if (!draft) try std.testing.expect(held.screen.offered() != null);
+        const inputs = held.screen.inputs;
+        try sendKeys(&held.self, confirmation);
+        try std.testing.expectEqual(inputs + 1, held.screen.inputs);
+        try std.testing.expect(held.screen.offered() == null);
+        try std.testing.expectEqual(@as(usize, 1), overview.archives);
+        try std.testing.expectEqual(consent, held.screen.consent.?);
+        try std.testing.expect(held.self.submission.view() == null);
+        try std.testing.expect(held.self.input.submitted == null);
+        try std.testing.expectEqualStrings(if (draft) "permission reason" else "", held.self.input.composition().bytes);
+        try std.testing.expectEqual(before.cursor, held.self.input.composition().cursor);
+        try std.testing.expectEqual(revision, held.self.input.revision);
+        try sendKeys(&held.self, confirmation);
+        try std.testing.expect(held.self.submission.view() == null);
+        try std.testing.expectEqual(consent, held.screen.consent.?);
+    };
+}
+
+test "Alt-A archive cannot be authorized by paste modified Enter or Ctrl-X" {
+    for ([_][]const u8{ "\x1b[13;2u", "\x1b[13;3u", "\x1b[13;5u", "\x1b[200~\r\x1b[201~", "\x1b[200~\n\x1b[201~", "\x18" }) |other| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        held.self.lender = overview.lender();
+        held.self.live.work.state = .{ .working = .{ .since = 1 } };
+        try sendKeys(&held.self, "keep me\x1b[D\x1ba");
+        try sendKeys(&held.self, other);
+        try std.testing.expectEqual(@as(usize, 0), overview.archives);
+        try std.testing.expect(held.self.submission.view() == null);
+        try std.testing.expect(held.self.input.submitted == null);
+        try std.testing.expect(held.self.input.queuedCommand() == null);
+        try std.testing.expect(held.self.overviewSays().asking != .archive);
+    }
+}
+
+test "Alt-A prompt replacement survives stop archive and repeated archive keys without confirming the wrong intent" {
+    const Case = enum { stop_to_archive, archive_to_stop, repeat_archive };
+    const Surface = enum { draft, approval_choice, approval_draft };
+    for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" }) |chord| for (std.enums.values(Case)) |case| for (std.enums.values(Surface)) |surface| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        errdefer std.debug.print("prompt replacement case={s} surface={s} chord={s}\n", .{ @tagName(case), @tagName(surface), chord[1..] });
+        held.self.lender = overview.lender();
+        held.self.live.work.state = if (surface == .draft) .{ .working = .{ .since = 1 } } else .{ .approval = .{ .since = 1 } };
+        const file: ?std.Io.File = if (surface == .draft) null else try held.adopt(3);
+        defer if (file) |opened| opened.close(std.testing.io);
+        if (surface != .draft) try held.settle();
+        if (surface != .approval_choice) try sendKeys(&held.self, "unfinished message\x1b[D\x1b[D");
+        const before = held.self.input.composition();
+        const revision = held.self.input.revision;
+        const consent = held.screen.consent;
+        try sendKeys(&held.self, if (case == .stop_to_archive) "\x18" else chord);
+        try std.testing.expectEqual(@as(?overview_view.Prompt.Action, if (case == .stop_to_archive) .stop else .archive), held.self.overviewSays().asking);
+        try sendKeys(&held.self, if (case == .archive_to_stop) "\x18" else chord);
+        const replacement: overview_view.Prompt.Action = if (case == .archive_to_stop) .stop else .archive;
+        try std.testing.expectEqual(@as(?overview_view.Prompt.Action, replacement), held.self.overviewSays().asking);
+        try std.testing.expectEqual(@as(usize, 0), overview.archives);
+        try std.testing.expectEqual(@as(usize, 0), overview.stops);
+        try sendKeys(&held.self, if (case == .archive_to_stop) "\x18" else "\r");
+        try std.testing.expectEqual(@as(usize, if (case == .archive_to_stop) 0 else 1), overview.archives);
+        try std.testing.expectEqual(@as(usize, if (case == .archive_to_stop) 1 else 0), overview.stops);
+        try std.testing.expect(held.self.overviewSays().asking == null);
+        try std.testing.expectEqualStrings(if (surface == .approval_choice) "" else "unfinished message", held.self.input.composition().bytes);
+        try std.testing.expectEqual(before.cursor, held.self.input.composition().cursor);
+        try std.testing.expectEqual(revision, held.self.input.revision);
+        try std.testing.expectEqual(consent, held.screen.consent);
+        try std.testing.expect(held.self.input.submitted == null);
+        try std.testing.expect(held.self.input.queuedCommand() == null);
+        try std.testing.expect(held.self.submission.view() == null);
+    };
+}
+
+test "Alt-A and Ctrl-X during opening still cancel an old prompt without forwarding an intent" {
+    for ([_][]const u8{ "\x1ba", "\x18" }) |chord| for (std.enums.values(overview_view.Prompt.Action)) |prompt| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        held.self.lender = overview.lender();
+        try sendKeys(&held.self, "keep draft\x1b[D");
+        const revision = held.self.input.revision;
+        const cursor = held.self.input.composition().cursor;
+        overview.state.prompt = .{ .stop = "k7m2qx".*, .action = prompt };
+        held.self.reading.opening = true;
+        try sendKeys(&held.self, chord);
+        try std.testing.expect(held.self.overviewSays().asking == null);
+        try std.testing.expectEqual(@as(usize, 0), overview.archives);
+        try std.testing.expectEqual(@as(usize, 0), overview.stops);
+        try std.testing.expectEqualStrings("keep draft", held.self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, held.self.input.composition().cursor);
+        try std.testing.expectEqual(revision, held.self.input.revision);
+    };
 }

@@ -109,10 +109,12 @@ Existing Sessions keep their saved settings, including approval mode and model.
 
 ### Archive Sessions
 
-Select a Session in the overview and enter `/archive`.
+Select a Session in the overview and press **Alt+A** or enter `/archive`.
 If it has work, confirm **Stop and archive**.
 The Session stays visible until the stop completes.
-You can also enter `/archive` inside its conversation.
+You can also press **Alt+A** or enter `/archive` inside its conversation.
+Alt+A keeps your draft intact.
+For **Stop and archive**, press Enter to confirm or Esc to cancel; neither sends or clears your draft.
 
 Use `/sessions archived` to show archived Sessions, `/sessions all` to show both views, or `/sessions unarchived` to return.
 Enter `/unarchive` to restore the selected Session without starting work.

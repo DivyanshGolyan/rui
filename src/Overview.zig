@@ -1000,7 +1000,12 @@ fn askBackground(self: *Self) !?Next {
 /// Every input takes one route, the one the core's input mode names, then
 /// one core step, whether or not anything changed.
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
-    const input = route(self.state.inputMode(), &self.composer, decoded);
+    const input = if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.plainEnter(decoded))
+        view.Input{ .composer = .submit }
+    else if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.select(view.keys, decoded) == .enter)
+        view.Input{ .composer = .none }
+    else
+        route(self.state.inputMode(), &self.composer, decoded);
     return self.event(.{ .composed = .{ .input = input, .draft = self.composerDraft() } });
 }
 
@@ -1160,10 +1165,10 @@ fn converse(self: *Self, session: view.Reference) ?Left {
 /// An input in the opened Session's conversation, whose work shows as
 /// `kind`, stepped as the overview's own: a stop it asks for is sent at
 /// once.
-fn conversed(raw: *anyopaque, kind: view.Kind, ctrl_x: bool) !void {
+fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    const next = try self.event(.{ .conversed = .{ .reference = self.opened, .work = kind, .stop = ctrl_x } });
+    const next = try self.event(.{ .conversed = .{ .reference = self.opened, .work = kind, .input = input } });
     std.debug.assert(next == null);
     try self.dispatch(.lent);
 }
@@ -2350,9 +2355,9 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     // A listing is due as the conversation opens.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
     overview.opened = "k7m2qx".*;
-    try conversed(overview, .working, true);
-    try std.testing.expect(conversationLine(overview, .working).asking);
-    try conversed(overview, .working, true);
+    try conversed(overview, .working, .stop);
+    try std.testing.expectEqual(view.Prompt.Action.stop, conversationLine(overview, .working).asking.?);
+    try conversed(overview, .working, .stop);
     // The Host read already running answers first; the stop goes before
     // the page queued ahead of it.
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
@@ -3261,6 +3266,7 @@ const key_encodings = std.enums.EnumArray(keymap.Key, []const []const u8).init(.
     .ctrl_p = &.{ "\x10", "\x1b[112;5u", "\x1b[27;5;112~" },
     .ctrl_r = &.{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" },
     .ctrl_x = &.{ "\x18", "\x1b[120;5u", "\x1b[27;5;120~" },
+    .alt_a = &.{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" },
     .up = &.{ "\x1b[A", "\x1bOA", "\x1b[1;1A" },
     .down = &.{ "\x1b[B", "\x1bOB", "\x1b[1;1B" },
     .shift_up = &.{ "\x1b[1;2A", "\x1b[1;2:1A" },
@@ -3341,7 +3347,7 @@ test "every key does what the overview's table says, through the editor, in ever
                 try std.testing.expectEqualStrings(&shownRow(rig, row), &selected);
             },
             .clear => try std.testing.expect(state.settings.empty()),
-            .stop => try std.testing.expectEqualStrings(&shownRow(rig, 2), &(state.prompt orelse return error.TestExpectedPrompt).stop),
+            .archive, .stop => try std.testing.expectEqualStrings(&shownRow(rig, 2), &(state.prompt orelse return error.TestExpectedPrompt).stop),
             .exit => unreachable,
         }
     };
@@ -3608,4 +3614,63 @@ test "overview archive effects preserve server filter, pending visibility, and r
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 3 * view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
+}
+
+test "Alt-A overview preserves draft bytes caret and revision through ask cancel confirm and server answer" {
+    for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" }) |chord| for ([_]bool{ false, true }) |rejected| for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[27;1;13~" }) |confirmation| {
+        const rig = try openListed();
+        defer rig.close();
+        const overview = rig.overview;
+        try std.testing.expect(try rig.press("/rename unfinished\x1b[D\x1b[D") == null);
+        if (rejected) try std.testing.expect(try rig.press("\x00") == null);
+        const before = overview.composerDraft();
+        const target = overview.state.selected.?;
+        try std.testing.expect(try rig.press(chord) == null);
+        try std.testing.expectEqual(view.Prompt.Action.archive, overview.state.prompt.?.action);
+        try std.testing.expect(try pressKey(rig, "\x1b") == null);
+        try std.testing.expect(overview.state.prompt == null);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
+        try std.testing.expect(try rig.press(chord) == null);
+        overview.state.selected = shownRow(rig, 3);
+        try std.testing.expect(try rig.press(confirmation) == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
+        try std.testing.expectEqualStrings(&target, &Seen.now.archive_session);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+        const after = overview.composerDraft();
+        try std.testing.expectEqualStrings("/rename unfinished", after.bytes);
+        try std.testing.expectEqual(before.cursor, after.cursor);
+        try std.testing.expectEqual(before.edits, after.edits);
+        try std.testing.expectEqual(rejected, overview.composer.rejected != null);
+    };
+}
+
+test "Alt-A overview confirmation precedes the visible model sign-in choice" {
+    const rig = try openListed();
+    defer rig.close();
+    try std.testing.expect(try rig.press("/model\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try rig.press("\x1b[B\r") == null);
+    const overview = rig.overview;
+    try std.testing.expectEqual(view.InputMode.choice, overview.state.inputMode());
+    const target = overview.state.selected.?;
+    try std.testing.expect(try rig.press("\x1ba\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
+    try std.testing.expectEqualStrings(&target, &Seen.now.archive_session);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.saves);
+    try std.testing.expectEqual(view.InputMode.choice, overview.state.inputMode());
+}
+
+test "Alt-A overview ignores paste and modified confirmation without submitting the draft" {
+    for ([_][]const u8{ "\x1b[13;2u", "\x1b[13;3u", "\x1b[13;5u", "\x1b[200~\r\x1b[201~", "\x1b[200~\n\x1b[201~", "\x18" }) |other| {
+        const rig = try openListed();
+        defer rig.close();
+        try std.testing.expect(try rig.press("keep me\x1b[D\x1ba") == null);
+        try std.testing.expect(try rig.press(other) == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+        if (rig.overview.state.prompt) |prompt| try std.testing.expectEqual(view.Prompt.Action.stop, prompt.action);
+    }
 }
