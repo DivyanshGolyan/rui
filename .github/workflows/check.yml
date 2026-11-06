@@ -38,6 +38,7 @@ jobs:
       cache_execution: ${{ steps.select.outputs.cache_execution }}
       linux_matrix: ${{ steps.select.outputs.linux_matrix }}
       linux_split: ${{ steps.select.outputs.linux_split }}
+      linux_codegen: ${{ steps.select.outputs.linux_codegen }}
       macos_matrix: ${{ steps.select.outputs.macos_matrix }}
       macos_split: ${{ steps.select.outputs.macos_split }}
     steps:
@@ -75,6 +76,12 @@ jobs:
           else:
               # Other PRs are Linux-only, even for strict paths. Mac runs after main.
               p['native_targets'] = []
+          # PR integration codegen is fast; the LLVM stack oracle remains a
+          # required, independent job rather than a dependency of every shard.
+          p['linux_codegen'] = (os.environ['EVENT_NAME'] == 'pull_request'
+                                  and bool({'check', 'stack-frames'} & set(p['targets'])))
+          if p['linux_codegen']:
+              p['targets'] = [t for t in p['targets'] if t != 'stack-frames']
           p['native_required'] = bool(p['native_targets'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               print('targets=' + json.dumps(p['targets']), file=f)
@@ -82,6 +89,7 @@ jobs:
               print('linux_matrix=' + json.dumps(shards(p['targets'])), file=f)
               print('linux_split=' + str(split_build(p['targets'])).lower(), file=f)
               print('macos_split=' + str(split_build(p['native_targets'])).lower(), file=f)
+              print('linux_codegen=' + str(p['linux_codegen']).lower(), file=f)
               print('macos_matrix=' + json.dumps(shards(p['native_targets'], 'macos')), file=f)
               print('native=' + str(p['native_required']).lower(), file=f)
               print('retry=' + str(p['retry']).lower(), file=f)
@@ -301,6 +309,20 @@ jobs:
           check-part: cache-execution
       - name: Prove warm compilation does not cache test acceptance
         run: python3 -B tests/ci/cache_execution.py
+  linux_codegen:
+    # LLVM's production frame oracle is still required, but never delays PR suites.
+    needs: plan
+    if: ${{ needs.plan.outputs.linux_codegen == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          targets: '["stack-frames"]'
+          check-part: codegen
+      - name: Check unchanged LLVM production stack frames
+        run: zig build stack-frames -Dcpu=baseline --summary all
   linux_suites:
     name: linux suites (${{ matrix.name }})
     needs: [plan, linux_build, linux_build_unit]
@@ -422,7 +444,7 @@ jobs:
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
   linux:
     # Policy is required even for documentation-only changes.
-    needs: [plan, policy, linux_build, linux_build_unit, linux_suites, macos_typecheck]
+    needs: [plan, policy, linux_build, linux_build_unit, linux_codegen, linux_suites, macos_typecheck]
     if: ${{ always() && !github.event.repository.private }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -435,11 +457,14 @@ jobs:
           BUILD_RESULT: ${{ needs.linux_build.result }}
           UNIT_RESULT: ${{ needs.linux_build_unit.result }}
           SPLIT: ${{ needs.plan.outputs.linux_split }}
+          CODEGEN: ${{ needs.plan.outputs.linux_codegen }}
+          CODEGEN_RESULT: ${{ needs.linux_codegen.result }}
           NATIVE_RESULT: ${{ needs.linux_suites.result }}
           TYPECHECK_RESULT: ${{ needs.macos_typecheck.result }}
         run: |
           test "$PLAN_RESULT" = success
           test "$POLICY_RESULT" = success
+          if [ "$CODEGEN" = true ]; then test "$CODEGEN_RESULT" = success; else test "$CODEGEN_RESULT" = skipped; fi
           if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
           if [ -n "$TARGETS" ] && [ "$TARGETS" != '[]' ]; then
             test "$BUILD_RESULT" = success
