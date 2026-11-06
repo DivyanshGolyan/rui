@@ -635,6 +635,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
     const Mode = enum { current, historical, strict, exact, body_mismatch, malformed_header, unavailable, unknown, budget };
     const Clock = struct {
         var nanoseconds: std.atomic.Value(i64) = .init(0);
+        var observation_finished: std.Io.Event = .unset;
         fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
             return .{ .nanoseconds = nanoseconds.load(.acquire) };
         }
@@ -692,7 +693,20 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 // Record the complete independent request before replying: joining
                 // the peer later cannot turn a missed attempt into evidence.
                 self.seen += 1;
-                if (self.mode == .budget) Clock.nanoseconds.store(if (index == 0) 900 * std.time.ns_per_ms else 1100 * std.time.ns_per_ms, .release);
+                if (self.mode == .budget) {
+                    Clock.nanoseconds.store(if (index == 0) 900 * std.time.ns_per_ms else 1100 * std.time.ns_per_ms, .release);
+                    if (index == 1) {
+                        // The observation expires before any second reply. EOF
+                        // makes a wrongly renewed deadline fail as truncation;
+                        // writing a reply here races the observer's close.
+                        switch (socket_os.shutdown(fd, std.c.SHUT.WR)) {
+                            .done, .peer_gone => {},
+                            .failed => return error.TestPeerShutdownFailed,
+                        }
+                        Clock.observation_finished.waitUncancelable(io);
+                        continue;
+                    }
+                }
                 const response_wire = switch (self.mode) {
                     .current, .unavailable => protocol.wire_version,
                     .unknown => "8",
@@ -724,18 +738,23 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
             std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
         }
         var peer: Peer = .{ .listener = &listener, .store = paths.store.slice(), .mode = mode };
+        Clock.nanoseconds.store(0, .release);
+        Clock.observation_finished.reset();
         const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
         var joined = false;
-        defer if (!joined) thread.join();
+        defer if (!joined) {
+            Clock.observation_finished.set(io);
+            thread.join();
+        };
         var clock_vtable = io.vtable.*;
         clock_vtable.now = Clock.now;
-        Clock.nanoseconds.store(0, .release);
         const observation_io: std.Io = if (mode == .budget) .{ .userdata = io.userdata, .vtable = &clock_vtable } else io;
         const result: anyerror!HostControlObservation = switch (mode) {
             .strict => if (observeHostProcess(io, root, null)) |_| error.TestUnexpectedResult else |err| err,
             .exact => observeHostForUpgradeProfile(io, root, .released_9, null),
             else => observeHostForUpgrade(observation_io, root, null),
         };
+        Clock.observation_finished.set(io);
         thread.join();
         joined = true;
         switch (mode) {
