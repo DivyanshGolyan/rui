@@ -1065,3 +1065,31 @@ test "a link keeps its address through wrapping, escaping, older pages and evict
     try std.testing.expect(evicted.origin != 0);
     try expectLinks(&evicted, .{}, 16, &.{ "-", "-", "-", "-" });
 }
+
+test "rendered local path cells carry the file URI but the sentence semicolon does not" {
+    const prefix = "The report is at ";
+    const path = "~/code/personal/rui-implicit-state-machines.md";
+    const input = prefix ++ path ++ ";";
+    const uri = "file:///home/test/code/personal/rui-implicit-state-machines.md";
+    for (0..input.len + 1) |split| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .home = "/home/test" };
+        try renderer.feed(input[0..split]);
+        for (input[split..]) |byte| try renderer.feed(&.{byte});
+        try renderer.finish();
+        var view: Sized(512, true) = .{};
+        try view.append(output.written());
+        try view.prepare();
+        var screen: TestScreen = undefined;
+        _ = view.draw(screen.window(80, 1), .{}, true, true, .{});
+        var row: [128]u8 = undefined;
+        try std.testing.expectEqualStrings(input, std.mem.trimEnd(u8, screen.row(0, &row), " "));
+        for (0..input.len) |column| {
+            const cell = screen.screen.readCell(@intCast(column), 0).?;
+            const in_path = column >= prefix.len and column < prefix.len + path.len;
+            try std.testing.expectEqualStrings(if (in_path) uri else "", cell.link.uri);
+            try std.testing.expectEqual(in_path, cell.style.ul_style == .single);
+        }
+    }
+}
