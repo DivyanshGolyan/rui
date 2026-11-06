@@ -1148,239 +1148,133 @@ fn content(requests: client.Requests, store: []const u8, session: []const u8, it
     if (try requests.readActivityContent(store, session, item.position, item.ordinal, .{ .bytes = reference.length, .digest = reference.digest }, target)) |failure| return requests.failRead(failure);
 }
 
-/// Compact tool outcome shared by live Activity and the scrolled transcript.
-/// Failures keep their last output lines in view; /details stays exact.
-pub fn toolResult(presentation: protocol.ToolPresentation, source: anytype, sink: anytype, colour: bool, compact: *bool) !void {
+pub const ToolHeaderFacts = struct {
+    exit: ?u16 = null,
+};
+
+pub const ToolHeaderScan = struct {
+    line: [64]u8 = undefined,
+    length: usize = 0,
+    ended: bool = false,
+    overflow: bool = false,
+
+    pub fn feed(self: *@This(), bytes: []const u8) !void {
+        for (bytes) |byte| {
+            if (self.ended) return;
+            if (byte == '\n') {
+                self.ended = true;
+            } else if (self.length < self.line.len) {
+                self.line[self.length] = byte;
+                self.length += 1;
+            } else {
+                self.overflow = true;
+                self.ended = true;
+            }
+        }
+    }
+
+    pub fn facts(self: *const @This(), code: protocol.ToolPresentation.Code) ToolHeaderFacts {
+        if (self.overflow or toolState(code).style != .failure) return .{};
+        var buffer: [64]u8 = undefined;
+        const prefix = std.fmt.bufPrint(&buffer, "Bash {s}. Exit code: ", .{@tagName(code)}) catch unreachable;
+        const line = self.line[0..self.length];
+        if (!std.mem.startsWith(u8, line, prefix) or !std.mem.endsWith(u8, line, ".")) return .{};
+        const digits = line[prefix.len .. line.len - 1];
+        if (digits.len == 0 or digits.len > 3) return .{};
+        for (digits) |byte| if (!std.ascii.isDigit(byte)) return .{};
+        return .{ .exit = std.fmt.parseInt(u16, digits, 10) catch return .{} };
+    }
+};
+
+pub fn toolResult(presentation: protocol.ToolPresentation, facts: ToolHeaderFacts, sink: anytype, colour: bool, compact: *bool) !void {
     const succeeded = presentation.code == .succeeded;
-    var summary: Summary(@TypeOf(sink)) = .{
-        .presentation = presentation,
-        .separate = !compact.* or !succeeded,
-        .escaped = .{ .sink = sink, .text = .{ .mode = .multiline } },
-        .code = presentation.code,
-        .colour = colour,
-        .section = switch (presentation.code) {
-            .denied, .unknown_tool, .invalid_arguments => .ended,
-            else => .summary,
-        },
-    };
-    try source.read(&summary);
-    try summary.finish();
-    if (summary.emitted) try sink.feed("\n");
-    compact.* = succeeded and !summary.emitted;
+    var buffer: [3]u8 = undefined;
+    const exit = if (facts.exit) |value| try std.fmt.bufPrint(&buffer, "{d}", .{value}) else "";
+    try toolHeadingWith(presentation, sink, colour, !compact.* or !succeeded, exit);
+    compact.* = succeeded;
 }
 
-fn failing(code: protocol.ToolPresentation.Code) bool {
-    return toolState(code).style == .failure;
-}
-
-fn Summary(comptime Sink: type) type {
-    return struct {
-        const excerpt_lines = 3;
-        const line_bytes = 256;
-        const Tail = struct {
-            // A few lines beyond the excerpt absorb the canonical trailer.
-            lines: [excerpt_lines + 6][line_bytes]u8 = undefined,
-            lengths: [excerpt_lines + 6]usize = undefined,
-            shortened: [excerpt_lines + 6]bool = undefined,
-            count: usize = 0,
-            total: usize = 0,
-
-            fn push(tail: *@This(), line: []const u8, shortened: bool) void {
-                const slot = tail.total % tail.lines.len;
-                @memcpy(tail.lines[slot][0..line.len], line);
-                tail.lengths[slot] = line.len;
-                tail.shortened[slot] = shortened;
-                tail.total += 1;
-                tail.count = @min(tail.count + 1, tail.lines.len);
-            }
-            fn last(tail: *const @This(), back: usize) []const u8 {
-                const slot = (tail.total - 1 - back) % tail.lines.len;
-                return tail.lines[slot][0..tail.lengths[slot]];
-            }
-            fn dropLast(tail: *@This()) void {
-                tail.total -= 1;
-                tail.count -= 1;
-            }
-        };
-        escaped: Escaped(Sink),
-        // The heading waits for the first detail: a failed exit status joins it.
-        presentation: ?protocol.ToolPresentation = null,
-        separate: bool = true,
-        code: protocol.ToolPresentation.Code,
-        colour: bool,
-        section: enum { summary, stdout, stderr, ended } = .summary,
-        line: [line_bytes]u8 = undefined,
-        length: usize = 0,
-        emitted: bool = false,
-        omitted: bool = false,
-        earlier_omitted: bool = false,
-        stdout: Tail = .{},
-        stderr: Tail = .{},
-        pub fn feed(self: *@This(), bytes: []const u8) !void {
-            for (bytes) |byte| {
-                if (self.section == .ended) return;
-                if (byte == '\n') {
-                    try self.emit();
-                } else if (self.length < self.line.len) {
-                    self.line[self.length] = byte;
-                    self.length += 1;
-                } else {
-                    // Shorten only this line; later capture/cleanup
-                    // warnings remain visible before output tails.
-                    self.omitted = true;
-                }
-            }
-        }
-        fn emit(self: *@This()) !void {
-            const line = self.line[0..self.length];
-            defer {
-                self.length = 0;
-                self.omitted = false;
-            }
-            const heading = !self.omitted and (std.mem.eql(u8, line, "stdout tail:") or std.mem.eql(u8, line, "stderr tail:"));
-            switch (self.section) {
-                .ended => return,
-                .stdout, .stderr => |stream| {
-                    if (stream == .stdout and heading and std.mem.eql(u8, line, "stderr tail:")) {
-                        self.section = .stderr;
-                    } else (if (stream == .stdout) &self.stdout else &self.stderr).push(line, self.omitted);
-                    return;
-                },
-                .summary => {},
-            }
-            // Only complete, known informational lines are quiet. Unknown or
-            // qualified diagnostics stay visible, even after successful exit.
-            // Keep canonical Bash evidence and detailed inspection unchanged.
-            const routine = !self.omitted and std.mem.eql(u8, line, "Bash succeeded. Exit code: 0.");
-            if (heading) {
-                // Output tails matter only to explain a failure.
-                self.section = if (!failing(self.code)) .ended else if (std.mem.eql(u8, line, "stdout tail:")) .stdout else .stderr;
-            } else if (line.len != 0 and !routine) {
-                var prefix_buffer: [64]u8 = undefined;
-                const prefix = if (failing(self.code)) try std.fmt.bufPrint(&prefix_buffer, "Bash {s}. ", .{@tagName(self.code)}) else "";
-                const detail = if (!self.omitted and prefix.len != 0 and std.mem.startsWith(u8, line, prefix)) line[prefix.len..] else line;
-                if (self.presentation != null and !self.emitted and prefix.len != 0 and !self.omitted) {
-                    const status = if (std.mem.startsWith(u8, detail, "Exit code: ") and std.mem.endsWith(u8, detail, ".")) detail["Exit code: ".len .. detail.len - 1] else "";
-                    var digits = status.len != 0 and status.len <= 3;
-                    for (status) |byte| digits = digits and std.ascii.isDigit(byte);
-                    if (digits) {
-                        try self.writeHeading(status);
-                        return;
-                    }
-                }
-                try self.writeHeading("");
-                try self.escaped.feed(if (self.emitted) "\n  " else "  ");
-                try self.escaped.feed(detail);
-                if (self.omitted) try self.escaped.feed(" [summary shortened; /details]");
-                self.emitted = true;
-            }
-        }
-        fn writeHeading(self: *@This(), exit: []const u8) !void {
-            const presentation = self.presentation orelse return;
-            self.presentation = null;
-            try toolHeadingWith(presentation, self.escaped.sink, self.colour, self.separate, exit);
-        }
-        fn finish(self: *@This()) !void {
-            if (self.length != 0) try self.emit();
-            try self.writeHeading("");
-            if (failing(self.code) and self.section != .ended) {
-                // The canonical trailer follows only the stream written last;
-                // trailing blank lines end either. Select after cleaning, so a
-                // blank-only stderr falls back to useful stdout.
-                const last = if (self.stderr.total != 0) &self.stderr else &self.stdout;
-                for ([_]*Tail{ &self.stdout, &self.stderr }) |stream| {
-                    while (stream.count != 0) {
-                        const line = stream.last(0);
-                        const trailer = stream == last and (std.mem.eql(u8, line, "Full output was not retained.") or
-                            std.mem.startsWith(u8, line, "Full stdout: ") or std.mem.startsWith(u8, line, "Full stderr: "));
-                        if (line.len == 0 or trailer) {
-                            stream.dropLast();
-                        } else if (stream == last and std.mem.eql(u8, line, "[earlier output omitted]")) {
-                            self.earlier_omitted = true;
-                            stream.dropLast();
-                        } else break;
-                    }
-                }
-                const tail = if (self.stderr.count != 0) &self.stderr else &self.stdout;
-                const shown = @min(tail.count, excerpt_lines);
-                var shortened = self.earlier_omitted or tail.total > shown;
-                for (0..shown) |index| {
-                    const back = shown - 1 - index;
-                    shortened = shortened or tail.shortened[(tail.total - 1 - back) % tail.lines.len];
-                    try self.escaped.feed(if (self.emitted) "\n  " else "  ");
-                    try self.escaped.feed(tail.last(back));
-                    self.emitted = true;
-                }
-                if (shortened) {
-                    try self.escaped.feed(if (self.emitted) "\n  " else "  ");
-                    try self.escaped.feed("/details for full output.");
-                    self.emitted = true;
-                }
-            }
-            try self.escaped.finish();
-        }
-    };
-}
-
-test "tool summary hides only complete routine metadata and retains warnings" {
+test "tool header hides all body lines for every outcome and first-line split" {
     const Sink = struct {
-        bytes: [2048]u8 = undefined,
+        bytes: [1024]u8 = undefined,
         length: usize = 0,
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
             self.length += bytes.len;
         }
     };
-    const warning = "Process-group signaling reported a failure.";
-    const incomplete = "Capture may be incomplete because writers outlived process-group termination.";
-    const capture_failure = "Capture failure: read; output may be incomplete.";
+    const body = "Bash failed. Exit code: 7.\nProcess-group signaling reported a failure.\n" ++
+        "Capture may be incomplete.\nstdout tail:\nhidden\nstderr tail:\n\x1b[2Jhidden\n" ++
+        "[earlier output omitted]\nFull stdout: /secret\n/details for full output.\n";
     const cases = .{
-        .{ .succeeded, "Bash succeeded. Exit code: 0.\nstdout tail:\nhidden", "", "" },
-        .{ .succeeded, "Bash succeeded. Exit code: 0.\n", "", "" },
-        .{ .succeeded, "Bash succeeded. Exit code: 0.\n" ++ incomplete ++ "\n" ++ warning ++ "\nstderr tail:\nhidden", "  " ++ incomplete ++ "\n  " ++ warning, "" },
-        .{ .failed, "Bash failed. Exit code: 7.\n" ++ capture_failure, "  " ++ capture_failure, "7" },
-        .{ .timed_out, "Bash timed_out. Signal: 15.\n" ++ warning, "  Signal: 15.\n  " ++ warning, "" },
-        .{ .cancelled, "Bash cancelled. Signal: 15.\n", "  Signal: 15.", "" },
-        .{ .indeterminate, "Bash indeterminate. Unknown process status: 0.\n" ++ warning, "  Unknown process status: 0.\n  " ++ warning, "" },
-        .{ .failed, "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning.", "" },
-        .{ .succeeded, "Bash failed. Exit code: 7.", "  Bash failed. Exit code: 7.", "" },
-        // Earlier results saved a retirement line; it is no longer routine.
-        .{ .succeeded, "Process retirement confirmed: the child was reaped.\n" ++ warning, "  Process retirement confirmed: the child was reaped.\n  " ++ warning, "" },
-        .{ .succeeded, "Process retirement unconfirmed.\n" ++ warning, "  Process retirement unconfirmed.\n  " ++ warning, "" },
-        .{ .succeeded, "Bash succeeded. Exit code: 0. Additional warning.", "  Bash succeeded. Exit code: 0. Additional warning.", "" },
-        .{ .succeeded, warning ++ @as([256]u8, @splat('x')) ++ "\n" ++ incomplete, "  " ++ (warning ++ @as([256]u8, @splat('x')))[0..256] ++ " [summary shortened; /details]\n  " ++ incomplete, "" },
-        .{ .succeeded, "stdout tail: unavailable\n" ++ warning, "  stdout tail: unavailable\n  " ++ warning, "" },
-        // Failures show the last stderr lines, else stdout, without the trailer.
-        .{ .failed, "Bash failed. Exit code: 127.\nstderr tail:\nbash: line 1: rui: command not found", "  bash: line 1: rui: command not found", "127" },
-        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nusage: x\nhelp", "  usage: x\n  help", "1" },
-        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nusage: x\nhelp\n\n[earlier output omitted]\n\nFull stdout: /s/o\n", "  usage: x\n  help\n  /details for full output.", "1" },
-        .{ .failed, "Bash failed. Exit code: 2.\nstdout tail:\nx\nstderr tail:\none\ntwo\nthree\nfour\n[earlier output omitted]\n\nFull stderr: /s/e\n", "  two\n  three\n  four\n  /details for full output.", "2" },
-        .{ .failed, "Bash failed. Exit code: 3.\nstderr tail:\nonly\n[earlier output omitted]\n\nFull output was not retained.\n", "  only\n  /details for full output.", "3" },
-        .{ .succeeded, "Bash succeeded. Exit code: 0.\nstdout tail:\nhidden\nstderr tail:\nalso hidden", "", "" },
-        .{ .failed, "Bash failed. Exit code: 4.\nstderr tail:\n\x1b[2Jcontrol", "  \\x1b[2Jcontrol", "4" },
-        .{ .failed, "Bash failed. Exit code: 5.\n", "", "5" },
-        // A blank-only stderr does not hide useful stdout, whole or truncated.
-        .{ .failed, "Bash failed. Exit code: 7.\nstdout tail:\nuseful diagnostic B\nstderr tail:\n\n", "  useful diagnostic B", "7" },
-        .{ .failed, "Bash failed. Exit code: 7.\nstdout tail:\nuseful\n\nstderr tail:\n\n\n", "  useful", "7" },
-        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nu1\nu2\nstderr tail:\n\n[earlier output omitted]\n\nFull stdout: /s/o\n", "  u1\n  u2\n  /details for full output.", "1" },
-        // Meaningful stderr still wins; warnings stay visible beside the fallback.
-        .{ .failed, "Bash failed. Exit code: 1.\nstdout tail:\nout\n\nstderr tail:\nerr\n", "  err", "1" },
-        .{ .failed, "Bash failed. Exit code: 7.\n" ++ warning ++ "\nstdout tail:\nB\nstderr tail:\n\n", "  " ++ warning ++ "\n  B", "7" },
+        .{ protocol.ToolPresentation.Code.unresolved, "• Tool call" },
+        .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
+        .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
+        .{ protocol.ToolPresentation.Code.failed, "! Tool call — Failed (exit 7)" },
+        .{ protocol.ToolPresentation.Code.timed_out, "! Tool call — Timed out" },
+        .{ protocol.ToolPresentation.Code.indeterminate, "! Tool call — Outcome unknown; may have run" },
+        .{ protocol.ToolPresentation.Code.storage_failed, "! Tool call — Output capture failed" },
+        .{ protocol.ToolPresentation.Code.spawn_failed, "! Tool call — Could not start" },
+        .{ protocol.ToolPresentation.Code.cancelled, "! Tool call — Cancelled" },
+        .{ protocol.ToolPresentation.Code.infrastructure_shutdown, "! Tool call — Host stopped; outcome unknown" },
+        .{ protocol.ToolPresentation.Code.denied, "• Tool call — Denied" },
+        .{ protocol.ToolPresentation.Code.unknown_tool, "• Tool call — Rejected: unknown tool" },
+        .{ protocol.ToolPresentation.Code.invalid_arguments, "• Tool call — Rejected: invalid arguments" },
     };
+    try std.testing.expectEqual(std.enums.values(protocol.ToolPresentation.Code).len, cases.len);
     inline for (cases) |case| {
-        for (0..case[1].len + 1) |split| {
-            var sink: Sink = .{};
-            const presentation: protocol.ToolPresentation = .{ .description = null, .code = case[0], .publication_position = null };
-            var summary: Summary(*Sink) = .{ .presentation = presentation, .code = case[0], .colour = false, .escaped = .{ .sink = &sink, .text = .{ .mode = .multiline } } };
-            try summary.feed(case[1][0..split]);
-            try summary.feed(case[1][split..]);
-            try summary.finish();
-            // A failed exit status joins the heading instead of a detail row.
-            var heading: Sink = .{};
-            try toolHeadingWith(presentation, &heading, false, true, case[3]);
-            try std.testing.expectEqualStrings(heading.bytes[0..heading.length], sink.bytes[0..heading.length]);
-            try std.testing.expectEqualStrings(case[2], sink.bytes[heading.length..sink.length]);
+        for (0..body.len + 1) |split| {
+            for ([_]bool{ false, true }) |colour| {
+                var scan: ToolHeaderScan = .{};
+                try scan.feed(body[0..split]);
+                try scan.feed(body[split..]);
+                var sink: Sink = .{};
+                var compact = false;
+                try toolResult(.{ .description = null, .code = case[0], .publication_position = null }, scan.facts(case[0]), &sink, colour, &compact);
+                var expected: Sink = .{};
+                try expected.feed("\n");
+                const glyph_end = std.mem.indexOfScalar(u8, case[1], ' ').?;
+                if (colour) try expected.feed(switch (case[0]) {
+                    .unresolved => "\x1b[90m",
+                    .pending_permission => "\x1b[33m",
+                    .succeeded, .denied, .unknown_tool, .invalid_arguments => "\x1b[39m",
+                    else => "\x1b[91m",
+                });
+                try expected.feed(case[1][0..glyph_end]);
+                if (colour) try expected.feed("\x1b[39m");
+                try expected.feed(case[1][glyph_end..]);
+                try expected.feed("\n");
+                try std.testing.expectEqualStrings(expected.bytes[0..expected.length], sink.bytes[0..sink.length]);
+                try std.testing.expectEqual(case[0] == .succeeded, compact);
+            }
         }
+    }
+}
+
+test "tool header numeric exit accepts only a complete canonical first line" {
+    for (std.enums.values(protocol.ToolPresentation.Code)) |code| {
+        if (toolState(code).style != .failure) continue;
+        for ([_]u16{ 0, 1, 7, 127, 255, 999 }) |exit| {
+            var buffer: [128]u8 = undefined;
+            const body = try std.fmt.bufPrint(&buffer, "Bash {s}. Exit code: {d}.\nignored", .{ @tagName(code), exit });
+            for (0..body.len + 1) |split| {
+                var scan: ToolHeaderScan = .{};
+                try scan.feed(body[0..split]);
+                try scan.feed(body[split..]);
+                try std.testing.expectEqual(exit, scan.facts(code).exit.?);
+            }
+        }
+    }
+    for ([_][]const u8{
+        "Bash failed. Exit code: 1000.",                                "Bash failed. Exit code: -1.",
+        "Bash failed. Exit code: 7. warning",                           "Bash failed. Exit code: .",
+        "Bash failed. Exit code: 0007.",                                "Bash failed. Exit code: +7.",
+        "ignored\nBash failed. Exit code: 7.",                          "Bash succeeded. Exit code: 7.",
+        "Bash failed. Exit code: " ++ @as([128]u8, @splat('0')) ++ ".",
+    }) |body| {
+        var scan: ToolHeaderScan = .{};
+        try scan.feed(body);
+        try std.testing.expectEqual(null, scan.facts(.failed).exit);
     }
 }
 
@@ -1624,28 +1518,14 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 try sink.feed("\n");
             },
             .tool_result => |result| {
-                // Keep outcomes and warnings, not routine zero exit codes or
-                // output tails. This affects presentation only, never execution,
-                // permission or outcome classification; /details stays exact.
-                const Source = struct {
-                    requests: client.Requests,
-                    store: []const u8,
-                    session: []const u8,
-                    item: protocol.ActivityItem,
-                    reference: protocol.ActivityItem.Content,
-                    pub fn read(self: @This(), summary: anytype) !void {
-                        if (try self.requests.readActivityContent(self.store, self.session, self.item.position, self.item.ordinal, .{ .bytes = self.reference.length, .digest = self.reference.digest }, summary)) |read_failure| return self.requests.failRead(read_failure);
-                    }
-                };
-                try toolResult(result.presentation, Source{ .requests = requests, .store = store, .session = session, .item = item, .reference = result.content }, sink, colour, compact_tools);
+                var scan: ToolHeaderScan = .{};
+                try content(requests, store, session, item, result.content, &scan);
+                try toolResult(result.presentation, scan.facts(result.presentation.code), sink, colour, compact_tools);
             },
             // A call the provider ran is its line alone, grouped with
             // other tool rows like a result with no output.
             .hosted_call => |presentation| {
-                const Empty = struct {
-                    pub fn read(_: @This(), _: anytype) !void {}
-                };
-                try toolResult(presentation, Empty{}, sink, colour, compact_tools);
+                try toolResult(presentation, .{}, sink, colour, compact_tools);
             },
             // Hidden call rows use admission-certified page metadata. Exact
             // proposal and permission inspection authenticate originals instead.
@@ -1716,9 +1596,6 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
             self.length += bytes.len;
         }
     };
-    const Empty = struct {
-        pub fn read(_: @This(), _: anytype) !void {}
-    };
     var sink: Sink = .{};
     var compact = false;
     for ([_]struct { []const u8, protocol.ToolPresentation.Code }{
@@ -1729,7 +1606,7 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
     }) |call| {
         var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
         try description.set(call[0]);
-        try toolResult(.{ .description = description, .code = call[1], .publication_position = 1 }, Empty{}, &sink, false, &compact);
+        try toolResult(.{ .description = description, .code = call[1], .publication_position = 1 }, .{}, &sink, false, &compact);
     }
     try std.testing.expectEqualStrings(
         "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n! Find “Io” in ziglang.org/x — Failed\n\n✓ Search the web\n",
