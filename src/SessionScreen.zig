@@ -1,6 +1,7 @@
 //! Logical text and cells belong to the UI thread. Nothing here reads the TTY
 //! or joins a worker. The supplied writer owns output credit and cancellation.
 const std = @import("std");
+const OutputBlocks = @import("output_blocks.zig");
 const vaxis = @import("vaxis");
 const Viewport = @import("ConversationViewport.zig");
 const Document = Viewport.Document;
@@ -122,6 +123,10 @@ pub fn init(self: *Self, backend: *Backend) void {
 
 pub fn append(self: *Self, bytes: []const u8) !void {
     try self.live.text.append(bytes);
+}
+
+pub fn appendPrepared(self: *Self, bytes: []const u8, offset: u64, span: ?*const OutputBlocks.Span(u64), admission: *Document.Admission) !void {
+    return self.live.text.appendPrepared(bytes, offset, span, admission);
 }
 
 /// Absolute live offsets: bytes before `origin` left the retained view.
@@ -464,8 +469,12 @@ pub fn transcriptAtTop(self: *const Self) bool {
 /// Prepends one older canonical page, rendered to `file`, above the
 /// transcript without moving the rows in view.
 pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !Prepended {
+    return self.prependPreparedFile(io, file, null);
+}
+
+pub fn prependPreparedFile(self: *Self, io: std.Io, file: std.Io.File, marks: ?*const OutputBlocks.Capture) !Prepended {
     std.debug.assert(self.view == .transcript);
-    try self.load(&self.staging.text, io, file, false);
+    try self.load(&self.staging.text, io, file, false, marks);
     if (self.staging.text.origin != 0) {
         // A page larger than the view cannot join its older neighbour without
         // a gap. Keep its newest whole lines and say so at the gap.
@@ -542,7 +551,7 @@ pub fn collapsedInView(self: *Self) ?usize {
 /// Shows one Message's full text over the live view or the transcript.
 pub fn showMessage(self: *Self, io: std.Io, file: std.Io.File) !void {
     std.debug.assert(self.view == .live or self.view == .transcript);
-    try self.load(&self.staging.text, io, file, true);
+    try self.load(&self.staging.text, io, file, true, null);
     self.staging.scroll.scroll.y = 0;
     self.message_return = self.view;
     self.view = .message;
@@ -578,18 +587,21 @@ pub fn latest(self: *Self) !void {
 
 /// Inspection and Action files show their prefix; an older page keeps its
 /// newest text, which adjoins the transcript.
-fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix: bool) !void {
+fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix: bool, marks: ?*const OutputBlocks.Capture) !void {
     const length = (try file.stat(io)).size;
     const end = if (prefix) @min(Viewport.capacity, length) else length;
     document.clear();
     document.sidenotes = false;
     document.quotes = false;
     var buffer: [4096]u8 = undefined;
+    var cursor: OutputBlocks.Cursor = .{ .marks = marks };
+    var admission: Document.Admission = .{};
     var offset: u64 = 0;
     while (offset < end) {
-        const wanted: usize = @intCast(@min(buffer.len, end - offset));
+        const part = cursor.part(offset, end);
+        const wanted: usize = @intCast(@min(buffer.len, part.end - offset));
         if (try file.readPositionalAll(io, buffer[0..wanted], offset) != wanted) return error.TruncatedDisplayScratch;
-        try document.append(buffer[0..wanted]);
+        try document.appendPrepared(buffer[0..wanted], offset, part.span, &admission);
         offset += wanted;
     }
     document.width_method = self.backend.widthMethod();
@@ -599,7 +611,7 @@ fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix:
 pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void {
     const length = (try file.stat(io)).size;
     self.view = if (action) .action else .inspection;
-    try self.load(&self.browsing.text, io, file, true);
+    try self.load(&self.browsing.text, io, file, true, null);
     self.browsing.text.quotes = action;
     self.browsing.scroll.scroll.y = 0;
     self.browsing.blank_tail = 0;
@@ -624,7 +636,7 @@ pub fn refreshFile(self: *Self, io: std.Io, file: std.Io.File) !void {
     const first = self.browsing.anchor(self.textLayout()).offset;
     const line = std.mem.count(u8, document.bytes[0..@min(first, document.length)], "\n");
     const length = (try file.stat(io)).size;
-    try self.load(document, io, file, true);
+    try self.load(document, io, file, true, null);
     var offset: usize = 0;
     for (0..line) |_| offset = 1 + (std.mem.indexOfScalarPos(u8, document.bytes[0..document.length], offset, '\n') orelse break);
     self.browsing.restore(self.textLayout(), .{ .offset = offset }, self.height, false);
@@ -2566,4 +2578,52 @@ test "quote draft screen fence opacity does not promote code markers" {
     _ = try Test.render(screen, &out.writer, size, nested, nested.len, .{}, &.{});
     try std.testing.expectEqualStrings("  >>  kl", rowText(screen, 21, &storage));
     try std.testing.expectEqualStrings("  >>", rowText(screen, 22, &storage));
+}
+
+test "typed saved-file loading preserves raw provenance through prepend Message overlay and literal paint" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "older", .{ .read = true });
+    defer file.close(io);
+    const raw = "h|x\n---|---\n\x1b[31m|\xff\n";
+    try file.writePositionalAll(io, raw, 0);
+    var marks: OutputBlocks.Capture = .{};
+    try std.testing.expect(marks.reserve(.{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } }));
+    try screen.append("newer\n");
+    const size: std.posix.winsize = .{ .row = 16, .col = 40, .xpixel = 0, .ypixel = 0 };
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(0);
+    _ = try screen.prependPreparedFile(io, file, &marks);
+    try std.testing.expectEqual(@as(u6, 1), screen.browsing.text.blocks.count);
+    try std.testing.expectEqualStrings(raw ++ "newer\n", screen.browsing.text.text());
+    try std.testing.expectEqual(@as(u32, raw.len), screen.browsing.text.blocks.items[0].complete_end);
+    const retained = screen.browsing.text.blocks.items[0];
+    // An actual overlay borrows staging; the transcript underneath keeps its
+    // independent provenance and source when the overlay is dismissed.
+    const overlay = try tmp.dir.createFile(io, "message", .{ .read = true });
+    defer overlay.close(io);
+    try overlay.writePositionalAll(io, "Message body already escaped\n", 0);
+    try screen.showMessage(io, overlay);
+    try screen.leaveMessage();
+    try std.testing.expectEqualDeep(retained, screen.browsing.text.blocks.items[0]);
+    screen.browsing.scroll.scroll.y = 0;
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    var storage: [128]u8 = undefined;
+    var escaped = false;
+    for (0..size.row) |row| if (std.mem.indexOf(u8, rowText(screen, @intCast(row), &storage), "\\x1b[31m|\\xff") != null) {
+        escaped = true;
+    };
+    try std.testing.expect(escaped);
+    // No raw source SGR/OSC becomes a style/link in the selected frame.
+    const cells = Test.window(screen);
+    for (0..size.row) |row| for (0..size.col) |col| try std.testing.expectEqualStrings("", cells.readCell(@intCast(col), @intCast(row)).?.link.uri);
 }

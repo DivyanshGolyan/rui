@@ -1,5 +1,6 @@
 //! Persistent terminal custody, separate from the fresh one-shot choice owner.
 const std = @import("std");
+const OutputBlocks = @import("output_blocks.zig");
 const Editor = @import("TerminalEditor.zig");
 const Input = @import("TerminalInput.zig");
 const Text = @import("TerminalText.zig");
@@ -781,6 +782,10 @@ pub fn notificationWaiting(self: *const Self) bool {
 
 pub fn permanent(self: *Self, bytes: []const u8) !void {
     return self.screen.append(bytes);
+}
+
+pub fn prepared(self: *Self, bytes: []const u8, offset: u64, span: ?*const OutputBlocks.Span(u64), admission: *@import("ConversationViewport.zig").Document.Admission) !void {
+    return self.screen.appendPrepared(bytes, offset, span, admission);
 }
 
 /// Writes the screen's selected frame. The receipt exists only after every

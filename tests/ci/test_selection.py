@@ -185,6 +185,12 @@ class SelectionTest(unittest.TestCase):
         core = select(["src/overview_view.zig"], "review", AVAILABLE)
         self.assertIn("test-logic", core["targets"])
 
+    def test_typed_output_core_selects_its_exact_boundary(self):
+        result = select(["src/output_blocks.zig"], "review", AVAILABLE)
+        self.assertEqual(["stack-frames", "test-logic"], result["targets"])
+        self.assertEqual(["test-logic"], result["native_targets"])
+        self.assertEqual([], result["server_targets"])
+
     def test_every_functional_core_selects_the_boundary_check(self):
         source = (Path(__file__).resolve().parents[2] / "src" / "logic_tests.zig").read_text()
         listed = source.split("const cores = .{", 1)[1].split("\n};", 1)[0]

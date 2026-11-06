@@ -1,6 +1,8 @@
 //! Bounded public Activity presentation with one forward-only content pass.
 //! A failed stream may leave a visible prefix; the terminal owner must not retry it.
 const std = @import("std");
+const OutputBlocks = @import("output_blocks.zig");
+const Markdown = @import("markdown_prefix.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
@@ -365,9 +367,17 @@ pub fn UserBody(comptime Sink: type) type {
         line_blank: bool = true,
         shown: usize = 0,
         nonblank: u64 = 0,
+        blocks: ?OutputBlocks.Sink = null,
+        quote_context: Markdown.Context = .plain,
+        quote_head: u8 = 0,
+        quote_stream: bool = false,
+        quote_active: bool = false,
 
         pub fn init(self: *Self, sink: Sink, length: u64, whole: bool) !void {
-            self.* = .{ .out = .{ .sink = sink }, .escaped = undefined, .length = length, .whole = whole };
+            return self.initBlocks(sink, length, whole, null);
+        }
+        pub fn initBlocks(self: *Self, sink: Sink, length: u64, whole: bool, blocks: ?OutputBlocks.Sink) !void {
+            self.* = .{ .out = .{ .sink = sink }, .escaped = undefined, .length = length, .whole = whole, .blocks = blocks };
             self.escaped = .{ .sink = &self.out, .text = .{ .mode = .multiline } };
             try self.out.feed(Mark.body);
         }
@@ -375,7 +385,7 @@ pub fn UserBody(comptime Sink: type) type {
         pub fn feed(self: *Self, bytes: []const u8) anyerror!void {
             self.received += bytes.len;
             if (self.received > self.length) return error.ContentLengthMismatch;
-            if (self.whole) return self.escaped.feed(bytes);
+            if (self.whole) return self.quoteFeed(bytes);
             if (self.length <= collapse_bytes) {
                 @memcpy(self.small[self.received - bytes.len ..][0..bytes.len], bytes);
                 return;
@@ -388,13 +398,14 @@ pub fn UserBody(comptime Sink: type) type {
             if (self.received != self.length) return error.ContentLengthMismatch;
             var collapsed = false;
             if (self.whole) {
-                try self.escaped.finish();
+                try self.quoteFinish(.canonical_eof);
             } else if (self.length <= collapse_bytes and !collapses(self.small[0..self.length])) {
-                try self.escaped.feed(self.small[0..beforeBlankLines(self.small[0..self.length])]);
-                try self.escaped.finish();
+                const end = beforeBlankLines(self.small[0..self.length]);
+                try self.quoteFeed(self.small[0..end]);
+                try self.quoteFinish(if (end < self.length and self.small[end] == '\n') .line_feed else .canonical_eof);
             } else {
                 if (self.length <= collapse_bytes) try self.scan(self.small[0..self.length]);
-                try self.endLine();
+                try self.endLine(.canonical_eof);
                 if (self.shown != 0) try self.out.feed("\n");
                 try self.out.feed(Mark.summary);
                 var count: [32]u8 = undefined;
@@ -411,10 +422,64 @@ pub fn UserBody(comptime Sink: type) type {
             return collapsed;
         }
 
+        fn beginQuote(self: *Self, quote: ?Markdown.Quote) !void {
+            const capability = self.blocks orelse return;
+            if (quote) |value| {
+                try self.escaped.finish();
+                // Emit the existing user indentation before the annotation;
+                // raw quote coordinates then begin at the actual marker.
+                if (self.out.line_start) try self.out.feed(Mark.body);
+                self.quote_active = try capability.send(.{ .quote = value });
+            }
+        }
+        fn endQuote(self: *Self) !void {
+            if (self.quote_active) {
+                try self.escaped.finish();
+                _ = try self.blocks.?.send(.{ .quote = null });
+                self.quote_active = false;
+            }
+        }
+        fn resolveQuote(self: *Self, line_ending: Markdown.HeadEnding) !bool {
+            const decision = switch (self.quote_context.step(self.line[0..self.quote_head], line_ending)) {
+                .need_more => return false,
+                .resolved => |value| value,
+            };
+            self.quote_context = decision.next;
+            try self.beginQuote(decision.projection.quote);
+            try self.escaped.feed(self.line[0..self.quote_head]);
+            self.quote_head = 0;
+            self.quote_stream = true;
+            return true;
+        }
+        fn quoteFeed(self: *Self, bytes: []const u8) !void {
+            if (self.blocks == null) return self.escaped.feed(bytes);
+            for (bytes) |byte| {
+                if (!self.quote_stream) {
+                    if (byte != '\n') {
+                        self.line[self.quote_head] = byte;
+                        self.quote_head += 1;
+                        if (!try self.resolveQuote(if (self.quote_head == Markdown.head_limit) .limit_cut else .pending)) continue;
+                        continue;
+                    }
+                    _ = try self.resolveQuote(.line_feed);
+                }
+                try self.escaped.feed(&.{byte});
+                if (byte == '\n') {
+                    try self.endQuote();
+                    self.quote_stream = false;
+                }
+            }
+        }
+        fn quoteFinish(self: *Self, line_ending: Markdown.HeadEnding) !void {
+            if (!self.quote_stream and self.quote_head != 0) _ = try self.resolveQuote(line_ending);
+            try self.escaped.finish();
+            try self.endQuote();
+        }
+
         fn scan(self: *Self, bytes: []const u8) !void {
             for (bytes) |byte| {
                 if (byte == '\n') {
-                    try self.endLine();
+                    try self.endLine(.line_feed);
                     continue;
                 }
                 if (!blank(byte)) self.line_blank = false;
@@ -423,11 +488,13 @@ pub fn UserBody(comptime Sink: type) type {
             }
         }
 
-        fn endLine(self: *Self) !void {
+        fn endLine(self: *Self, line_ending: Markdown.HeadEnding) !void {
             defer {
                 self.line_bytes = 0;
                 self.line_blank = true;
             }
+            const projection = if (self.blocks != null) self.quote_context.step(self.line[0..@intCast(@min(self.line_bytes, Markdown.head_limit))], if (self.line_bytes >= Markdown.head_limit) .limit_cut else line_ending).resolved else null;
+            if (projection) |value| self.quote_context = value.next;
             if (self.line_blank) return;
             self.nonblank += 1;
             if (self.shown == preview_lines) return;
@@ -435,8 +502,10 @@ pub fn UserBody(comptime Sink: type) type {
             self.shown += 1;
             const kept = self.line[0..@intCast(@min(self.line_bytes, self.line.len))];
             const cut = if (self.line_bytes <= preview_bytes) kept.len else graphemeCut(kept, preview_bytes);
+            if (projection) |value| try self.beginQuote(value.projection.quote);
             try self.escaped.feed(kept[0..cut]);
             try self.escaped.finish();
+            try self.endQuote();
             if (cut != kept.len) try self.out.feed(Mark.reset ++ Mark.summary ++ "…" ++ Mark.reset ++ Mark.body);
         }
     };
@@ -1133,10 +1202,22 @@ pub fn Answer(comptime Sink: type) type {
         writer: std.Io.Writer,
         renderer: Renderer,
         failure: ?anyerror = null,
+        capability: ?OutputBlocks.Sink = null,
         pub fn init(self: *@This(), sink: Sink, home: []const u8) void {
-            self.* = .{ .sink = sink, .writer = undefined, .renderer = undefined };
+            self.initBlocks(sink, home, null);
+        }
+        pub fn initBlocks(self: *@This(), sink: Sink, home: []const u8, capability: ?OutputBlocks.Sink) void {
+            self.* = .{ .sink = sink, .writer = undefined, .renderer = undefined, .capability = capability };
             self.writer = .{ .vtable = &.{ .drain = drain }, .buffer = &self.storage };
-            self.renderer = .{ .out = &self.writer, .home = home };
+            self.renderer = .{ .out = &self.writer, .home = home, .blocks = if (capability != null) .{ .context = self, .event = blockEvent } else null };
+        }
+        fn blockEvent(raw: *anyopaque, event: OutputBlocks.Request) anyerror!bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.writer.flush() catch |err| return self.failure orelse err;
+            return self.capability.?.send(event) catch |err| {
+                self.failure = err;
+                return err;
+            };
         }
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
             if (self.failure) |err| return err;
@@ -1219,6 +1300,10 @@ test "a queued Message is labelled only while work under way holds it" {
 /// One Message in full, labelled unless applied: live, in the opening and in
 /// a transcript's listing alike.
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool, compact: *bool) !void {
+    return messageBlocks(requests, store, session, item, value, labels, sink, colour, compact, null);
+}
+
+pub fn messageBlocks(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool, compact: *bool, blocks: ?OutputBlocks.Sink) !void {
     if (messageLabel(value.state, labels)) |text| {
         compact.* = false;
         try print(sink, "\n{s}", .{text});
@@ -1228,7 +1313,7 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     compact.* = false;
     try userPrefix(sink, colour, value.admitted_at);
     var body: UserBody(@TypeOf(sink)) = undefined;
-    try body.init(sink, value.content.length, false);
+    try body.initBlocks(sink, value.content.length, false, blocks);
     try content(requests, store, session, item, value.content, &body);
     if (try body.finish()) try noteCollapsed(sink, block);
     try sink.feed("\n");
@@ -1522,6 +1607,7 @@ pub const Taking = struct {
     /// The newest such Message shown while it waited, at its Admission: its
     /// row never shows live.
     drawn: queued_line.Drawn,
+    blocks: ?OutputBlocks.Sink = null,
     /// A position before the Admission of every such Message that waits at
     /// the page's start, where a stop's search for those it excluded begins;
     /// null when none waits.
@@ -1569,7 +1655,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
         if (!historical and item.value == .stop) {
             compact_tools.* = false;
-            if (from) |position| try excludedAtStop(requests, store, session, item, position, sink, colour);
+            if (from) |position| try excludedAtStop(requests, store, session, item, position, sink, colour, taking.blocks);
         }
         // The sink learns which item its next bytes belong to: some items
         // render nothing, and a read boundary must name the first that does.
@@ -1588,19 +1674,19 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     drawn = .{ .admission = value.admission, .position = item.position };
                     sink.drew(drawn.admission);
                 }
-                try message(requests, store, session, item, value, if (historical) .lasting(page.facts.work.work.state.holdsQueue()) else .none, sink, colour, compact_tools);
+                try messageBlocks(requests, store, session, item, value, if (historical) .lasting(page.facts.work.work.state.holdsQueue()) else .none, sink, colour, compact_tools, taking.blocks);
             },
             .user => |value| {
                 // Live, another Session's Message showed as its Admission,
                 // and one shown while it waited never shows again.
                 if (!historical and (value.sender != null or value.admission <= drawn.admission)) continue;
-                try message(requests, store, session, item, value, .none, sink, colour, compact_tools);
+                try messageBlocks(requests, store, session, item, value, .none, sink, colour, compact_tools, taking.blocks);
             },
             .assistant => |assistant| {
                 compact_tools.* = false;
                 try sink.feed("\n");
                 var answer: Answer(@TypeOf(sink)) = undefined;
-                answer.init(sink, home);
+                answer.initBlocks(sink, home, taking.blocks);
                 try content(requests, store, session, item, assistant.content, &answer);
                 try answer.finish();
                 try sink.feed("\n");
@@ -1654,7 +1740,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
 /// waiting just before it, at or below its cutoff and admitted after `from`.
 /// One shown while it waited is labelled here too: the stop is what asks the
 /// person to send it again. Their bytes belong to no item.
-fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, from: u64, sink: anytype, colour: bool) !void {
+fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, from: u64, sink: anytype, colour: bool, blocks: ?OutputBlocks.Sink) !void {
     var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .position = from, .kinds = .initOne(.admission) };
     var first = true;
     while (true) {
@@ -1669,7 +1755,7 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
             first = false;
             value.state = .excluded;
             var compact = false;
-            try message(requests, store, session, item, value, .lasting(false), sink, colour, &compact);
+            try messageBlocks(requests, store, session, item, value, .lasting(false), sink, colour, &compact, blocks);
         }
         cursor = page.continuation() orelse return;
     }

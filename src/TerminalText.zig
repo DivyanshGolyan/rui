@@ -135,17 +135,44 @@ fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
             return self.finish(out);
         };
         if (isControl(scalar)) {
-            var escaped: [12]u8 = undefined;
-            try out.writeAll(try std.fmt.bufPrint(&escaped, "\\u{x:0>4}", .{scalar}));
+            try out.writeAll(escapedControl(scalar));
         } else try out.writeAll(slice);
         self.utf8_len = 0;
     }
 }
 
+/// Immutable literal spellings may be borrowed by Window cells through encode.
+const byte_spellings = blk: {
+    var result: [256][max_bytes_per_byte]u8 = undefined;
+    const hex = "0123456789abcdef";
+    for (0..256) |byte| result[byte] = .{ '\\', 'x', hex[byte / 16], hex[byte % 16] };
+    break :blk result;
+};
+
+pub fn escapedByte(value: u8) []const u8 {
+    return &byte_spellings[value];
+}
+
+const c1_spellings = blk: {
+    var result: [32][6]u8 = undefined;
+    const hex = "0123456789abcdef";
+    for (0..32) |index| result[index] = .{ '\\', 'u', '0', '0', hex[(index + 0x80) / 16], hex[index % 16] };
+    break :blk result;
+};
+
+pub fn escapedControl(scalar: u21) []const u8 {
+    std.debug.assert(isControl(scalar));
+    if (scalar < 0x80) return escapedByte(@intCast(scalar));
+    if (scalar <= 0x9f) return &c1_spellings[scalar - 0x80];
+    inline for (.{ 0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069 }) |control| {
+        if (scalar == control) return std.fmt.comptimePrint("\\u{x:0>4}", .{control});
+    }
+    unreachable;
+}
+
 fn escapeByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
     _ = self;
-    var escaped: [max_bytes_per_byte]u8 = undefined;
-    try out.writeAll(try std.fmt.bufPrint(&escaped, "\\x{x:0>2}", .{value}));
+    try out.writeAll(escapedByte(value));
 }
 
 test "natural Unicode stays readable while controls and ambiguous command bytes remain visible" {

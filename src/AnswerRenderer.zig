@@ -1,6 +1,9 @@
 const std = @import("std");
 const TerminalText = @import("TerminalText.zig");
-const Fence = @import("markdown_prefix.zig").Fence;
+const Markdown = @import("markdown_prefix.zig");
+const Fence = Markdown.Fence;
+const Rows = @import("table_row.zig");
+const Blocks = @import("output_blocks.zig");
 const Renderer = @This();
 
 // A complete bounded fenced block may hide its delimiters. Unclosed or
@@ -65,7 +68,23 @@ line_start: bool = true,
 literal_line: bool = false,
 terminal_text: TerminalText = .{ .mode = .multiline },
 
+// Capability is deliberately absent for CLI/inspection/tool callers.
+blocks: ?Blocks.Sink = null,
+block_context: Markdown.Context = .plain,
+block_projection: ?Markdown.Context.Projection = null,
+block_head_len: u8 = 0,
+block_len: u16 = 0,
+block_header: u16 = 0,
+block_columns: ?Rows.Columns = null,
+block_stream: bool = false,
+block_quote: bool = false,
+
 pub fn feed(self: *Renderer, bytes: []const u8) !void {
+    if (self.blocks == null) return self.feedLegacy(bytes);
+    for (bytes) |byte| try self.blockByte(byte);
+}
+
+fn feedLegacy(self: *Renderer, bytes: []const u8) !void {
     for (bytes) |byte| {
         if (self.fence_pending and self.fence_body_start != 0) {
             try self.fencedByte(byte);
@@ -107,6 +126,11 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
 }
 
 pub fn finish(self: *Renderer) !void {
+    if (self.blocks != null) try self.finishBlocks();
+    try self.finishLegacy();
+}
+
+fn finishLegacy(self: *Renderer) !void {
     if (self.line_start and self.prefix_len != 0) {
         // A delimiter without its line ending is not a complete block marker.
         if (Fence.candidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
@@ -121,6 +145,172 @@ pub fn finish(self: *Renderer) !void {
     try self.flushSpan();
     if (self.line_style) try self.transition(.{});
     try self.terminal_text.finish(self.out);
+}
+
+/// One pre-inline owner. Context commits once per hard line; table probing
+/// shares held with legacy fences/links, never a second whole-row buffer.
+fn blockByte(self: *Renderer, byte: u8) !void {
+    if (self.block_projection == null) {
+        if (byte == '\n') {
+            _ = try self.resolveHead(.line_feed);
+        } else {
+            self.prefix[self.block_head_len] = byte;
+            self.block_head_len += 1;
+            const ending: Markdown.HeadEnding = if (self.block_head_len == Markdown.head_limit) .limit_cut else .pending;
+            if (!try self.resolveHead(ending)) return;
+            return;
+        }
+    }
+    if (self.block_stream) {
+        try self.feedLegacy(&.{byte});
+    } else {
+        if (self.block_len == fence_limit) {
+            // Combined candidate credit is exhausted. The current line can
+            // still be a header after replaying the older candidate.
+            if (self.block_header != 0) {
+                const header = self.block_header;
+                try self.replayHeld(0, header);
+                std.mem.copyForwards(u8, self.held[0 .. self.block_len - header], self.held[header..self.block_len]);
+                self.block_len -= header;
+                self.block_header = 0;
+            } else {
+                try self.endTable();
+                try self.replayHeld(0, self.block_len);
+                self.block_len = 0;
+                self.block_stream = true;
+            }
+        }
+        if (self.block_stream) try self.feedLegacy(&.{byte}) else {
+            self.held[self.block_len] = byte;
+            self.block_len += 1;
+        }
+    }
+    if (byte == '\n') {
+        if (!self.block_stream) try self.completeRawLine(.line_feed);
+        try self.endQuote();
+        self.block_projection = null;
+        self.block_head_len = 0;
+        self.block_stream = false;
+    }
+}
+
+fn resolveHead(self: *Renderer, ending: Markdown.HeadEnding) !bool {
+    const previous = self.block_context;
+    const decision = switch (previous.step(self.prefix[0..self.block_head_len], ending)) {
+        .need_more => return false,
+        .resolved => |value| value,
+    };
+    self.block_context = decision.next;
+    self.block_projection = decision.projection;
+    // Replaying a prior header uses legacy prefix too. Keep only this tiny
+    // unresolved head on stack across that replay, not another line buffer.
+    var head: [prefix_limit]u8 = undefined;
+    const length = self.block_head_len;
+    @memcpy(head[0..length], self.prefix[0..length]);
+    self.block_head_len = 0;
+    const stream = decision.projection.mode == .@"opaque" or decision.projection.quote != null or self.fence_pending;
+    if (stream) {
+        if (self.block_header != 0) {
+            try self.replayHeld(0, self.block_header);
+            self.block_header = 0;
+            self.block_len = 0;
+        }
+        try self.endTable();
+        // Broader opacity closers NEVER broaden legacy stripping or copy-code.
+        // If strict legacy effects still own the block, remain ineligible.
+        const opening = previous == .plain and decision.next == .fence;
+        if (decision.projection.mode == .@"opaque" and !self.fence_pending and (!opening or decision.projection.quote != null)) self.literal_line = true;
+        if (!self.fence_pending) if (decision.projection.quote) |quote| {
+            self.block_quote = try self.blocks.?.send(.{ .quote = quote });
+        };
+        self.block_stream = true;
+        try self.feedLegacy(head[0..length]);
+    } else {
+        // A head is <=128 bytes. Replay an older header first if the shared
+        // candidate budget cannot retain both; no truncation becomes EOF.
+        if (self.block_len + length > fence_limit) {
+            try self.replayHeld(0, self.block_header);
+            self.block_len = 0;
+            self.block_header = 0;
+        }
+        @memcpy(self.held[self.block_len..][0..length], head[0..length]);
+        self.block_len += length;
+    }
+    return true;
+}
+
+fn replayHeld(self: *Renderer, start: usize, end: usize) !void {
+    // Legacy link/fence writes are confined to already consumed positions:
+    // each written source byte first passed through this value-only cursor.
+    // No saved slice is allowed to advance independently of this cursor.
+    var at = start;
+    while (at < end) : (at += 1) {
+        const byte = self.held[at];
+        try self.feedLegacy(&.{byte});
+    }
+}
+
+fn completeRawLine(self: *Renderer, ending: Rows.Ending) !void {
+    const total = self.block_len;
+    const header = self.block_header;
+    const line_end = total - @as(u16, @intFromBool(ending == .line_feed));
+    if (self.block_columns) |columns| {
+        const parsed = Rows.parse(self.held[0..line_end], ending, columns.count);
+        if (parsed == .row and try self.blocks.?.send(.{ .table_row = self.held[0..total] })) {
+            self.block_len = 0;
+            return;
+        }
+        try self.endTable();
+    }
+    if (header != 0) {
+        const pair = Rows.header(self.held[0 .. header - 1], self.held[header..line_end], ending);
+        if (pair == .columns and try self.blocks.?.send(.{ .begin_table = .{ .header = self.held[0..header], .delimiter = self.held[header..total], .columns = pair.columns } })) {
+            self.block_columns = pair.columns;
+            self.block_header = 0;
+            self.block_len = 0;
+            return;
+        }
+        try self.replayHeld(0, header);
+        std.mem.copyForwards(u8, self.held[0 .. total - header], self.held[header..total]);
+        self.block_len = total - header;
+        self.block_header = 0;
+    }
+    const end = self.block_len - @as(u16, @intFromBool(ending == .line_feed));
+    if (ending == .line_feed and self.block_len < fence_limit and Rows.parse(self.held[0..end], ending, null) == .row) {
+        self.block_header = self.block_len;
+    } else {
+        try self.replayHeld(0, self.block_len);
+        self.block_len = 0;
+    }
+}
+
+fn endTable(self: *Renderer) !void {
+    if (self.block_columns != null) {
+        _ = try self.blocks.?.send(.end_table);
+        self.block_columns = null;
+    }
+}
+fn endQuote(self: *Renderer) !void {
+    if (self.block_quote) {
+        // Settle inline/output buffers before ending the synchronous scope.
+        try self.endLink();
+        try self.flushSpan();
+        _ = try self.blocks.?.send(.{ .quote = null });
+        self.block_quote = false;
+    }
+}
+fn finishBlocks(self: *Renderer) !void {
+    if (self.block_projection == null and self.block_head_len != 0) _ = try self.resolveHead(.canonical_eof);
+    if (!self.block_stream and self.block_len != 0) {
+        if (self.block_projection != null) try self.completeRawLine(.canonical_eof);
+        if (self.block_header != 0) {
+            try self.replayHeld(0, self.block_header);
+            self.block_len = 0;
+            self.block_header = 0;
+        }
+    }
+    try self.endQuote();
+    try self.endTable();
 }
 
 fn flushPrefix(self: *Renderer) !void {
@@ -1590,4 +1780,213 @@ test "fence lexical delegation preserves rendered bytes and LastCode at every sp
             } else try std.testing.expect(code.finish() == null);
         }
     }
+}
+
+const BlockRecorder = struct {
+    out: *std.Io.Writer,
+    marks: Blocks.Capture = .{},
+    active: ?u5 = null,
+
+    fn sink(self: *BlockRecorder) Blocks.Sink {
+        return .{ .context = self, .event = event };
+    }
+    fn event(raw: *anyopaque, request: Blocks.Request) anyerror!bool {
+        const self: *BlockRecorder = @ptrCast(@alignCast(raw));
+        switch (request) {
+            .begin_table => |table| {
+                std.debug.assert(self.active == null);
+                if (!self.marks.reserve(.{ .start = self.out.end, .end = self.out.end, .data = .{ .table = table.columns } })) return false;
+                self.active = @intCast(self.marks.count - 1);
+                try self.out.writeAll(table.header);
+                self.marks.items[self.active.?].header_end = self.out.end;
+                try self.out.writeAll(table.delimiter);
+                self.marks.items[self.active.?].delimiter_end = self.out.end;
+                self.marks.items[self.active.?].complete_end = self.out.end;
+                self.marks.items[self.active.?].end = self.out.end;
+            },
+            .table_row => |row| {
+                try self.out.writeAll(row);
+                self.marks.items[self.active.?].end = self.out.end;
+                self.marks.items[self.active.?].complete_end = self.out.end;
+            },
+            .end_table => self.active = null,
+            .quote => |quote| if (quote) |value| {
+                if (!self.marks.reserve(.{ .start = self.out.end, .end = self.out.end, .data = .{ .quote = value } })) return false;
+                self.active = @intCast(self.marks.count - 1);
+            } else {
+                self.marks.items[self.active.?].end = self.out.end;
+                self.active = null;
+            },
+        }
+        return true;
+    }
+};
+
+test "typed pre-inline table custody is exact at every feed split and real EOF" {
+    const table = "head|other\n:---|---:\na|\x1b[31m\xff\nfinal|row";
+    for (0..table.len + 1) |split| {
+        var storage: [8192]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        var record: BlockRecorder = .{ .out = &out };
+        var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+        try renderer.feed(table[0..split]);
+        try renderer.feed(table[split..]);
+        try renderer.finish();
+        try std.testing.expectEqualStrings(table, out.buffered());
+        try std.testing.expectEqual(@as(u6, 1), record.marks.count);
+        const block = record.marks.items[0];
+        try std.testing.expect(block.data == .table);
+        try std.testing.expectEqual(@as(u64, table.len), block.complete_end);
+        try std.testing.expectEqual(@as(u64, "head|other\n".len), block.header_end);
+        try std.testing.expectEqual(@as(u64, "head|other\n:---|---:\n".len), block.delimiter_end);
+    }
+}
+
+test "typed pre-inline rejected candidates preserve legacy inline replay and strict fences" {
+    const cases = [_][]const u8{
+        "plain paragraph\nnot a delimiter\n",
+        "# heading\n**bold** and *emphasis*\n",
+        "[label](https://example.test) **after**\nplain\n",
+        "https://example.test/path *after*\nnext line\n",
+        "```zig\n> code\n```\n",
+        "````\n> **literal**\n````\n",
+        "one column\n---\n",
+    };
+    for (cases[0 .. cases.len - 2]) |input| {
+        var expected_storage: [8192]u8 = undefined;
+        var expected = std.Io.Writer.fixed(&expected_storage);
+        var legacy: Renderer = .{ .out = &expected };
+        try legacy.feed(input);
+        try legacy.finish();
+        for (0..input.len + 1) |split| {
+            var storage: [8192]u8 = undefined;
+            var out = std.Io.Writer.fixed(&storage);
+            var record: BlockRecorder = .{ .out = &out };
+            var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+            try renderer.feed(input[0..split]);
+            try renderer.feed(input[split..]);
+            try renderer.finish();
+            try std.testing.expectEqualStrings(expected.buffered(), out.buffered());
+            try std.testing.expectEqual(@as(u6, 0), record.marks.count);
+        }
+    }
+    try std.testing.expect(@sizeOf(Renderer) <= 5 * 1024);
+    std.debug.print("typed Renderer={d} bytes; context={d} bytes\n", .{ @sizeOf(Renderer), @sizeOf(Markdown.Context) });
+}
+
+test "typed pre-inline shared opacity prevents false tables and greedy quoted code depth" {
+    const input = "~~~~\nhead|other\n---|---\n> code\n~~~~\n> quote\n";
+    for (0..input.len + 1) |split| {
+        var storage: [8192]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        var record: BlockRecorder = .{ .out = &out };
+        var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+        try renderer.feed(input[0..split]);
+        try renderer.feed(input[split..]);
+        try renderer.finish();
+        try std.testing.expectEqualStrings(input, out.buffered());
+        try std.testing.expectEqual(@as(u6, 1), record.marks.count);
+        try std.testing.expectEqual(@as(u4, 1), record.marks.items[0].data.quote.depth);
+    }
+}
+
+test "typed pre-inline tiny-row traversal cost is bounded at retained capacity" {
+    var source: [240 * 1024]u8 = undefined;
+    var raw = std.Io.Writer.fixed(&source);
+    try raw.writeAll("h|x\n---|---\n");
+    while (raw.buffer.len - raw.end >= 4) try raw.writeAll("a|b\n");
+    var storage: [source.len]u8 = undefined;
+    const before = std.Io.Clock.awake.now(std.testing.io);
+    for (0..3) |_| {
+        var out = std.Io.Writer.fixed(&storage);
+        var legacy: Renderer = .{ .out = &out };
+        try legacy.feed(raw.buffered());
+        try legacy.finish();
+        try std.testing.expectEqualStrings(raw.buffered(), out.buffered());
+    }
+    const middle = std.Io.Clock.awake.now(std.testing.io);
+    for (0..3) |_| {
+        var out = std.Io.Writer.fixed(&storage);
+        var record: BlockRecorder = .{ .out = &out };
+        var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+        try renderer.feed(raw.buffered());
+        try renderer.finish();
+        try std.testing.expectEqualStrings(raw.buffered(), out.buffered());
+        try std.testing.expectEqual(@as(u6, 1), record.marks.count);
+        try std.testing.expectEqual(@as(u64, raw.end), record.marks.items[0].complete_end);
+    }
+    const after = std.Io.Clock.awake.now(std.testing.io);
+    std.debug.print("typed capture tiny-row 240KiB legacy={d}ns typed={d}ns /3; one block, {d} source bytes\n", .{ middle.nanoseconds - before.nanoseconds, after.nanoseconds - middle.nanoseconds, raw.end });
+}
+
+test "typed pre-inline deterministic fence cap and conservative container closure" {
+    const cases = [_]struct { input: []const u8, quotes: u6 }{
+        .{ .input = @as([128]u8, @splat('`')) ++ "\n> hidden\n```\n> still hidden\n", .quotes = 0 },
+        .{ .input = @as([127]u8, @splat('`')) ++ "\n> hidden\n" ++ @as([127]u8, @splat('`')) ++ "\n> shown\n", .quotes = 1 },
+        .{ .input = "> ~~~~\n> > code\nmissing outer\n> ~~~~\n>> shown\n", .quotes = 4 },
+        .{ .input = "~~~~\n> hidden\n~~~~ \t\r\n> shown\n", .quotes = 1 },
+        .{ .input = "~~~~\n> hidden\n~~~~\r", .quotes = 0 },
+    };
+    for (cases) |case| for (0..case.input.len + 1) |split| {
+        var storage: [8192]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        var record: BlockRecorder = .{ .out = &out };
+        var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+        try renderer.feed(case.input[0..split]);
+        try renderer.feed(case.input[split..]);
+        try renderer.finish();
+        try std.testing.expectEqual(case.quotes, record.marks.count);
+        for (record.marks.slice()) |mark| try std.testing.expect(mark.data == .quote);
+        if (case.quotes == 4) {
+            try std.testing.expectEqual(@as(u4, 1), record.marks.items[1].data.quote.depth);
+            try std.testing.expectEqual(@as(u4, 2), record.marks.items[3].data.quote.depth);
+        }
+    };
+}
+
+test "typed candidate overflow replays aliased link source without an extra held buffer" {
+    var source: [2 * fence_limit + 256]u8 = undefined;
+    var text = std.Io.Writer.fixed(&source);
+    try text.writeAll("[label](https://example.test) ");
+    while (text.end < fence_limit - 4) try text.writeByte('x');
+    try text.writeAll("\n[second](https://other.test) ");
+    while (text.end < 2 * fence_limit + 10) try text.writeByte('y');
+    try text.writeAll("\n```zig\ncode\n```\n");
+    var expected_storage: [source.len + 512]u8 = undefined;
+    var expected = std.Io.Writer.fixed(&expected_storage);
+    var legacy: Renderer = .{ .out = &expected };
+    try legacy.feed(text.buffered());
+    try legacy.finish();
+    for ([_]usize{ 0, 1, 127, fence_limit - 1, fence_limit, fence_limit + 1, text.end }) |split| {
+        var storage: [source.len + 512]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        var record: BlockRecorder = .{ .out = &out };
+        var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+        try renderer.feed(text.buffered()[0..split]);
+        try renderer.feed(text.buffered()[split..]);
+        try renderer.finish();
+        try std.testing.expectEqualStrings(expected.buffered(), out.buffered());
+        try std.testing.expectEqual(@as(u6, 0), record.marks.count);
+    }
+}
+
+test "typed table admission shares row grammar for CRLF escaped pipes code and explicit one-column EOF" {
+    const cases = [_]struct { source: []const u8, columns: u4 }{
+        .{ .source = "| h | x |\r\n| :--- | ---: |\r\n| `a|b` | c\\|d |\r\n", .columns = 2 },
+        .{ .source = "heading\n| --- |", .columns = 1 },
+        .{ .source = "a|b|c|d|e|f|g|h\n---|---|---|---|---|---|---|---\n1|2|3|4|5|6|7|8", .columns = 8 },
+    };
+    for (cases) |case| for (0..case.source.len + 1) |split| {
+        var storage: [1024]u8 = undefined;
+        var out = std.Io.Writer.fixed(&storage);
+        var record: BlockRecorder = .{ .out = &out };
+        var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+        try renderer.feed(case.source[0..split]);
+        try renderer.feed(case.source[split..]);
+        try renderer.finish();
+        try std.testing.expectEqualStrings(case.source, out.buffered());
+        try std.testing.expectEqual(@as(u6, 1), record.marks.count);
+        try std.testing.expectEqual(case.columns, record.marks.items[0].data.table.count);
+        try std.testing.expectEqual(@as(u64, case.source.len), record.marks.items[0].complete_end);
+    };
 }

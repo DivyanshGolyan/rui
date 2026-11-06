@@ -2908,6 +2908,24 @@ Bare links omit trailing sentence punctuation, including `;` and unmatched final
 Other link targets (including Markdown file targets), links inside code or emphasis, Markdown link titles and complete addresses longer than 2,048 bytes after local expansion and encoding stay literal, and `/copy` still sends the original Markdown with every address.
 The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
 A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.
+Prepared typed output has an explicit capability path that remains inactive in production until its common consuming-unit layout is enabled.
+The concrete gate is capability injection: live `Taking.blocks` defaults to null, history calls the untyped `Prepared.render` wrapper, and seam listings call untyped `message`; only focused tests currently supply capture capabilities.
+`AnswerRenderer` owns its single pre-inline quote/fence opacity and table admission traversal; the existing 4,096-byte held storage is shared with legacy links and fences, not duplicated.
+The opacity context never expands strict legacy delimiter stripping or LastCode/copy-code credit; while legacy fence effects still own bytes, prose/table admission remains ineligible even if a broader opacity closer was recognized.
+A candidate can hold one header and its delimiter within the same 4,096-source-byte credit; rejection and overflow replay through the existing inline engine with a monotone value cursor that cannot overwrite unread held bytes.
+Only assistant preparation and original UserBody quote annotations receive this capability; UserBody continues through terminal escaping and collapse, without assistant inline parsing.
+Tool, peer, inspection, Action and ordinary CLI paths have no semantic authority.
+
+`output_blocks` carries at most 32 sorted shared table, literal-raw or trusted-prose quote spans: capture uses u64 offsets, and checked retained coordinates use u32.
+The synchronous bridge flushes trusted presentation before each event, borrows unchanged payload only through return, reserves block credit before raw writes, and propagates original failures rather than treating partial I/O as rejection.
+The same prepared-span cursor routes actual live staged windows and saved-history file loading, alongside the existing Message cuts; a cut or retention endpoint is never canonical EOF.
+Document edits carry bytes, styles and clipped/rebased marks through normalization, discard, suffix catch-up, prepend, clear and pane copies.
+Header loss downgrades surviving raw source in its existing slot; tail loss keeps only the last actual complete boundary, while a clipped quote marker loses annotation but retains escaped prose and links.
+Opaque bytes never enter the trusted ANSI parser or global Unicode normalization; their literal measurement and paint use the same replayable safety projection, borrowing retained clusters or immutable TerminalText escape spellings through encoding.
+Metadata-only promotion or downgrade advances the existing Document generation, not a separate cache key.
+Each body's logical credit is source bytes plus used descriptors and pending reservation within 256 KiB; physically resident arrays, worker/rewrite stack and the backend's separate 32 MiB charged budget are accounted independently.
+The custody checkpoint adds no assistant table/quote presentation, output layout cache, row index or canonical source/copy mutation.
+
 Normal tool presentation shows only the canonical outcome heading, including an optional numeric failed exit.
 A fixed 64-byte first-line scan derives the exit from a complete matching Bash outcome line; it retains no output excerpt, warnings or hints.
 The full stream still drains and authenticates before the heading is shown.

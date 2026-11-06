@@ -1,6 +1,7 @@
 //! One persistent caller owns drafts, terminal and joined Client borrowers.
 //! No worker writes the terminal; canonical activity supplies live output.
 const std = @import("std");
+const OutputBlocks = @import("output_blocks.zig");
 const vaxis = @import("vaxis");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -1755,7 +1756,7 @@ fn settleReader(self: *Self) !void {
         // The user may have left the transcript while this page loaded.
         const screen = self.terminal.screen;
         if (screen.view == .transcript and self.job.transcript == self.transcript.id) {
-            const prepended = try screen.prependFile(self.init.io, self.files.inspection);
+            const prepended = try screen.prependPreparedFile(self.init.io, self.files.inspection, &self.job.result.output_blocks);
             // The page's newest blocks are those its kept rows show.
             const collapsed = &self.job.result.collapsed;
             var older: [reads.Collected.capacity]?View.Collapsed = @splat(null);
@@ -1821,7 +1822,7 @@ fn showStaged(self: *Self) !void {
     const result = &self.job.result;
     self.live.messages = result.messages;
     if (result.lowest) |lowest| self.live.lowest = if (self.live.lowest) |known| @min(known, lowest) else lowest;
-    var staged: Staged = .{ .frontend = self, .length = result.output_length, .start = try self.terminal.screen.liveEnd() };
+    var staged: Staged = .{ .frontend = self, .length = result.output_length, .start = try self.terminal.screen.liveEnd(), .cursor = .{ .marks = &result.output_blocks } };
     // Every cut in output order; at one offset an echo ends before a
     // boundary prunes it, and a boundary prunes before an echo begins.
     const Cut = struct { output: u64, kind: enum { echo_end, boundary, echo_start }, index: usize };
@@ -1873,16 +1874,19 @@ const Staged = struct {
     start: u64,
     written: u64 = 0,
     buffer: [4096]u8 = undefined,
+    cursor: OutputBlocks.Cursor,
+    admission: @import("ConversationViewport.zig").Document.Admission = .{},
 
     fn to(self: *Staged, output: u64) !u64 {
         const frontend = self.frontend;
         while (self.written < output) {
-            const count = try frontend.files.inspection.readPositionalAll(frontend.init.io, self.buffer[0..@intCast(@min(self.buffer.len, output - self.written))], self.written);
+            const part = self.cursor.part(self.written, output);
+            const count = try frontend.files.inspection.readPositionalAll(frontend.init.io, self.buffer[0..@intCast(@min(self.buffer.len, part.end - self.written))], self.written);
             if (count == 0) return error.TruncatedDisplayScratch;
             // A notice can end the group while a read is still silent. Restore
             // its separator before the first compact heading.
             if (self.written == 0 and !frontend.reading.opening and !frontend.live.compact_tools and self.buffer[0] != '\n') try frontend.terminal.permanent("\n");
-            try frontend.terminal.permanent(self.buffer[0..count]);
+            try frontend.terminal.prepared(self.buffer[0..count], self.written, part.span, &self.admission);
             self.written += count;
         }
         return if (output == 0) self.start else try frontend.terminal.screen.liveEnd();
@@ -4536,5 +4540,40 @@ test "conversation slash archive errors propagate and consume only the submitted
         try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
         try std.testing.expectEqualStrings("original", try held.self.input.message(original));
         try std.testing.expect(held.self.input.queuedCommand() == null);
+    }
+}
+
+test "typed Staged live ingestion preserves message cuts raw controls and above 4GiB coordinates" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const file = try held.tmp.dir.createFile(std.testing.io, "typed-output", .{ .read = true });
+    defer file.close(std.testing.io);
+    self.files.inspection = file;
+    const raw = "h|x\n---|---\na|\x1b[31m\xff\nlast|row";
+    for ([_]u64{ 0, 1 << 34 }) |base| {
+        try file.setLength(std.testing.io, 0);
+        try file.writePositionalAll(std.testing.io, raw, base);
+        held.screen.live.text.clear();
+        self.job.result.output_blocks.clear();
+        try std.testing.expect(self.job.result.output_blocks.reserve(.{ .start = base, .end = base + raw.len, .header_end = base + 4, .delimiter_end = base + 12, .complete_end = base + raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } }));
+        var staged: Staged = .{ .frontend = self, .length = base + raw.len, .written = base, .start = 0, .cursor = .{ .marks = &self.job.result.output_blocks } };
+        // These are the real normalized endpoints used by Message cuts, not
+        // raw display-file offsets. No cut itself grants syntax/EOF authority.
+        const cuts = [_]u64{ base + 2, base + 8, base + 12, base + raw.len - 1, base + raw.len };
+        var previous: u64 = 0;
+        for (cuts) |cut| {
+            const end = try staged.to(cut);
+            try std.testing.expect(end >= previous);
+            previous = end;
+        }
+        const text = held.screen.live.text.text();
+        // At offset zero an existing compact group needs its normal separator.
+        const separator: usize = @intFromBool(base == 0);
+        try std.testing.expectEqualStrings(raw, text[separator..]);
+        const mark = held.screen.live.text.blocks.items[0];
+        try std.testing.expectEqual(@as(u32, @intCast(separator)), mark.start);
+        try std.testing.expectEqual(mark.end, mark.complete_end);
+        try std.testing.expectEqual(@as(u6, 1), held.screen.live.text.blocks.count);
     }
 }

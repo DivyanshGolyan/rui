@@ -2,6 +2,7 @@
 //! vaxis lays out and draws rows (`Window.print`); this module keeps retained
 //! bytes, trusted styles and which row of which logical line a view starts at.
 const std = @import("std");
+const OutputBlocks = @import("output_blocks.zig");
 const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
@@ -166,6 +167,10 @@ pub const Summaries = struct { count: usize = 0, last: ?usize = null };
 pub fn Sized(comptime limit: usize, comptime styled: bool) type {
     return struct {
         const Self = @This();
+        // Chrome documents never acquire a body-sized provenance sidecar.
+        const semantic = styled and limit == capacity;
+        blocks: if (semantic) OutputBlocks.Retained else struct {} = .{},
+        reservation: if (semantic) u1 else u0 = 0,
         bytes: [limit]u8 = undefined,
         styles: [if (styled) limit else 0]u8 = undefined,
         style: u8 = 0,
@@ -223,23 +228,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         fn appendText(self: *Self, input: []const u8) !void {
             var position: usize = 0;
             while (position < input.len) {
-                if (self.length == limit) {
-                    const wanted = @min(input.len - position, limit);
-                    var discard: usize = 0;
-                    var clusters = unicode.graphemeIterator(self.text());
-                    while (clusters.next()) |cluster| {
-                        discard = cluster.start;
-                        if (discard >= wanted) break;
-                    }
-                    // Keep the last cluster and incomplete scalar: the next
-                    // window can extend them with combining, RI or ZWJ bytes.
-                    if (discard == 0) return error.DisplayGraphemeTooLarge;
-                    std.mem.copyForwards(u8, &self.bytes, self.bytes[discard..self.length]);
-                    if (styled) std.mem.copyForwards(u8, &self.styles, self.styles[discard..self.length]);
-                    self.length -= discard;
-                    self.origin += discard;
-                }
-                const count = @min(input.len - position, limit - self.length);
+                try self.makeRoom(input.len - position);
+                const count = @min(input.len - position, self.available() - self.length);
                 @memcpy(self.bytes[self.length..][0..count], input[position..][0..count]);
                 if (styled) @memset(self.styles[self.length..][0..count], self.cellValue());
                 if (self.link == .address) self.address_length += count;
@@ -250,6 +240,182 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             // indexing below only visits complete scalars.
             self.dirty = true;
             self.generation +%= 1;
+        }
+
+        /// A prepared-file traversal owns this transient cursor. It is not a
+        /// retained source coordinate or another navigation/layout authority.
+        pub const Admission = struct {
+            span: ?*const OutputBlocks.Span(u64) = null,
+            destination: u64 = 0,
+            complete: u64 = 0,
+            intact: bool = true,
+        };
+
+        /// Explicit capability path. Untyped append never recognizes source
+        /// syntax, and opaque bytes never reach the presentation ANSI parser.
+        pub fn appendPrepared(self: *Self, input: []const u8, offset: u64, span: ?*const OutputBlocks.Span(u64), admission: *Admission) !void {
+            if (span != null and admission.span != span) try self.prepare();
+            return self.admitPrepared(input, offset, span, admission);
+        }
+
+        fn admitPrepared(self: *Self, input: []const u8, offset: u64, span: ?*const OutputBlocks.Span(u64), admission: *Admission) !void {
+            if (!semantic) @compileError("prepared source requires a body Document");
+            const source = span orelse {
+                admission.span = null;
+                return self.append(input);
+            };
+            std.debug.assert(offset >= source.start and offset + input.len <= source.end);
+            if (source.data == .table) std.debug.assert(source.start < source.header_end and source.header_end <= source.delimiter_end and source.delimiter_end <= source.complete_end and source.complete_end <= source.end);
+            if (admission.span != source) {
+                admission.* = .{ .span = source, .destination = self.origin + self.length, .complete = source.start, .intact = offset == source.start };
+            }
+            if (source.data == .quote) {
+                // Reserve before parsing trusted presentation controls. A
+                // clipped marker loses annotation, never its escaping/styles.
+                var saved: ?OutputBlocks.Span(u32) = null;
+                if (self.blocks.count != 0) {
+                    const last = &self.blocks.items[self.blocks.count - 1];
+                    if (self.origin + last.start == admission.destination and last.data == .quote) {
+                        saved = last.*;
+                        self.blocks.count -= 1;
+                    }
+                }
+                try self.reserveBlock();
+                self.reservation = 1;
+                defer self.reservation = 0;
+                try self.append(input);
+                if (admission.intact and admission.destination >= self.origin) {
+                    var value = saved orelse OutputBlocks.Span(u32){ .start = 0, .end = 0, .data = source.data };
+                    value.start = @intCast(admission.destination - self.origin);
+                    value.end = @intCast(self.length);
+                    self.reservation = 0;
+                    std.debug.assert(self.blocks.reserve(value));
+                }
+                return;
+            }
+            std.debug.assert(self.control_length == 0 and self.link == .none);
+            var position: usize = 0;
+            while (position < input.len) {
+                var existing = self.blocks.count != 0 and self.blocks.items[self.blocks.count - 1].end == self.length and
+                    self.origin + self.blocks.items[self.blocks.count - 1].start == @max(admission.destination, self.origin);
+                if (!existing) try self.reserveBlock();
+                const room = self.available() - self.length - (if (existing) @as(usize, 0) else @sizeOf(OutputBlocks.Span(u32)));
+                if (room == 0) {
+                    try self.makeRoom(input.len - position);
+                    continue;
+                }
+                if (!existing) {
+                    std.debug.assert(self.blocks.reserve(.{ .start = @intCast(self.length), .end = @intCast(self.length), .data = .literal_raw }));
+                    existing = true;
+                }
+                const count = @min(input.len - position, room);
+                const first = self.length;
+                @memcpy(self.bytes[first..][0..count], input[position..][0..count]);
+                @memset(self.styles[first..][0..count], 0);
+                self.length += count;
+                const last = &self.blocks.items[self.blocks.count - 1];
+                last.end = @intCast(self.length);
+                if (std.mem.lastIndexOfScalar(u8, input[position..][0..count], '\n')) |lf| {
+                    const proof = offset + position + lf + 1;
+                    if (proof <= source.complete_end) admission.complete = proof;
+                }
+                const loaded = offset + position + count;
+                if (loaded >= source.complete_end) admission.complete = source.complete_end;
+                self.revisePrepared(source, loaded, admission);
+                self.dirty = true;
+                self.generation +%= 1;
+                position += count;
+            }
+            // A promotion/downgrade can carry no new bytes. It is still an
+            // edit: the existing generation invalidates the scalar census.
+            if (input.len == 0) self.revisePrepared(source, offset, admission);
+        }
+
+        fn revisePrepared(self: *Self, source: *const OutputBlocks.Span(u64), loaded: u64, admission: *Admission) void {
+            if (self.blocks.count == 0) return;
+            const last = &self.blocks.items[self.blocks.count - 1];
+            if (last.end != self.length or self.origin + last.start != @max(admission.destination, self.origin)) return;
+            if (loaded >= source.complete_end) admission.complete = source.complete_end;
+            if (source.data == .table and admission.intact and admission.destination >= self.origin and loaded >= source.delimiter_end) {
+                last.data = source.data;
+                last.header_end = @intCast(admission.destination - self.origin + source.header_end - source.start);
+                last.delimiter_end = @intCast(admission.destination - self.origin + source.delimiter_end - source.start);
+                last.complete_end = @intCast(admission.destination - self.origin + admission.complete - source.start);
+            } else {
+                last.data = .literal_raw;
+                last.header_end = 0;
+                last.delimiter_end = 0;
+                last.complete_end = 0;
+            }
+            self.dirty = true;
+            self.generation +%= 1;
+        }
+
+        fn reserveBlock(self: *Self) !void {
+            while (self.blocks.count == OutputBlocks.limit or self.length + @sizeOf(OutputBlocks.Span(u32)) >= self.available()) {
+                const discard = if (self.blocks.count == OutputBlocks.limit) self.blocks.items[0].end else self.eviction(@sizeOf(OutputBlocks.Span(u32)));
+                if (discard == 0) return error.DisplayGraphemeTooLarge;
+                self.discardFront(self.origin + discard);
+            }
+        }
+
+        const Source = struct {
+            bytes: []const u8,
+            styles: []const u8,
+            blocks: ?*const OutputBlocks.Retained = null,
+        };
+
+        fn copyInterval(self: *Self, source: Source, start: usize, end: usize, destination: usize) !void {
+            std.debug.assert(start <= end and end <= source.bytes.len and destination + end - start <= limit);
+            if (semantic) if (source.blocks) |blocks| try self.blocks.copy(blocks, source.bytes, start, end, destination);
+            const into = self.bytes[destination..][0 .. end - start];
+            const from = source.bytes[start..end];
+            if (@intFromPtr(into.ptr) > @intFromPtr(from.ptr)) std.mem.copyBackwards(u8, into, from) else std.mem.copyForwards(u8, into, from);
+            if (styled) {
+                const styles = self.styles[destination..][0 .. end - start];
+                const from_styles = source.styles[start..end];
+                if (@intFromPtr(styles.ptr) > @intFromPtr(from_styles.ptr)) std.mem.copyBackwards(u8, styles, from_styles) else std.mem.copyForwards(u8, styles, from_styles);
+            }
+        }
+
+        fn retainedBlocks(self: *const Self) ?*const OutputBlocks.Retained {
+            return if (semantic) &self.blocks else null;
+        }
+
+        fn available(self: *const Self) usize {
+            return limit - if (semantic) (@as(usize, self.blocks.count) + self.reservation) * @sizeOf(OutputBlocks.Span(u32)) else 0;
+        }
+
+        /// Only trusted prose may supply a grapheme boundary. Opaque source
+        /// may contain invalid UTF-8; losing its head downgrades its same slot.
+        fn eviction(self: *const Self, wanted: usize) usize {
+            var start: usize = 0;
+            var end = self.length;
+            if (semantic) for (self.blocks.slice()) |block| {
+                if (block.data == .quote) continue;
+                if (block.start <= wanted and wanted <= block.end) return wanted;
+                if (block.end <= wanted) start = block.end;
+                if (block.start > wanted) {
+                    end = block.start;
+                    break;
+                }
+            };
+            var discard = start;
+            var clusters = unicode.graphemeIterator(self.bytes[start..end]);
+            while (clusters.next()) |cluster| {
+                discard = start + cluster.start;
+                if (discard >= wanted) break;
+            }
+            return discard;
+        }
+
+        fn makeRoom(self: *Self, incoming: usize) !void {
+            while (self.length >= self.available()) {
+                const wanted = @min(incoming, self.available());
+                const discard = self.eviction(wanted);
+                if (discard == 0) return error.DisplayGraphemeTooLarge;
+                self.discardFront(self.origin + discard);
+            }
         }
 
         /// The retained style of text appended now, with any link mark.
@@ -276,6 +442,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         pub fn clear(self: *Self) void {
+            if (semantic) self.blocks.clear();
+            self.reservation = 0;
             self.length = 0;
             self.origin = 0;
             self.style = 0;
@@ -287,6 +455,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         pub fn text(self: *const Self) []const u8 {
             var end = self.length;
+            if (semantic and self.blocks.count != 0) {
+                const last = self.blocks.items[self.blocks.count - 1];
+                if (last.end == end and last.data != .quote) return self.bytes[0..end];
+            }
             if (end != 0) {
                 var start = end - 1;
                 while (start > 0 and self.bytes[start] & 0xc0 == 0x80) start -= 1;
@@ -328,35 +500,31 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         fn original(self: *Self, bytes: []const u8, styles: []const u8) !void {
-            if (bytes.len == 0) return;
-            if (styled) self.style = styles[0];
-            try self.appendText(bytes);
-            // Preserve structural metadata and intra-cluster style bytes.
-            // RangeRuns alone chooses the whole glyph's presentation style.
-            if (styled) @memcpy(self.styles[self.length - bytes.len .. self.length], styles);
+            var at: usize = 0;
+            while (at < bytes.len) {
+                try self.makeRoom(bytes.len - at);
+                const count = @min(bytes.len - at, self.available() - self.length);
+                try self.copyInterval(.{ .bytes = bytes, .styles = styles }, at, at + count, self.length);
+                self.length += count;
+                at += count;
+            }
+            self.generation +%= 1;
         }
 
-        fn escape(self: *Self) !void {
-            const complete = self.text().len;
-            if (!needsEscape(self.bytes[0..complete], if (styled) self.styles[0..complete] else &.{}, self.width_method)) return;
-            const length = self.length;
-            var bytes: [limit]u8 = undefined;
-            var styles: [if (styled) limit else 0]u8 = undefined;
-            @memcpy(bytes[0..length], self.bytes[0..length]);
-            if (styled) @memcpy(styles[0..length], self.styles[0..length]);
-            const saved_style = self.style;
-            defer self.style = saved_style;
-            const saved_link = self.link;
-            const saved_address = self.address_length;
-            self.link = .none;
-            defer {
-                self.link = saved_link;
-                self.address_length = saved_address;
-            }
-            self.length = 0;
+        fn requiresEscape(self: *const Self, complete: usize) bool {
             var start: usize = 0;
-            while (start < complete) {
-                const end = channelEnd(&styles, start, complete);
+            if (semantic) for (self.blocks.slice()) |block| {
+                if (block.data == .quote) continue;
+                if (needsEscape(self.bytes[start..block.start], self.styles[start..block.start], self.width_method)) return true;
+                start = block.end;
+            };
+            return needsEscape(self.bytes[start..complete], if (styled) self.styles[start..complete] else &.{}, self.width_method);
+        }
+
+        fn rewriteProse(self: *Self, bytes: []const u8, styles: []const u8) !void {
+            var start: usize = 0;
+            while (start < bytes.len) {
+                const end = channelEnd(styles, start, bytes.len);
                 if (styled and displayChannel(styles[start]) == .address) {
                     try self.original(bytes[start..end], styles[start..end]);
                     start = end;
@@ -371,7 +539,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                         continue;
                     }
                     if (styled) self.style = styles[first];
-                    // A run of one scalar is shown once with its count.
                     var scalars = (try std.unicode.Utf8View.init(raw)).iterator();
                     var run: ?u21 = null;
                     var count: usize = 0;
@@ -391,7 +558,49 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 start = end;
             }
-            try self.original(bytes[complete..length], if (styled) styles[complete..length] else &.{});
+        }
+
+        fn escape(self: *Self) !void {
+            const complete = self.text().len;
+            if (!self.requiresEscape(complete)) return;
+            const length = self.length;
+            var bytes: [limit]u8 = undefined;
+            var styles: [if (styled) limit else 0]u8 = undefined;
+            @memcpy(bytes[0..length], self.bytes[0..length]);
+            if (styled) @memcpy(styles[0..length], self.styles[0..length]);
+            const blocks = if (semantic) self.blocks else OutputBlocks.Retained{};
+            const saved_style = self.style;
+            defer self.style = saved_style;
+            const saved_link = self.link;
+            const saved_address = self.address_length;
+            self.link = .none;
+            defer {
+                self.link = saved_link;
+                self.address_length = saved_address;
+            }
+            self.length = 0;
+            if (semantic) self.blocks.clear();
+            var start: usize = 0;
+            if (semantic) for (blocks.slice()) |block| {
+                try self.rewriteProse(bytes[start..block.start], styles[start..block.start]);
+                if (block.data == .quote) {
+                    try self.reserveBlock();
+                    const destination = self.origin + self.length;
+                    self.reservation = 1;
+                    try self.rewriteProse(bytes[block.start..@min(block.end, complete)], styles[block.start..@min(block.end, complete)]);
+                    if (block.end > complete) try self.original(bytes[complete..block.end], styles[complete..block.end]);
+                    self.reservation = 0;
+                    if (destination >= self.origin) std.debug.assert(self.blocks.reserve(.{ .start = @intCast(destination - self.origin), .end = @intCast(self.length), .data = block.data }));
+                } else {
+                    const span: OutputBlocks.Span(u64) = .{ .start = block.start, .end = block.end, .header_end = block.header_end, .delimiter_end = block.delimiter_end, .complete_end = block.complete_end, .data = block.data };
+                    var admission: Admission = .{ .span = &span, .destination = self.origin + self.length, .complete = span.start };
+                    try self.admitPrepared(bytes[block.start..block.end], block.start, &span, &admission);
+                }
+                start = block.end;
+            };
+            if (start < complete) try self.rewriteProse(bytes[start..complete], if (styled) styles[start..complete] else &.{});
+            const suffix = @max(start, complete);
+            try self.original(bytes[suffix..length], if (styled) styles[suffix..length] else &.{});
         }
 
         /// Where the line starting at `offset` ends (its newline or the text end).
@@ -410,11 +619,61 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return if (std.mem.lastIndexOfScalar(u8, self.bytes[0 .. offset - 1], '\n')) |line| line + 1 else 0;
         }
 
+        fn opaqueAt(self: *const Self, offset: usize) bool {
+            if (semantic) for (self.blocks.slice()) |block| {
+                if (block.start > offset) break;
+                if (offset < block.end and block.data != .quote) return true;
+            };
+            return false;
+        }
+
+        /// No generated cell borrows scratch: raw clusters borrow retained
+        /// source; escaped bytes/control spellings have static storage.
+        const LiteralRuns = struct {
+            bytes: []const u8,
+            method: gwidth.Method,
+            at: usize = 0,
+            escaped_end: usize = 0,
+
+            pub fn next(self: *@This()) ?vaxis.Segment {
+                if (self.at == self.bytes.len) return null;
+                if (self.at < self.escaped_end) {
+                    const byte = self.bytes[self.at];
+                    self.at += 1;
+                    return .{ .text = TerminalText.escapedByte(byte) };
+                }
+                var iterator = unicode.graphemeIterator(self.bytes[self.at..]);
+                const raw = iterator.next().?.bytes(self.bytes[self.at..]);
+                if (std.unicode.utf8ValidateSlice(raw)) {
+                    var scalars = (std.unicode.Utf8View.init(raw) catch unreachable).iterator();
+                    var unsafe = false;
+                    while (scalars.nextCodepoint()) |point| {
+                        if (TerminalText.isControl(point) and point != '\t') unsafe = true;
+                    }
+                    if (!unsafe and representable(raw, self.method)) {
+                        self.at += raw.len;
+                        return .{ .text = raw };
+                    }
+                    scalars = (std.unicode.Utf8View.init(raw) catch unreachable).iterator();
+                    const first = scalars.nextCodepoint().?;
+                    if (scalars.nextCodepoint() == null and TerminalText.isControl(first)) {
+                        self.at += raw.len;
+                        return .{ .text = TerminalText.escapedControl(first) };
+                    }
+                }
+                self.escaped_end = self.at + raw.len;
+                return self.next();
+            }
+        };
+
         /// Prints one logical line with its first row at window row `row`
         /// (negative rows are clipped), or only measures it. Returns its rows.
         /// Measuring and drawing segment identically, so they wrap identically.
         pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, plain: vaxis.Style) u16 {
             const end = self.lineEnd(offset);
+            if (self.opaqueAt(offset)) {
+                return rowsUsed(window.child(.{ .y_off = row }).printIterator(LiteralRuns{ .bytes = self.bytes[offset..end], .method = self.width_method }, .{ .wrap = .word, .commit = commit }));
+            }
             var user = false;
             // A line of summary text alone (a peer Message's line) keeps one
             // row, ending in `…` when it does not fit.
@@ -608,8 +867,9 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         pub fn discardFront(self: *Self, position: u64) void {
             if (position <= self.origin) return;
             const count: usize = @intCast(@min(position - self.origin, self.length));
-            std.mem.copyForwards(u8, &self.bytes, self.bytes[count..self.length]);
-            if (styled) std.mem.copyForwards(u8, &self.styles, self.styles[count..self.length]);
+            const blocks = if (semantic) self.blocks else OutputBlocks.Retained{};
+            if (semantic) self.blocks.clear();
+            self.copyInterval(.{ .bytes = self.bytes[0..self.length], .styles = if (styled) self.styles[0..self.length] else &.{}, .blocks = if (semantic) &blocks else null }, count, self.length, 0) catch unreachable;
             self.length -= count;
             self.origin += count;
             self.dirty = true;
@@ -622,10 +882,73 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         pub fn appendRetained(self: *Self, source: *const Self, start: usize) usize {
             std.debug.assert(styled and start <= source.length);
             const suffix = source.length - start;
-            var count = @min(suffix, limit - self.length);
-            if (count < suffix) count = if (std.mem.lastIndexOfScalar(u8, source.bytes[start..][0..count], '\n')) |line| line + 1 else 0;
-            @memcpy(self.bytes[self.length..][0..count], source.bytes[start..][0..count]);
-            @memcpy(self.styles[self.length..][0..count], source.styles[start..][0..count]);
+            var count = @min(suffix, self.available() - self.length);
+            var planned: OutputBlocks.Retained = .{};
+            while (true) {
+                if (count < suffix) count = if (std.mem.lastIndexOfScalar(u8, source.bytes[start..][0..count], '\n')) |line| line + 1 else 0;
+                if (!semantic) break;
+                planned = self.blocks;
+                var continuation: ?struct { old: OutputBlocks.Span(u32), source: OutputBlocks.Span(u32) } = null;
+                if (count != 0 and planned.count != 0) {
+                    const last = planned.items[planned.count - 1];
+                    for (source.blocks.slice()) |block| {
+                        if (block.start < start and start < block.end and last.end == self.length and
+                            last.end - last.start == start - block.start and
+                            std.mem.eql(u8, self.bytes[last.start..last.end], source.bytes[block.start..start]) and
+                            std.mem.eql(u8, self.styles[last.start..last.end], source.styles[block.start..start]))
+                        {
+                            if (block.data == .quote) {
+                                planned.items[planned.count - 1].end = @intCast(self.length + @min(start + count, block.end) - start);
+                            } else {
+                                continuation = .{ .old = last, .source = block };
+                                planned.count -= 1;
+                            }
+                            break;
+                        }
+                    }
+                }
+                planned.copy(&source.blocks, source.bytes[0..source.length], start, start + count, self.length) catch {
+                    // Slot pressure ends before the first unadmitted block,
+                    // never after silently dropping its raw provenance.
+                    const admitted = OutputBlocks.limit - self.blocks.count;
+                    var seen: usize = 0;
+                    for (source.blocks.slice()) |block| {
+                        if (block.end <= start or block.start >= start + count) continue;
+                        if (seen == admitted) {
+                            count = @min(count, block.start -| start);
+                            break;
+                        }
+                        seen += 1;
+                    }
+                    continue;
+                };
+                if (continuation) |joined| {
+                    // Caller proves this contiguous normalized suffix. Compare
+                    // its complete prior block prefix too: prepend rebases the
+                    // document origin, not this block's source identity.
+                    const index = self.blocks.count - 1;
+                    const end = planned.items[index].end;
+                    planned.items[index] = joined.old;
+                    planned.items[index].end = end;
+                    if (joined.old.data == .table and joined.source.data == .table) {
+                        const stop = start + count;
+                        if (joined.source.complete_end <= stop) {
+                            planned.items[index].complete_end = @intCast(self.length + joined.source.complete_end - start);
+                        } else if (std.mem.lastIndexOfScalar(u8, source.bytes[start..stop], '\n')) |lf| {
+                            planned.items[index].complete_end = @intCast(self.length + lf + 1);
+                        }
+                    }
+                }
+                const room = limit - self.length - @as(usize, planned.count) * @sizeOf(OutputBlocks.Span(u32));
+                if (count > room) {
+                    count = room;
+                    continue;
+                }
+                break;
+            }
+            if (semantic) self.blocks.clear();
+            self.copyInterval(.{ .bytes = source.bytes[0..source.length], .styles = &source.styles }, start, start + count, self.length) catch unreachable;
+            if (semantic) self.blocks = planned;
             self.length += count;
             self.dirty = true;
             self.generation +%= 1;
@@ -638,18 +961,30 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         pub fn prepend(self: *Self, older: anytype) !bool {
             std.debug.assert(older.control_length == 0 and older.length <= limit);
             try self.prepare();
-            var keep = self.text().len;
-            if (older.length + keep > limit) {
-                keep = limit - older.length;
-                keep = if (std.mem.lastIndexOfScalar(u8, self.bytes[0..keep], '\n')) |line| line + 1 else 0;
+            var keep = @min(self.text().len, limit - older.length);
+            const blocks = if (semantic) self.blocks else OutputBlocks.Retained{};
+            var planned: OutputBlocks.Retained = .{};
+            while (true) {
+                if (keep < self.text().len) keep = if (std.mem.lastIndexOfScalar(u8, self.bytes[0..keep], '\n')) |line| line + 1 else 0;
+                if (!semantic) break;
+                planned = if (older.retainedBlocks()) |marks| marks.* else .{};
+                planned.copy(&blocks, self.bytes[0..self.length], 0, keep, older.length) catch {
+                    const admitted = OutputBlocks.limit - if (older.retainedBlocks()) |marks| marks.count else @as(usize, 0);
+                    keep = @min(keep, blocks.items[admitted].start);
+                    continue;
+                };
+                const room = limit - older.length - @as(usize, planned.count) * @sizeOf(OutputBlocks.Span(u32));
+                if (keep > room) {
+                    keep = room;
+                    continue;
+                }
+                break;
             }
             const trimmed = keep != self.text().len or self.control_length != 0;
-            std.mem.copyBackwards(u8, self.bytes[older.length..][0..keep], self.bytes[0..keep]);
-            @memcpy(self.bytes[0..older.length], older.bytes[0..older.length]);
-            if (styled) {
-                std.mem.copyBackwards(u8, self.styles[older.length..][0..keep], self.styles[0..keep]);
-                @memcpy(self.styles[0..older.length], older.styles[0..older.length]);
-            }
+            if (semantic) self.blocks.clear();
+            try self.copyInterval(.{ .bytes = self.bytes[0..self.length], .styles = if (styled) self.styles[0..self.length] else &.{} }, 0, keep, older.length);
+            try self.copyInterval(.{ .bytes = older.bytes[0..older.length], .styles = if (styled) older.styles[0..older.length] else &.{} }, 0, older.length, 0);
+            if (semantic) self.blocks = planned;
             self.length = older.length + keep;
             if (trimmed) {
                 self.control_length = 0;
@@ -1519,4 +1854,225 @@ test "hanging prefixes include combining marks on their final space before split
         var screen: TestScreen = undefined;
         _ = doc.draw(screen.window(20, 2), .{}, true, false, .{});
     }
+}
+
+test "typed custody keeps unsafe bytes opaque through preparation and every retained splice" {
+    const raw = "h|x\n---|---\n\x1b[31m|\xff\nlast|row";
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var document: Document = .{};
+    try document.append("\xcc\x81\n");
+    var admission: Document.Admission = .{};
+    // Every feed partition must have the same complete boundary proof.
+    for (raw, 0..) |_, at| try document.appendPrepared(raw[at..][0..1], at, &span, &admission);
+    try document.prepare();
+    try std.testing.expectEqualStrings("\\u{301}\n" ++ raw, document.text());
+    try std.testing.expectEqual(@as(u6, 1), document.blocks.count);
+    const block = document.blocks.items[0];
+    try std.testing.expectEqual(@as(u32, "\\u{301}\n".len), block.start);
+    try std.testing.expectEqual(block.end, block.complete_end);
+    try std.testing.expectEqualStrings(raw, document.bytes[block.start..block.end]);
+    for (document.styles[block.start..block.end]) |style| try std.testing.expectEqual(@as(u8, 0), style);
+
+    var copied: Document = .{};
+    try std.testing.expectEqual(document.length, copied.appendRetained(&document, 0));
+    try std.testing.expectEqualDeep(block, copied.blocks.items[0]);
+    var older: Sized(128, true) = .{};
+    try older.append("older\n");
+    try std.testing.expect(!try copied.prepend(&older));
+    try std.testing.expectEqual(block.start + 6, copied.blocks.items[0].start);
+    copied.discardFront(copied.origin + copied.blocks.items[0].start + 1);
+    try std.testing.expectEqual(@as(u6, 1), copied.blocks.count);
+    try std.testing.expect(copied.blocks.items[0].data == .literal_raw);
+    try copied.prepare();
+    try std.testing.expectEqualStrings(raw[1..], copied.text());
+    copied.clear();
+    try std.testing.expectEqual(@as(u6, 0), copied.blocks.count);
+}
+
+test "typed custody retains one slot when a table header is evicted and charges descriptor credit" {
+    var document: Document = .{};
+    const raw = "h|x\n---|---\n";
+    var source: OutputBlocks.Span(u64) = .{ .start = 0, .end = capacity * 2, .header_end = 4, .delimiter_end = raw.len, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try document.appendPrepared(raw, 0, &source, &admission);
+    const chunk: [4096]u8 = @splat(0xff);
+    var at: u64 = raw.len;
+    while (at < source.end) {
+        const count: usize = @intCast(@min(chunk.len, source.end - at));
+        try document.appendPrepared(chunk[0..count], at, &source, &admission);
+        at += count;
+    }
+    try document.prepare();
+    try std.testing.expect(document.origin > 0);
+    try std.testing.expectEqual(@as(u6, 1), document.blocks.count);
+    try std.testing.expect(document.blocks.items[0].data == .literal_raw);
+    try std.testing.expect(document.length + @sizeOf(OutputBlocks.Span(u32)) <= capacity);
+    try std.testing.expectEqual(document.length, document.text().len);
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(@TypeOf((Sized(128, true){}).blocks)));
+}
+
+test "typed metadata-only changes advance the same document census generation" {
+    var pane: Pane = .{};
+    const raw = "h|x\n---|---\n";
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .data = .literal_raw };
+    var admission: Document.Admission = .{};
+    try pane.text.appendPrepared(raw, 0, &span, &admission);
+    const generation = pane.text.generation;
+    span.data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } };
+    span.header_end = 4;
+    span.delimiter_end = raw.len;
+    span.complete_end = raw.len;
+    try pane.text.appendPrepared("", raw.len, &span, &admission);
+    try std.testing.expect(pane.text.generation != generation);
+    try std.testing.expect(pane.text.blocks.items[0].data == .table);
+    try std.testing.expectEqualStrings(raw, pane.text.text());
+    const promoted = pane.text.generation;
+    span.data = .literal_raw;
+    try pane.text.appendPrepared("", raw.len, &span, &admission);
+    try std.testing.expect(pane.text.generation != promoted);
+    try std.testing.expect(pane.text.blocks.items[0].data == .literal_raw);
+}
+
+test "typed custody shares 32 slots and keeps frozen table identities on contiguous catch-up" {
+    var live: Document = .{};
+    for (0..OutputBlocks.limit - 1) |index| {
+        const span: OutputBlocks.Span(u64) = .{ .start = index * 4, .end = index * 4 + 4, .data = .literal_raw };
+        var admission: Document.Admission = .{};
+        try live.appendPrepared("a|b\n", span.start, &span, &admission);
+    }
+    const start = (OutputBlocks.limit - 1) * 4;
+    const header = "h|x\n---|---\n";
+    var table: OutputBlocks.Span(u64) = .{ .start = start, .end = start + header.len, .header_end = start + 4, .delimiter_end = start + header.len, .complete_end = start + header.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try live.appendPrepared(header, start, &table, &admission);
+    var snapshot = live;
+    const suffix = "body|row\nlast|line";
+    const boundary = table.end;
+    table.end += suffix.len;
+    table.complete_end = table.end;
+    try live.appendPrepared(suffix, boundary, &table, &admission);
+    try std.testing.expectEqual(@as(usize, suffix.len), snapshot.appendRetained(&live, @intCast(boundary)));
+    try std.testing.expectEqual(@as(u6, OutputBlocks.limit), snapshot.blocks.count);
+    try std.testing.expectEqualStrings(live.text(), snapshot.text());
+    const tail = snapshot.blocks.items[OutputBlocks.limit - 1];
+    try std.testing.expect(tail.data == .table);
+    try std.testing.expectEqual(@as(u32, start), tail.start);
+    try std.testing.expectEqual(tail.end, tail.complete_end);
+    const overflow: OutputBlocks.Span(u64) = .{ .start = table.end, .end = table.end + 4, .data = .literal_raw };
+    admission = .{};
+    try live.appendPrepared("x|y\n", overflow.start, &overflow, &admission);
+    try std.testing.expectEqual(@as(u6, OutputBlocks.limit), live.blocks.count);
+    try std.testing.expectEqual(@as(u64, 4), live.origin);
+    try std.testing.expect(live.length + @as(usize, live.blocks.count) * @sizeOf(OutputBlocks.Span(u32)) <= capacity);
+    try std.testing.expect(try snapshot.prepend(&live));
+    try std.testing.expectEqual(@as(u6, OutputBlocks.limit), snapshot.blocks.count);
+    try std.testing.expectEqualStrings(live.text(), snapshot.text());
+}
+
+test "typed quote normalization preserves trusted links and discards a clipped marker annotation" {
+    var text: Document = .{};
+    const shown = "> \xcc\x81 \x1b]8;;https://example.test\x1b\\label\x1b]8;;\x1b\\\n";
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = shown.len, .data = .{ .quote = .{ .bytes = 2, .depth = 1, .indent = 0 } } };
+    var admission: Document.Admission = .{};
+    for (shown, 0..) |_, at| try text.appendPrepared(shown[at..][0..1], at, &span, &admission);
+    try text.prepare();
+    try std.testing.expectEqual(@as(u6, 1), text.blocks.count);
+    const link_at = std.mem.indexOf(u8, text.text(), "label").?;
+    try std.testing.expectEqualStrings("https://example.test", text.address(link_at));
+    try std.testing.expectEqual(@as(u32, @intCast(text.length)), text.blocks.items[0].end);
+    text.discardFront(text.origin + 1);
+    try std.testing.expectEqual(@as(u6, 0), text.blocks.count);
+    try text.prepare();
+    const shifted = std.mem.indexOf(u8, text.text(), "label").?;
+    try std.testing.expectEqualStrings("https://example.test", text.address(shifted));
+}
+
+test "typed opaque rewrite remains byte-exact beside expanding trusted prose and malformed UTF8" {
+    var text: Document = .{};
+    const raw = "h|x\n---|---\n\u{202e}|\xff\n";
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try text.appendPrepared(raw, 0, &span, &admission);
+    try text.append("\u{200b} after\n");
+    try text.prepare();
+    try std.testing.expectEqualStrings(raw ++ "\\u{200b} after\n", text.text());
+    try std.testing.expectEqual(@as(u32, raw.len), text.blocks.items[0].end);
+    try std.testing.expectEqual(@as(u32, raw.len), text.blocks.items[0].complete_end);
+    const original = text.blocks.items[0];
+    try text.prepare();
+    try std.testing.expectEqualDeep(original, text.blocks.items[0]);
+    var screen: TestScreen = undefined;
+    _ = text.draw(screen.window(40, 10), .{}, true, false, .{});
+    var storage: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("\\u202e|\\xff", screen.row(2, &storage));
+}
+
+test "typed literal custody census cost stays linear for tiny rows and one oversized cluster" {
+    const raw = try std.testing.allocator.alloc(u8, 240 * 1024);
+    defer std.testing.allocator.free(raw);
+    for (0..raw.len / 4) |row| @memcpy(raw[row * 4 ..][0..4], "a|b\n");
+    const prose = try std.testing.allocator.create(Document);
+    defer std.testing.allocator.destroy(prose);
+    const literal_text = try std.testing.allocator.create(Document);
+    defer std.testing.allocator.destroy(literal_text);
+    prose.* = .{};
+    literal_text.* = .{};
+    try prose.append(raw);
+    try prose.prepare();
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .data = .literal_raw };
+    var admission: Document.Admission = .{};
+    try literal_text.appendPrepared(raw, 0, &span, &admission);
+    try literal_text.prepare();
+    const layout: Layout = .{ .width = 79, .method = .unicode };
+    const before = std.Io.Clock.awake.now(std.testing.io);
+    for (0..3) |_| try std.testing.expectEqual(raw.len / 4, prose.rowCount(layout));
+    const middle = std.Io.Clock.awake.now(std.testing.io);
+    for (0..3) |_| try std.testing.expectEqual(raw.len / 4, literal_text.rowCount(layout));
+    const after = std.Io.Clock.awake.now(std.testing.io);
+    // The single invalid/oversized cluster is scanned once, then its bytes
+    // escape monotonically. No scalar-count or expanded-text array is kept.
+    raw[0] = 'a';
+    for (0..(raw.len - 1) / 2) |index| @memcpy(raw[1 + 2 * index ..][0..2], "\xcc\x81");
+    raw[raw.len - 1] = '!';
+    literal_text.clear();
+    admission = .{};
+    try literal_text.appendPrepared(raw, 0, &span, &admission);
+    const escaped_rows = literal_text.rowCount(layout);
+    try std.testing.expect(escaped_rows >= (raw.len - 1) * TerminalText.max_bytes_per_byte / layout.width);
+    std.debug.print("typed literal census tiny-row 240KiB prose={d}ns literal_text={d}ns /3; oversized-cluster rows={d}\n", .{ middle.nanoseconds - before.nanoseconds, after.nanoseconds - middle.nanoseconds, escaped_rows });
+}
+
+test "typed contiguous block identity survives canonical prepend origin rebasing" {
+    var live: Document = .{};
+    const header = "h|x\n---|---\n";
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = header.len, .header_end = 4, .delimiter_end = header.len, .complete_end = header.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try live.appendPrepared(header, 0, &span, &admission);
+    var snapshot = live;
+    var older: Sized(64, true) = .{};
+    try older.append("older\n");
+    try std.testing.expect(!try snapshot.prepend(&older));
+    const previous = live.length;
+    const suffix = "body|row\n";
+    span.end += suffix.len;
+    span.complete_end = span.end;
+    try live.appendPrepared(suffix, previous, &span, &admission);
+    try std.testing.expectEqual(@as(usize, suffix.len), snapshot.appendRetained(&live, previous));
+    try std.testing.expectEqual(@as(u6, 1), snapshot.blocks.count);
+    try std.testing.expectEqual(@as(u32, 6), snapshot.blocks.items[0].start);
+    try std.testing.expect(snapshot.blocks.items[0].data == .table);
+    try std.testing.expectEqual(@as(u32, @intCast(snapshot.length)), snapshot.blocks.items[0].complete_end);
+    try std.testing.expectEqualStrings("older\n" ++ header ++ suffix, snapshot.text());
+}
+
+test "typed pending tail cannot outrun its complete admitted proof in one source window" {
+    const source = "h|x\n---|---\npending|row\n";
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = source.len, .header_end = 4, .delimiter_end = 12, .complete_end = 12, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var text: Document = .{};
+    var admission: Document.Admission = .{};
+    try text.appendPrepared(source, 0, &span, &admission);
+    try std.testing.expect(text.blocks.items[0].data == .table);
+    try std.testing.expectEqual(@as(u32, 12), text.blocks.items[0].complete_end);
+    try std.testing.expectEqual(@as(u32, source.len), text.blocks.items[0].end);
+    try std.testing.expectEqualStrings(source, text.text());
 }

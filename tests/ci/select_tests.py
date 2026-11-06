@@ -33,6 +33,8 @@ RULES = (
      ("test-logic",), (), "Portable owner transitions and encoding"),
     (("src/ResponseTiming.zig",), ("test-logic",), ("test-logic",),
      "Response policy values alongside native timeout consumers"),
+    (("src/output_blocks.zig",), ("test-logic",), ("test-logic",),
+     "Bounded typed output source extents and prepared span traversal"),
     (("src/table_row.zig",), ("test-logic",), ("test-logic",),
      "Pure shared table row ranges and delimiter syntax, without render activation"),
     (("src/markdown_prefix.zig",), ("test-logic",), ("test-logic",),

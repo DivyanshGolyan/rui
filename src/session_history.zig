@@ -1,5 +1,6 @@
 //! Atomic bounded Conversation preparation, distinct from one-pass opening.
 const std = @import("std");
+const OutputBlocks = @import("output_blocks.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
@@ -26,6 +27,10 @@ pub const Prepared = struct {
     pub const Mode = enum { transcript, details };
 
     pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, mode: Mode, colour: bool, home: []const u8) !void {
+        return self.renderBlocks(io, scratch, store, session, sink, mode, colour, home, null);
+    }
+
+    pub fn renderBlocks(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, mode: Mode, colour: bool, home: []const u8, blocks: ?OutputBlocks.Sink) !void {
         var window: [protocol.content_window_bytes]u8 = undefined;
         var compact = false;
         for (0..self.page.count) |reverse| {
@@ -99,14 +104,14 @@ pub const Prepared = struct {
                 .user => {
                     try View.userPrefix(sink, colour, item.admitted_at.?);
                     var body: View.UserBody(@TypeOf(sink)) = undefined;
-                    try body.init(sink, item.content.bytes, mode == .details);
+                    try body.initBlocks(sink, item.content.bytes, mode == .details, if (mode == .transcript) blocks else null);
                     try staged.read(&body);
                     if (try body.finish()) try View.noteCollapsed(sink, collapsed(item));
                 },
                 .assistant => {
                     try sink.feed("\n");
                     var answer: View.Answer(@TypeOf(sink)) = undefined;
-                    answer.init(sink, home);
+                    answer.initBlocks(sink, home, if (mode == .transcript) blocks else null);
                     try staged.read(&answer);
                     try answer.finish();
                 },

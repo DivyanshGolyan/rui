@@ -3,6 +3,7 @@
 //! not import the frontend, so no worker can read or write it.
 
 const std = @import("std");
+const OutputBlocks = @import("output_blocks.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
@@ -294,6 +295,7 @@ pub const Job = struct {
         summary: View.ActionSummary = .{},
         // Bytes of live output staged in the inspection scratch file.
         output_length: u64 = 0,
+        output_blocks: OutputBlocks.Capture = .{},
         copied: Copied = .no_answer,
         // What a /requests page offers to act on.
         requests: SavedRequests = .{},
@@ -505,7 +507,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .messages = job.messages, .end = page.facts.end, .drawn = job.drawn.admission };
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .typed = &job.result.output_blocks, .messages = job.messages, .end = page.facts.end, .drawn = job.drawn.admission };
     // Which Messages before the opening's page a seam lists is known only
     // by reading them, so its search starts at the history's first
     // position, at the first transcript that reaches the seam and not here:
@@ -557,7 +559,7 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .typed = &job.result.output_blocks };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
     try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home);
     if (!latest) job.result.history_cursor = prepared.page.continuation();
@@ -573,7 +575,7 @@ fn searchFrom(queued: protocol.Queued) ?u64 {
 fn list(job: *Job, task: *Task, step: Listing) !void {
     const requests = task.requests();
     try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
+    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .typed = &job.result.output_blocks };
     switch (step) {
         .echo => |echo| {
             const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .at = echo.message.admitted_at, .value = .{ .admission = echo.message } };
@@ -843,6 +845,8 @@ const DisplayCapture = struct {
     task: *Task,
     file: std.Io.File,
     offset: u64 = 0,
+    typed: ?*OutputBlocks.Capture = null,
+    active: ?u5 = null,
     /// Where its collapsed blocks are recorded, if anywhere: the job's
     /// result, filled in place.
     blocks: ?*Collected = null,
@@ -894,10 +898,53 @@ const DisplayCapture = struct {
         if (self.blocks) |blocks| blocks.add(value);
     }
 
+    fn capability(self: *@This()) OutputBlocks.Sink {
+        return .{ .context = self, .event = blockEvent };
+    }
+
+    fn blockEvent(raw: *anyopaque, request: OutputBlocks.Request) anyerror!bool {
+        const self: *DisplayCapture = @ptrCast(@alignCast(raw));
+        const marks = self.typed orelse return false;
+        switch (request) {
+            .begin_table => |table| {
+                std.debug.assert(self.active == null);
+                if (!marks.reserve(.{ .start = self.offset, .end = self.offset, .data = .{ .table = table.columns } })) return false;
+                self.active = @intCast(marks.count - 1);
+                try self.feed(table.header);
+                marks.items[self.active.?].header_end = self.offset;
+                try self.feed(table.delimiter);
+                marks.items[self.active.?].delimiter_end = self.offset;
+                marks.items[self.active.?].complete_end = self.offset;
+            },
+            .table_row => |row| {
+                const index = self.active orelse return error.InvalidOutputBlockSequence;
+                std.debug.assert(marks.items[index].data == .table);
+                try self.feed(row);
+                marks.items[index].complete_end = self.offset;
+            },
+            .end_table => self.active = null,
+            .quote => |quote| {
+                if (quote) |value| {
+                    std.debug.assert(self.active == null);
+                    if (!marks.reserve(.{ .start = self.offset, .end = self.offset, .data = .{ .quote = value } })) return false;
+                    self.active = @intCast(marks.count - 1);
+                } else {
+                    if (self.active) |index| {
+                        std.debug.assert(marks.items[index].data == .quote);
+                        if (marks.items[index].start == marks.items[index].end) marks.count -= 1;
+                    }
+                    self.active = null;
+                }
+            },
+        }
+        return true;
+    }
+
     pub fn feed(self: *@This(), bytes: []const u8) !void {
         if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
         try self.file.writePositionalAll(self.task.io, bytes, self.offset);
         self.offset += bytes.len;
+        if (self.active) |index| self.typed.?.items[index].end = self.offset;
         if (bytes.len == 0 or self.current_shown) return;
         const current = self.current orelse return;
         self.current_shown = true;
@@ -2001,4 +2048,160 @@ test "a stop labels a Message that showed while it waited at the opening" {
     try host.read(&live);
     try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Stopped before it ran · send it again to run it") != null);
     try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Session stopped.") != null);
+}
+
+test "typed capture ordered bridge publishes exact raw extents for live and actual saved_capture rendering" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const staged = try tmp.dir.createFile(io, "rendered", .{ .read = true });
+    defer staged.close(io);
+    const raw_file = try tmp.dir.createFile(io, "canonical", .{ .read = true });
+    defer raw_file.close(io);
+    var task: Task = .{ .io = io };
+    const raw = "h|x\n---|---\na|\x1b[31m\xff\nlast|row";
+    try raw_file.writePositionalAll(io, raw, 0);
+    var expected: [256]u8 = undefined;
+    var history_marks: OutputBlocks.Capture = .{};
+    // HISTORY uses the actual Prepared.renderBlocks path, not the live-only
+    // Answer helper. Content staging authentication has its independent tests.
+    var prepared: History.Prepared = .{ .page = .{ .end = 9, .count = 1, .more = false } };
+    prepared.page.items[0] = .{ .position = 9, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = raw.len, .digest = protocol.contentDigest(raw) } };
+    prepared.bodies[0] = .{ .whole = .{ .offset = 0, .length = raw.len } };
+    var saved_capture: DisplayCapture = .{ .task = &task, .file = staged, .typed = &history_marks };
+    try prepared.renderBlocks(io, raw_file, "store", "09azvw", &saved_capture, .transcript, false, "", saved_capture.capability());
+    try std.testing.expect(saved_capture.active == null);
+    try std.testing.expectEqual(@as(u6, 1), history_marks.count);
+    try std.testing.expectEqualStrings("\n" ++ raw ++ "\n", expected[0..try staged.readPositionalAll(io, &expected, 0)]);
+    try std.testing.expectEqual(@as(u64, 1), history_marks.items[0].start);
+    try std.testing.expectEqual(@as(u64, 1 + raw.len), history_marks.items[0].complete_end);
+    for (0..raw.len + 1) |split| {
+        try staged.setLength(io, 0);
+        var marks: OutputBlocks.Capture = .{};
+        var capture: DisplayCapture = .{ .task = &task, .file = staged, .typed = &marks };
+        try capture.feed("\n");
+        var answer: View.Answer(*DisplayCapture) = undefined;
+        answer.initBlocks(&capture, "", capture.capability());
+        try answer.feed(raw[0..split]);
+        try answer.feed(raw[split..]);
+        try answer.finish();
+        try capture.feed("\n");
+        try std.testing.expect(capture.active == null);
+        try std.testing.expectEqualStrings("\n" ++ raw ++ "\n", expected[0..try staged.readPositionalAll(io, &expected, 0)]);
+        try std.testing.expectEqual(@as(u6, 1), marks.count);
+        try std.testing.expectEqual(history_marks.items[0].start, marks.items[0].start);
+        try std.testing.expectEqual(history_marks.items[0].complete_end, marks.items[0].complete_end);
+    }
+    // A details/inspection path cannot grant syntax authority even when its
+    // caller happens to own the capability.
+    try staged.setLength(io, 0);
+    history_marks.clear();
+    saved_capture = .{ .task = &task, .file = staged, .typed = &history_marks };
+    try prepared.renderBlocks(io, raw_file, "store", "09azvw", &saved_capture, .details, false, "", saved_capture.capability());
+    try std.testing.expectEqual(@as(u6, 0), history_marks.count);
+}
+
+test "typed capture rejects slot pressure before writes and preserves original callback cancellation" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "output", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    var marks: OutputBlocks.Capture = .{};
+    for (0..OutputBlocks.limit) |index| try std.testing.expect(marks.reserve(.{ .start = index, .end = index + 1, .data = .literal_raw }));
+    var capture: DisplayCapture = .{ .task = &task, .file = file, .offset = OutputBlocks.limit, .typed = &marks };
+    const table: OutputBlocks.Request = .{ .begin_table = .{ .header = "h|x\n", .delimiter = "---|---\n", .columns = .{ .count = 2, .alignment = @splat(.left) } } };
+    try std.testing.expect(!try capture.capability().send(table));
+    try std.testing.expectEqual(@as(u64, OutputBlocks.limit), capture.offset);
+    try std.testing.expectEqual(@as(u64, 0), (try file.stat(io)).size);
+    marks.clear();
+    capture.offset = 0;
+    task.cancellation.requestStop();
+    var answer: View.Answer(*DisplayCapture) = undefined;
+    answer.initBlocks(&capture, "", capture.capability());
+    try std.testing.expectError(error.Cancelled, answer.feed("h|x\n---|---\n"));
+    try std.testing.expectEqual(@as(u64, 0), capture.offset);
+    try std.testing.expectError(error.Cancelled, answer.finish());
+}
+
+test "typed submitted quote capture uses original bytes through escaping collapse and fence opacity" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "user", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    const source = "> *literal* \x1b[31m\n````\n> > code\n````\n>> nested\n";
+    const digest = protocol.contentDigest(source);
+    var bytes: [1024]u8 = undefined;
+    for (0..source.len + 1) |split| {
+        try file.setLength(io, 0);
+        var marks: OutputBlocks.Capture = .{};
+        var capture: DisplayCapture = .{ .task = &task, .file = file, .typed = &marks };
+        var body: View.UserBody(*DisplayCapture) = undefined;
+        try body.initBlocks(&capture, source.len, true, capture.capability());
+        try body.feed(source[0..split]);
+        try body.feed(source[split..]);
+        try std.testing.expect(!try body.finish());
+        const written = bytes[0..try file.readPositionalAll(io, &bytes, 0)];
+        try std.testing.expect(std.mem.indexOf(u8, written, "> *literal* \\x1b[31m") != null);
+        try std.testing.expect(std.mem.indexOf(u8, written, "\x1b[3m") == null);
+        try std.testing.expectEqual(@as(u6, 2), marks.count);
+        try std.testing.expectEqual(@as(u4, 1), marks.items[0].data.quote.depth);
+        try std.testing.expectEqual(@as(u4, 2), marks.items[1].data.quote.depth);
+        for (marks.slice()) |mark| try std.testing.expect(written[@intCast(mark.start)] == '>');
+    }
+    try std.testing.expectEqualSlices(u8, &digest, &protocol.contentDigest(source));
+    try file.setLength(io, 0);
+    var marks: OutputBlocks.Capture = .{};
+    var capture: DisplayCapture = .{ .task = &task, .file = file, .typed = &marks };
+    const preview = "> *first*\n~~~~\n> hidden code\n~~~~\n> hidden quote\n";
+    var body: View.UserBody(*DisplayCapture) = undefined;
+    try body.initBlocks(&capture, preview.len, false, capture.capability());
+    try body.feed(preview);
+    try std.testing.expect(try body.finish());
+    try std.testing.expectEqual(@as(u6, 1), marks.count);
+    try std.testing.expect(marks.items[0].data == .quote);
+}
+
+test "typed storage owners expose physical bounds separately from logical source credit" {
+    std.debug.print("output physical Document={d} Pane={d} Screen3panes={d} Job={d} JobResult={d} rewriteByteStyleArrays={d} rewriteMarks={d} bytes; backend budget is separate\n", .{
+        @sizeOf(Viewport.Document), @sizeOf(Viewport.Pane), @sizeOf(@import("SessionScreen.zig")), @sizeOf(Job), @sizeOf(@FieldType(Job, "result")), 2 * Viewport.capacity, @sizeOf(OutputBlocks.Retained),
+    });
+    try std.testing.expectEqual(@as(usize, 32), @typeInfo(@FieldType(OutputBlocks.Retained, "items")).array.len);
+    try std.testing.expectEqual(@as(usize, 32), @typeInfo(@FieldType(OutputBlocks.Capture, "items")).array.len);
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(OutputBlocks.Span(u32)));
+}
+
+test "typed bridge partial raw I/O remains fatal and cannot replay as rejection" {
+    const Fault = struct {
+        var writes: usize = 0;
+        fn write(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
+            writes += 1;
+            if (offset >= 4) return error.InputOutput;
+            return std.testing.io.vtable.fileWritePositional(userdata, file, header, data, splat, offset);
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "partial", .{ .read = true });
+    defer file.close(io);
+    var vtable = io.vtable.*;
+    vtable.fileWritePositional = Fault.write;
+    var task: Task = .{ .io = .{ .userdata = io.userdata, .vtable = &vtable } };
+    var marks: OutputBlocks.Capture = .{};
+    var capture: DisplayCapture = .{ .task = &task, .file = file, .typed = &marks };
+    var answer: View.Answer(*DisplayCapture) = undefined;
+    answer.initBlocks(&capture, "", capture.capability());
+    Fault.writes = 0;
+    try std.testing.expectError(error.InputOutput, answer.feed("h|x\n---|---\n"));
+    try std.testing.expectEqual(@as(u64, 4), capture.offset);
+    try std.testing.expectEqual(@as(u64, 4), (try file.stat(io)).size);
+    try std.testing.expectEqual(@as(u6, 1), marks.count);
+    const calls = Fault.writes;
+    try std.testing.expectError(error.InputOutput, answer.finish());
+    try std.testing.expectError(error.InputOutput, answer.feed("more"));
+    try std.testing.expectEqual(calls, Fault.writes);
 }
