@@ -296,7 +296,7 @@ fn nanosecondsNow() u64 {
     return @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds);
 }
 
-test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 over it" {
+test "overview benchmark: merging a 10,000-row listing and computing its layout" {
     const total = 10_000;
     const runs = 5;
     const now_s = 1_792_937_000;
@@ -304,9 +304,9 @@ test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 ove
     defer std.testing.allocator.free(rows);
     var merge_ns: [runs]u64 = undefined;
     var listing_ns: [runs]u64 = undefined;
-    var render_ns: [runs]u64 = undefined;
+    var layout_ns: [runs]u64 = undefined;
     var merge_allocations: usize = 0;
-    var render_allocations: usize = 0;
+    var layout_allocations: usize = 0;
     for (0..runs) |run| {
         var counting: CountingAllocator = .{ .child = std.heap.smp_allocator };
         var state: overview_view.State = undefined;
@@ -327,16 +327,16 @@ test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 ove
 
         _ = try overview_view.step(&state, .{ .resized = .{ .width = 200, .height = 60 } });
         counting.count = 0;
-        const render_start = nanosecondsNow();
-        var screen = try overview_view.render(counting.allocator(), &state, .{}, .{}, 0);
-        render_ns[run] = nanosecondsNow() - render_start;
-        render_allocations = @max(render_allocations, counting.count);
-        screen.deinit();
+        const layout_start = nanosecondsNow();
+        const layout = overview_view.layout(&state, 1, 0);
+        try std.testing.expect(layout.list.len() != 0);
+        layout_ns[run] = nanosecondsNow() - layout_start;
+        layout_allocations = @max(layout_allocations, counting.count);
     }
     std.mem.sortUnstable(u64, &merge_ns, {}, std.sort.asc(u64));
     std.mem.sortUnstable(u64, &listing_ns, {}, std.sort.asc(u64));
-    std.mem.sortUnstable(u64, &render_ns, {}, std.sort.asc(u64));
-    std.debug.print("overview benchmark, {d} rows: merging step {d}us median ({d}-{d}); whole listing {d}us median ({d}-{d}), {d} allocations; render 200x60 {d}us median ({d}-{d}), {d} allocations\n", .{
+    std.mem.sortUnstable(u64, &layout_ns, {}, std.sort.asc(u64));
+    std.debug.print("overview benchmark, {d} rows: merging step {d}us median ({d}-{d}); whole listing {d}us median ({d}-{d}), {d} allocations; layout 200x60 {d}us median ({d}-{d}), {d} allocations\n", .{
         total,
         merge_ns[runs / 2] / 1000,
         merge_ns[0] / 1000,
@@ -345,11 +345,11 @@ test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 ove
         listing_ns[0] / 1000,
         listing_ns[runs - 1] / 1000,
         merge_allocations,
-        render_ns[runs / 2] / 1000,
-        render_ns[0] / 1000,
-        render_ns[runs - 1] / 1000,
-        render_allocations,
+        layout_ns[runs / 2] / 1000,
+        layout_ns[0] / 1000,
+        layout_ns[runs - 1] / 1000,
+        layout_allocations,
     });
     try std.testing.expect(merge_allocations <= total);
-    try std.testing.expect(render_allocations <= total);
+    try std.testing.expect(layout_allocations <= total);
 }

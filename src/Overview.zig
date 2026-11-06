@@ -3,7 +3,8 @@
 //!
 //! It owns the terminal and one loop. Keys, ticks at `State.wakeAt` and the
 //! worker's replies enter `overview_view.step` as events; the loop runs the
-//! effects `step` returns and draws `overview_view.render`. It branches only
+//! effects `step` returns and paints `OverviewPaint.draw` into the shared backend.
+//! It branches only
 //! on which effect to run, so every screen decision stays in the core. One
 //! worker runs the client requests in order, so one list read is in flight
 //! at a time, and the core only ever hears list replies for the listing it
@@ -20,6 +21,7 @@ const model_picker = @import("model_picker.zig");
 const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
+const OverviewPaint = @import("OverviewPaint.zig");
 const ClientTask = @import("ClientTask.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
@@ -306,10 +308,9 @@ command_page: ?std.Io.File = null,
 /// What the last command printed, as far as the core takes it.
 output: Output = .{},
 
-/// The screen the terminal shows, so a frame writes only what changed;
-/// null when the terminal's contents are unknown.
-shown: ?view.Screen = null,
-frame: std.ArrayList(u8) = .empty,
+/// Whether the current semantic rows need another animation tick. The
+/// backend, not the overview, owns the retained cells and diff reference.
+spins: bool = false,
 /// What a key read while output waited asks of the loop.
 pumped: ?Next = null,
 /// The Session a conversation borrows, in stable storage.
@@ -449,8 +450,6 @@ fn destroy(self: *Self) void {
     if (self.scratch) |file| file.close(self.init.io);
     if (self.command_page) |file| file.close(self.init.io);
     self.closePipes();
-    self.forget();
-    self.frame.deinit(self.init.gpa);
     self.state.deinit();
     self.menu.deinit(self.init.gpa);
     self.init.gpa.destroy(self);
@@ -487,7 +486,7 @@ fn turn(self: *Self) !?Next {
     const awake_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds;
     const awake_ms: u64 = @intCast(@max(@divFloor(awake_ns, std.time.ns_per_ms), 0));
     if (try self.draw(awake_ms / view.spin_interval_ms)) |next| return next;
-    const spins = if (self.shown) |*held| held.spins else false;
+    const spins = self.spins;
     const timeout = switch (self.terminal.stream.wait(awake_ns, self.budget(now_ms, awake_ms, spins))) {
         .expire => 0,
         .poll => |milliseconds| milliseconds,
@@ -513,13 +512,9 @@ fn proceed(self: *Self, next: Next) ?Ending {
         .leave => return .overview,
         .open => |reference| {
             self.opened = reference;
-            self.forget();
-            self.terminal.screen.backend.invalidate();
+            // Both views paint the SAME retained grid; changing the borrower
+            // is not a reason to discard a healthy libvaxis diff reference.
             if (self.ops.converse(self, self.opened)) |left| return .{ .conversation = left };
-            // The legacy overview and backend must each forget the other's
-            // projection until U4 removes the Span/diff owner altogether.
-            self.forget();
-            self.terminal.screen.backend.invalidate();
             return null;
         },
     }
@@ -1027,45 +1022,44 @@ fn route(mode: view.InputMode, composer: *TerminalEditor, decoded: TerminalInput
     };
 }
 
-/// Draws the core's screen at `frame`, writing only what the terminal does
-/// not already show. The shown screen says whether it changes with the
-/// next frame.
+/// Paints semantic rows at animation `frame`; libvaxis alone diffs its grid.
+/// Encoded bytes remain frozen until the existing pumped write completes.
 fn draw(self: *Self, frame: u64) !?Next {
     if (try self.resize()) |next| return next;
-    var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), self.caps, frame);
-    errdefer screen.deinit();
-    self.draft_anchor = screen.draft_anchor;
-    self.state.commands = screen.commands;
-    self.frame.clearRetainingCapacity();
-    var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
-    // Waiting reports and a notification go first, through the frame's
-    // pumped write.
-    self.terminal.writeWaiting(&bytes.writer) catch return error.OutOfMemory;
-    screen.writeFrame(if (self.shown) |*held| held else null, &bytes.writer) catch return error.OutOfMemory;
-    self.frame = bytes.toArrayList();
-    // The terminal already shows it; keep the new screen, whose spinner is
-    // current.
-    if (self.frame.items.len == 0) {
-        self.forget();
-        self.shown = screen;
-        return null;
+    self.terminal.applyReports();
+    const backend = self.terminal.screen.backend;
+    _ = backend.setPolicy(.{ .width = self.caps.width, .depth = switch (self.caps.depth) {
+        .none => .none,
+        .indexed => .indexed,
+        .direct => .direct,
+    } });
+    const size = self.terminal.geometry();
+    try backend.begin(.{ .cols = size.col, .rows = size.row, .x_pixel = size.xpixel, .y_pixel = size.ypixel });
+    defer {
+        backend.end();
+        self.terminal.applyReports();
     }
+    errdefer backend.poison();
+    // Waiting reports go first, while this is still only allocating memory.
+    self.terminal.writeWaiting(backend.prefixWriter()) catch return error.OutOfMemory;
+    const drawn = try OverviewPaint.draw(backend.window(), backend.scratch(), &self.state, self.composerDraft(), self.caps, frame);
+    self.draft_anchor = drawn.draft_anchor;
+    self.state.commands = drawn.commands;
+    self.spins = drawn.spins;
+    const bytes = try backend.encode();
     self.terminal.pump = .{ .context = self, .step = pump };
     defer self.terminal.pump = null;
-    // An output failure retires the invocation; never recover its diff cache.
-    self.forget();
     self.pumped = null;
     defer self.pumped = null;
-    self.terminal.write(self.frame.items) catch |err| {
-        self.terminal.screen.backend.poison();
-        if (err == error.InteractiveInterrupted) {
-            screen.deinit();
-            return .leave;
-        }
+    self.terminal.write(bytes) catch |err| {
+        // A normal leave is still a failed frozen frame: poison BEFORE the
+        // catch converts the I/O interruption into the loop's normal result.
+        backend.poison();
+        if (err == error.InteractiveInterrupted) return .leave;
         return err;
     };
+    // Also the existing acknowledgement point for a genuinely empty frame.
     self.terminal.wrote();
-    self.shown = screen;
     return self.pumped;
 }
 
@@ -1075,11 +1069,6 @@ fn resize(self: *Self) !?Next {
     const size = self.terminal.geometry();
     if (size.col == self.state.size.width and size.row == self.state.size.height) return null;
     return self.event(.{ .resized = .{ .width = size.col, .height = size.row } });
-}
-
-fn forget(self: *Self) void {
-    if (self.shown) |*held| held.deinit();
-    self.shown = null;
 }
 
 /// How long the loop may wait, in milliseconds, -1 for ever: until the
@@ -1112,7 +1101,6 @@ fn converse(self: *Self, session: view.Reference) ?Left {
     const screen = self.terminal.screen;
     // Fresh domain state borrows the SAME invocation grids and decoder.
     screen.init(screen.backend);
-    screen.backend.invalidate();
     var opened: [6]std.Io.File = undefined;
     for (&opened, 0..) |*file, count| file.* = self.hooks.scratch(self.init) catch |err| {
         for (opened[0..count]) |done| done.close(io);
@@ -2176,8 +2164,9 @@ test "the loop opens the resumed Session first, lists on its tick, draws once an
     const question = "\x1b]11;?\x1b\\\x1b[c";
     try std.testing.expect(std.mem.startsWith(u8, written, question));
     const frame = written[question.len..];
-    try std.testing.expect(std.mem.startsWith(u8, frame, "\x1b[?2026h"));
-    try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[?2026l"));
+    // The backend may stage resize controls before its synchronized render.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, frame, "\x1b[?2026h"));
+    try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[?2026l" ++ vaxis.ctlseqs.osc8_clear ++ vaxis.ctlseqs.sgr_reset));
     // The terminal already shows an unchanged screen. The Host read may
     // have answered after that frame, so draw what it changed first.
     try std.testing.expect(try rig.overview.draw(0) == null);
@@ -2197,17 +2186,19 @@ test "each frame rewrites your working Session's spinner alone, and without colo
     try std.testing.expect(try overview.event(.{ .tick = (test_now_s - 10) * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     var buffer: [64 * 1024]u8 = undefined;
-    try std.testing.expect(try overview.draw(2) == null and overview.shown.?.spins);
-    try std.testing.expect(std.mem.count(u8, rig.drawn(&buffer), "\x1b[2K") == 24);
-    try std.testing.expect(try overview.draw(2) == null and overview.shown.?.spins);
+    try std.testing.expect(try overview.draw(2) == null and overview.spins);
+    const first = rig.drawn(&buffer);
+    const first_len = first.len;
+    try std.testing.expect(first_len != 0);
+    try std.testing.expect(try overview.draw(2) == null and overview.spins);
     try std.testing.expectEqualStrings("", rig.drawn(&buffer));
-    try std.testing.expect(try overview.draw(3) == null and overview.shown.?.spins);
+    try std.testing.expect(try overview.draw(3) == null and overview.spins);
     const turned = rig.drawn(&buffer);
     try std.testing.expect(std.mem.indexOf(u8, turned, view.spinner[3]) != null);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, turned, "H\x1b[0"));
-    try std.testing.expect(std.mem.indexOf(u8, turned, "\x1b[2K") == null);
+    try std.testing.expect(turned.len < first_len);
+    try std.testing.expect(std.mem.indexOf(u8, turned, "Type a task") == null);
     overview.caps = .{ .depth = .none };
-    try std.testing.expect(try overview.draw(4) == null and !overview.shown.?.spins);
+    try std.testing.expect(try overview.draw(4) == null and !overview.spins);
 }
 
 test "the loop waits for the core's next tick, and while the screen spins no later than its next frame" {
@@ -2982,7 +2973,10 @@ test "a terminal that answers device attributes before the probe keeps the notif
     var buffer: [64 * 1024]u8 = undefined;
     try std.testing.expect(try overview.draw(0) == null);
     const written = rig.drawn(&buffer);
-    try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]9;Rui: Fix the flaky test finished\x07\x1b[?2026h"));
+    const notice = "\x1b]9;Rui: Fix the flaky test finished\x07";
+    try std.testing.expect(std.mem.startsWith(u8, written, notice));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, written[notice.len..], "\x1b[?2026h"));
+    try std.testing.expect(std.mem.endsWith(u8, written, vaxis.ctlseqs.osc8_clear ++ vaxis.ctlseqs.sgr_reset));
     try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]7501;") == null);
     // The background question's device attributes answer still ends its
     // wait.
@@ -3690,4 +3684,54 @@ test "a command that fails while it runs is the failure reported, even when taki
     defer rig.overview.state.gpa = gpa;
     try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
     try std.testing.expect(failing.has_induced_failure);
+}
+
+test "overview detail overview paints one healthy backend and retains the invocation decoder" {
+    var phase: []const u8 = "setup";
+    errdefer std.debug.print("roundtrip phase={s}\n", .{phase});
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.caps = .{ .depth = .indexed };
+    Seen.now.listed = 3;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    const backend = rig.screen.backend;
+    const decoder = &rig.terminal.stream;
+    overview.state.selected = shownRow(rig, 1);
+    const selected = overview.state.selected.?;
+    var buffer: [64 * 1024]u8 = undefined;
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(rig.drawn(&buffer).len != 0);
+    // A borrower that changes no cell needs no cache retirement at either boundary.
+    phase = "healthy empty borrower";
+    try std.testing.expect(overview.proceed(.{ .open = selected }) == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+    // Carry an unfinished CSI across actual overview/detail/overview painting.
+    phase = "split prefix";
+    try std.testing.expect(try rig.press("\x1b[") == null);
+    rig.screen.init(backend);
+    try rig.screen.append("A detail answer\n");
+    phase = "detail redraw";
+    const delivered = try rig.terminal.redraw("detail draft", 12, .{}, &.{});
+    phase = "detail receipt";
+    try std.testing.expect(!rig.screen.ticket.?.delivered);
+    _ = rig.screen.presented(delivered);
+    try std.testing.expect(rig.screen.ticket.?.delivered);
+    try std.testing.expect(rig.drawn(&buffer).len != 0);
+    phase = "return to overview";
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(rig.drawn(&buffer).len != 0);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+    try std.testing.expect(rig.screen.backend == backend and &rig.terminal.stream == decoder);
+    try std.testing.expectEqualStrings(&selected, &overview.state.selected.?);
+    phase = "split tail";
+    try std.testing.expectEqual(@as(@import("TerminalInput.zig").Pending, .incomplete), decoder.pending());
+    try std.testing.expect(try rig.press("B") == null);
+    try std.testing.expectEqual(@as(@import("TerminalInput.zig").Pending, .none), decoder.pending());
+    try std.testing.expect(!std.mem.eql(u8, &selected, &overview.state.selected.?));
+    try std.testing.expectEqualStrings("", overview.composerDraft().bytes);
 }

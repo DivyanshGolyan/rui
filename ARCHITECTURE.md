@@ -127,7 +127,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts (listed efforts and optional context window); `src/model_capability.zig` derives capability from that catalog. |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
-| Session overview | `src/Overview.zig` owns the terminal surface and its reader; `src/overview_view.zig` is its presentation core. |
+| Session overview | `src/Overview.zig` owns the terminal and its reader; `src/overview_view.zig` owns semantic layout and decisions; `src/OverviewPaint.zig` paints directly into the invocation's charged `RenderBackend`. |
 | Desktop notifications | `src/attention.zig` decides which states are news and words them, and what program status record each Session has; `src/SessionTerminal.zig` owns focus and the program status probe, and writes both. |
 | Functional cores | The `cores` list in `src/logic_tests.zig`; `src/core_boundary.zig` defines what a core may name. |
 
@@ -2145,10 +2145,14 @@ Keys are read while output waits for terminal credit, so Ctrl-C still leaves.
 Ctrl-D on an empty composer, or Ctrl-C, leaves the overview, and the Detached notice names the command that opens it again.
 
 The overview paints its own look; the conversation and the shell keep the terminal's.
-`overview_view` holds the two Khadi skins as data, one palette table each, and `render` names only roles (text colours and grounds).
+`overview_view` holds the two Khadi skins as data, one palette table each; `OverviewPaint.draw` names roles (text colours and grounds) and writes directly through libvaxis `Window.printSegment` into the same charged grid a conversation borrows.
 The shell asks the terminal for its background with OSC 11, followed by DA1 so that a terminal without OSC 11 ends the wait, and waits at most 200 ms before the first frame; an answer that comes later still applies.
 The core chooses night unless the answer is light.
-Each frame clears every line to the skin's ground, draws its spans in 24-bit colour under `COLORTERM=truecolor` or `24bit` and in the nearest 256-colour entries otherwise, and ends in an SGR reset, so no exit path has colours to restore.
+Each paint fills the current grid with the skin's ground and writes only bounded visible rows in 24-bit colour under `COLORTERM=truecolor` or `24bit`, or in the domain's nearest 256-colour entries otherwise.
+There is no overview Screen, Span list, frame-byte buffer, ANSI encoder or retained diff: libvaxis owns the one retained cell reference, and healthy overview/detail handoffs do not invalidate it.
+All generated labels and cleaned graphemes live in the backend's charged frame scratch through encoding; the painter returns only the composer anchor, shown-command facts and whether animation is needed.
+Waiting terminal reports precede paint in the backend prefix writer; frozen bytes, including any resize controls, are written completely before the existing report acknowledgement or captured handoff.
+Every nonempty frame ends with OSC 8 close and SGR reset; an unchanged frame emits nothing. A partial output failure poisons the invocation before any normal-leave conversion.
 `NO_COLOR` frames carry no colour at all: the band and the selection are reverse video.
 
 Typing in the overview's composer and pressing Enter starts a new Session with that text as its first Message, through one captured `session start` command: atomic configuration plus Message admission with the full Workspace, exact provider/model, Bash and `bypass` unless the composer's `/configure` start settings select otherwise.

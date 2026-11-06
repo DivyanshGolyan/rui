@@ -172,6 +172,19 @@ class SelectionTest(unittest.TestCase):
             for family in ("targets", "native_targets"):
                 self.assertEqual(result[family], owners[family], path)
 
+    def test_direct_overview_paint_executes_ui_root_and_pty_callers(self):
+        result = select(["src/OverviewPaint.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertIn("test", result[family])
+            self.assertIn("terminal-restoration-integration", result[family])
+            self.assertNotIn("check", result[family])
+        # Preserve the selector's existing development-vs-boundary policy.
+        development = select(["src/OverviewPaint.zig"], "development", AVAILABLE)
+        self.assertEqual(["test-logic"], development["targets"])
+        self.assertEqual([], development["native_targets"])
+        core = select(["src/overview_view.zig"], "review", AVAILABLE)
+        self.assertIn("test-logic", core["targets"])
+
     def test_every_functional_core_selects_the_boundary_check(self):
         source = (Path(__file__).resolve().parents[2] / "src" / "logic_tests.zig").read_text()
         listed = source.split("const cores = .{", 1)[1].split("\n};", 1)[0]

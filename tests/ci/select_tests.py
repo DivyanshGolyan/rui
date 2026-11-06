@@ -17,7 +17,7 @@ FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSub
             "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/RenderBackend.zig", "src/RenderGeometry.zig", "src/testing/render.zig",
             "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
             "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig", "src/overview_view.zig",
-            "src/Overview.zig", "src/keymap.zig", "src/status_page.zig", "src/command_value.zig", "src/home_path.zig")
+            "src/Overview.zig", "src/OverviewPaint.zig", "src/keymap.zig", "src/status_page.zig", "src/command_value.zig", "src/home_path.zig")
 PTY_TARGETS = ("terminal-restoration-integration", "canonical-failure-integration")
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
 RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
@@ -58,8 +58,10 @@ RULES = (
     (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/draft_layout.zig", "src/session_line.zig", "src/work_line.zig", "src/queued_line.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig", "src/keymap.zig"),
      ("test-logic", *PTY_TARGETS), ("test-logic", *PTY_TARGETS),
      "Terminal layout and input values retain their separate logic root and native wiring"),
+    (("src/OverviewPaint.zig",), ("test", *PTY_TARGETS), ("test", *PTY_TARGETS),
+     "Direct shared-backend overview and model-picker cells with native handoffs"),
     (("src/overview_view.zig", "src/attention.zig", "src/model_picker.zig"), ("test-logic",), ("test-logic",),
-     "Overview decisions and screen over values; its shell's owner selects native checks"),
+     "Pure overview identity, layout, selection and effects; UI painting has its own root"),
     (("src/failure_class.zig",), ("test-logic", "test"), ("test-logic", "test"),
      "What a saved failure code lets the person do; the conversation view renders it"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the nonblocking renderer contracts run them"),
