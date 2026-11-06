@@ -1,13 +1,13 @@
 # Status and navigation
 
-`/status` shows the Session's settings and current work as a browsing page. The user scrolls history with PgUp/PgDn, arrows or the wheel, returns to live with Esc, End or Ctrl-G, and loses no draft.
+`/status` shows the Session's settings and current work as a browsing page. The user scrolls history with PgUp/PgDn, arrows or the wheel, resumes live by scrolling to the actual end or Ctrl-End (End only with an empty draft); Esc or Ctrl-G retains page-return navigation, and loses no draft.
 
 ## Sub-features
 
 - `status-page`: `/status` shows ` Status · NAME · ID`, the `Permissions` row (bypass is described only here), the `Work` section and the compaction rows, under `Browsing · Esc returns`.
 - `status-refresh`: a second `/status` during or after work shows the current `Work` state, not stale text.
 - `details`: `/details` shows full saved tool output.
-- `scroll-page`: PgUp/PgDn move by pages, and repeated PgUp reaches `Start of conversation`.
+- `scroll-page`: PgUp/PgDn move by pages without a Browsing header; the footer says Looking back. All-fitting/no-older Up/PgUp changes no cells; `/history` can reveal Start of conversation. Appends preserve the first content; downward motion joins retained newer output before following at the actual end. View-capacity limits and real retention gaps have distinct footer labels.
 - `scroll-wheel`: the physical wheel scrolls. Rui enables alternate scroll (`?1007h`) when the terminal reports it reset, so the terminal sends arrow keys. Rui does not enable mouse tracking.
 - `return-live`: Esc, End (empty draft) and Ctrl-G return to the latest messages with the draft unchanged.
 

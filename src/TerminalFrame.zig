@@ -44,9 +44,6 @@ call_heights: [3]u16,
 heading: Viewport.Sized(128, false),
 used: usize,
 height: u16,
-/// Document rows a transcript would have with this frame's status and draft:
-/// no calls, and a heading row when one fits.
-browsing_height: u16,
 first: Position,
 document_rows: usize,
 /// Rows above a whole Action, so that it ends right above the input. The
@@ -92,6 +89,10 @@ pub const Input = struct {
     width: u16,
     height: u16,
     method: Viewport.Method = .wcwidth,
+    /// Stable text width excludes the conversation rail, not draft/chrome.
+    document_width: ?u16 = null,
+    first_row: ?usize = null,
+    document_total: ?usize = null,
     draft: []const u8 = "",
     cursor: usize,
     /// The byte that started the previous frame's first draft line.
@@ -155,6 +156,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
 fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
     try validateGeometry(input.width, input.height);
     const layout: Viewport.Layout = .{ .width = input.width, .method = input.method };
+    const text_layout: Viewport.Layout = .{ .width = input.document_width orelse input.width, .method = input.method };
     self.* = .{
         .status = .{ .width_method = input.method },
         .notice = .{ .width_method = input.method },
@@ -163,7 +165,6 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
         .heading = .{ .width_method = input.method },
         .used = if (input.selected) 0 else input.calls.len,
         .height = 0,
-        .browsing_height = 0,
         .first = .{},
         .document_rows = 0,
         .document_offset = 0,
@@ -208,6 +209,7 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
     // the draft can then grow up to its cap.
     var available: u16 = input.height - 1 - self.rule_height - footer;
     try document.prepare();
+    const total = input.document_total orelse document.rowCount(text_layout);
     for (input.calls, 0..) |line, index| {
         try self.calls[index].append(line);
         self.call_heights[index] = try rows(&self.calls[index], layout);
@@ -235,7 +237,7 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
             self.heading.clear();
             if (omitted != 0) {
                 heading_height = try self.overflow(layout, omitted, compact);
-            } else heading_height = if (input.selected and (!input.action_visible or !input.preview_complete or document.measure(layout, .{}, budget -| (needed - 1)).next.order(.end) != .eq) and budget -| call_rows > 1) 1 else 0;
+            } else heading_height = if (input.selected and (!input.action_visible or !input.preview_complete or total > budget -| (needed - 1)) and budget -| call_rows > 1) 1 else 0;
             if (@as(u32, call_rows) + heading_height <= budget) break;
             if (omitted != 0 and !compact) {
                 compact = true;
@@ -265,27 +267,11 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
     // have: it is dropped before any draft or command list row.
     self.queued_height = @intFromBool(input.queued != null and room > self.draft.rows + self.list_height);
     const unreserved = input.height - self.draft.rows - self.list_height - self.rule_height - footer;
-    // A transcript of this text shows the live line under its heading and a
-    // readable row.
-    const navigation: u16 = @intFromBool(unreserved > 1);
-    self.browsing_height = unreserved - navigation - @intFromBool(input.live and document.text().len != 0 and unreserved > navigation + 1);
     available = unreserved - self.live_height - self.queued_height;
     self.height = available - heading_height - call_rows;
-    self.first = document.first(layout, self.height);
-    const shown = document.measure(layout, self.first, self.height);
-    self.document_rows = shown.rows;
-    if (input.action_visible and input.preview_complete) {
-        // A whole Action sits right above the input; a taller one pages from
-        // its top.
-        if (self.first.order(.{}) == .eq and shown.next.order(.end) == .eq) self.document_offset = self.height - @as(u16, @intCast(shown.rows));
-        // Only rows delivered contiguously from the top count as read.
-        if (self.first.order(input.action_seen) != .gt and shown.next.order(input.action_seen) == .gt) self.action_seen = shown.next;
-        self.approval_ready = self.action_seen.order(.end) == .eq;
-        if (heading_height != 0) {
-            self.heading.clear();
-            try self.heading.append(if (self.approval_ready) (if (input.width >= 11) "Action read" else "Read") else if (input.width >= 24) "Action continues · PgDn" else "PgDn");
-        }
-    }
+    // This is a value-only preview for callers measuring chrome. The screen
+    // observes the sole ScrollView offset after its final draw below.
+    try self.observe(.{ .text = document, .layout = text_layout, .total = total }, input.first_row orelse if (input.selected) 0 else total -| self.height, input);
     try self.heading.prepare();
     try self.notice.prepare();
     self.overflow_height = if (!input.selected and input.total_calls > self.used) heading_height else 0;
@@ -302,6 +288,33 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
     self.live_row = self.calls_row + call_rows + self.overflow_height;
     self.caret_row = self.draft_top + @as(u16, @intCast(shape.caret_line - self.draft.first));
     self.caret_column = @min(shape.caret_column + 2, input.width - 1);
+}
+
+/// Observes real text rows only, after ScrollView clamps the final canvas.
+/// This forecast is not delivery credit; SessionScreen.presented owns that.
+pub fn observe(self: *Self, rows_: Viewport.TextRows, first_row: usize, input: Input) !void {
+    self.first = if (rows_.total == 0) .{} else rows_.position(first_row);
+    self.document_rows = @min(rows_.total -| first_row, self.height);
+    const next = rows_.position(first_row + self.document_rows);
+    self.action_seen = input.action_seen;
+    self.approval_ready = false;
+    self.document_offset = 0;
+    if (input.action_visible and input.preview_complete) {
+        // A whole Action sits right above the input; a taller one pages from
+        // its top.
+        if (self.first.order(.{}) == .eq and next.order(.end) == .eq) self.document_offset = self.height - @as(u16, @intCast(self.document_rows));
+        // Only rows delivered contiguously from the top count as read.
+        if (self.first.order(input.action_seen) != .gt and next.order(input.action_seen) == .gt) self.action_seen = next;
+        self.approval_ready = self.action_seen.order(.end) == .eq;
+        if (self.navigation_height != 0 or self.heading.length != 0) {
+            self.heading.clear();
+            try self.heading.append(if (self.approval_ready) (if (input.width >= 11) "Action read" else "Read") else if (input.width >= 24) "Action continues · PgDn" else "PgDn");
+        }
+    }
+    self.calls_row = self.navigation_height + self.document_offset + @as(u16, @intCast(self.document_rows));
+    var call_rows: u16 = 0;
+    for (self.call_heights[0..self.used]) |height| call_rows += height;
+    self.live_row = self.calls_row + call_rows + self.overflow_height;
 }
 
 test "geometry is bounded before the shell allocates cells" {
@@ -399,16 +412,13 @@ test "the status stays above the rule while calls and the live line follow the c
     try std.testing.expectEqual(frame.status_row, frame.calls_row + 1);
     // A browsed page keeps the live line above the status, and a transcript
     // opened now would give it a row.
-    const browsing = frame.browsing_height;
     input.selected = true;
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 1), frame.live_height);
     try std.testing.expectEqual(frame.status_row, frame.live_row + 1);
-    try std.testing.expectEqual(browsing, frame.height);
     input.live = false;
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 0), frame.live_height);
-    try std.testing.expectEqual(browsing + 1, frame.browsing_height);
 }
 
 test "the live line takes a row after every required row and before call rows" {
@@ -540,12 +550,10 @@ test "the live row is kept only while the live line draws" {
         const input: Input = .{ .width = 80, .height = 24, .status = "", .cursor = 0, .calls = &.{}, .total_calls = 0, .live = true, .selected = selected, .action_visible = false, .preview_complete = true };
         try frame.plan(&document, input);
         const height = frame.height;
-        const browsing = frame.browsing_height;
         try std.testing.expectEqual(@as(u16, @intFromBool(!selected)), frame.live_height);
         var idle = input;
         idle.live = false;
         try frame.plan(&document, idle);
-        try std.testing.expectEqual(browsing, frame.browsing_height);
         if (selected) try std.testing.expectEqual(frame.height, height);
     }
 }
@@ -642,7 +650,6 @@ test "a multiline draft grows to its cap and then scrolls inside the input" {
     }
     // A capped draft leaves browsing and Action pages their rows: this short
     // page shows whole, so an Action on it is read.
-    document.top = .{};
     for ([_]bool{ false, true }) |action| {
         try frame.plan(&document, .{ .width = 100, .height = 24, .draft = &tall, .cursor = tall.len, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = action, .preview_complete = true });
         try std.testing.expectEqual(@as(usize, 2), frame.document_rows);
@@ -690,7 +697,7 @@ test "a whole Action ends right above the input, a taller one pages from the top
     try document.append("\n? Delete the Zig build cache\n  $ rm -rf .zig-cache zig-out\n");
     var frame: Self = undefined;
     var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
-    document.top = .{};
+    input.first_row = 0;
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(usize, 3), frame.document_rows);
     try std.testing.expectEqual(@as(u16, 0), frame.navigation_height);
@@ -729,22 +736,28 @@ test "Action approval requires contiguous displayed rows and resets after resize
     var frame: Self = undefined;
     var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
     const layout: Viewport.Layout = .{ .width = 80, .method = .wcwidth };
-    document.top = .{};
+    input.first_row = 0;
     try frame.plan(&document, input);
     try std.testing.expect(!frame.approval_ready);
     try std.testing.expectEqualStrings("Action continues · PgDn", frame.heading.text());
     const seen = frame.action_seen;
-    document.top = .{ .offset = 70 * 13 }; // A jump must not certify the skipped rows.
+    input.first_row = 70; // A jump must not certify the skipped rows.
     input.action_seen = seen;
     try frame.plan(&document, input);
     try std.testing.expect(!frame.approval_ready);
     try std.testing.expectEqual(seen, frame.action_seen);
-    document.top = .{};
+    input.first_row = 0;
     for (0..8) |_| {
         input.action_seen = frame.action_seen;
         // Coalesced repeat cannot scroll past the first unread row even when
         // many more keys arrive than could fit between two physical frames.
-        for (0..20) |_| document.browse(layout, true, frame.height, frame.height, if (frame.approval_ready) null else input.action_seen);
+        for (0..20) |_| {
+            var scroll: @import("vaxis").widgets.ScrollView = .{ .scroll = .{ .y = input.first_row orelse 0 } };
+            scroll.scroll.y +|= frame.height;
+            if (!frame.approval_ready) scroll.scroll.y = @min(scroll.scroll.y, document.rowOf(layout, input.action_seen));
+            scroll.scroll.restrictTo(0, document.rowCount(layout) -| frame.height);
+            input.first_row = scroll.scroll.y;
+        }
         try frame.plan(&document, input);
     }
     try std.testing.expect(frame.approval_ready);

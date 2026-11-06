@@ -159,10 +159,9 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         address_length: usize = 0,
         length: usize = 0,
         origin: u64 = 0,
-        /// The first row in view; null follows the latest rows.
-        top: ?Position = null,
         width_method: gwidth.Method = .wcwidth,
         dirty: bool = true,
+        generation: u64 = 0,
         /// Reserve the right margin for sidenotes at `sidenote_width` and wider.
         sidenotes: bool = false,
         /// An Action: each wrapped row of its description, command or stdin
@@ -233,6 +232,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             // Input windows can split UTF-8. Keep the suffix until the next append;
             // indexing below only visits complete scalars.
             self.dirty = true;
+            self.generation +%= 1;
         }
 
         /// The retained style of text appended now, with any link mark.
@@ -261,11 +261,11 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         pub fn clear(self: *Self) void {
             self.length = 0;
             self.origin = 0;
-            self.top = null;
             self.style = 0;
             self.control_length = 0;
             self.link = .none;
             self.dirty = true;
+            self.generation +%= 1;
         }
 
         pub fn text(self: *const Self) []const u8 {
@@ -479,75 +479,37 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return .{ .rows = result.rows, .next = result.next };
         }
 
-        /// Keeps a position inside the current text and wrapping.
-        pub fn clamp(self: *const Self, layout: Layout, position: Position) Position {
-            if (position.offset >= self.text().len) return self.lastRow(layout);
-            return .{ .offset = position.offset, .row = @min(position.row, self.lineRows(layout, position.offset) - 1) };
+        /// Number of laid-out rows; no navigation state belongs to text.
+        pub fn rowCount(self: *const Self, layout: Layout) usize {
+            if (self.text().len == 0) return 0;
+            var total: usize = 0;
+            var line: ?usize = 0;
+            while (line) |offset| : (line = self.nextLine(offset)) total += self.lineRows(layout, offset);
+            return total;
         }
 
-        fn lastRow(self: *const Self, layout: Layout) Position {
-            const bytes = self.text();
-            if (bytes.len == 0) return .{};
-            const last = self.previousLine(if (bytes[bytes.len - 1] == '\n') bytes.len else bytes.len + 1) orelse 0;
-            return .{ .offset = last, .row = self.lineRows(layout, last) - 1 };
-        }
-
-        pub fn down(self: *const Self, layout: Layout, from: Position, moves: usize) Position {
-            var position = self.clamp(layout, from);
-            var remaining = moves;
-            while (remaining != 0) {
-                const used = self.lineRows(layout, position.offset);
-                if (remaining < used - position.row) {
-                    position.row += @intCast(remaining);
-                    break;
-                }
-                remaining -= used - position.row;
-                position = .{ .offset = self.nextLine(position.offset) orelse return .{ .offset = position.offset, .row = used - 1 } };
+        pub fn positionAtRow(self: *const Self, layout: Layout, row: usize) Position {
+            if (self.text().len == 0) return .end;
+            var remaining = row;
+            var line: ?usize = 0;
+            while (line) |offset| : (line = self.nextLine(offset)) {
+                const used = self.lineRows(layout, offset);
+                if (remaining < used) return .{ .offset = offset, .row = @intCast(remaining) };
+                remaining -= used;
             }
-            return position;
+            return .end;
         }
 
-        pub fn up(self: *const Self, layout: Layout, from: Position, moves: usize) Position {
-            var position = self.clamp(layout, from);
-            var remaining = moves;
-            while (remaining > position.row) {
-                remaining -= position.row + 1;
-                const previous = self.previousLine(position.offset) orelse return .{ .offset = position.offset };
-                position = .{ .offset = previous, .row = self.lineRows(layout, previous) - 1 };
+        pub fn rowOf(self: *const Self, layout: Layout, position: Position) usize {
+            if (self.text().len == 0) return 0;
+            var row: usize = 0;
+            var line: ?usize = 0;
+            while (line) |offset| : (line = self.nextLine(offset)) {
+                const used = self.lineRows(layout, offset);
+                if (offset >= position.offset) return row + @min(position.row, used - 1);
+                row += used;
             }
-            position.row -= @intCast(remaining);
-            return position;
-        }
-
-        /// The first row that shows the last `height` rows.
-        pub fn bottom(self: *const Self, layout: Layout, height: usize) Position {
-            return self.up(layout, self.lastRow(layout), height -| 1);
-        }
-
-        pub fn first(self: *const Self, layout: Layout, height: usize) Position {
-            const last = self.bottom(layout, height);
-            return if (self.top) |top| self.clamp(layout, top).min(last) else last;
-        }
-
-        /// Moves by `rows` (a page is the view height). Key repeat may deliver
-        /// many events before a frame: never skip unread Action rows; only
-        /// delivered frames advance that cap.
-        pub fn browse(self: *Self, layout: Layout, down_: bool, rows_: usize, height: usize, first_unseen: ?Position) void {
-            const current = self.first(layout, height);
-            if (!down_) {
-                self.top = self.up(layout, current, rows_);
-                return;
-            }
-            const moved = self.down(layout, current, rows_).min(self.bottom(layout, height));
-            self.top = if (first_unseen) |unseen| moved.min(unseen) else moved;
-        }
-
-        pub fn atTop(self: *const Self, layout: Layout, height: usize) bool {
-            return self.first(layout, height).order(.{}) == .eq;
-        }
-
-        pub fn atBottom(self: *const Self, layout: Layout, height: usize) bool {
-            return self.first(layout, height).order(self.bottom(layout, height)) != .lt;
+            return row;
         }
 
         /// Where each collapsed block's summary starts within text bytes
@@ -578,17 +540,32 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             if (styled) std.mem.copyForwards(u8, &self.styles, self.styles[count..self.length]);
             self.length -= count;
             self.origin += count;
-            self.top = null;
             self.dirty = true;
+            self.generation +%= 1;
         }
 
-        /// Places complete older text before this text, keeping the same rows
-        /// in view. Newer bytes beyond capacity leave from the end at a line
+        /// Copies a normalized contiguous suffix without parsing it again or
+        /// evicting the anchor. Styles include hidden link addresses. Returns
+        /// the bytes admitted; a partial copy ends at a whole logical line.
+        pub fn appendRetained(self: *Self, source: *const Self, start: usize) usize {
+            std.debug.assert(styled and start <= source.length);
+            const suffix = source.length - start;
+            var count = @min(suffix, limit - self.length);
+            if (count < suffix) count = if (std.mem.lastIndexOfScalar(u8, source.bytes[start..][0..count], '\n')) |line| line + 1 else 0;
+            @memcpy(self.bytes[self.length..][0..count], source.bytes[start..][0..count]);
+            @memcpy(self.styles[self.length..][0..count], source.styles[start..][0..count]);
+            self.length += count;
+            self.dirty = true;
+            self.generation +%= 1;
+            return count;
+        }
+
+        /// Places complete older text before retained text. Newer bytes
+        /// beyond capacity leave from the end at a line
         /// boundary; returns whether any did.
-        pub fn prepend(self: *Self, older: anytype, layout: Layout, height: usize) !bool {
+        pub fn prepend(self: *Self, older: anytype) !bool {
             std.debug.assert(older.control_length == 0 and older.length <= limit);
             try self.prepare();
-            const anchor = self.first(layout, height);
             var keep = self.text().len;
             if (older.length + keep > limit) {
                 keep = limit - older.length;
@@ -608,13 +585,107 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
             self.origin = older.origin;
             self.dirty = true;
+            self.generation +%= 1;
             try self.prepare();
-            // Older text ends at a line boundary, so its lines precede ours.
-            self.top = .{ .offset = anchor.offset + older.length, .row = anchor.row };
             return trimmed;
         }
     };
 }
+
+/// Immutable layout projection. Byte positions remain source/consent
+/// coordinates; ScrollView is the only stored navigation coordinate.
+pub const TextRows = struct {
+    text: *const Document,
+    layout: Layout,
+    total: usize,
+
+    pub fn init(text: *const Document, layout: Layout) TextRows {
+        return .{ .text = text, .layout = layout, .total = text.rowCount(layout) };
+    }
+    pub fn row(self: TextRows, at: Position) usize {
+        if (at.offset <= self.text.length / 2) return self.text.rowOf(self.layout, at);
+        var end = self.text.length + @intFromBool(self.text.length != 0 and self.text.bytes[self.text.length - 1] != '\n');
+        var remaining = self.total;
+        while (self.text.previousLine(end)) |offset| {
+            const used = self.text.lineRows(self.layout, offset);
+            remaining -= used;
+            if (offset <= at.offset) return if (at.offset >= self.text.length) self.total else remaining + @min(at.row, used - 1);
+            end = offset;
+        }
+        return 0;
+    }
+    pub fn position(self: TextRows, at: usize) Position {
+        if (at >= self.total) return .end;
+        if (at <= self.total / 2) return self.text.positionAtRow(self.layout, at);
+        var end = self.text.length + @intFromBool(self.text.bytes[self.text.length - 1] != '\n');
+        var remaining = self.total;
+        while (self.text.previousLine(end)) |offset| {
+            remaining -= self.text.lineRows(self.layout, offset);
+            if (remaining <= at) return .{ .offset = offset, .row = @intCast(at - remaining) };
+            end = offset;
+        }
+        unreachable;
+    }
+
+    pub fn paint(self: TextRows, scroll: *vaxis.widgets.ScrollView, parent: vaxis.Window, colour: bool) void {
+        if (self.total == 0) return;
+        const bounds = scroll.bounds(parent);
+        const first = self.position(bounds.y1);
+        if (first.order(.end) == .eq) return;
+        var row_: usize = bounds.y1 - first.row;
+        var line: ?usize = first.offset;
+        while (line) |offset| : (line = self.text.nextLine(offset)) {
+            if (row_ >= bounds.y2) break;
+            const used = self.text.lineRows(self.layout, offset);
+            if (row_ + used > bounds.y1) {
+                const delta: i17 = if (row_ >= bounds.y1) @intCast(row_ - bounds.y1) else -@as(i17, @intCast(bounds.y1 - row_));
+                const window = parent.child(.{ .y_off = delta, .width = @intCast(bounds.x2 - bounds.x1) });
+                _ = self.text.printLine(window, 0, offset, true, colour, .{});
+            }
+            row_ += used;
+        }
+    }
+};
+
+pub const Pane = struct {
+    text: Document = .{},
+    scroll: vaxis.widgets.ScrollView = .{},
+    // Only transcripts have trailing canvas: preserve a logical first row
+    // when text prepends or geometry grows, never create overscroll on Down.
+    blank_tail: usize = 0,
+    // Measured full-buffer census was 7–18 ms per clock frame at 240 KiB.
+    // Cache one scalar total, never rows, cells, or a second scroll position.
+    census: ?struct { generation: u64, layout: Layout, sidenotes: bool, quotes: bool, total: usize } = null,
+
+    pub fn projection(self: *Pane, layout: Layout) TextRows {
+        if (self.census) |known| {
+            if (known.generation == self.text.generation and std.meta.eql(known.layout, layout) and known.sidenotes == self.text.sidenotes and known.quotes == self.text.quotes)
+                return .{ .text = &self.text, .layout = layout, .total = known.total };
+        }
+        const rows = TextRows.init(&self.text, layout);
+        self.census = .{ .generation = self.text.generation, .layout = layout, .sidenotes = self.text.sidenotes, .quotes = self.text.quotes, .total = rows.total };
+        return rows;
+    }
+    pub fn anchor(self: *Pane, layout: Layout) Position {
+        return self.projection(layout).position(self.scroll.scroll.y);
+    }
+    pub fn restore(self: *Pane, layout: Layout, at: Position, height: usize, pin: bool) void {
+        const rows = self.projection(layout);
+        self.scroll.scroll.y = @min(rows.row(at), rows.total -| 1);
+        self.blank_tail = if (pin) (self.scroll.scroll.y +| height) -| rows.total else 0;
+    }
+    pub fn move(self: *Pane, layout: Layout, down: bool, count: usize, height: usize, unseen: ?Position) void {
+        const rows = self.projection(layout);
+        if (down) {
+            self.scroll.scroll.y +|= count;
+            if (unseen) |at| self.scroll.scroll.y = @min(self.scroll.scroll.y, rows.row(at));
+        } else {
+            self.scroll.scroll.y -|= count;
+            self.blank_tail = @min(self.blank_tail, (self.scroll.scroll.y +| height) -| rows.total);
+        }
+        self.scroll.scroll.restrictTo(0, (rows.total +| self.blank_tail) -| height);
+    }
+};
 
 const TestScreen = struct {
     screen: vaxis.Screen,
@@ -711,31 +782,20 @@ test "vaxis wraps reading text at words with hanging indentation" {
     try std.testing.expectEqual(@as(u16, 2), whole.caret_column);
 }
 
-test "positions move by laid-out rows and never skip the first unseen row" {
+test "row projection preserves source positions and wraps without navigation state" {
     var view: Sized(256, false) = .{};
     try view.append("one two three four five six\nseven\neight\n");
     const layout: Layout = .{ .width = 10, .method = .unicode };
-    // Rows: "one two" "three four" "five six" | "seven" | "eight".
-    try std.testing.expectEqual(@as(u16, 3), view.lineRows(layout, 0));
-    try std.testing.expectEqual(Position{ .offset = 0, .row = 2 }, view.bottom(layout, 3));
-    try std.testing.expectEqual(Position{ .offset = 28, .row = 0 }, view.down(layout, .{}, 3));
-    try std.testing.expectEqual(Position{ .offset = 34, .row = 0 }, view.down(layout, .{}, 99));
-    try std.testing.expectEqual(Position{ .offset = 0, .row = 1 }, view.up(layout, .{ .offset = 34 }, 3));
-    try std.testing.expectEqual(Position{}, view.up(layout, .{ .offset = 34 }, 99));
-    view.top = .{};
-    view.browse(layout, true, 9, 2, .{ .offset = 0, .row = 2 });
-    try std.testing.expectEqual(Position{ .offset = 0, .row = 2 }, view.first(layout, 2));
-    view.browse(layout, true, 9, 2, null);
-    try std.testing.expect(view.atBottom(layout, 2));
-    try std.testing.expectEqual(Position{ .offset = 28 }, view.first(layout, 2));
-    view.browse(layout, false, 9, 2, null);
-    try std.testing.expect(view.atTop(layout, 2));
-    // A wider terminal keeps the line and clamps its row.
-    view.top = .{ .offset = 0, .row = 2 };
-    try std.testing.expectEqual(Position{}, view.first(.{ .width = 40, .method = .unicode }, 1));
+    try std.testing.expectEqual(@as(usize, 5), view.rowCount(layout));
+    for ([_]Position{ .{}, .{ .row = 1 }, .{ .row = 2 }, .{ .offset = 28 }, .{ .offset = 34 } }, 0..) |at, row| {
+        try std.testing.expectEqual(at, view.positionAtRow(layout, row));
+        try std.testing.expectEqual(row, view.rowOf(layout, at));
+    }
+    try std.testing.expectEqual(Position.end, view.positionAtRow(layout, 5));
+    try std.testing.expectEqual(@as(usize, 0), view.rowOf(.{ .width = 40, .method = .unicode }, .{ .row = 2 }));
     var empty: Sized(16, false) = .{};
-    try std.testing.expectEqual(@as(usize, 0), empty.measure(layout, .{}, 9).rows);
-    try std.testing.expect(empty.atTop(layout, 2) and empty.atBottom(layout, 2));
+    try std.testing.expectEqual(@as(usize, 0), empty.rowCount(layout));
+    try std.testing.expectEqual(Position.end, empty.positionAtRow(layout, 0));
 }
 
 test "viewport retention is finite and split Unicode is not rendered early" {
@@ -962,15 +1022,13 @@ test "invisible and oversized output clusters become visible escapes" {
 }
 
 test "older text prepends above the rows in view and trims newer text at capacity" {
-    const layout: Layout = .{ .width = 20, .method = .unicode };
     var view: Sized(64, true) = .{};
     try view.append("live 1\nlive 2\nlive 3\n");
-    view.top = .{ .offset = 7 }; // "live 2" is the first row in view.
     var older: Sized(64, true) = .{};
     try older.append("\x1b[90mold A\x1b[39m\nold B\n");
-    try std.testing.expect(!try view.prepend(&older, layout, 2));
+    try std.testing.expect(!try view.prepend(&older));
     try std.testing.expectEqualStrings("old A\nold B\nlive 1\nlive 2\nlive 3\n", view.text());
-    const first = view.first(layout, 2);
+    const first: Position = .{ .offset = older.length + 7 };
     try std.testing.expectEqualStrings("live 2", view.bytes[first.offset..view.lineEnd(first.offset)]);
     try std.testing.expectEqual(@as(?u8, 8), cellStyle(view.styles[0], true).foreground);
     try std.testing.expectEqual(@as(?u8, null), cellStyle(view.styles[6], true).foreground);
@@ -980,17 +1038,16 @@ test "older text prepends above the rows in view and trims newer text at capacit
         var line: [8]u8 = undefined;
         try full.append(try std.fmt.bufPrint(&line, "new {d}\n", .{index}));
     }
-    full.top = .{};
     var page: Sized(64, true) = .{};
     for (0..5) |index| {
         var line: [8]u8 = undefined;
         try page.append(try std.fmt.bufPrint(&line, "old {d}\n", .{index}));
     }
-    try std.testing.expect(try full.prepend(&page, layout, 2));
+    try std.testing.expect(try full.prepend(&page));
     try std.testing.expect(full.length <= 64);
     try std.testing.expect(std.mem.startsWith(u8, full.text(), "old 0\n"));
     try std.testing.expect(std.mem.endsWith(u8, full.text(), "\n"));
-    const kept = full.first(layout, 2);
+    const kept: Position = .{ .offset = page.length };
     try std.testing.expectEqualStrings("new 0", full.bytes[kept.offset..full.lineEnd(kept.offset)]);
     // Discarding the front keeps later text and offsets absolute.
     full.discardFront(full.origin + 6);
@@ -1055,7 +1112,7 @@ test "a link keeps its address through wrapping, escaping, older pages and evict
     try view.append("See " ++ comptime linkBytes(a, "docs") ++ "\n");
     var older: Sized(64, true) = .{};
     try older.append(comptime linkBytes(b, "old") ++ " page\n");
-    try std.testing.expect(!try view.prepend(&older, .{ .width = 16, .method = .unicode }, 2));
+    try std.testing.expect(!try view.prepend(&older));
     try expectLinks(&view, .{}, 16, &.{ b, b, b, "-", "-" });
     try expectLinks(&view, .{ .offset = view.nextLine(0).? }, 16, &.{ "-", "-", "-", "-", a, a, a, a, "-" });
     // Eviction that cuts into an address leaves its text unlinked, never
@@ -1092,4 +1149,136 @@ test "rendered local path cells carry the file URI but the sentence semicolon do
             try std.testing.expectEqual(in_path, cell.style.ul_style == .single);
         }
     }
+}
+
+test "row projection cost at retained capacity" {
+    const pane = try std.testing.allocator.create(Pane);
+    defer std.testing.allocator.destroy(pane);
+    const layout: Layout = .{ .width = 79, .method = .unicode };
+    for ([_][]const u8{ "short line\n", "abcdefghijklmnopqrstuvwxyz", "\x1b[90m中 é 🐄\x1b[39m\n", (comptime linkBytes("https://example.test", "linked text")) ++ "\n" }, 0..) |line, index| {
+        pane.* = .{};
+        while (pane.text.length < 240 * 1024) try pane.text.append(line);
+        try pane.text.prepare();
+        const start = std.Io.Clock.awake.now(std.testing.io);
+        for (0..10) |_| {
+            var offset = pane.text.length;
+            for (0..21) |_| {
+                const previous = pane.text.previousLine(offset) orelse break;
+                offset = previous;
+                std.mem.doNotOptimizeAway(pane.text.lineRows(layout, offset));
+                if (offset == 0) break;
+            }
+        }
+        const cold = std.Io.Clock.awake.now(std.testing.io);
+        _ = pane.projection(layout);
+        const middle = std.Io.Clock.awake.now(std.testing.io);
+        for (0..10) |_| {
+            const rows = pane.projection(layout);
+            std.mem.doNotOptimizeAway(rows.position(rows.total -| 21));
+        }
+        const end = std.Io.Clock.awake.now(std.testing.io);
+        std.debug.print("row cost case{d}: tail={d}ns cold={d}ns projection={d}ns /10\n", .{ index, cold.nanoseconds - start.nanoseconds, middle.nanoseconds - cold.nanoseconds, end.nanoseconds - middle.nanoseconds });
+    }
+}
+
+test "the library row owner preserves a pinned short canvas without downward overscroll" {
+    const pane = try std.testing.allocator.create(Pane);
+    defer std.testing.allocator.destroy(pane);
+    pane.* = .{};
+    const layout: Layout = .{ .width = 19, .method = .unicode };
+    for (0..10) |_| try pane.text.append("line\n");
+    try pane.text.prepare();
+    pane.restore(layout, .{ .offset = 15 }, 10, true);
+    try std.testing.expectEqual(@as(usize, 3), pane.scroll.scroll.y);
+    try std.testing.expectEqual(@as(usize, 3), pane.blank_tail);
+    pane.move(layout, true, 100, 10, null);
+    try std.testing.expectEqual(@as(usize, 3), pane.scroll.scroll.y);
+    pane.move(layout, false, 1, 10, null);
+    try std.testing.expectEqual(@as(usize, 2), pane.scroll.scroll.y);
+    try std.testing.expectEqual(@as(usize, 2), pane.blank_tail);
+    pane.move(layout, true, 100, 10, null);
+    try std.testing.expectEqual(@as(usize, 2), pane.scroll.scroll.y);
+    const anchor = pane.anchor(layout);
+    try pane.text.append("new\nnew\nnew\n");
+    try pane.text.prepare();
+    pane.restore(layout, anchor, 10, true);
+    try std.testing.expectEqual(@as(usize, 2), pane.scroll.scroll.y);
+    try std.testing.expectEqual(@as(usize, 0), pane.blank_tail);
+    pane.move(layout, true, 1, 10, null);
+    try std.testing.expectEqual(@as(usize, 3), pane.scroll.scroll.y);
+}
+
+test "row projection cache follows every text edit and complete layout key" {
+    const pane = try std.testing.allocator.create(Pane);
+    defer std.testing.allocator.destroy(pane);
+    pane.* = .{};
+    try pane.text.append("alpha beta gamma\nline\n");
+    try pane.text.prepare();
+    for ([_]u16{ 8, 79, 8 }) |width| {
+        const layout: Layout = .{ .width = width, .method = .unicode };
+        for ([_]bool{ true, false }) |sidenotes| {
+            pane.text.sidenotes = sidenotes;
+            pane.text.quotes = !sidenotes;
+            const rows = pane.projection(layout);
+            try std.testing.expectEqual(pane.text.rowCount(layout), rows.total);
+            for (0..rows.total) |row| {
+                try std.testing.expectEqual(pane.text.positionAtRow(layout, row), rows.position(row));
+                try std.testing.expectEqual(row, rows.row(rows.position(row)));
+            }
+        }
+    }
+    const layout: Layout = .{ .width = 79, .method = .wcwidth };
+    try pane.text.append("new\n");
+    try pane.text.prepare();
+    try std.testing.expectEqual(@as(usize, 3), pane.projection(layout).total);
+    var older: Sized(64, true) = .{};
+    try older.append("older\n");
+    _ = try pane.text.prepend(&older);
+    try std.testing.expectEqual(@as(usize, 4), pane.projection(layout).total);
+    pane.text.discardFront(pane.text.origin + 6);
+    try std.testing.expectEqual(@as(usize, 3), pane.projection(layout).total);
+    pane.text.clear();
+    try std.testing.expectEqual(@as(usize, 0), pane.projection(layout).total);
+}
+
+test "normalized suffix copying preserves styles and complete linked collapsed summaries" {
+    var source: Sized(256, true) = .{};
+    try source.append("prefix\n\x1b[90mquiet\x1b[39m " ++ comptime linkBytes("https://example.test", "docs") ++ "\n");
+    try source.prepare();
+    var copy: Sized(256, true) = .{};
+    try copy.append("prefix\n");
+    try std.testing.expectEqual(source.length - 7, copy.appendRetained(&source, 7));
+    try std.testing.expectEqualSlices(u8, source.text(), copy.text());
+    try std.testing.expectEqualSlices(u8, source.styles[0..source.length], copy.styles[0..copy.length]);
+    try expectLinks(&copy, .{ .offset = 7 }, 20, &.{ "-", "-", "-", "-", "-", "-", "https://example.test", "https://example.test", "https://example.test", "https://example.test" });
+    // A bounded copy stops at a complete logical line, never mid-address or
+    // mid-summary. The remaining source bytes stay identifiable by endpoint.
+    var small_source: Sized(32, true) = .{};
+    try small_source.append("a\nb\nlonger than available\n");
+    var bounded: Sized(32, true) = .{};
+    try bounded.append("already kept bytes\n");
+    const copied = bounded.appendRetained(&small_source, 0);
+    try std.testing.expectEqual(@as(usize, 4), copied);
+    try std.testing.expect(std.mem.endsWith(u8, bounded.text(), "a\nb\n"));
+}
+
+test "ScrollView translated printing keeps wrapped link cells and hanging indentation" {
+    const pane = try std.testing.allocator.create(Pane);
+    defer std.testing.allocator.destroy(pane);
+    pane.* = .{};
+    try pane.text.append("• " ++ comptime linkBytes("https://example.test", "alpha beta gamma delta epsilon zeta") ++ "\n");
+    try pane.text.prepare();
+    const layout: Layout = .{ .width = 12, .method = .unicode };
+    var screen: TestScreen = undefined;
+    const window = screen.window(13, 3);
+    pane.scroll.scroll.y = 1;
+    const rows = pane.projection(layout);
+    pane.scroll.draw(window, .{ .cols = layout.width, .rows = rows.total });
+    rows.paint(&pane.scroll, window, false);
+    try std.testing.expectEqual(@as(usize, 1), pane.scroll.scroll.y);
+    try std.testing.expectEqualStrings(" ", screen.screen.readCell(0, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("g", screen.screen.readCell(2, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("https://example.test", screen.screen.readCell(2, 0).?.link.uri);
+    try std.testing.expectEqualStrings("d", screen.screen.readCell(2, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("▐", screen.screen.readCell(12, 0).?.char.grapheme);
 }

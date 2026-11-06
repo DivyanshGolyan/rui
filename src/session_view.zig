@@ -557,7 +557,7 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
     return switch (code) {
         .unresolved => .{ .glyph = "•", .suffix = "", .style = .quiet },
         .pending_permission => .{ .glyph = "?", .suffix = "", .style = .attention },
-        .succeeded => .{ .glyph = "✓", .suffix = "", .style = .normal },
+        .succeeded => .{ .glyph = "✓", .suffix = "", .style = .quiet },
         .denied => .{ .glyph = "•", .suffix = " — Denied", .style = .normal },
         .unknown_tool => .{ .glyph = "•", .suffix = " — Rejected: unknown tool", .style = .normal },
         .invalid_arguments => .{ .glyph = "•", .suffix = " — Rejected: invalid arguments", .style = .normal },
@@ -579,11 +579,11 @@ pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colou
 fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool, exit: []const u8) !void {
     const state = toolState(presentation.code);
     if (separate) try sink.feed("\n");
+    try sink.feed("  ");
     try sink.feed(state.style.code(colour));
     try sink.feed(state.glyph);
-    try sink.feed(Style.normal.code(colour));
     try sink.feed(" ");
-    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
+    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .prefix = "    " };
     var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .label } };
     try escaped.feed(if (presentation.description) |label| label.slice() else "Tool call");
     try escaped.finish();
@@ -594,6 +594,7 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
         try indented.feed(")");
     }
     try indented.finish();
+    try sink.feed(Style.normal.code(colour));
     try sink.feed("\n");
 }
 
@@ -621,7 +622,7 @@ pub const Live = struct {
         const entry = self.entries[index];
         const state = toolState(entry.presentation.code);
         var writer = std.Io.Writer.fixed(buffer);
-        try writer.print("{s} ", .{state.glyph});
+        try writer.print("  {s} ", .{state.glyph});
         var text: Text = .{ .mode = .label };
         try text.feed(&writer, if (entry.presentation.description) |label| label.slice() else "Tool call");
         try text.finish(&writer);
@@ -634,6 +635,54 @@ pub const Live = struct {
         return toolState(self.entries[index].presentation.code).style;
     }
 };
+
+test "routine tools stay subordinate in every state without colouring assistant prose" {
+    const Viewport = @import("ConversationViewport.zig");
+    const vaxis = @import("vaxis");
+    const Sink = struct {
+        bytes: [2048]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    for (std.enums.values(protocol.ToolPresentation.Code)) |code| {
+        const expected: Style = switch (code) {
+            .unresolved, .succeeded => .quiet,
+            .pending_permission => .attention,
+            .denied, .unknown_tool, .invalid_arguments => .normal,
+            .failed, .timed_out, .indeterminate, .storage_failed, .spawn_failed, .cancelled, .infrastructure_shutdown => .failure,
+        };
+        var live: Live = .{ .count = 1, .total = 1 };
+        live.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .code = code, .description = .{}, .publication_position = null } };
+        try live.entries[0].presentation.description.?.set("Inspect\x1b[2J");
+        try std.testing.expectEqual(expected, live.style(0));
+        var line: [Live.line_bytes]u8 = undefined;
+        const tray = try live.line(0, &line, "");
+        try std.testing.expect(std.mem.startsWith(u8, tray, "  "));
+        try std.testing.expect(std.mem.indexOf(u8, tray, "Inspect\\x1b[2J") != null);
+        for ([_]bool{ false, true }) |colour| {
+            var sink: Sink = .{};
+            try toolHeading(live.entries[0].presentation, &sink, colour, false);
+            if (colour) {
+                try std.testing.expect(std.mem.startsWith(u8, sink.bytes[0..sink.length], "  "));
+                try std.testing.expectEqualStrings(expected.code(true), sink.bytes[2..][0..expected.code(true).len]);
+                try std.testing.expect(std.mem.endsWith(u8, sink.bytes[0..sink.length], "\x1b[39m\n"));
+            } else try std.testing.expectEqualStrings(tray, std.mem.trimEnd(u8, sink.bytes[0..sink.length], "\n"));
+            try sink.feed("Assistant answer\n");
+            var doc: Viewport.Sized(2048, true) = .{};
+            try doc.append(sink.bytes[0..sink.length]);
+            try doc.prepare();
+            var cells: [160]vaxis.Cell = @splat(.{});
+            var screen: vaxis.Screen = .{ .width = 80, .height = 2, .width_method = .unicode, .buf = &cells };
+            _ = doc.draw(.{ .screen = &screen, .width = 80, .height = 2, .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0 }, .{}, true, colour, .{});
+            try std.testing.expectEqualStrings("A", screen.readCell(0, 1).?.char.grapheme);
+            try std.testing.expectEqual(vaxis.Color.default, screen.readCell(0, 1).?.style.fg);
+            try std.testing.expect(!screen.readCell(0, 1).?.style.bold);
+        }
+    }
+}
 
 /// Live conversation and inspection share hanging indentation. Input is already
 /// escaped or rendered; cell layout owns wrapping in the alternate screen.
@@ -1732,7 +1781,7 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
         try toolResult(.{ .description = description, .code = call[1], .publication_position = 1 }, Empty{}, &sink, false, &compact);
     }
     try std.testing.expectEqualStrings(
-        "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n! Find “Io” in ziglang.org/x — Failed\n\n✓ Search the web\n",
+        "\n  ✓ Search “zig 0.17”\n  ✓ Open ziglang.org/x\n\n  ! Find “Io” in ziglang.org/x — Failed\n\n  ✓ Search the web\n",
         sink.bytes[0..sink.length],
     );
 }

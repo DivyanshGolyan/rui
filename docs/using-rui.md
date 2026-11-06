@@ -47,10 +47,17 @@ If a submission is uncertain, Ctrl-R retries that same request instead of creati
 ## Screen and scrolling
 
 The conversation uses the full terminal screen.
+Assistant text is primary; routine tools are quieter and indented, even without colour, while failures and approval remain prominent.
 When you exit, your shell's screen returns as it was, and conversation text does not stay in your terminal's scrollback.
 
 Scroll with PgUp, PgDn, the arrow keys or the mouse wheel.
 Keep scrolling up to read older conversation.
+Short conversations stay top-aligned; scrolling up does nothing when everything fits and nothing older exists.
+Scrolling back keeps the same tool and queued-message rows, with a quiet `Looking back` footer instead of a history-mode heading.
+The fixed rail shows position within the loaded conversation, not all saved history.
+New output does not move what you are reading; the footer says `New output below`.
+Scroll down to catch up contiguously and resume following at the actual current end.
+If the bounded view cannot join the newer rows, `More output below` names the view limit, while `Retention gap below` names a missing retained interval; Ctrl-End always shows latest.
 Esc or Ctrl-G returns to the latest messages, and from there to the overview.
 Ctrl-End, or End on an empty draft, returns to the latest messages and stays in the conversation.
 

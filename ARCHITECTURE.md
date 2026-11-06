@@ -2563,7 +2563,7 @@ Call rows keep their places, in issue order.
 While the work is a running Bash call, that call's own row carries the clock, `• Run zig build test-store · 42s`, found by the call's Operation and ordinal, never by its text.
 Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Waiting · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
 The time counts from the state's `since`, against the terminal's clock.
-A browsed page or transcript keeps the line under its shown text, so above the status when the page is full.
+An inspection page keeps the work line under its shown text, so above the status when the page is full; a transcript keeps the live call tray and work line in their existing places.
 The line takes a row after the input, status and overflow rows and before call rows, which the overflow row then counts; with no row left it is dropped rather than refusing the terminal.
 While a permission prompt is open the Action's instructions speak instead.
 An overview row whose work needs the person or explains a wait (approval, a retry, a running command, stopping) says the same words beside its own age column, so it adds only a retry's countdown, and takes its tone; one functional core, `work_line`, holds the wording and tone for both.
@@ -2574,8 +2574,8 @@ A Message a person or script sends while work is under way waits dimmed right ab
 Divyansh approved that row and those labels on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 The Host reports how many wait and the newest on each Activity page (`queued`), and the row reads that Message's first line at its Admission position, which holds that Admission alone, never by text; it keeps the line with that Message's admission ID and shows it only while the Host names that Message newest.
 A Message sent when the work does not hold the queue and no older one waits is taken next, so live output shows it at once as its Admission, and never its row again, however long a pending Session takes to start it (as after Ctrl-R recovery).
-Any other waits in the row, which shows only in the latest view, whenever the Host reports a Message waiting that live output has not shown, whatever the work is doing, and counts only those; live output shows a waiting Message only when it is the oldest, so at most that one is left out; until its row, its stop or the queued row shows it, the send reads `Sent`.
-It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or a browsed page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
+Any other waits in the row, which shows in both latest and transcript views, whenever the Host reports a Message waiting that live output has not shown, whatever the work is doing, and counts only those; live output shows a waiting Message only when it is the oldest, so at most that one is left out; until its row, its stop or the queued row shows it, the send reads `Sent`.
+It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or an inspection page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.
@@ -2583,6 +2583,8 @@ Wire version 8 dropped the `proposal_page`, `proposal_field` and `person_message
 Normal desktop widths are the design target; narrower terminals wrap the same interface, never omit an approval command or decision label.
 Opening adds no configuration banner or command tutorial.
 Bash bypass mode retains its safety warning.
+Routine tool labels, including successful calls, are quiet and indented beneath assistant prose in both saved conversation and the live call tray; indentation keeps that hierarchy visible without colour.
+The whole tool label carries its state style, reset before assistant prose; failures and approval keep their prominent state styles, compact grouping and output summaries remain, and labels and links keep their existing escaping.
 Routine capture, reserved keys, proposal fields, resize notices and repeated attention prose stay out of the transcript.
 Unconfirmed or rejected submissions retain actionable notices.
 Explicit `/status` keeps the current reserved recovery key under the page, even before publication, and `/requests` lists recovery handles; reservation does not prove capture or acceptance.
@@ -2590,11 +2592,19 @@ Explicit `/status` keeps the current reserved recovery key under the page, even 
 The interface preserves the shell's previous screen; conversation output does not enter native scrollback or remain after exit, so terminal search covers only the shell.
 This trade-off is accepted for one library-owned renderer.
 It retains a bounded latest view (256 KiB each for live text and a selected inspection).
-PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines and the mouse wheel scroll it; Esc, Ctrl-G, End on an empty draft or scrolling past the end returns to the latest view, or to a pending Action.
-At the latest view, Esc, Ctrl-G or End on an empty draft returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view, running command or unresolved submission; a draft keeps the conversation open, and the status line says to clear it first.
+PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines and the mouse wheel scroll it; Ctrl-End, End on an empty draft, or scrolling down to the actual current end resumes the latest view, or a pending Action, without needing Escape.
+Esc and Ctrl-G retain their existing page-return navigation.
+At the latest view, Esc or Ctrl-G on an empty draft returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view, running command or unresolved submission; a draft keeps the conversation open, and the status line says to clear it first.
 Sending a Message returns to the latest view, where it and its reply appear, and a page asked for before it no longer opens over it.
-With nothing said yet, scrolling up reaches `Start of conversation`.
-Scrolling up from live text freezes a transcript copy that starts at the first retained read boundary.
+When all retained text fits and no older conversation exists, Up and PgUp do nothing, including before the opening read knows the predecessor.
+`/history` can deliberately reveal `Start of conversation`; ordinary detachment does not insert that label into the shown short text.
+Actual backward movement or a real request for older conversation freezes a transcript copy that starts at the first retained read boundary, pinning the exact first logical content from the delivered frame before applying the movement.
+Live and transcript share body width, calls, queued row, draft and status geometry; only genuine inspection, Message and Action pages have navigation headings.
+The existing footer quietly says `Looking back`, or `New output below` when the normalized live endpoint has advanced, with `Ctrl-End` as the unconditional return hint.
+Notices take priority over approval hints, then looking-back state, then Session metadata; the rule keeps its independent hidden-draft-line labels.
+No unread count or history persists beyond this snapshot.
+New output leaves the anchored snapshot unchanged; downward input appends its still-retained contiguous normalized suffix, with styles, links and exact collapsed Message proofs, before moving toward the actual current end.
+A frozen snapshot endpoint is never mistaken for the current end: an endpoint lost to retention or trimmed by older paging says `Retention gap below`, while insufficient snapshot capacity says `More output below`, not that saved output was lost; both retain `Ctrl-End` as an explicit transition to latest.
 A boundary pairs a live offset with the Conversation cursor before it (an Admission or call row is no Conversation cursor) and is valid only if no Conversation item at or after its cursor showed before its offset.
 `session_reads.Marks` owns that rule: the opening's start is one, and a later page records each item it shows that follows the conversation row of every Message shown so far as its Admission.
 A stop answers every Message up to its cutoff, since each has its row by then or never will, and a read whose stop shows queued Messages before its line keeps no boundary before that stop.
@@ -2624,7 +2634,14 @@ A Message page never shows or decides an Action.
 Display eviction does not delete saved work.
 Wheel motion arrives as arrow keys through alternate scroll mode 1007, which Rui enables only when the terminal reports it present and reset, and restores on exit; opening never waits for that report. libvaxis `Window.print` lays out and wraps all text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
 Rui's pinned vaxis patch keeps wide clusters, window-wide words and words crossing a style change off the row edge.
-`ConversationViewport` keeps retained bytes, styles and the first row in view as a logical line and row within it; `TerminalFrame` budgets regions and counts the Action rows a frame delivers; `SessionScreen` owns libvaxis cells and bounded allocations; and `SessionTerminal` alone owns terminal modes and output. libvaxis's own TTY owner is not used: restoration must attempt every step without waiting on a drain, wait at most one bounded second for output credit, and restore descriptor flags exactly.
+`ConversationViewport` keeps retained bytes, styles and parser state separately from each Pane's libvaxis `ScrollView`, the sole stored row offset and extent-clamp owner.
+An immutable laid-out row projection converts byte Positions for source joins and consent, and paints intersecting logical lines through `ScrollView.bounds` and translated `Window.print` windows, without cell copies or input-sized surfaces.
+One scalar row census per Pane is cached by text generation and the complete layout key; no row table, second navigation anchor or cell cache is kept.
+The conversation reserves a stable one-column library scrollbar rail from its first frame, showing position within the loaded retained canvas, never a percentage of all saved history.
+A transcript alone may keep bounded trailing blank canvas to pin short text through prepend or geometry changes; Down never grows it, Up shrinks it, and added text absorbs it.
+`TerminalFrame` budgets regions without moving the scroll owner and observes only real text rows after final layout; blank canvas cannot credit an Action.
+`SessionScreen` owns libvaxis cells and bounded allocations, and `SessionTerminal` alone owns terminal modes and output.
+libvaxis's own TTY owner is not used: restoration must attempt every step without waiting on a drain, wait at most one bounded second for output credit, and restore descriptor flags exactly.
 Resize keeps the first browsed line in view and preserves draft bytes and logical cursor; an Action restarts from its top.
 Text uses existing width behavior unless a terminal reports Unicode mode 2027 already enabled.
 The renderer neither enables that mode nor requires Kitty graphics, mouse reporting or a particular emulator.

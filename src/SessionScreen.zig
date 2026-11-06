@@ -15,6 +15,7 @@ const View = @import("session_view.zig");
 const protocol = @import("protocol.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const Self = @This();
+const LiveAnchor = struct { offset: u64, row: u16 };
 
 /// What the conversation area shows. The transcript is a frozen copy of live
 /// text that can grow older canonical pages at its top; inspection, Action and
@@ -43,6 +44,7 @@ pub const Ticket = struct {
     first: Position,
     next: Position,
     delivered: bool = false,
+    live_first: ?LiveAnchor = null,
 };
 
 /// Proof that every byte of one frame was written and flushed. Only `render`
@@ -57,19 +59,19 @@ vx: vaxis.Vaxis = undefined,
 memory: Memory = .{},
 // Live text and its transcript copy keep a right margin for user Messages'
 // times; pages loaded from files use the full width.
-live: Document = .{ .sidenotes = true },
-browsing: Document = .{},
-staging: Document = .{},
+live: Viewport.Pane = .{ .text = .{ .sidenotes = true } },
+browsing: Viewport.Pane = .{},
+staging: Viewport.Pane = .{},
 // The draft as displayed: tabs show as one space so offsets stay exact.
 composer: [65_536]u8 = undefined,
 view: ViewKind = .live,
-// Newer transcript rows left the copy so older pages fit; returning to them
-// means returning to live.
-newer_trimmed: bool = false,
+// The copy's normalized live endpoint. Capacity limits are not retention
+// loss: both retain their exact endpoint, while a gap cannot be joined.
+tail: union(enum) { retained: u64, limited: u64, gap } = .{ .retained = 0 },
+live_first: ?LiveAnchor = null,
 // Rows asked for above the transcript's top while an older page loads; the
 // page applies them, so holding PgUp or the wheel keeps moving.
 overscroll: usize = 0,
-browsing_height: u16 = 0,
 // The byte the draft's first shown line started at in the latest frame,
 // kept first by the next one so the input scrolls only when its caret
 // leaves view. The choice never moves it.
@@ -128,7 +130,7 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn append(self: *Self, bytes: []const u8) !void {
-    try self.live.append(bytes);
+    try self.live.text.append(bytes);
 }
 
 /// Absolute live offsets: bytes before `origin` left the retained view.
@@ -139,28 +141,43 @@ pub fn append(self: *Self, bytes: []const u8) !void {
 /// Both ends are taken after preparing: escaping can also grow text and
 /// move the origin past offsets recorded earlier.
 pub fn liveEnd(self: *Self) !u64 {
-    try self.live.prepare();
-    return self.live.origin + self.live.length;
+    try self.live.text.prepare();
+    return self.live.text.origin + self.live.text.length;
 }
 
 pub fn liveStart(self: *Self) !u64 {
-    try self.live.prepare();
-    return self.live.origin;
+    try self.live.text.prepare();
+    return self.live.text.origin;
 }
 
-fn textLayout(self: *const Self) Viewport.Layout {
-    return .{ .width = @max(1, self.vx.screen.width), .method = self.vx.caps.unicode };
+fn paneLayout(kind: ViewKind, columns: u16, method: vaxis.gwidth.Method) Viewport.Layout {
+    return .{ .width = @max(1, columns -| @as(u16, @intFromBool(kind == .live or kind == .transcript))), .method = method };
+}
+
+pub fn textLayout(self: *const Self) Viewport.Layout {
+    return paneLayout(self.view, self.vx.screen.width, self.vx.caps.unicode);
+}
+
+// An overlay does not lend its full-width layout to the retained transcript.
+// Capture and restore under that pane's own old/new rail-adjusted widths.
+fn reflowHiddenTranscript(self: *Self, columns: u16, method: vaxis.gwidth.Method) void {
+    if (self.view != .message or self.message_return != .transcript) return;
+    const first = self.browsing.anchor(paneLayout(.transcript, self.vx.screen.width, self.vx.caps.unicode));
+    self.browsing.restore(paneLayout(.transcript, columns, method), .{ .offset = first.offset }, self.height, true);
 }
 
 pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
     if (self.vx.caps.unicode == method) return;
+    const anchor = self.viewed().anchor(self.textLayout());
+    self.reflowHiddenTranscript(self.vx.screen.width, method);
     self.invalidateLayout();
     self.vx.caps.unicode = method;
     self.vx.screen.width_method = method;
-    inline for (.{ &self.live, &self.browsing, &self.staging }) |document| {
-        document.width_method = method;
-        document.dirty = true;
+    inline for (.{ &self.live, &self.browsing, &self.staging }) |pane| {
+        pane.text.width_method = method;
+        pane.text.dirty = true;
     }
+    if (self.view != .live and self.view != .action) self.viewed().restore(self.textLayout(), .{ .offset = anchor.offset }, self.height, self.view == .transcript);
     self.vx.queueRefresh();
 }
 
@@ -170,7 +187,7 @@ pub fn actionVisible(self: *const Self) bool {
 
 /// Paging a long Action moves its `?` row off screen.
 pub fn actionTopHidden(self: *const Self) bool {
-    return self.actionVisible() and !self.browsing.atTop(self.textLayout(), self.height);
+    return self.actionVisible() and self.browsing.scroll.scroll.y != 0;
 }
 
 /// Delivered frames showed every Action row in the current layout.
@@ -180,6 +197,7 @@ pub fn actionRead(self: *const Self) bool {
 
 /// Width, geometry and adoption changes restart reading from the top.
 fn invalidateLayout(self: *Self) void {
+    if (self.view == .action) self.browsing.scroll.scroll.y = 0;
     self.action_seen = .{};
     self.scope +%= 1;
 }
@@ -258,6 +276,9 @@ pub fn presented(self: *Self, delivered: Delivered) PresentationChange {
     const ticket = &(self.ticket orelse return .{});
     if (ticket.frame != delivered.frame or ticket.delivered) return .{};
     ticket.delivered = true;
+    if (ticket.scope == self.scope) if (ticket.live_first) |first| {
+        self.live_first = first;
+    };
     const action = if (self.consent) |pending| pending.action else null;
     if (ticket.scope != self.scope or ticket.action != action or ticket.action == null or !self.actionVisible() or !self.preview_complete) return .{};
     const was_read = self.actionRead();
@@ -375,18 +396,40 @@ pub fn liveApproval(self: *const Self, command_blocked: bool) ConsentPolicy.Appr
 /// position from which older canonical pages continue without a gap.
 pub fn beginTranscript(self: *Self, front: u64) !void {
     std.debug.assert(self.view == .live);
+    try self.live.text.prepare();
+    const current = self.live.anchor(self.textLayout());
+    const first = self.live_first orelse LiveAnchor{ .offset = self.live.text.origin + if (current.order(.end) == .eq) @as(usize, 0) else current.offset, .row = current.row };
     self.browsing = self.live;
-    self.browsing.discardFront(front);
-    try self.browsing.prepare();
-    // Moves apply to the transcript's own height, which its heading and the
-    // absent calls make differ from the live view's: start at its end so the
-    // same rows down as up return to live output.
-    self.height = self.browsing_height;
-    self.browsing.top = null;
-    self.newer_trimmed = false;
+    self.browsing.text.discardFront(front);
+    try self.browsing.text.prepare();
+    self.browsing.restore(self.textLayout(), .{ .offset = @intCast(first.offset -| self.browsing.text.origin), .row = first.row }, self.height, true);
+    self.tail = .{ .retained = self.live.text.origin + self.live.text.length };
     self.overscroll = 0;
     self.view = .transcript;
     self.invalidateScope();
+}
+
+/// Join only the still-retained contiguous suffix, on downward input. New
+/// output never mutates a snapshot by itself. The caller associates these
+/// newly admitted collapsed blocks with the newest live Message proofs.
+pub fn catchUp(self: *Self) !usize {
+    std.debug.assert(self.view == .transcript);
+    try self.live.text.prepare();
+    const end = switch (self.tail) {
+        .retained, .limited => |position| position,
+        .gap => return 0,
+    };
+    if (end < self.live.text.origin or end > self.live.text.origin + self.live.text.length) {
+        self.tail = .gap;
+        return 0;
+    }
+    const before = self.transcriptCollapsed();
+    const anchor = self.browsing.anchor(self.textLayout());
+    const copied = self.browsing.text.appendRetained(&self.live.text, @intCast(end - self.live.text.origin));
+    self.browsing.restore(self.textLayout(), anchor, self.height, true);
+    const next = end + copied;
+    self.tail = if (next == self.live.text.origin + self.live.text.length) .{ .retained = next } else .{ .limited = next };
+    return self.transcriptCollapsed() - before;
 }
 
 /// Pages or lines through the shown document. Returns true when a downward
@@ -395,29 +438,25 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
 pub fn browse(self: *Self, down: bool, page: bool) bool {
     std.debug.assert(self.view != .live);
     const document = self.viewed();
-    const end = document.atBottom(self.textLayout(), self.height);
     const moves: usize = if (page) self.height else 1;
-    if (self.view == .transcript) self.overscroll = if (down) 0 else if (document.atTop(self.textLayout(), self.height)) @min(self.overscroll + moves, 4 * @as(usize, self.height)) else 0;
+    if (self.view == .transcript) self.overscroll = if (down) 0 else if (document.scroll.scroll.y == 0) @min(self.overscroll + moves, 4 * @as(usize, self.height)) else 0;
     const unseen = if (self.actionVisible() and self.preview_complete and !self.actionRead()) self.action_seen else null;
-    document.browse(self.textLayout(), down, moves, self.height, unseen);
+    document.move(self.textLayout(), down, moves, self.height, unseen);
     if (self.view != .transcript or !down) return false;
-    // Untrimmed transcript ends where live output continues.
-    return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.textLayout(), self.height));
+    // A frozen endpoint is not the current end. Only a contiguous joined
+    // suffix can resume following; limits and gaps require explicit End.
+    return self.tail == .retained and self.tail.retained == self.live.text.origin + self.live.text.length and document.scroll.scroll.y + self.height >= document.projection(self.textLayout()).total;
 }
 
 /// Scrolls the inspection page so line `line` begins in view, as little as
 /// it takes.
 pub fn revealLine(self: *Self, line: usize) void {
     std.debug.assert(self.view == .inspection);
-    const document = &self.browsing;
+    const document = &self.browsing.text;
     const start = lineStart(document, line) orelse return;
-    const layout = self.textLayout();
-    const first = document.first(layout, self.height);
-    if (start < first.offset or (start == first.offset and first.row != 0)) {
-        document.top = .{ .offset = start };
-    } else if (document.measure(layout, first, self.height).next.order(.{ .offset = start }) != .gt) {
-        document.top = document.up(layout, .{ .offset = start }, self.height -| 1);
-    }
+    const row = document.rowOf(self.textLayout(), .{ .offset = start });
+    const y = &self.browsing.scroll.scroll.y;
+    if (row < y.*) y.* = row else if (row >= y.* + self.height) y.* = row -| (self.height -| 1);
 }
 
 fn lineStart(document: *const Document, line: usize) ?usize {
@@ -428,34 +467,36 @@ fn lineStart(document: *const Document, line: usize) ?usize {
 
 /// The transcript shows its first retained row, so older text is wanted.
 pub fn transcriptAtTop(self: *const Self) bool {
-    return self.view == .transcript and self.browsing.atTop(self.textLayout(), self.height);
+    return self.view == .transcript and self.browsing.scroll.scroll.y == 0;
 }
 
 /// Prepends one older canonical page, rendered to `file`, above the
 /// transcript without moving the rows in view.
 pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !Prepended {
     std.debug.assert(self.view == .transcript);
-    try self.load(&self.staging, io, file, false);
-    if (self.staging.origin != 0) {
+    try self.load(&self.staging.text, io, file, false);
+    if (self.staging.text.origin != 0) {
         // A page larger than the view cannot join its older neighbour without
         // a gap. Keep its newest whole lines and say so at the gap.
         const text = "Rui: Earlier rows of this saved page exceed the view.\n";
-        const retained = self.staging.bytes[0..self.staging.length];
+        const retained = self.staging.text.bytes[0..self.staging.text.length];
         const cut = std.mem.indexOfScalarPos(u8, retained, text.len, '\n') orelse retained.len - 1;
-        self.staging.discardFront(self.staging.origin + cut + 1);
-        var marker: Viewport.Sized(128, true) = .{ .width_method = self.staging.width_method };
+        self.staging.text.discardFront(self.staging.text.origin + cut + 1);
+        var marker: Viewport.Sized(128, true) = .{ .width_method = self.staging.text.width_method };
         try marker.append(View.Style.quiet.code(self.colour));
         try marker.append(text);
         try marker.append(View.Style.normal.code(self.colour));
-        _ = try self.staging.prepend(&marker, self.textLayout(), 1);
+        _ = try self.staging.text.prepend(&marker);
     }
-    const before = self.browsing.collapsed(0, self.browsing.text().len).count;
-    const older = self.staging.collapsed(0, self.staging.text().len).count;
-    if (try self.browsing.prepend(&self.staging, self.textLayout(), self.height)) self.newer_trimmed = true;
-    const first = self.browsing.first(self.textLayout(), self.height);
-    self.browsing.top = self.browsing.up(self.textLayout(), first, self.overscroll);
+    const before = self.browsing.text.collapsed(0, self.browsing.text.text().len).count;
+    const older = self.staging.text.collapsed(0, self.staging.text.text().len).count;
+    var anchor = self.browsing.anchor(self.textLayout());
+    if (try self.browsing.text.prepend(&self.staging.text)) self.tail = .gap;
+    anchor.offset +|= self.staging.text.length;
+    self.browsing.restore(self.textLayout(), anchor, self.height, true);
+    self.browsing.move(self.textLayout(), false, self.overscroll, self.height, null);
     self.overscroll = 0;
-    return .{ .older = older, .trimmed = before + older - self.browsing.collapsed(0, self.browsing.text().len).count };
+    return .{ .older = older, .trimmed = before + older - self.browsing.text.collapsed(0, self.browsing.text.text().len).count };
 }
 
 /// Collapsed blocks an older page kept, its newest, and those newer rows
@@ -464,7 +505,7 @@ pub const Prepended = struct { older: usize, trimmed: usize };
 
 /// Collapsed blocks in the transcript.
 pub fn transcriptCollapsed(self: *const Self) usize {
-    return self.browsing.collapsed(0, self.browsing.text().len).count;
+    return self.browsing.text.collapsed(0, self.browsing.text.text().len).count;
 }
 
 /// Shows that the transcript reached the start of the saved conversation.
@@ -481,12 +522,15 @@ pub fn markGap(self: *Self) !usize {
 
 fn boundary(self: *Self, text: []const u8) !usize {
     std.debug.assert(self.view == .transcript);
-    var marker: Viewport.Sized(128, true) = .{ .width_method = self.browsing.width_method };
+    var marker: Viewport.Sized(128, true) = .{ .width_method = self.browsing.text.width_method };
     try marker.append(View.Style.quiet.code(self.colour));
     try marker.append(text);
     try marker.append(View.Style.normal.code(self.colour));
     const before = self.transcriptCollapsed();
-    if (try self.browsing.prepend(&marker, self.textLayout(), self.height)) self.newer_trimmed = true;
+    var anchor = self.browsing.anchor(self.textLayout());
+    if (try self.browsing.text.prepend(&marker)) self.tail = .gap;
+    anchor.offset +|= marker.length;
+    self.browsing.restore(self.textLayout(), anchor, self.height, true);
     return before - self.transcriptCollapsed();
 }
 
@@ -495,7 +539,7 @@ fn boundary(self: *Self, text: []const u8) !usize {
 /// Call right after drawing: later text moves what the frame drew.
 pub fn collapsedInView(self: *Self) ?usize {
     if (self.view != .live and self.view != .transcript) return null;
-    const document = self.viewed();
+    const document = &self.viewed().text;
     const text = document.text().len;
     const next = document.measure(self.textLayout(), self.drawn.first, self.drawn.rows).next;
     // A line cut at the bottom shows its first rows, which hold the mark.
@@ -507,8 +551,8 @@ pub fn collapsedInView(self: *Self) ?usize {
 /// Shows one Message's full text over the live view or the transcript.
 pub fn showMessage(self: *Self, io: std.Io, file: std.Io.File) !void {
     std.debug.assert(self.view == .live or self.view == .transcript);
-    try self.load(&self.staging, io, file, true);
-    self.staging.top = .{};
+    try self.load(&self.staging.text, io, file, true);
+    self.staging.scroll.scroll.y = 0;
     self.message_return = self.view;
     self.view = .message;
     self.invalidateScope();
@@ -518,13 +562,13 @@ pub fn showMessage(self: *Self, io: std.Io, file: std.Io.File) !void {
 /// position. An Action that became pending meanwhile takes precedence.
 pub fn leaveMessage(self: *Self) !void {
     std.debug.assert(self.view == .message);
-    self.staging.clear();
+    self.staging.text.clear();
     if (self.action_view != null) return self.latest();
     self.view = self.message_return;
     self.invalidateScope();
 }
 
-fn viewed(self: *Self) *Document {
+fn viewed(self: *Self) *Viewport.Pane {
     return switch (self.view) {
         .live => &self.live,
         .message => &self.staging,
@@ -564,10 +608,11 @@ fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix:
 pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void {
     const length = (try file.stat(io)).size;
     self.view = if (action) .action else .inspection;
-    try self.load(&self.browsing, io, file, true);
-    self.browsing.quotes = action;
-    self.browsing.top = .{};
-    self.preview_complete = length <= Viewport.capacity and self.browsing.origin == 0;
+    try self.load(&self.browsing.text, io, file, true);
+    self.browsing.text.quotes = action;
+    self.browsing.scroll.scroll.y = 0;
+    self.browsing.blank_tail = 0;
+    self.preview_complete = length <= Viewport.capacity and self.browsing.text.origin == 0;
     if (action) {
         self.action_seen = .{};
         self.action_view = .{ .io = io, .file = file };
@@ -584,14 +629,14 @@ pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void 
 /// visible line keeps its line number, clamped to the new page.
 pub fn refreshFile(self: *Self, io: std.Io, file: std.Io.File) !void {
     std.debug.assert(self.view == .inspection);
-    const document = &self.browsing;
-    const first = document.first(self.textLayout(), self.height).offset;
+    const document = &self.browsing.text;
+    const first = self.browsing.anchor(self.textLayout()).offset;
     const line = std.mem.count(u8, document.bytes[0..@min(first, document.length)], "\n");
     const length = (try file.stat(io)).size;
     try self.load(document, io, file, true);
     var offset: usize = 0;
     for (0..line) |_| offset = 1 + (std.mem.indexOfScalarPos(u8, document.bytes[0..document.length], offset, '\n') orelse break);
-    document.top = .{ .offset = offset };
+    self.browsing.restore(self.textLayout(), .{ .offset = offset }, self.height, false);
     self.preview_complete = length <= Viewport.capacity and document.origin == 0;
 }
 
@@ -686,18 +731,21 @@ fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, s
 /// Rendering credits nothing; `presented` does.
 pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: []const u8, cursor: usize, footer: Footer, live: *const View.Live) !Delivered {
     const status = footer.status;
+    try self.live.text.prepare();
     // The terminal reports untrusted geometry. Cell allocations (including
     // replacement grids during resize) share the same bounded allocator.
     try Frame.validateGeometry(size.col, size.row);
     var frame: std.Io.Writer.Allocating = .init(self.memory.allocator());
     defer frame.deinit();
-    if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) {
+    const old_layout = self.textLayout();
+    const browsed = self.view != .live;
+    var anchor = if (browsed) self.viewed().anchor(old_layout) else Position{};
+    const resized = size.col != self.vx.screen.width or size.row != self.vx.screen.height;
+    if (resized) {
         // Reflow keeps the first browsed line in view and the draft bytes and
         // caret unchanged. An Action restarts its reading from the top.
-        const browsed = self.view == .transcript or self.view == .inspection or (self.view == .message and self.message_return == .transcript);
-        const anchor: Position = if (browsed) .{ .offset = self.browsing.first(self.textLayout(), self.height).offset } else .{};
-        self.browsing.top = anchor;
-        if (self.view == .message) self.staging.top = .{ .offset = self.staging.first(self.textLayout(), self.height).offset };
+        anchor.row = 0;
+        self.reflowHiddenTranscript(size.col, self.vx.caps.unicode);
         self.invalidateLayout();
         // A render failure retires this invocation; no old grid is needed for
         // rollback. Retire it before allocating replacements, rather than
@@ -721,7 +769,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     window.clear();
     var call_storage: [3][View.Live.line_bytes]u8 = undefined;
     var calls: [3][]const u8 = undefined;
-    const selected = self.view != .live;
+    const selected = self.view != .live and self.view != .transcript;
     // Calls keep their places. While the work is a running Bash call, that
     // call's own row carries the clock; the live line says it only when the
     // row is not shown.
@@ -734,11 +782,16 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         calls[index] = try live.line(index, &call_storage[index], if (named) work_line.clockText(&clock, footer.live.?.clock, .conversation, .unicode) else "");
     };
     const document = self.viewed();
+    try document.text.prepare();
+    const projection = document.projection(self.textLayout());
     var layout: Frame = undefined;
-    try layout.plan(document, .{
+    const frame_input: Frame.Input = .{
         .width = size.col,
         .height = size.row,
         .method = self.vx.caps.unicode,
+        .document_width = self.textLayout().width,
+        .first_row = document.scroll.scroll.y,
+        .document_total = projection.total,
         .draft = draft,
         .cursor = if (selector) 0 else cursor,
         .draft_anchor = if (selector) 0 else self.draft_anchor,
@@ -755,20 +808,33 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .action_pending = self.action_view != null,
         .action_seen = self.action_seen,
         .preview_complete = self.preview_complete,
-    });
+    };
+    try layout.plan(&document.text, frame_input);
+    if (self.view == .live) {
+        document.scroll.scroll.y = std.math.maxInt(usize);
+        document.blank_tail = 0;
+    } else if (self.view == .transcript and (resized or self.height != layout.height)) {
+        document.restore(self.textLayout(), anchor, layout.height, true);
+    } else if (resized and self.view != .action) {
+        document.restore(self.textLayout(), anchor, layout.height, false);
+    }
     self.height = layout.height;
+    const conversation = self.view == .live or self.view == .transcript;
+    document.scroll.vertical_scrollbar = if (conversation) .{ .fg = self.style(.normal), .bg = self.style(.quiet) } else null;
+    const body = window.child(.{ .y_off = layout.navigation_height, .height = layout.height });
+    document.scroll.draw(body, .{ .cols = self.textLayout().width, .rows = projection.total +| document.blank_tail });
+    try layout.observe(projection, document.scroll.scroll.y, frame_input);
     if (!selector) self.draft_anchor = layout.draft_lines[0].start;
-    self.browsing_height = layout.browsing_height;
     self.drawn = .{ .first = layout.first, .rows = @intCast(layout.document_rows) };
     self.commands = footer.commands;
     if (self.commands) |*commands| commands.drew(layout.list_height != 0);
     _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet));
-    _ = document.draw(window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = @intCast(layout.document_rows) }), layout.first, true, self.colour, .{});
+    projection.paint(&document.scroll, window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = layout.height - layout.document_offset }), self.colour);
     if (layout.document_offset != 0) {
         // The conversation's latest rows fill the rows above a whole Action;
         // they are context, never read rows of the Action.
-        try self.live.prepare();
-        _ = self.live.draw(window.child(.{ .y_off = layout.navigation_height, .height = layout.document_offset }), self.live.bottom(self.textLayout(), layout.document_offset), true, self.colour, .{});
+        try self.live.text.prepare();
+        _ = self.live.text.draw(window.child(.{ .y_off = layout.navigation_height, .height = layout.document_offset }), self.live.text.positionAtRow(self.textLayout(), self.live.text.rowCount(self.textLayout()) -| layout.document_offset), true, self.colour, .{});
     }
     const failure = std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected");
     _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status_height }), .{}, true, self.colour, self.style(if (selector) .attention else .quiet));
@@ -820,7 +886,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         // While an Action waits, the line under the input says how to decide it.
         const text = if (self.selected.approval != .absent)
             approvalHint(self.selected.approval, self.actionVisible(), size.col, self.vx.caps.unicode)
-        else if (footer.session) |line| line.shown.text(line.facts, size.col, self.vx.caps.unicode) else "";
+        else if (self.view == .transcript) self.lookbackLabel(size.col) else if (footer.session) |line| line.shown.text(line.facts, size.col, self.vx.caps.unicode) else "";
         _ = window.child(.{ .y_off = line_row, .height = 1 }).printSegment(.{ .text = text, .style = self.style(.quiet) }, .{ .wrap = .none });
         says_deny = self.selected.approval == .reason and text.len != 0;
     }
@@ -844,6 +910,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .action = if (!self.actionVisible()) null else if (self.consent) |pending| pending.action else null,
         .shown = if (self.selected.approval == .reason and !says_deny) null else ConsentPolicy.offered(self.consent, self.selected.approval),
         .inputs = self.inputs,
+        .live_first = if (self.view == .live) .{ .offset = self.live.text.origin + if (layout.first.order(.end) == .eq) @as(usize, 0) else layout.first.offset, .row = layout.first.row } else null,
         .first = layout.first,
         .next = layout.action_seen,
     };
@@ -968,6 +1035,22 @@ fn drawLive(self: *const Self, window: vaxis.Window, width: u16, line: work_line
     }
 }
 
+/// The existing footer row is shared: notice, approval, lookback, metadata.
+/// Narrow widths keep the state before the End hint. Draft hidden-line labels
+/// stay on the rule and never compete with this indication.
+fn lookbackLabel(self: *const Self, width: u16) []const u8 {
+    const forms: []const []const u8 = switch (self.tail) {
+        .gap => &.{ "Looking back · Retention gap below · Ctrl-End: latest", "Retention gap below · Ctrl-End", "Retention gap below", "Gap below", "Gap" },
+        .limited => &.{ "Looking back · More output below · Ctrl-End: latest", "More output below · Ctrl-End", "More output below", "More below", "More" },
+        .retained => if (self.tail.retained < self.live.text.origin + self.live.text.length)
+            &.{ "Looking back · New output below · Ctrl-End: latest", "New output below · Ctrl-End", "New output below", "New below", "New" }
+        else
+            &.{ "Looking back · Ctrl-End: latest", "Looking back", "Back" },
+    };
+    for (forms) |form| if (session_line.cells(form, self.vx.caps.unicode) <= width) return form;
+    return "";
+}
+
 /// The rule above the input. It names the draft lines hidden above or
 /// below the input when there are any.
 fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View, buffer: *[64]u8) !void {
@@ -1062,7 +1145,7 @@ test "wide resize preserves a growing combining draft" {
     screen.colour = true;
     screen.vx.caps.no_color = false;
     for ([_][]const u8{ "中", "é", "🐄", "\x1b[1m\x1b[3m\x1b[4m\x1b[91mX\x1b[0mX" }) |pattern| {
-        screen.live.clear();
+        screen.live.text.clear();
         const cells: usize = if (std.mem.indexOf(u8, pattern, "\x1b") != null or std.mem.eql(u8, pattern, "中") or std.mem.eql(u8, pattern, "🐄")) 2 else 1;
         for (0..Frame.max_cells / cells) |_| try screen.append(pattern);
         for ([_]std.posix.winsize{ .{ .row = 192, .col = 256, .xpixel = 0, .ypixel = 0 }, wide }) |size| {
@@ -1091,13 +1174,13 @@ test "a transcript's front is taken after escaping, which can grow live text pas
     try screen.append("GROWS-FIRST\n");
     for (0..45000) |_| try screen.append("\u{200b}");
     try screen.append("\nGROWS-END\n");
-    try std.testing.expectEqual(@as(u64, 0), screen.live.origin);
+    try std.testing.expectEqual(@as(u64, 0), screen.live.text.origin);
     const front = try screen.liveStart();
     try std.testing.expect(front > 0);
     try screen.beginTranscript(front);
-    try std.testing.expectEqual(front, screen.browsing.origin);
-    try std.testing.expectEqualStrings(screen.live.text(), screen.browsing.text());
-    try std.testing.expectEqual(front + screen.live.length, try screen.liveEnd());
+    try std.testing.expectEqual(front, screen.browsing.text.origin);
+    try std.testing.expectEqualStrings(screen.live.text.text(), screen.browsing.text.text());
+    try std.testing.expectEqual(front + screen.live.text.length, try screen.liveEnd());
 }
 
 test "the input keeps the bottom rows under a rule while content starts at the top" {
@@ -1194,7 +1277,7 @@ test "the transcript fills every row above the rule" {
     const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
     for ([_]usize{ 21, 22, 23 }) |rows| {
         for ([_]bool{ false, true }) |trailing_newline| {
-            screen.live.clear();
+            screen.live.text.clear();
             for (0..rows) |row| {
                 var bytes: [16]u8 = undefined;
                 const text = try std.fmt.bufPrint(&bytes, "row{d:0>2}{s}", .{ row, if (row + 1 < rows or trailing_newline) "\n" else "" });
@@ -1213,10 +1296,9 @@ test "the transcript fills every row above the rule" {
             try screen.beginTranscript(0);
             try std.testing.expect(!screen.browse(false, true));
             _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
-            // The browsing heading takes a row; the first row stays reachable.
-            try std.testing.expectEqualStrings("B", window.readCell(0, 0).?.char.grapheme);
-            try std.testing.expectEqualStrings("r", window.readCell(0, 1).?.char.grapheme);
-            try std.testing.expectEqualStrings("0", window.readCell(4, 1).?.char.grapheme);
+            // Transcript chrome is identical: no browsing header.
+            try std.testing.expectEqualStrings("r", window.readCell(0, 0).?.char.grapheme);
+            try std.testing.expectEqualStrings("0", window.readCell(4, 0).?.char.grapheme);
             // Paging past the transcript's end returns to live output.
             try std.testing.expect(screen.browse(true, true));
             try screen.latest();
@@ -1256,13 +1338,13 @@ test "mandatory status and calls wrap wide clusters before the edge" {
     // The call follows the empty conversation from the top; the status
     // stays right above the rule on row 9. The continuation aligns under
     // the call's text, after its glyph.
-    try std.testing.expectEqualStrings("5", window.readCell(6, 0).?.char.grapheme);
-    try std.testing.expectEqualStrings("中", window.readCell(2, 1).?.char.grapheme);
-    try std.testing.expectEqualStrings("Z", window.readCell(4, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("3", window.readCell(6, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(5, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("Z", window.readCell(7, 1).?.char.grapheme);
     try std.testing.expectEqualStrings("I", window.readCell(0, 8).?.char.grapheme);
     _ = try screen.render(&out.writer, size, "", 0, .{ .status = "́Z" }, &live);
     try std.testing.expectEqualStrings("\\", window.readCell(0, 8).?.char.grapheme);
-    try std.testing.expectEqualStrings("中", window.readCell(2, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(5, 1).?.char.grapheme);
 }
 
 test "actual overflow yields wording before clipping required status" {
@@ -1323,31 +1405,31 @@ test "the running call's row carries the clock, in its place, and other work end
     }
     const size: std.posix.winsize = .{ .row = 12, .col = 52, .xpixel = 0, .ypixel = 0 };
     var buffer: [256]u8 = undefined;
-    for ([_]u64{ 1, 2 }, [_][2][]const u8{ .{ "• Run zig build · 42s", "• Run zig build" }, .{ "• Run zig build", "• Run zig build · 42s" } }) |ordinal, rows| {
+    for ([_]u64{ 1, 2 }, [_][2][]const u8{ .{ "  • Run zig build · 42s", "  • Run zig build" }, .{ "  • Run zig build", "  • Run zig build · 42s" } }) |ordinal, rows| {
         const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = ordinal, .description = calls.entries[ordinal].presentation.description, .running = 2, .approvals = 0 } };
         _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
         try std.testing.expectEqualStrings("› run the store tests", rowText(screen, 0, &buffer));
-        try std.testing.expectEqualStrings("✓ Read the failing test output", rowText(screen, 1, &buffer));
+        try std.testing.expectEqualStrings("  ✓ Read the failing test output", rowText(screen, 1, &buffer));
         try std.testing.expectEqualStrings(rows[0], rowText(screen, 2, &buffer));
         try std.testing.expectEqualStrings(rows[1], rowText(screen, 3, &buffer));
         try std.testing.expectEqualStrings("", rowText(screen, 4, &buffer));
         // A call of another Operation is not the one running.
         _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 8, 142_000) }, &calls);
-        try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 2, &buffer));
-        try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 3, &buffer));
+        try std.testing.expectEqualStrings("  • Run zig build", rowText(screen, 2, &buffer));
+        try std.testing.expectEqualStrings("  • Run zig build", rowText(screen, 3, &buffer));
         try std.testing.expectEqualStrings("• Run zig build · 42s", rowText(screen, 4, &buffer));
     }
     // Other work under way is the conversation's last line, then goes.
     const waiting: protocol.WorkState = .{ .working = .{ .since = 130 } };
     _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
-    try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 3, &buffer));
+    try std.testing.expectEqualStrings("  • Run zig build", rowText(screen, 3, &buffer));
     try std.testing.expectEqualStrings("• Waiting · 12s", rowText(screen, 4, &buffer));
     _ = try screen.render(&out.writer, size, "", 0, .{}, &calls);
     try std.testing.expectEqualStrings("", rowText(screen, 4, &buffer));
     // A narrow line cuts the words and keeps the clock, under the
     // conversation and calls that now wrap.
     _ = try screen.render(&out.writer, .{ .row = 12, .col = 14, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
-    try std.testing.expectEqualStrings("  build", rowText(screen, 7, &buffer));
+    try std.testing.expectEqualStrings("    build", rowText(screen, 7, &buffer));
     try std.testing.expectEqualStrings("• Waiti… · 12s", rowText(screen, 8, &buffer));
     try std.testing.expectEqualStrings("─", screen.vx.window().readCell(0, 9).?.char.grapheme);
     // Stopping says so quietly, with no clock.
@@ -1383,14 +1465,12 @@ test "a browsed page keeps the live line above the status" {
     _ = screen.browse(false, true);
     _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
     var buffer: [256]u8 = undefined;
-    // Calls are not drawn on a page, so the line says the running call.
-    try std.testing.expectEqualStrings("• Run zig build · 42s", rowText(screen, 7, &buffer));
+    // The same call row carries the clock while looking back.
+    try std.testing.expectEqualStrings("  • Run zig build · 42s", rowText(screen, 7, &buffer));
     try std.testing.expectEqualStrings("Opening…", rowText(screen, 8, &buffer));
-    // The page moves by the rows it shows.
-    try std.testing.expectEqual(screen.height, screen.browsing_height);
 }
 
-test "a queued Message sits dimmed right above the status, in the latest view only" {
+test "a queued Message keeps its row and status while looking back" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
@@ -1431,13 +1511,12 @@ test "a queued Message sits dimmed right above the status, in the latest view on
     _ = try screen.render(&out.writer, short, "one", 3, working, &running);
     try std.testing.expect(screenHas(screen, "queued", &buffer));
     try std.testing.expect(!screenHas(screen, "Sent", &buffer));
-    // A browsed page shows the conversation down to the status instead,
-    // and Sent with it.
+    // A transcript keeps the same queued row and confirming status.
     try screen.beginTranscript(0);
     _ = screen.browse(false, true);
     _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
-    try std.testing.expect(!screenHas(screen, "queued", &buffer));
-    try std.testing.expect(screenHas(screen, "Sent", &buffer));
+    try std.testing.expect(screenHas(screen, "queued", &buffer));
+    try std.testing.expect(!screenHas(screen, "Sent", &buffer));
 }
 
 test "a command list of one row shows a command, not only how many match" {
@@ -1485,7 +1564,7 @@ test "a description's controls read escaped alike on its call row and on the liv
     // On its call row.
     const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = 0, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };
     _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
-    try std.testing.expectEqualStrings(shown, rowText(screen, 1, &buffer));
+    try std.testing.expectEqualStrings("  " ++ shown, rowText(screen, 1, &buffer));
     // On the live line: the call is not among the rows, as from an older
     // Host that names no call.
     const older: protocol.WorkState = .{ .bash = .{ .since = 100, .call = null, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };
@@ -1496,7 +1575,7 @@ test "a description's controls read escaped alike on its call row and on the liv
     try std.testing.expectEqualStrings("• Run\\t\\x1b[2… · 42s", rowText(screen, 1, &buffer));
 }
 
-test "narrow browsing retains the complete return instruction" {
+test "narrow lookback footer uses measured labels without an Escape mode" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
@@ -1513,7 +1592,9 @@ test "narrow browsing retains the complete return instruction" {
             const before = out.written().len;
             screen.vx.queueRefresh();
             _ = try screen.render(&out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = status }, &.{});
-            try std.testing.expect(std.mem.indexOf(u8, out.written()[before..], "Esc") != null);
+            _ = before;
+            var row: [256]u8 = undefined;
+            try std.testing.expectEqualStrings(if (columns == 8) "Back" else "Looking back", rowText(screen, 23, &row));
         }
     }
 }
@@ -1553,16 +1634,16 @@ test "prepared Action preserves selected inspection until explicit return" {
         }
         try screen.showFile(io, inspection, false);
         _ = screen.browse(false, true);
-        const position = screen.browsing.top;
+        const position = screen.browsing.scroll.scroll.y;
         try screen.adopt(io, action, 5, true);
-        try std.testing.expectEqualStrings(status, screen.browsing.text());
-        try std.testing.expectEqual(position, screen.browsing.top);
+        try std.testing.expectEqualStrings(status, screen.browsing.text.text());
+        try std.testing.expectEqual(position, screen.browsing.scroll.scroll.y);
         try std.testing.expect(!screen.actionVisible());
         try std.testing.expect(screen.preview_complete);
         try screen.latest();
         try std.testing.expect(screen.actionVisible());
         try std.testing.expectEqual(!oversized, screen.preview_complete);
-        try std.testing.expect(std.mem.startsWith(u8, screen.browsing.text(), "Run Bash: exact command\n"));
+        try std.testing.expect(std.mem.startsWith(u8, screen.browsing.text.text(), "Run Bash: exact command\n"));
         if (!oversized) {
             try screen.append("› clean the build cache\n");
             const size: std.posix.winsize = .{ .row = 12, .col = 80, .xpixel = 0, .ypixel = 0 };
@@ -1604,6 +1685,7 @@ fn rowText(screen: *Self, row: u16, storage: []u8) []const u8 {
     var length: usize = 0;
     for (0..window.width) |column| {
         const grapheme = (window.readCell(@intCast(column), row) orelse break).char.grapheme;
+        if (column + 1 == window.width and std.mem.eql(u8, grapheme, "▐")) break;
         if (length + grapheme.len > storage.len) break;
         @memcpy(storage[length..][0..grapheme.len], grapheme);
         length += grapheme.len;
@@ -2269,4 +2351,234 @@ test "links stay within the cell memory budget at every frame and over many fram
     try std.testing.expect(kept < grid_link_bytes);
     // Unchanged, the frame would write nothing; redrawn, it writes every row.
     try std.testing.expect(out.written().len > 20 * 79);
+}
+
+test "snapshot detach pins delivered content through labels, tray draft and resize changes" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 60, .xpixel = 0, .ypixel = 0 };
+    for (0..30) |index| {
+        var line: [32]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&line, "row {d:0>2}\n", .{index}));
+    }
+    _ = screen.presented(try screen.render(&out.writer, size, "", 0, .{}, &.{}));
+    const delivered = screen.live_first.?;
+    // Live grows before another frame: detaching uses what was delivered,
+    // not the undisplayed new bottom. A stale receipt cannot replace it.
+    const old_receipt = Delivered{ .frame = screen.frames };
+    try screen.append("not delivered yet\n");
+    try screen.beginTranscript(0);
+    _ = screen.presented(old_receipt);
+    try std.testing.expectEqual(delivered.offset, screen.browsing.anchor(screen.textLayout()).offset);
+    var row: [256]u8 = undefined;
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    const first = try std.testing.allocator.dupe(u8, rowText(screen, 0, &row));
+    defer std.testing.allocator.free(first);
+    _ = try screen.markBeginning();
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    try std.testing.expectEqualStrings(first, rowText(screen, 0, &row));
+    var calls: View.Live = .{ .count = 1, .total = 1 };
+    calls.entries[0] = .{ .operation = 1, .ordinal = 0, .presentation = .{ .code = .unresolved, .description = null, .publication_position = null } };
+    _ = try screen.render(&out.writer, size, "draft\nsecond\nthird", 18, .{}, &calls);
+    try std.testing.expectEqualStrings(first, rowText(screen, 0, &row));
+    const taller: std.posix.winsize = .{ .row = 24, .col = 50, .xpixel = 0, .ypixel = 0 };
+    _ = try screen.render(&out.writer, taller, "", 0, .{}, &.{});
+    try std.testing.expectEqualStrings(first, rowText(screen, 0, &row));
+    try std.testing.expect(screen.browsing.blank_tail > 0);
+    screen.setWidth(if (screen.vx.caps.unicode == .unicode) .wcwidth else .unicode);
+    _ = try screen.render(&out.writer, taller, "", 0, .{}, &.{});
+    try std.testing.expectEqualStrings(first, rowText(screen, 0, &row));
+}
+
+test "new output leaves a snapshot unchanged until contiguous catchup reaches actual end" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 10, .col = 40, .xpixel = 0, .ypixel = 0 };
+    for (0..30) |_| try screen.append("older row\n");
+    _ = screen.presented(try screen.render(&out.writer, size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(0);
+    _ = screen.browse(false, false);
+    const anchor = screen.browsing.anchor(screen.textLayout());
+    const length = screen.browsing.text.length;
+    for (0..12) |_| try screen.append("new row\n");
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    try std.testing.expectEqual(length, screen.browsing.text.length);
+    try std.testing.expectEqual(anchor, screen.browsing.anchor(screen.textLayout()));
+    try std.testing.expect(std.mem.indexOf(u8, screen.lookbackLabel(80), "New output below") != null);
+    // The old snapshot bottom cannot resume following while live is newer.
+    try std.testing.expect(!screen.browse(true, false));
+    const before_join = screen.browsing.anchor(screen.textLayout());
+    _ = try screen.catchUp();
+    try std.testing.expectEqual(before_join, screen.browsing.anchor(screen.textLayout()));
+    try std.testing.expect(std.mem.endsWith(u8, screen.browsing.text.text(), "new row\n"));
+    var moves: usize = 0;
+    while (!screen.browse(true, false)) : (moves += 1) {
+        try std.testing.expect(moves < 20);
+        _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    }
+    try std.testing.expectEqual(@as(usize, 11), moves);
+    try screen.latest();
+    try std.testing.expectEqual(ViewKind.live, screen.view);
+}
+
+test "capacity limit and lost retention are distinct and cannot claim the frozen end is latest" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 60, .xpixel = 0, .ypixel = 0 };
+    const line = "retained line bytes\n";
+    while (screen.live.text.length < Viewport.capacity - line.len) try screen.append(line);
+    _ = screen.presented(try screen.render(&out.writer, size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(screen.live.text.origin);
+    const first = screen.browsing.anchor(screen.textLayout());
+    for (0..5) |_| try screen.append("new line\n");
+    _ = try screen.catchUp();
+    try std.testing.expectEqual(first, screen.browsing.anchor(screen.textLayout()));
+    try std.testing.expect(screen.tail == .limited);
+    try std.testing.expect(std.mem.indexOf(u8, screen.lookbackLabel(80), "More output below") != null);
+    try std.testing.expect(!screen.browse(true, true));
+    // Evict the join endpoint from live: this is an actual missing interval.
+    for (0..15000) |_| try screen.append(line);
+    _ = try screen.catchUp();
+    try std.testing.expect(screen.tail == .gap);
+    try std.testing.expect(std.mem.indexOf(u8, screen.lookbackLabel(80), "Retention gap below") != null);
+    try std.testing.expect(!screen.browse(true, true));
+    try std.testing.expect(screen.browsing.text.length <= Viewport.capacity);
+    for ([_]vaxis.gwidth.Method{ .unicode, .wcwidth }) |method| {
+        screen.vx.caps.unicode = method;
+        for (8..2049) |width| {
+            for ([_]u8{ 0, 1, 2, 3 }) |state| {
+                screen.tail = switch (state) {
+                    0 => .gap,
+                    1 => .{ .limited = 0 },
+                    2 => .{ .retained = 0 },
+                    else => .{ .retained = screen.live.text.origin + screen.live.text.length },
+                };
+                const label = screen.lookbackLabel(@intCast(width));
+                try std.testing.expect(label.len != 0);
+                try std.testing.expect(session_line.cells(label, method) <= width);
+                try std.testing.expect(std.mem.indexOf(u8, label, "Esc") == null);
+                if (width >= 60) try std.testing.expect(std.mem.indexOf(u8, label, "Ctrl-End") != null);
+            }
+        }
+    }
+}
+
+test "live and transcript chrome have identical cells with calls queue work drafts and NO_COLOR" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 16, .col = 60, .xpixel = 0, .ypixel = 0 };
+    var saved: [16 * 60]vaxis.Cell = undefined;
+    var calls: View.Live = .{ .count = 3, .total = 4 };
+    for (0..3) |index| calls.entries[index] = .{ .operation = 1, .ordinal = index, .presentation = .{ .code = if (index == 2) .failed else .unresolved, .description = null, .publication_position = null } };
+    const state: protocol.WorkState = .{ .working = .{ .since = 100 } };
+    for ([_]bool{ false, true }) |colour| for (0..4) |count| for ([_]bool{ false, true }) |queued| for ([_]bool{ false, true }) |working| for ([_][]const u8{ "", "draft\nsecond" }) |draft| {
+        screen.colour = colour;
+        try screen.latest();
+        screen.live.text.clear();
+        try screen.append("Assistant answer\n");
+        calls.count = count;
+        calls.total = if (count == 3) 4 else count;
+        const footer: Footer = .{ .status = "Sent", .queued = if (queued) .{ .waiting = .{ .line = "queued message", .count = 1 }, .status = "" } else null, .live = if (working) work_line.of(&test_words, &state, null, 142_000) else null };
+        _ = screen.presented(try screen.render(&out.writer, size, draft, draft.len, footer, &calls));
+        for (&saved, 0..) |*cell, index| cell.* = screen.vx.screen_last.readCell(@intCast(index % 60), @intCast(index / 60)).?;
+        const height = screen.height;
+        try screen.beginTranscript(0);
+        _ = try screen.render(&out.writer, size, draft, draft.len, footer, &calls);
+        try std.testing.expectEqual(height, screen.height);
+        for (saved[0 .. 15 * 60], 0..) |before, index| {
+            const after = screen.vx.screen_last.readCell(@intCast(index % 60), @intCast(index / 60)).?;
+            try std.testing.expectEqualStrings(before.char.grapheme, after.char.grapheme);
+            try std.testing.expectEqualDeep(before.style, after.style);
+            try std.testing.expectEqualStrings(before.link.uri, after.link.uri);
+        }
+        var row: [256]u8 = undefined;
+        try std.testing.expect(std.mem.indexOf(u8, rowText(screen, 15, &row), "Looking back") != null);
+        _ = try screen.render(&out.writer, size, draft, draft.len, .{ .notice = "Important notice" }, &calls);
+        try std.testing.expectEqualStrings("Important notice", rowText(screen, 15, &row));
+    };
+}
+
+test "idle clock redraw cost stays bounded over retained text populations" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    const state: protocol.WorkState = .{ .working = .{ .since = 100 } };
+    for ([_][]const u8{ "short line\n", "abcdefghijklmnopqrstuvwxyz", "\x1b[90m中 é 🐄\x1b[39m\n", @import("TerminalText.zig").link_open ++ "https://example.test" ++ @import("TerminalText.zig").link_end ++ "linked text" ++ @import("TerminalText.zig").link_close ++ "\n" }, 0..) |line, index| {
+        screen.live.text.clear();
+        while (screen.live.text.length < 240 * 1024) try screen.append(line);
+        _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+        const start = std.Io.Clock.awake.now(std.testing.io);
+        for (0..10) |tick| _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, null, 142_000 + tick * 1000) }, &.{});
+        const end = std.Io.Clock.awake.now(std.testing.io);
+        std.debug.print("idle clock redraw case{d}: {d}ns /10\n", .{ index, end.nanoseconds - start.nanoseconds });
+    }
+}
+
+fn expectHiddenTranscriptReflow(width_report: bool) !void {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try screen.init(std.testing.io, &environ, false);
+    defer screen.deinit();
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var page = try ActionFixture.init(1);
+    defer page.deinit();
+    screen.setWidth(.wcwidth);
+    const line = if (width_report) "👩‍🚀👩‍🚀👩‍🚀\n" else "abcdefghiX\n";
+    for (0..30) |_| try screen.append(line);
+    const size: std.posix.winsize = .{ .row = 12, .col = 10, .xpixel = 0, .ypixel = 0 };
+    _ = screen.presented(try screen.render(&out.writer, size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(0);
+    screen.browsing.scroll.scroll.y = 20;
+    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    const first = screen.browsing.anchor(screen.textLayout());
+    try std.testing.expectEqual(10 * line.len, first.offset);
+    try screen.showMessage(std.testing.io, page.file);
+    if (width_report) screen.setWidth(.unicode) else {
+        _ = try screen.render(&out.writer, .{ .row = 12, .col = 20, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{});
+    }
+    try screen.leaveMessage();
+    const returned = screen.browsing.anchor(screen.textLayout());
+    try std.testing.expectEqual(first.offset, returned.offset);
+    try std.testing.expectEqual(@as(u16, 0), returned.row);
+}
+
+test "a width report on a Message overlay reflows its hidden transcript at its own width" {
+    try expectHiddenTranscriptReflow(true);
+}
+
+test "a resize on a Message overlay reflows its hidden transcript at its own width" {
+    try expectHiddenTranscriptReflow(false);
 }

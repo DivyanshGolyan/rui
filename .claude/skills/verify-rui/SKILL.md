@@ -96,7 +96,8 @@ It also prints macOS Accessibility and Screen Recording status for information o
 
 Stable handles from the product:
 - `›`: the composer prompt.
-- `Browsing · Esc returns`: an inspection or scrolled view.
+- `Browsing · Esc returns`: an inspection page, not a scrolled transcript.
+- `Looking back`: transcript footer; `New output below` appears when live text advanced. Ctrl-End follows latest; live tools and queue keep their geometry.
 - `Session: NAME` and `Work:`: the /status page.
 - `Start of conversation`.
 - `Detached. Host work continues.` and `Resume: rui session resume …`: shown after exit.
