@@ -183,6 +183,13 @@ pub const read_transcript_record: Record = .{
     .input_schema = core_tools.read_transcript_schema,
 };
 
+pub const skill_record: Record = .{
+    .name = "skill",
+    .owner = .rui,
+    .description = core_tools.skill_description,
+    .input_schema = core_tools.skill_schema,
+};
+
 pub const start_agent_record: Record = .{
     .name = "start_agent",
     .owner = .rui,
@@ -204,7 +211,7 @@ pub const Runner = enum {
     pub fn of(tool: *const Record) Runner {
         if (tool.owner == .mcp) return .mcp;
         if (tool.owner == .provider) return .provider;
-        const core = std.mem.eql(u8, tool.name, find_tools_record.name) or std.mem.eql(u8, tool.name, message_agent_record.name) or std.mem.eql(u8, tool.name, read_transcript_record.name) or std.mem.eql(u8, tool.name, start_agent_record.name);
+        const core = std.mem.eql(u8, tool.name, find_tools_record.name) or std.mem.eql(u8, tool.name, message_agent_record.name) or std.mem.eql(u8, tool.name, read_transcript_record.name) or std.mem.eql(u8, tool.name, start_agent_record.name) or std.mem.eql(u8, tool.name, skill_record.name);
         return if (core) .core else .bash;
     }
 };
@@ -219,6 +226,7 @@ pub fn record(tool: Tool) *const Record {
         .message_agent => &message_agent_record,
         .read_transcript => &read_transcript_record,
         .start_agent => &start_agent_record,
+        .skill => &skill_record,
         .web_search => &web_search_record,
     };
 }
@@ -309,6 +317,7 @@ pub const Call = union(Tool) {
     find_tools,
     message_agent: *const core_tools.MessageAgentArguments,
     read_transcript: ?protocol.Bounded(protocol.session_id_bytes),
+    skill,
     start_agent,
     web_search: WebSearchCall,
 };
@@ -341,6 +350,11 @@ pub fn describe(call: Call) Description {
         .read_transcript => |id| blk: {
             var out: Description = .{};
             if (id) |target| compose(&out, &.{ "Read ", "'s transcript" }, &.{target.slice()}) else compose(&out, &.{"Read own transcript"}, &.{});
+            break :blk out;
+        },
+        .skill => blk: {
+            var out: Description = .{};
+            out.set("Use skills") catch unreachable;
             break :blk out;
         },
         .start_agent => blk: {
@@ -539,6 +553,7 @@ pub fn toolBit(tool: Tool) u8 {
         .start_agent => 8,
         .read_transcript => 16,
         .find_tools => 32,
+        .skill => 64,
     };
 }
 
@@ -565,6 +580,7 @@ pub const CallFacts = struct {
     removed: bool = false,
     invalid_mcp_arguments: bool = false,
     find_tools: bool = false,
+    skill: bool = false,
     read_transcript: bool = false,
     transcript_id: ?protocol.Bounded(protocol.session_id_bytes) = null,
 
@@ -593,6 +609,7 @@ pub const CallFacts = struct {
         if (self.bashArguments()) |arguments| return describe(.{ .bash = arguments });
         if (self.messageAgentArguments()) |arguments| return describe(.{ .message_agent = arguments });
         if (self.find_tools) return describe(.find_tools);
+        if (self.skill) return describe(.skill);
         if (self.read_transcript) return describe(.{ .read_transcript = self.transcript_id });
         if (self.tool) |*selected| if (selected.runner() == .core and std.mem.eql(u8, selected.name, start_agent_record.name)) return describe(.start_agent);
         return null;
@@ -640,6 +657,7 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     const complete = name_length <= name.len and length == name_length and try name_source.next() == null;
     const named = complete and std.mem.eql(u8, name[0..length], bash_record.name);
     const finding = complete and std.mem.eql(u8, name[0..length], find_tools_record.name);
+    const skill = complete and std.mem.eql(u8, name[0..length], skill_record.name);
     const transcript = complete and std.mem.eql(u8, name[0..length], read_transcript_record.name);
     const messaging = complete and std.mem.eql(u8, name[0..length], message_agent_record.name);
     var tool: ?Record = if (complete) if (offeredFunction(offered.slice(), name[0..length])) |candidate| candidate.* else null else null;
@@ -663,6 +681,7 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
         .read_transcript = transcript and (runner == null or runner == .core),
         .transcript_id = if (transcript and (runner == null or runner == .core)) try transcriptDescriptionId(arguments) else null,
         .find_tools = finding and (runner == null or runner == .core),
+        .skill = skill and (runner == null or runner == .core),
     };
 }
 

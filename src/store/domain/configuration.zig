@@ -13,6 +13,7 @@ const command_domain = @import("command.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const tool_set = @import("tool_set.zig");
+const skills_domain = @import("skills.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const Faults = store_core.Faults;
@@ -22,6 +23,7 @@ pub const AcceptedConfiguration = struct {
     replayed: bool,
     revision: u64 = 0,
     created: bool = false,
+    skills: ?protocol.SkillsReloadStatus = null,
     session: protocol.Bounded(protocol.max_session_bytes) = .{},
 };
 
@@ -357,7 +359,7 @@ pub fn planConfigurationUpdate(
 /// write round (`importSealed`). The
 /// decision is `applyConfiguration`; the write round saves the Session,
 /// the command and its revision, then commits.
-pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, preset: ?*const PresetDecision, faults: Faults) !ConfigureReply {
+pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protocol.ConfigureCommand, preset: ?*const PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) !ConfigureReply {
     // The captured creation intent has no ID. Save its original digest
     // alongside the allocated target so a lost reply never creates twice.
     const command = request;
@@ -378,6 +380,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
             .replayed = true,
             .revision = existing.revision,
             .created = existing.created,
+            .skills = if (command.reload_skills) (if (existing.code.eql("skills_reloaded")) .reloaded else if (existing.code.eql("skills_unchanged")) .unchanged else return error.CorruptStore) else null,
             .session = existing.target,
         } },
         .rejected => |code| return .{ .rejected = .{ .replayed = true, .code = code } },
@@ -389,7 +392,33 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
     if (command.require_model and !servesProviderOf(served, &command.configuration, if (reads.found.get()) reads.next.provider else null)) {
         return saveConfigurationRejection(a, command, &digest, .model_capability_unavailable, faults);
     }
-    const applied = switch (try applyConfiguration(a, io, command.session.slice(), &command.configuration, faults, reads)) {
+    if (command.reload_skills) {
+        if (creating or !reads.found.get()) return saveConfigurationRejection(a, command, &digest, .unknown_session, faults);
+        var invalid = command.preset != null or command.require_model;
+        inline for (@typeInfo(protocol.Configuration).@"struct".field_names) |field| {
+            if (@field(command.configuration, field).state != .omitted) invalid = true;
+        }
+        if (invalid) return saveConfigurationRejection(a, command, &digest, .incomplete_initial_configuration, faults);
+        const captured = reload_capture orelse return saveConfigurationRejection(a, command, &digest, .skills_unavailable, faults);
+        if (captured.* == .failed) return saveConfigurationRejectionWithFailure(a, command, &digest, captured.failed.rejection(protocol.ConfigurationRejection), captured.failed, faults);
+        if (captured.* != .reload) return saveConfigurationRejection(a, command, &digest, .skills_unavailable, faults);
+        var memory: std.heap.ArenaAllocator = .init(std.heap.c_allocator);
+        defer memory.deinit();
+        const head: rsql.SessionHead = .{ .ref = command.session.slice()[0..protocol.session_id_bytes].*, .workspace_key = .of(reads.next.workspace_key), .next_position = .of(reads.next.next_position) };
+        const result = try skills_domain.apply(a, memory.allocator(), head, captured, faults);
+        var outcome: content_domain.Import = .ofBytes(result.bytes, false);
+        content_domain.lookup(a, &outcome);
+        try a.run();
+        const outcome_id = try content_domain.importBytes(a, &outcome, result.bytes);
+        const status = result.reload_status orelse return error.CorruptStore;
+        var answer: StoredAnswer = .{ .accepted = true, .revision = reads.next.revision };
+        try answer.code.set(if (status == .unchanged) "skills_unchanged" else "skills_reloaded");
+        try command_domain.queueCommand(a, command.key.slice(), .configure, command.session.slice(), &digest, outcome_id, null, &answer);
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try a.commit();
+        return .{ .accepted = .{ .replayed = false, .revision = reads.next.revision, .created = false, .session = command.session, .skills = status } };
+    }
+    const applied = switch (try applyConfiguration(a, io, command.session.slice(), &command.configuration, initial_skills, faults, reads)) {
         .rejected => |code| return saveConfigurationRejection(a, command, &digest, code, faults),
         .accepted => |value| value,
     };
@@ -799,6 +828,7 @@ pub fn applyConfiguration(
     io: std.Io,
     session: []const u8,
     configuration: *const protocol.Configuration,
+    initial_skills: ?*const skills_domain.Initial,
     faults: Faults,
     reads: *ConfigurationReads,
 ) !Application {
@@ -827,6 +857,7 @@ pub fn applyConfiguration(
     if (!creating and !reads.found.get()) {
         return .{ .rejected = .unknown_session };
     }
+    if (creating) if (initial_skills) |captured| if (captured.* == .unavailable) return .{ .rejected = .skills_unavailable };
     if (reads.found.get()) try checkSaved(next);
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
     const default_provider = defaultProvider(a.store.served);
@@ -918,6 +949,7 @@ pub fn applyConfiguration(
         };
         insertSession(a, head, next, &reads.workspace_digest, created_seq, if (reads.parent) |*parent| parent else null);
         try target.set(&reads.reference);
+        try skills_domain.initialize(a, head, initial_skills, faults);
     } else {
         head = .{ .ref = session[0..protocol.session_id_bytes].*, .workspace_key = .of(next.workspace_key), .next_position = .of(next.next_position) };
         a.write(update_session, .{
@@ -955,9 +987,21 @@ fn saveConfigurationRejection(
     code: protocol.ConfigurationRejection,
     faults: Faults,
 ) !ConfigureReply {
+    return saveConfigurationRejectionWithFailure(a, command, digest, code, null, faults);
+}
+
+fn saveConfigurationRejectionWithFailure(
+    a: anytype,
+    command: *const protocol.ConfigureCommand,
+    digest: *const [32]u8,
+    code: protocol.ConfigurationRejection,
+    failure: ?skills_domain.Failure,
+    faults: Faults,
+) !ConfigureReply {
+    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic, faults) else null;
     var answer = StoredAnswer{ .accepted = false };
     try answer.code.set(@tagName(code));
-    try command_domain.queueCommand(a, command.key.slice(), .configure, command.session.slice(), digest, null, null, &answer);
+    try command_domain.queueCommand(a, command.key.slice(), .configure, command.session.slice(), digest, outcome_id, null, &answer);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
     return .{ .rejected = .{ .replayed = false, .code = code } };

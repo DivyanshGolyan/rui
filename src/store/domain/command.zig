@@ -2,6 +2,7 @@
 //! interruptions, permission decisions), their replay, and their observed results.
 
 const std = @import("std");
+const skills_domain = @import("skills.zig");
 const protocol = @import("../../protocol.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
@@ -216,6 +217,7 @@ const MessageReads = struct {
     sender: message_sender.Result = null,
     /// The text's identity, and the row its lookup found.
     text: content_domain.Import,
+    captured_text: ?[]const u8 = null,
 };
 
 /// The handle a peer Message's sender claims, when its address names this
@@ -282,9 +284,22 @@ fn rejectMessage(
     code: protocol.MessageRejection,
     faults: Faults,
 ) !MessageReply {
+    return rejectMessageWithFailure(a, command, reads, sender_known, code, null, faults);
+}
+
+fn rejectMessageWithFailure(
+    a: anytype,
+    command: *const protocol.MessageCommand,
+    reads: *const MessageReads,
+    sender_known: bool,
+    code: protocol.MessageRejection,
+    failure: ?skills_domain.Failure,
+    faults: Faults,
+) !MessageReply {
+    const outcome_id = if (failure) |diagnostic| try skills_domain.importFailure(a, diagnostic, faults) else null;
     var answer = StoredAnswer{ .accepted = false };
     try answer.code.set(@tagName(code));
-    try queueCommand(a, command.key.slice(), .message, command.session.slice(), &reads.digest, null, null, &answer);
+    try queueCommand(a, command.key.slice(), .message, command.session.slice(), &reads.digest, outcome_id, null, &answer);
     if (sender_known) {
         const sender = reads.sender.?.session;
         a.write(reject_sent, .{ .key = command.key.slice(), .sender = sender, .position = try (try a.positions(sender)).take(1) });
@@ -308,7 +323,7 @@ fn admitMessage(
     committed: ?MessageCommitted,
     faults: Faults,
 ) !MessageReply {
-    const text_id = try content_domain.importSealed(a, io, &command.text, &reads.text, faults);
+    const text_id = if (reads.captured_text) |bytes| try content_domain.importBytes(a, &reads.text, bytes) else try content_domain.importSealed(a, io, &command.text, &reads.text, faults);
     const answer: StoredAnswer = .{ .accepted = true };
     if (configured) |applied| {
         try configuration_domain.queueConfiguredCommand(a, applied, command.key.slice(), .message, &reads.digest, text_id, null, &answer);
@@ -343,7 +358,7 @@ fn admitMessage(
             .replayed = false,
             .admission_id = admission_id,
             // The text's row was found or written under exactly this identity.
-            .content = .{ .length = command.text.length, .digest = command.text.digest },
+            .content = .{ .length = reads.text.length, .digest = reads.text.digest },
             .session = session,
         },
     };
@@ -359,11 +374,13 @@ pub fn submitMessage(
     selector: []const u8,
     command: *const protocol.MessageCommand,
     committed: ?MessageCommitted,
+    initial_skills: ?*const skills_domain.Initial,
+    captured_skill: ?*const skills_domain.Capture,
     faults: Faults,
 ) !MessageReply {
-    if (command.configuration != null) return submitCreating(a, io, served, selector, command, committed, faults);
+    if (command.configuration != null) return submitCreating(a, io, served, selector, command, committed, initial_skills, faults);
     var reads: MessageReads = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
-    return submitTo(a, io, served, selector, command, committed, faults, &reads);
+    return submitTo(a, io, served, selector, command, committed, captured_skill, faults, &reads);
 }
 
 /// Round 1 reads the saved answer, the sender's Action, the Session and
@@ -377,6 +394,7 @@ noinline fn submitTo(
     selector: []const u8,
     command: *const protocol.MessageCommand,
     committed: ?MessageCommitted,
+    captured_skill: ?*const skills_domain.Capture,
     faults: Faults,
     reads: *MessageReads,
 ) !MessageReply {
@@ -401,6 +419,15 @@ noinline fn submitTo(
     else
         null;
     if (rejection) |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, code, faults);
+    if (command.skill != null) {
+        const captured = captured_skill orelse return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
+        if (captured.* == .failed) return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, captured.failed.rejection(protocol.MessageRejection), captured.failed, faults);
+        if (captured.* != .invocation) return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
+        reads.captured_text = captured.invocation;
+        reads.text = .ofBytes(captured.invocation, false);
+        content_domain.lookup(a, &reads.text);
+        try a.run();
+    }
     if (target.?.archive_state == .archived) a.write(clear_archive, .{ .session = target.?.session });
     return admitMessage(a, io, command, reads, target.?.session, command.session, null, committed, faults);
 }
@@ -420,6 +447,7 @@ noinline fn submitCreating(
     selector: []const u8,
     command: *const protocol.MessageCommand,
     committed: ?MessageCommitted,
+    initial_skills: ?*const skills_domain.Initial,
     faults: Faults,
 ) !MessageReply {
     const configuration = &command.configuration.?;
@@ -440,7 +468,7 @@ noinline fn submitCreating(
         .model_capability_unavailable
     else
         null;
-    if (rejection == null) switch (try configuration_domain.applyConfiguration(a, io, "", configuration, faults, creation)) {
+    if (rejection == null) switch (try configuration_domain.applyConfiguration(a, io, "", configuration, initial_skills, faults, creation)) {
         .rejected => |code| rejection = std.meta.stringToEnum(protocol.MessageRejection, @tagName(code)).?,
         .accepted => |applied| {
             content_domain.lookup(a, &reads.text);
@@ -483,7 +511,7 @@ pub fn deliverAgentMessage(
     const key = agentMessageKey(&key_buffer, binding.action_id);
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var receiver: target_session.Result = null;
@@ -672,13 +700,14 @@ pub fn startAgent(
     attached: bool,
     configuration: *protocol.Configuration,
     committed: ?MessageCommitted,
+    initial_skills: ?*const skills_domain.Initial,
     faults: Faults,
 ) !AgentStart {
     var key_buffer: [protocol.max_key_bytes]u8 = undefined;
     const key = std.fmt.bufPrint(&key_buffer, "rui.core/start_agent/{d}", .{binding.action_id}) catch unreachable;
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     configuration.workspace = .{ .state = .value, .value = .{ .len = 0 } };
@@ -712,7 +741,7 @@ pub fn startAgent(
     configuration.provider.value.set(@tagName(parent.provider)) catch unreachable;
     if (attached) creation.parent = found.session.ref;
     const application: ?configuration_domain.Application = if (refusal == null)
-        try configuration_domain.applyConfiguration(a, io, "", configuration, faults, creation)
+        try configuration_domain.applyConfiguration(a, io, "", configuration, initial_skills, faults, creation)
     else
         null;
     const applied: ?*const configuration_domain.Applied = if (application) |*decided| switch (decided.*) {
@@ -767,7 +796,7 @@ pub fn startAgent(
 pub fn resolveCoreCall(a: anytype, binding: action_domain.ActionAttemptBinding, code: action_domain.ActionResolutionCode, result: []const u8, faults: Faults) !bool {
     var facts: action_domain.core_facts.Result = undefined;
     const names: action_domain.CoreNames = .of();
-    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &facts);
+    a.read(action_domain.core_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id, .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &facts);
     var outcome: content_domain.Import = .ofBytes(result, false);
     content_domain.lookup(a, &outcome);
     try a.run();
@@ -1878,12 +1907,17 @@ fn readRecovery(a: anytype, key: []const u8, out: *reads_domain.Recovery) !void 
 /// An accepted Message's outcome, whether a stop excluded it, and its
 /// answer's metadata.
 const message_result = rsql.Read(.{
+    .compound = true,
     .sql = "SELECT t.outcome_code,t.outcome_content_id,EXISTS(" ++
         "SELECT 1 FROM session_stop stopped WHERE stopped.session_ref=m.session_ref " ++
-        "AND m.admission_id<=stopped.admission_cutoff) AS stopped,answer.byte_length AS answer_length,answer.digest AS answer_digest " ++
+        "AND m.admission_id<=stopped.admission_cutoff) AS stopped,answer.byte_length AS answer_length,answer.digest AS answer_digest,answer.private AS outcome_private,0 AS direct " ++
         "FROM core_command command JOIN message_admission m ON m.command_key=command.command_key " ++
         "LEFT JOIN turn t ON t.turn_id=m.turn_id LEFT JOIN content answer ON answer.content_id=t.outcome_content_id " ++
-        "WHERE command.command_key=?1 AND command.kind=2 AND command.accepted=1",
+        "WHERE command.command_key=?1 AND command.kind=2 AND command.accepted=1 UNION ALL " ++
+        "SELECT NULL,command.primary_content_id,0,outcome.byte_length,outcome.digest,outcome.private,1 " ++
+        "FROM core_command command LEFT JOIN content outcome ON outcome.content_id=command.primary_content_id " ++
+        "WHERE command.command_key=?1 AND command.primary_content_id IS NOT NULL AND " ++
+        "(command.accepted=0 OR (command.kind=1 AND command.code IN ('skills_reloaded','skills_unchanged')))",
     .Args = struct { key: []const u8 },
     .Row = struct {
         outcome_code: ?protocol.Bounded(protocol.max_code_bytes),
@@ -1891,17 +1925,25 @@ const message_result = rsql.Read(.{
         stopped: bool,
         answer_length: ?u64,
         answer_digest: ?[32]u8,
+        outcome_private: ?bool,
+        direct: bool,
     },
     .cardinality = .optional,
 });
 
-/// One round: the Message's outcome with its answer's metadata.
+/// One round: an ordinary command outcome, or the Message's eventual answer.
+/// Captured skill refusals and idle reload acknowledgements are saved content;
+/// retrieving them never rereads the filesystem or admits model work.
 pub fn commandResult(a: anytype, key: []const u8) !ContentReference {
     var result: message_result.Result = null;
     a.read(message_result, .{ .key = key }, &result);
     // The Host's fence names this read, as on main.
     try store_access.runAs(a, error.ResultReadFailed);
     const row = result orelse return error.ResultNotFound;
+    if (row.direct) {
+        if (row.outcome_content_id == null or row.outcome_private != false) return error.CorruptStore;
+        return .{ .length = row.answer_length orelse return error.CorruptStore, .digest = row.answer_digest orelse return error.CorruptStore };
+    }
     const outcome = row.outcome_code orelse return if (row.stopped) error.ResultFailed else error.ResultNotReady;
     switch (try TurnOutcome.decode(outcome.slice(), if (row.outcome_content_id) |id| @intCast(id.get()) else null)) {
         .completed => return .{

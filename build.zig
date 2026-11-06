@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
             }));
         }
         configureSqlite(b, compile);
+        configureYaml(b, compile);
         configureBashPlatform(b, compile);
         configureHostLaunch(b, compile);
         configureTerminalEditor(b, compile);
@@ -115,6 +116,7 @@ pub fn build(b: *std.Build) void {
         .filters = if (test_filters.len != 0) test_filters else &.{"Host processing wait does not consume response transfer inactivity"},
     });
     configureSqlite(b, deadline_witness);
+    configureYaml(b, deadline_witness);
     configureBashPlatform(b, deadline_witness);
     configureHostLaunch(b, deadline_witness);
     configureTerminalEditor(b, deadline_witness);
@@ -337,6 +339,11 @@ pub fn build(b: *std.Build) void {
         "Run the targeted model dispatch, output, retry, and recovery shortcut",
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
+
+    const skills_integration = b.addSystemCommand(&.{"python3"});
+    skills_integration.addFileArg(b.path("tests/integration/skills_integration.py"));
+    skills_integration.addFileArg(ci.path(release_safe));
+    b.step("skills-integration", "Run isolated native skills capture, replay and creation cases").dependOn(&skills_integration.step);
 
     const login_signal_integration = b.addSystemCommand(&.{"python3"});
     login_signal_integration.addFileArg(b.path("tests/integration/login_signal_integration.py"));
@@ -765,6 +772,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         configureSqlite(b, apple_tests);
+        configureYaml(b, apple_tests);
         configureBashPlatform(b, apple_tests);
         configureHostLaunch(b, apple_tests);
         configureTerminalEditor(b, apple_tests);
@@ -1109,6 +1117,7 @@ fn addRuiWithIdentity(
     });
     executable.root_module.link_libc = true;
     configureSqlite(b, executable);
+    configureYaml(b, executable);
     configureBashPlatform(b, executable);
     configureHostLaunch(b, executable);
     configureTerminalEditor(b, executable);
@@ -1273,6 +1282,22 @@ fn addTransportHeaders(b: *std.Build, target: std.Build.ResolvedTarget) std.Buil
 fn transportEnabled(target: std.Build.ResolvedTarget) bool {
     return (target.result.os.tag == .macos or target.result.os.tag == .linux) and
         (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64);
+}
+
+fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    const module = compile.root_module;
+    const yaml = b.dependency("yaml", .{});
+    const yaml_bindings = addBindings(b, module, "yaml", "#include <yaml.h>\n");
+    yaml_bindings.addIncludePath(yaml.path("include"));
+    module.addIncludePath(yaml.path("include"));
+    module.addIncludePath(yaml.path("src"));
+    module.addCMacro("YAML_VERSION_STRING", "\"0.2.5\"");
+    module.addCMacro("YAML_VERSION_MAJOR", "0");
+    module.addCMacro("YAML_VERSION_MINOR", "2");
+    module.addCMacro("YAML_VERSION_PATCH", "5");
+    for ([_][]const u8{ "api.c", "reader.c", "scanner.c", "parser.c", "loader.c", "writer.c", "emitter.c", "dumper.c" }) |source| {
+        module.addCSourceFile(.{ .file = yaml.path(b.fmt("src/{s}", .{source})), .flags = &.{"-std=c99"} });
+    }
 }
 
 fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {

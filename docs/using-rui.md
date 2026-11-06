@@ -204,8 +204,8 @@ Rui does not compact unchanged input again.
 
 ### Loading tools on demand
 
-The built-in catalog, in name order, is `bash`, `find_tools`, `message_agent`, `read_transcript`, `start_agent`, `web_search`.
-Fresh Sessions still default to `bash` and `web_search`.
+The built-in catalog, in name order, is `bash`, `find_tools`, `message_agent`, `read_transcript`, `skill`, `start_agent`, `web_search`.
+Fresh Sessions default to `bash`, `skill` and `web_search`.
 
 Set `--tools` to the tools a Session may use and `--loaded-tools` to the subset
 initially offered to its model.
@@ -214,7 +214,7 @@ For example:
 
 ```sh
 rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" \
-  --tools bash,find_tools,message_agent,read_transcript,start_agent,web_search \
+  --tools bash,find_tools,message_agent,read_transcript,skill,start_agent,web_search \
   --loaded-tools bash,find_tools
 ```
 
@@ -225,3 +225,17 @@ Words are split on ASCII spaces; supply one to eight, at most 64 bytes each.
 The result lists loaded names and description previews.
 They become callable on the next request.
 Searches that find nothing report how many tools remain unloaded.
+
+## Skills
+
+Rui advertises valid skills from your repository's `.agents/skills` and the Host user's `~/.agents/skills` when a Session is created.
+A repository skill wins a same-name home skill; other roots, including `.claude`, are not scanned.
+Each skill directory contains a `SKILL.md` with required YAML `name` and `description`.
+Optional metadata cannot grant permissions or tools; `disable-model-invocation` is ignored.
+
+Use `/skill NAME` to send the full current `SKILL.md` and its absolute path as ordinary conversation input.
+The model can invoke the `skill` tool when your chosen tool set includes it.
+Skills run nothing on load and do not bypass approvals.
+Use `/reload-skills` to refresh this Session's advertised names, descriptions and paths without starting a model turn.
+Only changes append a new catalog instruction; editing only a body needs no reload before the next invocation.
+Earlier catalog instructions and invocation results stay unchanged, and skills receive no special retention during compaction.

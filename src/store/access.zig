@@ -206,10 +206,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         inserted: [if (mode == .read or mode == .single) 0 else max_inserted]InsertedContent = undefined,
         inserted_count: u8 = 0,
 
-        /// The most content rows one Access inserts: a creating Message's
-        /// instructions, output schema, empty default and text, or the two
-        /// texts of each record one catalog transaction saves.
-        const max_inserted = 4;
+        /// A peer creation can import six distinct values in one transaction:
+        /// authored instructions, schema, catalog metadata, catalog instruction,
+        /// task and start result. Other creations use at most five; catalog
+        /// record batches use two texts per record. Equal values share one row.
+        const max_inserted = 6;
         comptime {
             std.debug.assert(2 * @import("domain/tool_set.zig").records_per_transaction <= max_inserted);
         }

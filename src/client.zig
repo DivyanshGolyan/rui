@@ -440,6 +440,7 @@ pub const ConfigureInput = struct {
         create,
     },
     require_model: bool = false,
+    reload_skills: bool = false,
     workspace: OptionalText = .{},
     provider: OptionalText = .{},
     model: OptionalText = .{},
@@ -460,6 +461,7 @@ pub const MessageInput = struct {
     session: []const u8,
     text_path: []const u8,
     text: ?[]const u8 = null,
+    skill: ?[]const u8 = null,
     configuration: ?ConfigureInput = null,
     // The full sending address from the tool process, retained for recovery.
     sender: ?Address = null,
@@ -1378,9 +1380,13 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             break :blk .configure;
         },
         .message => blk: {
+            if (fields.sender) |sender| _ = sender.address() catch return error.InvalidRequestRecord;
+            if (fields.skill) |name| {
+                if (name.slice().len == 0 or fields.text != null or fields.configuration != null) return error.InvalidRequestRecord;
+                break :blk .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } };
+            }
             const text = fields.text orelse return error.InvalidRequestRecord;
             if (!text.state.eql("value")) return error.InvalidRequestRecord;
-            if (fields.sender) |sender| _ = sender.address() catch return error.InvalidRequestRecord;
             if (fields.configuration != null and saved.session.len != 0) return error.InvalidRequestRecord;
             break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest, .creates_session = fields.configuration != null } };
         },
@@ -1399,7 +1405,8 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     // a creating Message.
     if ((kind != .configure and kind != .message and fields.configuration != null) or
         (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
-        (kind != .message and (fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
+        (kind != .configure and fields.reload_skills != null) or
+        (kind != .message and (fields.skill != null or fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
 }
@@ -1481,7 +1488,11 @@ fn writeConfigureCapture(io: std.Io, paths: *const platform.Paths, input: Config
     errdefer capture.abort();
     try capture.writeRequest(protocol.configure_request.head, .{ paths.store.slice(), location.key, session });
     try capture.writeConfiguration(input);
-    if (input.require_model)
+    if (input.reload_skills and input.require_model)
+        try capture.writeRequest(protocol.configure_request.reload_require_model_tail, .{})
+    else if (input.reload_skills)
+        try capture.writeRequest(protocol.configure_request.reload_skills_tail, .{})
+    else if (input.require_model)
         try capture.writeRequest(protocol.configure_request.require_model_tail, .{})
     else
         try capture.writeRequest(protocol.configure_request.tail, .{});
@@ -1527,6 +1538,10 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
         // either variable payload. Inspection never scans Message content.
         try capture.writeRequest(protocol.message_request.configuration, .{});
         try capture.writeConfiguration(configuration);
+    }
+    if (input.skill) |name| {
+        try capture.writeRequest(protocol.message_request.skill, .{name});
+        return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .message);
     }
     try capture.writeRequest(protocol.message_request.text, .{});
     if (input.text) |value| {
@@ -4684,4 +4699,31 @@ test "archive recovery preserves the protocol default and refuses ambiguous or m
             try std.testing.expectEqual(expected, recovered.target.session_archive.archived);
         } else try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } }));
     }
+}
+
+test "skills typed captures preserve invocation and invalid mixed reload intent" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "not-read", .skill = "demo" }, .{ .generated = root }).get();
+    defer captured.close(io);
+    const binding = try readCapturedBinding(io, &captured.file);
+    try std.testing.expect(binding.target.message.invokes_skill);
+    var bytes: [4096]u8 = undefined;
+    var length = try captured.file.readPositionalAll(io, &bytes, 0);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("demo", parsed.value.object.get("skill").?.string);
+    try std.testing.expect(parsed.value.object.get("text") == null);
+    var reload = try captureConfigure(io, .{ .store = root, .session = .{ .named = "k7m2qx" }, .reload_skills = true, .require_model = true }, .{ .generated = root }).get();
+    defer reload.close(io);
+    _ = try readCapturedBinding(io, &reload.file);
+    length = try reload.file.readPositionalAll(io, &bytes, 0);
+    parsed.deinit();
+    parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+    try std.testing.expect(parsed.value.object.get("reload_skills").?.bool);
+    try std.testing.expect(parsed.value.object.get("require_model").?.bool);
 }

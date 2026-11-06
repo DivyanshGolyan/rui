@@ -1455,8 +1455,18 @@ const Header = struct {
 noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer) store_module.MessageReply {
     std.debug.assert(offer.value() != null);
     defer offer.deinit(host.allocator);
+    var memory: std.heap.ArenaAllocator = .init(host.allocator);
+    defer memory.deinit();
+    const initial_skills = if (command.configuration) |*configuration|
+        @import("session_skills.zig").initial(memory.allocator(), host.allocator, host.io, host.store, command.key.slice(), configuration, host.bash_facts.home) catch return .infrastructure_failure
+    else
+        null;
+    const captured_skill: ?store_module.CapturedSkill = if (command.skill != null and !(host.store.commandExists(command.key.slice()) catch return .infrastructure_failure))
+        @import("session_skills.zig").capture(memory.allocator(), host.allocator, host.io, host.store, command.session.slice(), &.{ .operation = .invoke, .name = command.skill }, host.bash_facts.home) catch return .infrastructure_failure
+    else
+        null;
     const faults = host.hooks.storeFaults(.command);
-    const environments = host.environments orelse return host.store.submitMessageWithModel(command, null, faults);
+    const environments = host.environments orelse return host.store.submitMessageCapturedSkills(command, null, initial_skills, if (captured_skill) |*value| value else null, faults);
     const Install = struct {
         environments: *SessionEnvironments,
         offer: *SessionEnvironments.Offer,
@@ -1470,7 +1480,7 @@ noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, 
         }
     };
     var install: Install = .{ .environments = environments, .offer = offer };
-    return host.store.submitMessageWithModel(command, .{ .context = &install, .call = Install.call }, faults);
+    return host.store.submitMessageCapturedSkills(command, .{ .context = &install, .call = Install.call }, initial_skills, if (captured_skill) |*value| value else null, faults);
 }
 
 /// Resolve before the Store hashes or saves. Normal answers bind the resolved
@@ -1478,7 +1488,7 @@ noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, 
 /// including its name. The Store keeps that identity for a saved refusal even
 /// if the preset later exists: the same request cannot become an acceptance.
 noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureCommand) store_module.ConfigureReply {
-    const name = command.preset orelse return host.store.configure(command, host.hooks.storeFaults(.command));
+    const name = command.preset orelse return configureCapturedSkills(host, command, null);
     var decision: store_module.PresetDecision = .{ .request_digest = command.presetRequestDigest() };
     if (command.session.len != 0) {
         decision.rejection = .preset_on_update;
@@ -1500,6 +1510,7 @@ noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureComma
         .key = command.key,
         .session = command.session,
         .require_model = command.require_model,
+        .reload_skills = command.reload_skills,
     };
     const checked = core_tools.parseAgentSpec(arena, preset.spec, &resolved.configuration) catch return .infrastructure_failure;
     // The immutable launch frame checked this same spec with this parser.
@@ -1508,7 +1519,21 @@ noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureComma
         const override = &@field(command.configuration, field);
         if (override.state != .omitted) @field(resolved.configuration, field) = override.*;
     }
-    return host.store.configureWithPreset(resolved, &decision, host.hooks.storeFaults(.command));
+    return configureCapturedSkills(host, resolved, &decision);
+}
+
+noinline fn configureCapturedSkills(host: *Host, command: *const protocol.ConfigureCommand, preset: ?*const store_module.PresetDecision) store_module.ConfigureReply {
+    var memory: std.heap.ArenaAllocator = .init(host.allocator);
+    defer memory.deinit();
+    const reload_capture: ?store_module.CapturedSkill = if (command.reload_skills and !(host.store.commandExists(command.key.slice()) catch return .infrastructure_failure))
+        @import("session_skills.zig").capture(memory.allocator(), host.allocator, host.io, host.store, command.session.slice(), &.{ .operation = .reload }, host.bash_facts.home) catch return .infrastructure_failure
+    else
+        null;
+    const initial_skills = if (command.session.len == 0 and !command.reload_skills)
+        @import("session_skills.zig").initial(memory.allocator(), host.allocator, host.io, host.store, command.key.slice(), &command.configuration, host.bash_facts.home) catch return .infrastructure_failure
+    else
+        null;
+    return host.store.configureWithCapturedSkills(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.hooks.storeFaults(.command));
 }
 
 /// `client_environment` holds a Message's checked environment.
@@ -1993,7 +2018,7 @@ fn renderConfigureReply(
 ) !void {
     const shapes = protocol.configuration_reply;
     try switch (result) {
-        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
+        .accepted => |value| if (value.skills) |status| response.appendShape(shapes.accepted_skills, .{ value.replayed, value.session.slice(), value.revision, status }) else response.appendShape(shapes.accepted, .{ value.replayed, value.session.slice(), value.revision, value.created }),
         .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, command.session.slice(), value.code }),
         .conflict => response.appendShape(shapes.conflict, .{command.session.slice()}),
         .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
@@ -3400,7 +3425,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var configure: protocol.ConfigureCommand = .{};
     try configure.session.set(&escaped_session);
     try std.testing.expectEqual(protocol.configuration_reply.max_bytes, try Worst.reply(renderConfigureReply, &configure, .{
-        store_module.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session } },
+        store_module.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .skills = .unchanged } },
         store_module.ConfigureReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.ConfigurationRejection) } },
         store_module.ConfigureReply.conflict,
     }));
@@ -4678,6 +4703,17 @@ test "presets seed configure before Store validation and idempotency" {
     create.* = .{ .preset = .{} };
     try create.preset.?.set("review");
     try create.key.set("preset-create");
+    // Native API intent survives preset resolution: reload cannot create a
+    // Session, and its saved refusal cannot become a plain preset creation.
+    const reload = try arena.create(protocol.ConfigureCommand);
+    reload.* = .{ .preset = create.preset, .reload_skills = true };
+    try reload.key.set("skills-reload-preset-empty");
+    const reload_refused = submitConfigure(&host, reload);
+    try std.testing.expect(reload_refused == .rejected);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_session, reload_refused.rejected.code);
+    try std.testing.expect(submitConfigure(&host, reload).rejected.replayed);
+    reload.reload_skills = false;
+    try std.testing.expect(submitConfigure(&host, reload) == .conflict);
     const first = submitConfigure(&host, create);
     try std.testing.expect(first == .accepted);
     try std.testing.expect(!first.accepted.replayed);

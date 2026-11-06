@@ -361,7 +361,7 @@ A deliberate second submission uses a new identity.
 ### Conversation entries and pending messages
 
 **Conversation** is the immutable ordered history of User text, assistant text, Tool Calls, Tool Results and System Instructions.
-Each entry records its exact causal source and applicable Turn.
+Each entry records its exact causal source and applicable Turn, except immediately appended catalog-origin System Instructions, which have no Turn.
 No edit, deletion or compaction rewrites history.
 An admitted User Message and its Conversation entry are distinct: **projection** means appending the admitted message to this history.
 Admission can precede projection, as the pending-message rules below specify.
@@ -483,6 +483,49 @@ For example, while a request is active, admit “review this code,” then confi
 A configuration committed after that boundary affects later requests; it cannot alter the admitted Operation or its replacement Attempts.
 Instruction updates remain ordered canonical Conversation facts under the rule below.
 This model-input boundary does not define when action permission policy changes take effect; authorization follows its own contract.
+
+### Skills
+
+A **Skill Catalog** is a Session's sorted list of skill names, descriptions and absolute `SKILL.md` paths.
+The shared Host capture owner discovers only `<repository>/.agents/skills` and the Host user's `~/.agents/skills` before creating a Session, including direct API, initial Message and `start_agent` creation.
+The repository is the nearest ancestor with a `.git` directory or worktree `.git` file; outside a repository, the Session Workspace is the repository root for discovery.
+Only direct child directories containing a valid `SKILL.md` are candidates, including symlinks; broken paths and missing roots are absent, while other root/file I/O failures fail the whole capture.
+A valid repository skill wins a same-name home skill.
+No `.claude` roots, marketplace discovery, installation or package machinery participates.
+
+Pinned LibYAML validates the complete frontmatter document, including quoted, literal and folded scalars.
+Required `name` and `description` follow the Agent Skills format, and the name must match its candidate directory.
+Unknown optional/vendor fields are ignored, including `disable-model-invocation` even when true and tool/permission metadata.
+Discovery reads no sibling resources and runs no script.
+The initial nonempty Catalog appends an immutable catalog-origin System Instruction before any model Operation; an empty Catalog is still captured durably but adds no instruction.
+It does not change authored instructions, their content identity, the revision-one baseline or the caller's explicit tool selection.
+Normal defaults offer/load `skill` even with no skills; an explicit restricted tool set remains authoritative, and routing hints are conditional on availability.
+
+The model `skill` tool accepts `invoke` with a name or `reload` without one.
+User `/skill NAME` and native `session send --skill NAME` use the same capture operation and admit its captured text as an ordinary User Message; the explicit native `skill` field is not hidden command text.
+Invocation reads the selected advertised absolute path anew, returning the complete raw UTF-8 `SKILL.md`, including frontmatter and trailing bytes, with its absolute path.
+The result is ordinary immutable conversation content, with no added authority, tools or permissions.
+Sibling resources remain accessible through the Session's existing tools and permission rules.
+An invocation result is not an active skill, retained body registry or protected instruction.
+
+User `/reload-skills` and native `session configure --reload-skills` rescan both roots without admitting a Message, changing the configuration revision or starting model work.
+The model tool's reload settles its ordinary Tool Result in the existing Turn.
+Both compare the captured candidate against the latest durable Session Catalog inside the settlement transaction, updating metadata and appending only added, removed and changed catalog entries as one new ordinary System Instruction.
+Name, description and winning absolute path determine a change; body-only edits are a no-op reload but a later fresh invocation reads their new bytes.
+No-change reload acknowledges without a catalog instruction.
+Failed scans preserve the previous Catalog, never fabricate removals, and typed native failures retain their diagnostic as an ordinary keyed command outcome.
+`request read-result` can read this captured refusal or reload acknowledgement without reopening files.
+
+File capture happens outside the Store writer; captured invocation/result bytes, catalog metadata and any delta instruction commit atomically with their originating command or bound tool settlement.
+Matching keyed replay returns its saved outcome before filesystem capture; already-admitted model Operations and replacement Attempts use their frozen history, never a rescan.
+Catalog instructions have the same immutable chronology, retry and compaction rules as other System Instructions.
+There is no active-skill state, body pinning, retention exception, reinjection or baseline rewriting.
+
+Bounds fail explicitly rather than truncating semantic input: `SKILL.md` is at most 1 MiB, YAML frontmatter 64 KiB, each root 4096 direct children, the winning Catalog 4096 entries and encoded metadata 64 MiB.
+Malformed metadata is not a valid candidate, but I/O, UTF-8 path and resource-limit failures abort discovery.
+Per-candidate raw/parser scratch is reclaimed independently of request/result metadata; shadowed home bodies do not accumulate in the capture arena.
+Canonical metadata must be public and each nonzero snapshot must have its exact same-position ordinary System Instruction; missing, mismatched or private required provenance fences rather than repairing history.
+Only the legitimate empty initial snapshot uses position zero without an instruction.
 
 ### Recording and rendering instruction updates
 
@@ -1198,9 +1241,9 @@ Call rejection, Action denial, failure, cancellation and uncertainty all produce
 ### Authorizing exact actions
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority.
-It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_transcript` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
-The CLI and TUI put `bash` and `web_search` in a fresh Session's spec; the Host never supplies a tools list (D104).
-CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_transcript`, `start_agent`, `web_search`).
+It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_transcript`, `skill` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
+The CLI and TUI put `bash`, `skill` and `web_search` in a fresh Session's spec; the Host never supplies a tools list (D104).
+CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_transcript`, `skill`, `start_agent`, `web_search`).
 A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools`, and is the set sent to the model and used to validate calls.
 Every loaded name must be in its resulting tools or configure refuses `loaded_tools_not_in_tools`; a strict subset must contain `find_tools` or configure refuses `loaded_tools_unreachable`.
 Changing tools without specifying loaded_tools keeps equality when the saved sets were equal; otherwise it intersects the saved loaded set with the new tools and applies the same checks.
@@ -2600,7 +2643,7 @@ A request made during Admission may recover that same original if it becomes unc
 
 After restoration and joined Admission settlement, detachment reports any unresolved original with its exact recovery key, even when local cancellation itself succeeds.
 A later fatal observation or failed detach notice reports the last accepted intent through `rui request inspect KEY` for a Message, or `rui request recover KEY` for the same saved Permission Decision admission.
-Explicit `request read-result` reads the Message's saved answer after completion.
+Explicit `request read-result` reads the Message's saved answer after completion, or the ordinary saved skill-refusal/reload outcome without model work.
 Guidance preserves its exact handle and selectors.
 A current unresolved original takes precedence over that accepted fallback.
 Joined read borrowers transfer structured HTTP status, type and code into one bounded frontend owner, independent of worker reuse.
@@ -2653,6 +2696,8 @@ It is the first row dropped when rows run short, before any draft row, and the f
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
+
+Wire version 11 adds explicit native skill invocation and idle catalog reload intent, typed capture refusals and reload acknowledgements; different versions refuse each other rather than silently discarding the new intent.
 Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.
 Wire version 8 dropped the `proposal_page`, `proposal_field` and `person_message` requests, added the Activity page's `kinds`, `limit` and `received` rows, renamed its `outcome` rows to `turn_ended`, each naming its `ending`, and marked a done Turn's answer `final` on its assistant row, after version 7 dropped the page's `read_through` and `beyond_unseen` fields and the `mark_read` request (the "new since you looked" feature, removed 2026-11-03), version 6 added the `label` on the Session a Message row names as sender or target, version 5 added the pages' `hosted_call` items, version 4 added each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 Normal desktop widths are the design target; narrower terminals wrap the same interface, never omit an approval command or decision label.
@@ -3406,7 +3451,7 @@ Ordinary observation/transport failures keep their existing handling; this adds 
 Fatal diagnosis never replaces the original captured identity or demotes an earlier confirmed admission to unconfirmed.
 
 `request inspect` presents the saved command's original rejection, queued/processing state, exclusion, failure, cancellation or completion as data.
-`request read-result` explicitly streams its original public answer when available.
+`request read-result` explicitly streams its original public answer, or captured skill-refusal/reload outcome, when available.
 Answer streams, including Action call ID and argument reads, withhold their final window until every advertised byte and EOF arrive, so a truncated read exits nonzero without complete-looking output.
 Neither infers work failure from an observation error or substitutes the Session's latest result.
 Before a Permission Decision in an ask-configured Session, normal interactive presentation shows the exact Workspace and complete decoded Bash command with the allow-once/deny choice, not numeric IDs.

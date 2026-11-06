@@ -66,7 +66,7 @@ pub const Full = struct {
         pub const json_shape = .{ "{\"admission\":\"", H.decimal, "\",\"command_key\":", H{ .string = protocol.max_key_bytes }, ",\"content\":", H{ .json = Inline }, ",\"turn\":", H.optional_id, ",\"application\":\"", H{ .tag = enum { applied, pending, excluded } }, "\",\"exclusion\":", H{ .optional_json = Exclusion }, ",\"outcome\":", H{ .optional_json = Outcome }, "}" };
     };
     pub const Conversation = struct {
-        pub const json_shape = .{ "{\"ordinal\":\"", H.decimal, "\",\"position\":\"", H.decimal, "\",\"kind\":\"", H{ .tag = enum { message, settings, assistant } }, "\",\"turn\":\"", H.decimal, "\",\"source_admission\":", H.optional_id, ",\"source_revision\":", H.optional_id, ",\"source_operation\":", H.optional_id, ",\"content\":", H{ .json = Reference }, "}" };
+        pub const json_shape = .{ "{\"ordinal\":\"", H.decimal, "\",\"position\":\"", H.decimal, "\",\"kind\":\"", H{ .tag = enum { message, settings, assistant } }, "\",\"turn\":", H.optional_id, ",\"source_admission\":", H.optional_id, ",\"source_revision\":", H.optional_id, ",\"source_catalog_position\":", H.optional_id, ",\"source_operation\":", H.optional_id, ",\"content\":", H{ .json = Reference }, "}" };
     };
     pub const Turn = struct {
         pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"first_admission\":\"", H.decimal, "\",\"input_cutoff\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"outcome\":", H{ .optional_json = Outcome }, "}" };

@@ -3698,7 +3698,7 @@ test "real SQLite full during import publishes no canonical prefix" {
             defer entry.release();
             var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
             defer a.deinit();
-            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, .{}));
+            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, null, null, .{}));
         },
     );
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
@@ -11285,4 +11285,81 @@ test "prepared cache eviction keeps colliding probe chains reachable" {
         buckets[bucket] = key;
     }
     unreachable; // 65 static keys in 64 initial buckets must collide.
+}
+
+test "skills schema 56 wire 9 upgrades populated rows to the current Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var migrated_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const migrated = try std.fmt.bufPrint(&migrated_buffer, "{s}/skills-56.sqlite3", .{root});
+    var fresh_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const fresh = try std.fmt.bufPrint(&fresh_buffer, "{s}/skills-fresh.sqlite3", .{root});
+    {
+        const raw = try openRaw(migrated);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        for (store_schema.migrations) |step| {
+            if (step.from >= 56) break;
+            for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+        }
+        // Deliberately old metadata, not protocol.wire_version: omitting
+        // the new wire UPDATE must fail the production open below.
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=56", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','9'),('store_selector',?1),('format','56')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, root);
+        try sqlite.expectDone(meta);
+        try std.testing.expectEqual(@as(u32, 56), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='9'", .{}));
+        try std.testing.expectEqual(@as(u64, 3), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM conversation_entry", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM sqlite_schema WHERE name='session_skill_catalog'", .{}));
+    }
+    {
+        var storage: Store = undefined;
+        try storage.open(std.testing.io, migrated, root);
+        defer storage.close() catch unreachable;
+        try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u64, store_schema.schema_version), try store_testing.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
+        try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE source_catalog_position IS NULL AND turn_id IS NOT NULL", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+        // The old assistant answer is still ordinary public content, byte
+        // for byte, accessible through the same production content reader.
+        const reference = try testingContentReference(&storage, 5);
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(reference));
+        defer reader.close();
+        var answer: ["hello\nworld".len]u8 = undefined;
+        try std.testing.expectEqual(answer.len, try reader.read(0, &answer));
+        try std.testing.expectEqualStrings("hello\nworld", &answer);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const skills = try storage.readSkills(arena.allocator(), "d8mv7p");
+        try std.testing.expectEqual(@as(usize, 0), skills.catalog.entries.len);
+    }
+    // The pinned expected rows are independent of the forward migration.
+    // Compare every durable row (including new NULL provenance fields),
+    // not just the populated table counts or a schema assembled as current.
+    try freshStoreWithExpectedRows(fresh, root);
+    var migrated_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer migrated_rows.deinit();
+    var fresh_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer fresh_rows.deinit();
+    {
+        const raw = try openRaw(migrated);
+        defer _ = c.sqlite3_close(raw);
+        try writeRows(raw, &migrated_rows.writer);
+    }
+    {
+        const raw = try openRaw(fresh);
+        defer _ = c.sqlite3_close(raw);
+        try writeRows(raw, &fresh_rows.writer);
+    }
+    try std.testing.expect(migrated_rows.written().len > 1000);
+    try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }

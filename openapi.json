@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Rui Host",
-    "version": "10",
+    "version": "11",
     "description": "The Rui Host's local protocol: HTTP/1.1 over the Unix socket of a running Host, one POST per request, generated from the Host's own wire types.\n\nRequest bodies list their fields in the order this document lists them; the Host refuses another order. Numbers that may exceed 2^53 travel as decimal strings. String bounds are in UTF-8 bytes (`x-rui-max-bytes`)."
   },
   "paths": {
@@ -1092,7 +1092,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "activity_content"
@@ -2057,7 +2057,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "activity_page"
@@ -2125,7 +2125,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "activity_page"
@@ -2155,7 +2155,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "activity_page"
@@ -2246,7 +2246,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "activity_page"
@@ -2433,7 +2433,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "activity_search"
@@ -2467,7 +2467,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "activity_search"
@@ -3163,7 +3163,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "configuration_reply"
@@ -3225,7 +3225,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3289,7 +3289,79 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
+              },
+              "type": {
+                "const": "configuration_reply"
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "accepted"
+                  },
+                  "replayed": {
+                    "type": "boolean"
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  "revision": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "created": {
+                    "const": false
+                  },
+                  "skills": {
+                    "type": "string",
+                    "enum": [
+                      "reloaded",
+                      "unchanged"
+                    ]
+                  }
+                },
+                "required": [
+                  "status",
+                  "replayed",
+                  "session",
+                  "revision",
+                  "created",
+                  "skills"
+                ],
+                "additionalProperties": false
+              },
+              "execution": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "unavailable"
+                  },
+                  "reason": {
+                    "const": "direct_reply_does_not_wait_for_model_processing"
+                  }
+                },
+                "required": [
+                  "status",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "answer",
+              "execution"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "11"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3334,7 +3406,12 @@
                       "workspace_is_immutable",
                       "provider_is_immutable",
                       "model_is_immutable",
-                      "revision_exhausted"
+                      "revision_exhausted",
+                      "skills_unavailable",
+                      "unknown_skill",
+                      "skill_file_unavailable",
+                      "skill_file_too_large",
+                      "skill_text_invalid"
                     ]
                   }
                 },
@@ -3379,7 +3456,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "configure"
@@ -3417,7 +3494,95 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
+              },
+              "kind": {
+                "const": "configure"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "configuration": {
+                "$ref": "#/components/schemas/Configuration"
+              },
+              "reload_skills": {
+                "const": true
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "configuration",
+              "reload_skills"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "11"
+              },
+              "kind": {
+                "const": "configure"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "configuration": {
+                "$ref": "#/components/schemas/Configuration"
+              },
+              "reload_skills": {
+                "const": true
+              },
+              "require_model": {
+                "const": true
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "configuration",
+              "reload_skills",
+              "require_model"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "11"
               },
               "kind": {
                 "const": "configure"
@@ -3459,7 +3624,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "configure"
@@ -3503,7 +3668,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "configure"
@@ -3553,7 +3718,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "conversation_content"
@@ -3599,7 +3764,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "conversation_page"
@@ -3908,7 +4073,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "conversation_page"
@@ -4227,7 +4392,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "conversation_page"
@@ -4272,7 +4437,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "type": "string",
@@ -4343,7 +4508,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "host_info"
@@ -4437,7 +4602,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "host_info"
@@ -4539,7 +4704,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "host_info"
@@ -4561,7 +4726,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "host_pause_reply"
@@ -4581,7 +4746,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "host_pause"
@@ -4607,7 +4772,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "host_stop_reply"
@@ -4627,7 +4792,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "host_stop"
@@ -4651,7 +4816,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_report"
@@ -4754,7 +4919,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_report"
@@ -4853,7 +5018,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_report"
@@ -4906,7 +5071,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_report"
@@ -4955,7 +5120,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "inspect_session"
@@ -4983,7 +5148,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5024,7 +5189,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5056,7 +5221,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "inspect_session"
@@ -5201,7 +5366,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_list"
@@ -5255,7 +5420,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_list"
@@ -5311,7 +5476,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_list"
@@ -5356,7 +5521,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "list_sessions"
@@ -5408,7 +5573,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "list_sessions"
@@ -5465,7 +5630,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "list_sessions"
@@ -5993,7 +6158,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "message_reply"
@@ -6105,7 +6270,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "message_reply"
@@ -6200,7 +6365,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "message_reply"
@@ -6247,7 +6412,12 @@
                       "workspace_is_immutable",
                       "provider_is_immutable",
                       "model_is_immutable",
-                      "revision_exhausted"
+                      "revision_exhausted",
+                      "skills_unavailable",
+                      "unknown_skill",
+                      "skill_file_unavailable",
+                      "skill_file_too_large",
+                      "skill_text_invalid"
                     ]
                   }
                 },
@@ -6310,7 +6480,138 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
+              },
+              "kind": {
+                "const": "message"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "sender": {
+                "type": "null"
+              },
+              "sender_handle": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 32,
+                    "x-rui-max-bytes": 32
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "skill": {
+                "type": "string",
+                "maxLength": 64,
+                "x-rui-max-bytes": 64
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "sender",
+              "sender_handle",
+              "skill"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "11"
+              },
+              "kind": {
+                "const": "message"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "sender": {
+                "type": "object",
+                "properties": {
+                  "store": {
+                    "type": "string",
+                    "maxLength": 492,
+                    "x-rui-max-bytes": 492
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  }
+                },
+                "required": [
+                  "store",
+                  "session"
+                ],
+                "additionalProperties": false
+              },
+              "sender_handle": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 32,
+                    "x-rui-max-bytes": 32
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "skill": {
+                "type": "string",
+                "maxLength": 64,
+                "x-rui-max-bytes": 64
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "sender",
+              "sender_handle",
+              "skill"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "11"
               },
               "kind": {
                 "const": "message"
@@ -6379,7 +6680,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "message"
@@ -6465,7 +6766,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "message"
@@ -6538,7 +6839,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "message"
@@ -6617,7 +6918,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "model_interruption_reply"
@@ -6679,7 +6980,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -6735,7 +7036,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -6805,7 +7106,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "model_interruption"
@@ -6904,7 +7205,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "model_list"
@@ -6927,7 +7228,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "model_list"
@@ -6978,7 +7279,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -7021,7 +7322,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -7201,7 +7502,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -10479,7 +10780,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -10725,7 +11026,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -10931,7 +11232,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -11141,7 +11442,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -11347,7 +11648,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "command_observation"
@@ -11383,7 +11684,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "observe_command"
@@ -11411,7 +11712,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "kind": {
                 "const": "observe_command"
@@ -11542,7 +11843,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "permission_decision_reply"
@@ -11599,7 +11900,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -11650,7 +11951,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -11715,7 +12016,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "permission_decision"
@@ -11785,7 +12086,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "read_action_arguments"
@@ -11817,7 +12118,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "read_action_call_id"
@@ -11849,7 +12150,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "read_result"
@@ -11877,7 +12178,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "session_archive_reply"
@@ -11935,7 +12236,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -11995,7 +12296,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -12058,7 +12359,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "session_archive"
@@ -12216,7 +12517,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "type": {
             "const": "session_stop_reply"
@@ -12274,7 +12575,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -12354,7 +12655,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "10"
+                "const": "11"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -12416,7 +12717,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "10"
+            "const": "11"
           },
           "kind": {
             "const": "session_stop"
@@ -13192,6 +13493,7 @@
               "find_tools",
               "message_agent",
               "read_transcript",
+              "skill",
               "start_agent",
               "web_search"
             ]
@@ -13560,7 +13862,14 @@
             ]
           },
           "turn": {
-            "$ref": "#/components/schemas/Decimal"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "source_admission": {
             "anyOf": [
@@ -13573,6 +13882,16 @@
             ]
           },
           "source_revision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_catalog_position": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/Decimal"
@@ -13603,6 +13922,7 @@
           "turn",
           "source_admission",
           "source_revision",
+          "source_catalog_position",
           "source_operation",
           "content"
         ],
@@ -14245,7 +14565,7 @@
         "description": "The wire version this document describes. Any other version is refused.",
         "schema": {
           "type": "string",
-          "const": "10"
+          "const": "11"
         }
       },
       "HostInstance": {

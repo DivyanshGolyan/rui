@@ -1700,7 +1700,7 @@ pub const CommandObservation = struct {
 /// observation spelling; `rui request recover --kind` uses the hyphenated spelling.
 pub const MutationTarget = union(protocol.CommandKind) {
     configure,
-    message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
+    message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false, invokes_skill: bool = false },
     session_stop,
     session_archive: struct { archived: bool },
     model_interruption: struct { turn: u64, operation: u64 },
@@ -1708,9 +1708,11 @@ pub const MutationTarget = union(protocol.CommandKind) {
 };
 
 pub const MutationAnswer = struct {
+    /// Validated Host-owned input identity, including captured native skills.
+    input: ?CommandObservation.ContentReference = null,
     result: union(enum) {
         accepted: union(enum) {
-            configure: struct { revision: u64, created: bool },
+            configure: struct { revision: u64, created: bool, skills: ?protocol.SkillsReloadStatus = null },
             message: struct { admission: u64 },
             session_stop: struct { turn: ?u64, admission_cutoff: u64, completion: protocol.SessionStopCompletion },
             session_archive: protocol.SessionArchiveObservation,
@@ -2388,6 +2390,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
             code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
             revision: OmittableJson(JsonString(20)) = .{},
             created: OmittableJson(bool) = .{},
+            skills: OmittableJson(JsonEnum(protocol.SkillsReloadStatus)) = .{},
             admission: OmittableJson(JsonString(20)) = .{},
             action: OmittableJson(JsonString(20)) = .{},
             decision: OmittableJson(JsonString(16)) = .{},
@@ -2459,11 +2462,12 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         if (conflict and (!code.eql("idempotency_key_conflict") or answer.replayed)) return error.InvalidResponse;
     }
     var value: @FieldType(@FieldType(MutationAnswer, "result"), "accepted") = undefined;
+    var confirmed_input: ?CommandObservation.ContentReference = null;
     switch (target) {
         .configure => {
             const execution = wire.execution.value orelse return error.InvalidResponse;
             if (!execution.status.eql("unavailable") or !(execution.reason.value orelse return error.InvalidResponse).eql("direct_reply_does_not_wait_for_model_processing")) return error.InvalidResponse;
-            if (accepted) value = .{ .configure = .{ .revision = try mutationId(answer.revision.value orelse return error.InvalidResponse, false), .created = answer.created.value orelse return error.InvalidResponse } };
+            if (accepted) value = .{ .configure = .{ .revision = try mutationId(answer.revision.value orelse return error.InvalidResponse, false), .created = answer.created.value orelse return error.InvalidResponse, .skills = if (answer.skills.value) |skills_value| skills_value.value else null } };
         },
         .message => |expected| {
             if (!(wire.execution.value orelse return error.InvalidResponse).status.eql("queued")) return error.InvalidResponse;
@@ -2474,7 +2478,9 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
                 var digest: [32]u8 = undefined;
                 if (!input.type.eql("text") or input.sha256.slice().len != 64) return error.InvalidResponse;
                 _ = std.fmt.hexToBytes(&digest, input.sha256.slice()) catch return error.InvalidResponse;
-                if (try mutationId(input.bytes, true) != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest)) return error.RequestBindingMismatch;
+                const input_bytes = try mutationId(input.bytes, true);
+                confirmed_input = .{ .bytes = input_bytes, .digest = digest };
+                if (!expected.invokes_skill and (input_bytes != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest))) return error.RequestBindingMismatch;
                 if (accepted) {
                     const admission = try mutationId(answer.admission.value orelse return error.InvalidResponse, false);
                     const queue = wire.queue.value orelse return error.InvalidResponse;
@@ -2519,6 +2525,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         (target != .session_archive and answer.archived.value != null) or
         (target != .session_stop and target != .session_archive and wire.completion.value != null)) return error.InvalidResponse;
     return .{
+        .input = confirmed_input,
         .replayed = answer.replayed,
         .result = if (accepted) .{ .accepted = value } else if (conflict) .conflict else .{ .rejected = answer.code.value.?.value },
     };
@@ -2534,6 +2541,9 @@ test "mutation decoder checks binding queue ambiguity and fixed reply bounds" {
     const valid = try std.fmt.bufPrint(&body, "{s}{s}", .{ prefix, suffix });
     const reply: CommandReply = .{ .status = 200, .body = valid };
     try std.testing.expectEqual(@as(u64, 7), (try decodeMutationReply(reply, "k7m2qx", target).answer).result.accepted.message.admission);
+    const captured = try decodeMutationReply(reply, "k7m2qx", .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } }).answer;
+    try std.testing.expectEqual(@as(u64, 4), captured.input.?.bytes);
+    try std.testing.expectEqualSlices(u8, &digest, &captured.input.?.digest);
     try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "09azvw", target).answer);
     var changed = target;
     changed.message.bytes = 5;
