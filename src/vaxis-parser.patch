@@ -507,7 +507,7 @@ diff --git a/src/Window.zig b/src/Window.zig
  
  const Window = @This();
  
-@@ -288,11 +288,38 @@
+@@ -288,11 +288,41 @@
  /// prints segments to the window. returns true if the text overflowed with the
  /// given wrap strategy and size.
  pub fn print(self: Window, segments: []const Segment, opts: PrintOptions) PrintResult {
@@ -529,9 +529,12 @@ diff --git a/src/Window.zig b/src/Window.zig
 +/// Print one logical flow from an allocation-free replayable source passed by
 +/// value, with `pub fn next(self: *Source) ?Segment`. Copies MUST have independent
 +/// cursors; next must have no effects or shared mutable cursor/scratch storage.
-+/// Borrowed text/link slices stay valid and unchanged through all cloned
-+/// lookahead and until this call returns. Segment boundaries preserve complete
-+/// graphemes (including CRLF). No reset method or retained continuation state.
++/// Borrowed text and link URI/params stay valid and unchanged through all
++/// cloned lookahead and until this call returns. With commit=true, Screen keeps
++/// those borrowed cell slices: storage must ALSO survive until committed cells
++/// are no longer consumed or have been overwritten (normally through render).
++/// The source cursor itself need not outlive this call. Segment boundaries
++/// preserve complete graphemes (including CRLF). No reset or continuation state.
 +/// Existing print(slice) uses this same layout owner. Passing only row/column
 +/// offsets to separate print calls does not continue a word or whitespace run.
 +/// Lookahead occurs only at a new word, stopping at its delimiter or as soon as
@@ -547,7 +550,7 @@ diff --git a/src/Window.zig b/src/Window.zig
                  var iter = unicode.graphemeIterator(segment.text);
                  while (iter.next()) |grapheme| {
                      if (col >= self.width) {
-@@ -308,6 +335,12 @@
+@@ -308,6 +338,12 @@
                      }
                      const w = self.gwidth(s);
                      if (w == 0) continue;
@@ -560,7 +563,7 @@ diff --git a/src/Window.zig b/src/Window.zig
                      if (opts.commit) self.writeCell(col, row, .{
                          .char = .{
                              .grapheme = s,
-@@ -334,13 +367,18 @@
+@@ -334,13 +370,18 @@
              var col: u16 = opts.col_offset;
              var overflow: bool = false;
              var soft_wrapped: bool = false;
@@ -582,7 +585,7 @@ diff --git a/src/Window.zig b/src/Window.zig
                              row += 1;
                              col = 0;
                          }
-@@ -349,11 +387,15 @@
+@@ -349,11 +390,15 @@
                      while (iter.next()) |token| {
                          switch (token) {
                              .whitespace => |len| {
@@ -598,7 +601,7 @@ diff --git a/src/Window.zig b/src/Window.zig
                                          break;
                                      }
                                      if (opts.commit) {
-@@ -370,11 +412,23 @@
+@@ -370,11 +415,23 @@
                                  }
                              },
                              .word => |word| {
@@ -626,7 +629,7 @@ diff --git a/src/Window.zig b/src/Window.zig
  
                                  var grapheme_iterator = unicode.graphemeIterator(word);
                                  while (grapheme_iterator.next()) |grapheme| {
-@@ -385,6 +439,14 @@
+@@ -385,6 +442,14 @@
                                      }
                                      const s = grapheme.bytes(word);
                                      const w = self.gwidth(s);
@@ -641,7 +644,7 @@ diff --git a/src/Window.zig b/src/Window.zig
                                      if (opts.commit) self.writeCell(col, row, .{
                                          .char = .{
                                              .grapheme = s,
-@@ -414,7 +476,7 @@
+@@ -414,7 +479,7 @@
          },
          .none => {
              var col: u16 = opts.col_offset;
@@ -650,7 +653,7 @@ diff --git a/src/Window.zig b/src/Window.zig
                  var iter = unicode.graphemeIterator(segment.text);
                  while (iter.next()) |grapheme| {
                      if (col >= self.width) break :blk true;
-@@ -443,6 +505,19 @@
+@@ -443,6 +508,19 @@
      return false;
  }
  
@@ -670,7 +673,7 @@ diff --git a/src/Window.zig b/src/Window.zig
  /// print a single segment. This is just a shortcut for print(&.{segment}, opts)
  pub fn printSegment(self: Window, segment: Segment, opts: PrintOptions) PrintResult {
      return self.print(&.{segment}, opts);
-@@ -815,7 +890,7 @@
+@@ -815,7 +893,7 @@
  
          const start = self.index;
          const end = std.mem.indexOfAnyPos(u8, self.buf, self.index, "\r\n") orelse {
