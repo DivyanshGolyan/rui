@@ -653,7 +653,8 @@ test "modified kitty text cannot become an ordinary permission choice" {
             var stream: Input = .{};
             var event: KeyOutcome = .none;
             for (input) |byte| event = editor.feed(&stream, byte);
-            try std.testing.expectEqual(KeyOutcome{ .refused = .unbound }, event);
+            const expected: KeyOutcome = if (modifier == 3) .{ .action = .alt_a } else .{ .refused = .unbound };
+            try std.testing.expectEqual(expected, event);
             try std.testing.expectEqual(@as(usize, 0), editor.length);
             try std.testing.expectEqual(KeyOutcome.submit, editor.feed(&stream, '\r'));
         }
@@ -1238,11 +1239,10 @@ test "unknown CSI retains following text; malformed input and marked choice reje
         const event = editor.feed(&stream, byte);
         if (byte == '\n' and !stream.paste) try std.testing.expectEqual(KeyOutcome{ .refused = .invalid }, event);
     }
-    // Alt-a never becomes the choice "a": it is dropped, and the frontend
-    // resets the choice on the report.
+    // Alt-A remains a screen action, never the permission choice "a".
     editor = .{ .buffer = &storage, .allow_paste = false };
     _ = editor.feed(&stream, 0x1b);
-    try std.testing.expectEqual(KeyOutcome{ .refused = .unbound }, editor.feed(&stream, 'a'));
+    try std.testing.expectEqual(KeyOutcome{ .action = .alt_a }, editor.feed(&stream, 'a'));
     try std.testing.expectEqual(@as(usize, 0), editor.length);
 }
 
