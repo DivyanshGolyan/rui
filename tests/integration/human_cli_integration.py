@@ -1350,8 +1350,8 @@ def raw_export(master, screen):
     """
     columns = terminal_capture(master).screen.columns
     lines = screen.split("\n")
-    start = next(index for index, line in enumerate(lines) if line.startswith("Raw export: "))
-    command = lines[start].removeprefix("Raw export: ")
+    start = next(index for index, line in enumerate(lines) if line.lstrip(" ").startswith("Raw export: "))
+    command = lines[start].lstrip(" ").removeprefix("Raw export: ")
     previous = lines[start]
     for line in lines[start + 1:]:
         if re.search(r"--ordinal [0-9]+$", command):
@@ -3069,13 +3069,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             "routine retirement diagnostics leaked into conversation", settled)
         if timed_out:
             assert f"! {description} — Timed out" in settled, settled
-            # The notice wraps with the text beside the timestamp margin.
-            assert "[summary shortened; /details]" in " ".join(settled.split()), settled
         elif exit_code:
             assert f"! {description} — Failed (exit {exit_code})" in settled, ("quiet view hid tool failure", settled)
             assert "Exit code:" not in settled, ("exit status repeated below its heading", settled)
             assert "Bash failed." not in settled, ("failure status repeated below its heading", settled)
-            assert "/details for full output." in settled, settled
         elif decision == "allow-action":
             assert f"✓ {description}" in settled, ("quiet view hid tool outcome", settled)
             assert "Exit code: 0." not in settled, ("routine zero exit code leaked", settled)
@@ -3083,17 +3080,16 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             assert f"• {description} — Denied" in settled, ("intentional denial was not a settled outcome", settled)
             assert f"! {description}" not in settled and "/details for full output." not in settled, settled
         assert "Bash succeeded." not in settled and "Tool result:" not in settled, settled
+        assert all(hidden not in settled for hidden in (
+            "inspection-only-output", "stdout tail:", "stderr tail:", "Exit code:",
+            "Process-group signaling reported a failure.", "Capture may be incomplete",
+            "Execution timed out after", "[summary shortened; /details]",
+            "/details for full output.", "Historical item omitted", "Raw export:",
+        )), ("tool body leaked into normal presentation", settled)
         if signal_failure:
-            assert "Process-group signaling reported a failure." in settled, ("quiet view hid cleanup warning", settled)
-            if timed_out:
-                # The warning starts its own line after the wrapped notice.
-                assert re.search(r"\[summary\s+shortened;\s+/details\]\n  Process-group signaling reported a failure\.\n", settled), settled
+            assert "Process-group signaling reported a failure." in saved_result, saved_result
         assert f"\n{answer}" in settled, settled
         assert all(noise not in settled for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), settled
-        if not timed_out:
-            # Only a failure keeps its last output lines in view; this one
-            # is a single shortened 9000-column line.
-            assert "inspection-only-output" not in settled, ("routine tool output leaked", settled)
         effect = state / "effect-count"
         assert effect.read_text() == "unsafe" if decision == "allow-action" else not effect.exists()
         if stdin is not None:
@@ -3127,9 +3123,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert "\n› requires permission" in details and f"\n{answer}" in details, details
         assert all(noise not in details for noise in ("You:", "Assistant:", "Tool Result:")), details
         if exit_code:
-            # The omitted saved result carries the exit status; export reads it.
-            assert f"! {description} — Failed\nRui: Historical item omitted:" in details, details
-            assert "inspection-only-output" not in details and "Exit code:" not in details, details
+            assert f"! {description} — Failed (exit {exit_code})\n  Earlier output omitted" in details, details
+            assert "inspection-only-output" in details and "Exit code:" not in details, details
+            assert "Historical item omitted" not in details, details
             export = raw_export(master, details)
             exported = run(home, *shlex.split(export)[1:])
             assert len(exported.encode()) > 8192 and exported.startswith(f"Bash failed. Exit code: {exit_code}.\n"), exported[:200]
@@ -3427,8 +3423,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             "routine retirement diagnostics leaked on reopening", reopened)
         if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, timed_out)):
             assert "✓ Prepare external approval 1\n✓ External approval 1\n" in reopened, ("reopening lost compact successes", reopened)
-        if signal_failure:
-            assert "Process-group signaling reported a failure." in reopened, ("reopening hid cleanup warning", reopened)
+        assert all(hidden not in reopened for hidden in (
+            "Process-group signaling reported a failure.", "inspection-only-output",
+            "stdout tail:", "stderr tail:", "[summary shortened; /details]",
+            "/details for full output.", "Historical item omitted", "Raw export:",
+        )), ("tool body leaked on reopening", reopened)
         os.write(master, b"/exit\n")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
@@ -3446,7 +3445,6 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 fixture.message(state, store, key, reference, f"later input {index}")
                 fixture.wait_for(lambda: fixture.completed_observation(store, key), "age saved Tool Result")
             calls_before_history = len(endpoint.requests)
-            # Wide enough that the raw export command is one row.
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 512, 0, 0))
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", reference], env={**os.environ, "HOME": str(home)},
@@ -3456,10 +3454,12 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             read_terminal(master, "Browsing · Esc returns")
             scroll_until(master, b"\x1b[5~", "Start of conversation")
             history = current_screen(master)
-            assert f"! {description} — Failed\nRui: Historical item omitted:" in history, history
-            assert "inspection-only-output" not in history
-            history_export = raw_export(master, history)
-            assert history_export == export and run(home, *shlex.split(history_export)[1:]) == exported
+            assert f"! {description} — Failed (exit {exit_code})\n" in history, history
+            assert all(hidden not in history for hidden in (
+                "inspection-only-output", "Historical item omitted", "Raw export:",
+                "/details for full output.", "Process-group signaling reported a failure.",
+            )), history
+            assert run(home, *shlex.split(export)[1:]) == exported
             assert len(endpoint.requests) == calls_before_history and effect.read_text() == "unsafe"
             os.write(master, b"/exit\n")
             _, errors = terminal_exit(caller, master)
@@ -6173,7 +6173,10 @@ def main(selected="all"):
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "persistent-opening", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications"), selected
+    if selected == "persistent-opening":
+        persistent_opening_case()
+        return
     if selected == "notifications":
         notification_cases()
         return

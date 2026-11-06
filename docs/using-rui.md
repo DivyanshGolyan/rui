@@ -11,13 +11,17 @@ Enter these at the `›` prompt.
 | --- | --- |
 | `/help` | Lists available commands. |
 | `/history` | Shows older conversation. |
-| `/details` | Shows recent conversation with full saved tool output. |
+| `/details` | Shows recent conversation with each tool result's last 8,192 raw bytes and a full raw export command. |
 | `/status` | Shows settings, including the Bash permission mode, and current work. |
 | `/requests` | Lists saved requests for recovery. |
 | `/configure` | Changes settings for the current Session only. |
 | `/setup` | Changes defaults for future Sessions, not the current one. |
 | `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
+
+Tool outcomes in normal conversation show only their description and outcome, with a numeric failed exit when available.
+`/details` escapes the retained tool bytes safely and marks shortened results with `Earlier output omitted`.
+Its raw export command reads the full unchanged saved result.
 
 ## Approve Bash commands
 
