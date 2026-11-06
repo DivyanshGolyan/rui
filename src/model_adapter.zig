@@ -1600,6 +1600,13 @@ test "real preparation consumes the configured allowance across multiple advance
     defer message.removeTemporaryContent(std.testing.io) catch unreachable;
     try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
 
+    const expected = try requestGolden(
+        workspace,
+        session.slice(),
+        "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"" ++ text ++ "\"}]}," ++
+            declared_bash_json ++ "],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
+    );
+    defer std.testing.allocator.free(expected);
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
     var used: std.atomic.Value(u64) = .init(0);
@@ -1609,7 +1616,7 @@ test "real preparation consumes the configured allowance across multiple advance
     try preparation.init(
         std.testing.io,
         root,
-        .{ .used = &used, .limit = 4096 },
+        .{ .used = &used, .limit = expected.len },
         protocol.routesAll(.endpoint),
         null,
         .{},
@@ -1620,9 +1627,7 @@ test "real preparation consumes the configured allowance across multiple advance
     var last_request: u64 = 0;
     while (true) {
         advances += 1;
-        // Fixture runaway guard, not a request limit: allow the full scratch
-        // budget even if an advance makes only one byte of output progress.
-        try std.testing.expect(advances < 4096);
+        try std.testing.expect(advances <= preparationTestStepBound(expected.len));
         const progress = preparation.advance(16, 2);
         const stats = preparation.advanceStats();
         try std.testing.expect(stats.work_bytes <= 16);
@@ -1632,9 +1637,9 @@ test "real preparation consumes the configured allowance across multiple advance
         switch (progress) {
             .pending => {},
             .prepared => |request| {
+                defer request.deinit(std.testing.io, preparation.writer.budget);
                 try std.testing.expect(advances > 1);
-                try std.testing.expect(request.length > 0);
-                request.deinit(std.testing.io, preparation.writer.budget);
+                try std.testing.expectEqual(@as(u64, expected.len), request.length);
                 return;
             },
             .failed => |err| return err,
@@ -1908,6 +1913,14 @@ fn requestGolden(workspace: []const u8, session: []const u8, request: []const u8
     return std.testing.allocator.print("{s}{s}{s}", .{
         request[0..offset], encoded[1 .. encoded.len - 1], request[offset..],
     });
+}
+
+/// Runaway guard for the small golden fixtures, not a production request limit.
+/// Even a one-byte advance must scan and emit the strings and cross item/piece
+/// boundaries. Allow four turns per encoded byte for those passes and transitions;
+/// derive the bound from the whole golden, including shared prose and paths.
+fn preparationTestStepBound(request_bytes: usize) usize {
+    return 4 * request_bytes;
 }
 
 fn drainPreparation(
@@ -2297,8 +2310,9 @@ test "request preparation minimal golden is exact across schedules" {
         var preparation: Preparation = undefined;
         try setup.storage.openHistoricalView(binding, &preparation.view);
         try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        defer if (preparation.state.active) preparation.cancel();
         try std.testing.expect(retained == null);
-        const result = try drainPreparation(&preparation, schedule[0], schedule[1], 4096);
+        const result = try drainPreparation(&preparation, schedule[0], schedule[1], preparationTestStepBound(full_expected.len));
         defer std.testing.allocator.free(result.bytes);
         const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.bytes, .{});
         defer parsed.deinit();
@@ -2418,6 +2432,13 @@ test "request preparation escapes instructions and user content" {
     };
     try setup.submit("prep-escape-file", "prep-escape-message", session.slice(), user_text);
 
+    const expected = try requestGolden(
+        setup.workspace,
+        session.slice(),
+        "{\"model\":\"model-a\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"instructions\":\"a\\\"b\\\\c\\n\\u0000\\u0001d\",\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"u\\\"v\\\\w\\u0000\x7fé\"}]}," ++
+            declared_bash_json ++ "],\"tools\":[" ++ default_top_tools_json ++ "],\"text\":{\"verbosity\":\"low\"}}",
+    );
+    defer std.testing.allocator.free(expected);
     var admission = (try setup.storage.admitNextModelAttempt(.{})).?;
     const binding = try admission.permit.consume();
     var used: std.atomic.Value(u64) = .init(0);
@@ -2425,8 +2446,10 @@ test "request preparation escapes instructions and user content" {
     var preparation: Preparation = undefined;
     try setup.storage.openHistoricalView(binding, &preparation.view);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
-    const first = try drainPreparation(&preparation, 2, 2, 4096);
+    defer if (preparation.state.active) preparation.cancel();
+    const first = try drainPreparation(&preparation, 2, 2, preparationTestStepBound(expected.len));
     defer std.testing.allocator.free(first.bytes);
+    try std.testing.expectEqualStrings(expected, first.bytes);
     try setup.storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "prep_escape_release" }, .ordinary, .{});
 
     // Independent escape expectations: quotes, backslashes, newline and
@@ -2485,7 +2508,9 @@ test "request preparation escapes instructions and user content" {
     var preparation_two: Preparation = undefined;
     try setup_two.storage.openHistoricalView(binding_two, &preparation_two.view);
     try preparation_two.init(std.testing.io, setup_two.root, .{ .used = &used_two, .limit = 8 * 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained_two);
-    const second = try drainPreparation(&preparation_two, 1, 1, 8192);
+    defer if (preparation_two.state.active) preparation_two.cancel();
+    // Both Stores have the same workspace and fixed-width Session addresses.
+    const second = try drainPreparation(&preparation_two, 1, 1, preparationTestStepBound(expected.len));
     defer std.testing.allocator.free(second.bytes);
     // Only each Operation's own address differs between the two Stores.
     const readdressed = try readdressRequestForTesting(first.bytes, session.slice(), session_two.slice());
@@ -3345,8 +3370,10 @@ test "request preparation cancellation yields inside history discovery" {
     try setup.storage.openHistoricalView(binding, &preparation.view);
     try preparation.init(std.testing.io, setup.root, .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
     defer if (preparation.state.active) preparation.cancel();
+    const expected = try requestGolden(setup.workspace, history.session.slice(), composed_expected);
+    defer std.testing.allocator.free(expected);
     var pending_turns: usize = 0;
-    for (0..4096) |_| {
+    for (0..preparationTestStepBound(expected.len)) |_| {
         const before = preparation.writer.offset;
         const progress = preparation.advance(1, 1);
         try std.testing.expect(progress == .pending);
