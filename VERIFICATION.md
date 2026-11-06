@@ -86,7 +86,8 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 
 ### Landing cadence
 
-[AGENTS.md](AGENTS.md#landing) owns the landing rule and per-commit proof.
+[AGENTS.md](AGENTS.md#landing) owns the landing grant.
+[Landing procedures](docs/agents/landing.md) own PR operations and per-commit proof.
 [strict_paths.py](tests/ci/strict_paths.py) owns the strict paths, whose failures are diagnosed rather than retried.
 Each small, coherent change lands on main by merging its PR.
 Lane completion and review signoff are not prerequisites.
