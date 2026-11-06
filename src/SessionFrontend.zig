@@ -20,6 +20,7 @@ const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
+const UpgradePanel = @import("UpgradePanel.zig");
 const Self = @This();
 
 const reads = @import("session_reads.zig");
@@ -70,6 +71,9 @@ saved_requests: reads.SavedRequests = .{},
 /// are listed.
 recover_line: [slash_commands_shared.recover_line_bytes]u8 = undefined,
 reader: Task = .{},
+upgrade_requested: bool = false,
+upgrade_blocked: bool = false,
+upgrade_reobserving: bool = false,
 // The reader's only context; the UI reads its result after join.
 job: Job = .{},
 // When the next live read may start.
@@ -255,6 +259,8 @@ fn launch(self: *Self, job: *const Job, worker: Task.Run) !void {
 /// The overview that lent the terminal decides what Ctrl-X does here and
 /// sends the stop, so a conversation stops its Session exactly as the
 /// Session's row does. Each call names the work the conversation shows.
+pub const UpgradeHandoff = enum { quiesce, ready, incompatible };
+
 pub const Lender = struct {
     context: *anyopaque,
     /// Steps the overview with an input here: Ctrl-X when `ctrl_x`, else
@@ -273,6 +279,8 @@ pub const Lender = struct {
     /// news, named `name`, unless it is the read the conversation opens on.
     /// Its failure is the overview's and ends the conversation.
     observed: *const fn (context: *anyopaque, work: protocol.session_work.Work, name: []const u8, opening: bool) anyerror!void,
+
+    upgrade: ?*const fn (context: *anyopaque, handoff: UpgradeHandoff) anyerror!bool = null,
 
     pub const Said = struct {
         /// The stop prompt, or the overview's notice; null for neither.
@@ -524,6 +532,7 @@ const Slash = union(enum) {
     inspection: Inspection,
     /// The Session's model and sign-in, which never change.
     model,
+    upgrade,
     discard,
     recover: []const u8,
     wait,
@@ -553,6 +562,7 @@ fn parse(text: []const u8) Slash {
         .wait => .wait,
         .login => .login,
         .model => .model,
+        .upgrade => .upgrade,
     };
 }
 
@@ -566,7 +576,13 @@ fn requestHistory(self: *Self, history: History) void {
 /// Runs one slash command the draft admitted; it never decides. Local
 /// commands answer at once; an inspection queues for the reader.
 fn slashCommand(self: *Self, text: []const u8) void {
-    switch (parse(text)) {
+    const parsed = parse(text);
+    if ((self.upgrade_requested or self.upgrade_blocked or self.upgrade_reobserving) and parsed != .upgrade and parsed != .exit and parsed != .model) {
+        self.notice = upgrade_recovery;
+        return;
+    }
+    switch (parsed) {
+        .upgrade => self.upgrade_requested = true,
         .exit => self.leaving = .detached,
         .history => |history| self.requestHistory(history),
         .inspection => self.input.queueCommand(text),
@@ -780,12 +796,127 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
     }
 }
 
+const upgrade_recovery = "! Host requests paused after Upgrade; draft and original retained. /upgrade or use the selected Rui in a new terminal.";
+
+fn quiesceUpgrade(self: *Self) !bool {
+    self.notice = "Upgrade: waiting for Client borrowers; draft and original retained.";
+    self.submission.retry = null;
+    self.submission.cancel();
+    if (self.submission.task.thread != null and self.submission.task.completed()) {
+        const end = self.submission.join();
+        try self.followAdmission(end);
+        if (end.failure()) |err| if (err != error.Cancelled) return err;
+    }
+    if (self.reader.thread != null) {
+        if (!self.inspection.command_running) self.reader.cancel();
+        if (self.reader.completed()) try self.settleReader();
+    }
+    if (self.reading.pending_diagnostic != null and self.reader.thread == null) try self.presentReadDiagnostic(self.terminal);
+    try self.startQueuedCommand();
+    const lender_ready = if (self.lender.upgrade) |handoff| try handoff(self.lender.context, .quiesce) else true;
+    return lender_ready and self.reader.thread == null and self.submission.task.thread == null;
+}
+
+fn showUpgrade(self: *Self) !void {
+    const outcome = try UpgradePanel.run(self.init, self.store, self.terminal, &self.input.stream, self.interrupted);
+    self.upgrade_requested = false;
+    self.applyUpgrade(outcome);
+    if (self.lender.upgrade) |handoff| {
+        _ = try handoff(self.lender.context, if (self.upgrade_blocked) .incompatible else .ready);
+    }
+}
+
+fn applyUpgrade(self: *Self, outcome: UpgradePanel.Outcome) void {
+    switch (outcome) {
+        .unchanged => {},
+        .compatible => {
+            self.upgrade_blocked = false;
+            self.poll_at = 0;
+            self.upgrade_reobserving = true;
+            self.reading.prepared_action = null;
+        },
+        .incompatible => {
+            self.upgrade_blocked = true;
+            self.upgrade_reobserving = false;
+        },
+    }
+    self.notice = if (self.upgrade_blocked) upgrade_recovery else "Upgrade closed; draft and original retained. No work was resent.";
+    self.dirty = true;
+}
+
+fn startQueuedCommand(self: *Self) !void {
+    if (self.reader.thread == null) if (self.input.takeCommand()) |text| {
+        const kind = parse(text).inspection;
+        try self.leaveFor(kind);
+        self.inspection.kind = kind;
+        // The worker borrows its own copy; the editor may queue another.
+        const job = self.freeze(.inspection);
+        @memcpy(job.command_text[0..text.len], text);
+        job.command_text_length = text.len;
+        job.inspection_submission = self.submission.view();
+        const consent = self.terminal.screen.consent;
+        job.inspection_action = if (consent) |pending| (if (pending.presentation == .preview) pending.action else null) else null;
+        // The newer inspection replaces a /status not yet shown.
+        self.inspection.status_requested = false;
+        try self.launch(job, switch (kind) {
+            .command => reads.runCommand,
+            .copy => reads.copyAnswer,
+            else => reads.inspectPage,
+        });
+        self.inspection.command_running = true;
+    };
+}
+
 fn driveActive(self: *Self) !void {
     while (self.leaving == null) {
         if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-        if (try self.lender.service(self.lender.context)) self.dirty = true;
+        if (!self.upgrade_requested and !self.upgrade_blocked) {
+            if (try self.lender.service(self.lender.context)) self.dirty = true;
+        }
         const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
+        if (self.upgrade_requested) {
+            const ready = self.quiesceUpgrade() catch |err| {
+                if (err == error.CanonicalStoreFailure) return err;
+                self.upgrade_requested = false;
+                self.upgrade_blocked = true;
+                self.upgrade_reobserving = false;
+                var writer = std.Io.Writer.fixed(&self.notice_buffer);
+                try writer.print("! Upgrade could not settle Client work: {s}. Draft and original retained; /upgrade to retry.", .{@errorName(err)});
+                self.notice = writer.buffered();
+                self.dirty = true;
+                if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
+                continue;
+            };
+            if (ready) try self.showUpgrade();
+            if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
+            _ = try self.step(16);
+            continue;
+        }
+        if (self.upgrade_blocked) {
+            if (self.notice == null) self.notice = upgrade_recovery;
+            if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
+            _ = try self.step(16);
+            continue;
+        }
+        if (self.upgrade_reobserving) {
+            if (self.reader.thread != null and self.reader.completed()) {
+                self.settleReader() catch |err| {
+                    if (err == error.CanonicalStoreFailure) return err;
+                    self.upgrade_blocked = true;
+                    self.upgrade_reobserving = false;
+                    var writer = std.Io.Writer.fixed(&self.notice_buffer);
+                    try writer.print("! Reattach failed: {s}. Draft and original retained; /upgrade or reopen with selected Rui.", .{@errorName(err)});
+                    self.notice = writer.buffered();
+                    if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
+                };
+                self.withdrawDecided();
+            }
+            if (self.upgrade_reobserving and self.reader.thread == null) try self.launch(self.freeze(.activity), reads.scan);
+            if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
+            _ = try self.step(16);
+            continue;
+        }
         try self.admit();
         if (self.input.queuedCommand()) |text| if (parse(text).inspection == .status) {
             // /status is the next scan's: one capture for the page, the
@@ -811,26 +942,7 @@ fn driveActive(self: *Self) !void {
         if (self.reading.pending_diagnostic) |pending| {
             if (pending.recoverable) try self.presentReadDiagnostic(self.terminal);
         }
-        if (self.reader.thread == null) if (self.input.takeCommand()) |text| {
-            const kind = parse(text).inspection;
-            try self.leaveFor(kind);
-            self.inspection.kind = kind;
-            // The worker borrows its own copy; the editor may queue another.
-            const job = self.freeze(.inspection);
-            @memcpy(job.command_text[0..text.len], text);
-            job.command_text_length = text.len;
-            job.inspection_submission = self.submission.view();
-            const consent = self.terminal.screen.consent;
-            job.inspection_action = if (consent) |pending| (if (pending.presentation == .preview) pending.action else null) else null;
-            // The newer inspection replaces a /status not yet shown.
-            self.inspection.status_requested = false;
-            try self.launch(job, switch (kind) {
-                .command => reads.runCommand,
-                .copy => reads.copyAnswer,
-                else => reads.inspectPage,
-            });
-            self.inspection.command_running = true;
-        };
+        try self.startQueuedCommand();
         // Scans continue during consent, so an Action decided elsewhere leaves.
         if (self.reader.thread == null and self.reading.prepared_action == null) {
             if (self.transcript.history_requested != null and !self.reading.opening) {
@@ -1141,7 +1253,7 @@ fn beginMessage(self: *Self, intent: Submission.Intent) !void {
 
 /// A queued or running command holds the choice until it completes.
 fn commandActive(self: *const Self) bool {
-    return self.input.queuedCommand() != null or self.inspection.command_running;
+    return self.upgrade_requested or self.upgrade_blocked or self.upgrade_reobserving or self.input.queuedCommand() != null or self.inspection.command_running;
 }
 
 /// What a key does in a conversation, beside the draft or an Action's choice.
@@ -1204,6 +1316,10 @@ const conversation_keys: keymap.Keymap(ConversationAction) = .init(.{
 });
 
 fn perform(self: *Self, action: ConversationAction) !void {
+    if ((self.upgrade_blocked or self.upgrade_requested or self.upgrade_reobserving) and (action == .recover or action == .stop or action == .expand)) {
+        self.notice = upgrade_recovery;
+        return;
+    }
     const screen = self.terminal.screen;
     switch (action) {
         // A shown list takes the arrows, as the overview's model list does.
@@ -1432,11 +1548,11 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     // its stop prompt. An open prompt is cancelled after the input instead,
     // so Ctrl-X can confirm it and Esc can see it.
     const asked = self.overviewSays().asking;
-    if (!asked) try self.converse(false);
+    if (!asked and !self.upgrade_blocked and !self.upgrade_requested) try self.converse(false);
     const screen = self.terminal.screen;
     const offer = screen.spendOffer();
     if (screen.inputRow() == .selector) try self.choiceEvent(decoded, offer) else try self.draftEvent(decoded, offer);
-    if (asked and self.overviewSays().asking) try self.converse(false);
+    if (asked and !self.upgrade_blocked and !self.upgrade_requested and self.overviewSays().asking) try self.converse(false);
     if (self.leaving != null) screen.interruptConsent();
 }
 
@@ -1561,12 +1677,12 @@ fn commandLine(self: *Self) void {
             .refused => |why| self.notice = refusedNotice(why),
             else => if (taken.runs) {
                 self.slashCommand(self.input.composition().bytes);
-                self.input.clear();
+                if (!self.upgrade_requested and !self.upgrade_blocked) self.input.clear();
             },
         }
     } else {
         self.slashCommand(self.input.composition().bytes);
-        self.input.clear();
+        if (!self.upgrade_requested and !self.upgrade_blocked) self.input.clear();
     }
 }
 
@@ -1634,7 +1750,7 @@ fn settleReader(self: *Self) !void {
     const end = self.joinReader();
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     // A pending inspection supersedes a silent read it cancelled.
-    const mode: departure.Mode = if (self.input.queuedCommand() != null) .inspection else .active;
+    const mode: departure.Mode = if (self.upgrade_requested or self.input.queuedCommand() != null) .inspection else .active;
     // A fatal failure leaves command output for exit to print.
     if (end.failure(mode)) |err| return err;
     if (end != .complete and self.inspection.command_running) {
@@ -1950,6 +2066,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         self.live.view = result.live;
         self.live.cursor = result.cursor;
         self.reading.opening = false;
+        self.upgrade_reobserving = false;
         if (self.reading.phase == .permission) {
             self.reading.prepared_action = result.action;
             self.reading.prepared_summary = result.summary;
@@ -3829,5 +3946,82 @@ test "a change run from the /status page replies under the page, which shows the
             try std.testing.expect(rowWith(held.screen, "--label is 1-100", &storage) != null);
             try std.testing.expect(rowWith(held.screen, " Name ", &storage) == null);
         }
+    }
+}
+
+test "upgrade command stays local and preserves the actual draft cursor and original submission" {
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    screen.* = .{ .colour = false };
+    var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
+    self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false };
+    self.input.init();
+    const original = self.input.submitText("original indeterminate model input");
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('K'), .retry = @splat('K') };
+    _ = self.input.append("/upgrade");
+    const before = self.input.composition();
+    const revision = self.input.revision;
+    self.commandLine();
+    try std.testing.expect(self.upgrade_requested);
+    try std.testing.expectEqualStrings(before.bytes, self.input.composition().bytes);
+    try std.testing.expectEqual(before.cursor, self.input.composition().cursor);
+    try std.testing.expectEqual(revision, self.input.revision);
+    try std.testing.expect(self.input.queuedCommand() == null);
+    try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
+    try std.testing.expect(try self.quiesceUpgrade());
+    try std.testing.expect(self.submission.retry == null);
+    try std.testing.expectEqualStrings("original indeterminate model input", try self.input.message(original));
+    try std.testing.expectEqualStrings(&@as([36]u8, @splat('K')), &self.submission.view().?.key);
+    try std.testing.expectEqual(Submission.State.unconfirmed, self.submission.view().?.state);
+    try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
+}
+
+test "upgrade outcomes retain Unicode draft cursor selection and unresolved original until safe reobservation" {
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    inline for (std.enums.values(UpgradePanel.Outcome)) |outcome| {
+        for ([_]bool{ false, true }) |blocked| {
+            self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .upgrade_blocked = blocked };
+            self.input.init();
+            const original = self.input.submitText("the original request");
+            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('H') };
+            for ("next é!\x1b[D") |byte| _ = self.input.feed(byte);
+            const draft = self.input.composition();
+            const revision = self.input.revision;
+            self.inspection.selected = status_page.first;
+            const selection = self.inspection.selected;
+            self.applyUpgrade(outcome);
+            try std.testing.expectEqualStrings("next é!", self.input.composition().bytes);
+            try std.testing.expectEqual(draft.cursor, self.input.composition().cursor);
+            try std.testing.expectEqual(revision, self.input.revision);
+            try std.testing.expectEqual(selection, self.inspection.selected);
+            try std.testing.expectEqualStrings("the original request", try self.input.message(original));
+            try std.testing.expectEqualStrings(&@as([36]u8, @splat('H')), &self.submission.view().?.key);
+            try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
+            try std.testing.expectEqual(outcome == .compatible, self.upgrade_reobserving);
+            try std.testing.expectEqual(if (outcome == .unchanged) blocked else outcome == .incompatible, self.upgrade_blocked);
+            if (outcome != .unchanged or blocked) try std.testing.expect(self.commandActive());
+        }
+    }
+}
+
+test "upgrade quiescing reobservation and protocol holds refuse a fresh Message without clearing its draft" {
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    screen.* = .{ .colour = false };
+    var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
+    for (0..3) |hold| {
+        self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false }, .upgrade_requested = hold == 0, .upgrade_reobserving = hold == 1, .upgrade_blocked = hold == 2 };
+        self.input.init();
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        _ = self.input.append("never send before safe reattachment");
+        try self.draftEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }, null);
+        try std.testing.expect(self.submission.view() == null);
+        try std.testing.expect(self.submission.task.thread == null);
+        try std.testing.expectEqualStrings("never send before safe reattachment", self.input.composition().bytes);
     }
 }

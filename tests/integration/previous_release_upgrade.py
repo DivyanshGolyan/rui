@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify same-format upgrades and prompt, preserving breaking-format refusal."""
+"""Verify supported startup migrations and preserving unsupported-format refusal."""
 import contextlib
 import hashlib
 import json
@@ -20,11 +20,19 @@ import host_process
 from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for, wait_for_execution_release
 
 
-def install(checkout):
+def install(checkout, publisher=None):
     revision = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
-    print(f"Installing {revision} through ./install.sh", flush=True)
-    subprocess.run(["bash", "./install.sh"], cwd=checkout, check=True, timeout=1200)
+    if publisher is None:
+        print(f"Installing current {revision} through ./install.sh", flush=True)
+        subprocess.run(["bash", "./install.sh"], cwd=checkout, check=True, timeout=1200)
+    else:
+        prefix = pathlib.Path(os.environ["HOME"], ".local/lib/rui")
+        stage = pathlib.Path(tempfile.mkdtemp(prefix="install.", dir=prefix))
+        subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "--prefix", str(stage)],
+                       cwd=checkout, check=True, timeout=1200)
+        subprocess.run([publisher, "--publish-install", os.environ["HOME"], str(stage), "intentional-source"],
+                       check=True, timeout=30)
     binary = pathlib.Path(os.environ["HOME"], ".local/bin/rui")
     print(f"Installed artifact sha256={hashlib.sha256(binary.read_bytes()).hexdigest()}", flush=True)
     return binary
@@ -35,6 +43,14 @@ def supported_format(checkout):
     path = checkout / "src/store/schema.zig"
     source = (path if path.exists() else checkout / "src/store.zig").read_text()
     return int(re.search(r"pub const schema_version: u32 = (\d+);", source)[1])
+
+
+def supported_range(checkout):
+    path = checkout / "src/store/schema.zig"
+    source = (path if path.exists() else checkout / "src/store.zig").read_text()
+    current = supported_format(checkout)
+    baseline = re.search(r"pub const migration_baseline: u32 = (\d+);", source)
+    return (int(baseline[1]) if baseline else current), current
 
 
 def help_text(binary, *command):
@@ -158,7 +174,9 @@ def stop_detached(dialect, binary, store):
 
 def main():
     previous, candidate = (pathlib.Path(value).resolve() for value in sys.argv[1:])
-    previous_format, candidate_format = supported_format(previous), supported_format(candidate)
+    previous_format = supported_format(previous)
+    candidate_minimum, candidate_format = supported_range(candidate)
+    supported = candidate_minimum <= previous_format <= candidate_format
     # Do not use the runner's HOME, default Store or credentials. Keep the
     # compiler cache outside HOME so both normal installs can reuse compilation.
     os.environ.setdefault("ZIG_GLOBAL_CACHE_DIR", str(pathlib.Path.home() / ".cache/zig"))
@@ -171,7 +189,8 @@ def main():
         os.environ["HOME"] = str(home)
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(root / "absent-credentials.json")
         fixture.ROOT = workspace
-        binary = install(previous)
+        publisher = install(candidate).resolve()
+        binary = install(previous, publisher)
         previous_artifact = binary.resolve()
         previous_hash = hashlib.sha256(previous_artifact.read_bytes()).digest()
         fixture.RUI = binary
@@ -223,7 +242,7 @@ def main():
             assert hashlib.sha256(previous_artifact.read_bytes()).digest() == previous_hash, "old build changed"
             fixture.RUI = binary
             dialect = candidate_cli = Dialect(binary)
-            commands = ((("host", "start"),) if previous_format == candidate_format
+            commands = ((("host", "start"),) if supported
                         else (("host", "start"), candidate_cli.serve()))
             for command in commands:
                 attempted_restart = True
@@ -237,13 +256,20 @@ def main():
                     resource.setrlimit(resource.RLIMIT_NOFILE, original_limits)
                 elapsed = time.monotonic() - started_at
                 print(restarted.stdout + restarted.stderr, flush=True)
-                if previous_format == candidate_format:
-                    assert restarted.returncode == 0, "same-format upgrade must start without a fresh Store"
+                if supported:
+                    assert restarted.returncode == 0, "supported upgrade must start without a fresh Store"
                     state, shown = dialect.host_status(binary, store, 5)
                     assert state == "ready", shown
                     # Restarted from soft 256, the candidate uses its own default.
                     assert json.loads(shown)["active_capacity"] == "100", shown
                     print(shown, flush=True)
+                    if previous_format != candidate_format:
+                        backup = store / "rui.backup"
+                        assert backup.exists(), "startup migration omitted its pre-migration backup"
+                        with contextlib.closing(sqlite3.connect(backup.as_uri() + "?mode=ro&immutable=1", uri=True)) as database:
+                            assert database.execute("PRAGMA user_version").fetchone()[0] == previous_format
+                        with contextlib.closing(sqlite3.connect((store / "rui.sqlite3").as_uri() + "?mode=ro", uri=True)) as database:
+                            assert database.execute("PRAGMA user_version").fetchone()[0] == candidate_format
                 else:
                     assert restarted.returncode != 0 and elapsed < 5, (elapsed, restarted)
                     for text in (str(store), f"found schema {previous_format}",
@@ -256,7 +282,7 @@ def main():
                     stop_detached(dialect, binary, store)
                     attempted_restart = False
                     print(f"Breaking format {previous_format}→{candidate_format} {' '.join(command)} refused in {elapsed:.3f}s; SQLite hashes unchanged", flush=True)
-            if previous_format != candidate_format:
+            if not supported:
                 # The previous installed artifact must still recover the exact
                 # work at its original Store path. This is not a migration.
                 fixture.RUI = previous_artifact
@@ -288,7 +314,7 @@ def main():
         raise
     else:
         shutil.rmtree(directory)
-        print("Compatibility passed: same-format readiness or explicit breaking-format refusal; exact saved work/configuration and no replay", flush=True)
+        print("Compatibility passed: supported startup readiness/migration backup or unsupported-format refusal; exact saved work/configuration and no replay", flush=True)
 
 
 if __name__ == "__main__":

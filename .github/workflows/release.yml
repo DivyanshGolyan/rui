@@ -97,7 +97,7 @@ jobs:
           fi
           test "$("$RUNNER_TEMP/$name/bin/rui" --version)" = "rui $VERSION ($SHA)"
           if [ "$(uname -s)" = Darwin ]; then otool -L "$RUNNER_TEMP/$name/bin/rui"; else ldd "$RUNNER_TEMP/$name/bin/rui"; fi
-          tar -czf "dist/$name.tar.gz" -C "$RUNNER_TEMP" "$name"
+          COPYFILE_DISABLE=1 tar -czf "dist/$name.tar.gz" -C "$RUNNER_TEMP" "$name"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rui-${{ matrix.platform }}
@@ -162,6 +162,11 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          path: .release-source
+          persist-credentials: false
       - name: Create the tagged release with archives, digests and installer
         env:
           GH_TOKEN: ${{ github.token }}
@@ -180,7 +185,7 @@ jobs:
           find "$RUNNER_TEMP/artifacts" -name "rui-$VERSION-*.tar.gz" -exec mv {} dist/ \;
           find "$RUNNER_TEMP/artifacts" -name "rui-*$VERSION.tgz" -exec mv {} dist/ \;
           (cd dist && sha256sum rui-*.tar.gz rui-*.tgz > SHA256SUMS && cat SHA256SUMS)
-          python3 -B tests/ci/release.py installer "$VERSION" dist/SHA256SUMS dist/install.sh
+          python3 -B tests/ci/release.py installer "$VERSION" dist/SHA256SUMS dist/install.sh --source-root .release-source
           schema=$(echo "$VERSION" | cut -d . -f 2)
           {
             echo "Rui $VERSION from stable commit $SHA (Store schema $schema)."
@@ -191,7 +196,7 @@ jobs:
             echo "curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh | sh"
             echo '```'
             echo
-            echo "Releases 0.$schema.x open the same Stores. A different middle number needs a fresh Store."
+            echo "The target build checks Store compatibility at Host startup. Supported SQLite formats are backed up and migrated then; installation alone never migrates or resets a Store. MySQL schema changes remain operator-owned."
             echo
             echo "Also attached: the Linux ARM64 archive, and the npm tarballs (the TypeScript client and one executable package per platform). npm publishing is manual."
             echo

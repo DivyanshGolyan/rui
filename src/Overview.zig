@@ -21,6 +21,7 @@ const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
 const ClientTask = @import("ClientTask.zig");
+const UpgradePanel = @import("UpgradePanel.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
 const SessionInput = @import("SessionInput.zig");
@@ -288,6 +289,7 @@ done: [2]c_int = .{ -1, -1 },
 signalled: [2]c_int = .{ -1, -1 },
 
 worker: ClientTask = .{},
+upgrade_requested: bool = false,
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
 /// The job the worker runs or last ran, and its output.
@@ -485,8 +487,23 @@ fn loop(self: *Self) !Ending {
 /// the worker or a signal.
 fn turn(self: *Self) !?Next {
     const now_ms = self.realMs();
-    if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |next| return next;
-    try self.dispatch(.all);
+    if (self.upgrade_requested) {
+        if (try self.quiesceUpgrade()) {
+            const outcome = try UpgradePanel.run(self.init, self.options.store, self.terminal, &self.input, self.interrupted);
+            self.upgrade_requested = false;
+            switch (outcome) {
+                .unchanged => {},
+                .compatible => self.state.upgrade_blocked = false,
+                .incompatible => self.state.upgrade_blocked = true,
+            }
+            self.state.upgrade_pending = !self.state.upgrade_blocked;
+            self.state.next_list_ms = 0;
+            self.forget();
+        }
+    } else if (!self.state.upgrade_blocked) {
+        if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |next| return next;
+        try self.dispatch(.all);
+    }
     // Frames count on the monotonic clock, so a wall-clock step cannot
     // stall or race the spinner; ticks keep the Host's wall clock.
     const awake_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds;
@@ -546,6 +563,10 @@ fn event(self: *Self, value: view.Event) !?Next {
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
         .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
+        .upgrade => {
+            self.upgrade_requested = true;
+            self.state.upgrade_pending = true;
+        },
         .list_models => self.queue(.models),
         .save_default => |binding| self.queue(.{ .save = binding }),
         .command => |command| self.queue(.{ .command = .{ .name = command.name, .session = command.session, .line = try self.init.gpa.dupe(u8, command.text) } }),
@@ -1066,7 +1087,7 @@ fn forget(self: *Self) void {
 /// core's next tick, and while the screen spins, no later than its next
 /// frame. Until then only input, the worker or a signal wakes it.
 fn budget(self: *const Self, now_ms: u64, awake_ms: u64, spins: bool) i32 {
-    const tick: i32 = if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
+    const tick: i32 = if (self.state.upgrade_blocked or self.upgrade_requested) 16 else if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
     if (!spins) return tick;
     const frame: i32 = @intCast(view.spin_interval_ms - awake_ms % view.spin_interval_ms);
     return if (tick < 0) frame else @min(tick, frame);
@@ -1113,7 +1134,7 @@ fn converse(self: *Self, session: view.Reference) ?Left {
         left.ended = err;
         return left;
     };
-    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed };
+    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeHandoff };
     var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted, lender);
     // The conversation may have read the terminal's width report.
     self.caps.width = screen.vx.caps.unicode;
@@ -1153,6 +1174,7 @@ fn observed(raw: *anyopaque, read: protocol.session_work.Work, name: []const u8,
 fn service(raw: *anyopaque) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
+    if (self.state.upgrade_blocked) return false;
     const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) {
         _ = try self.event(.{ .tick = now_ms });
@@ -1167,6 +1189,41 @@ fn service(raw: *anyopaque) !bool {
     }
     try self.dispatch(.lent);
     return answered;
+}
+
+fn quiesceUpgrade(self: *Self) !bool {
+    if (self.worker.thread == null) try self.dispatch(.all);
+    if (self.worker.thread != null) {
+        switch (self.job) {
+            .host, .list, .lines, .models => self.worker.cancel(),
+            .start, .stop, .save, .command => {},
+        }
+        if (self.worker.completed()) {
+            drain(self.done[0]);
+            if (try self.complete()) |next| switch (next) {
+                .leave => return error.InteractiveInterrupted,
+                .open => |reference| self.started = reference,
+            };
+        }
+    }
+    self.state.upgrade_pending = true;
+    return self.worker.thread == null and self.job_count == 0;
+}
+
+fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    switch (handoff) {
+        .quiesce => {
+            self.state.upgrade_pending = true;
+            return self.quiesceUpgrade();
+        },
+        .ready, .incompatible => {
+            self.state.upgrade_pending = handoff == .ready;
+            self.state.upgrade_blocked = handoff == .incompatible;
+            self.state.next_list_ms = 0;
+            return true;
+        },
+    }
 }
 
 /// What the overview says under the opened Session's conversation.

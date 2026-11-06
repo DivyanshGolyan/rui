@@ -73,6 +73,7 @@ const cores = .{
 };
 
 test {
+    _ = @import("UpgradePanel.zig");
     _ = @import("AnswerRenderer.zig");
     _ = @import("core_boundary.zig");
     _ = @import("execution.zig");

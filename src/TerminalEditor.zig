@@ -591,12 +591,16 @@ const Press = union(enum) {
     none,
 };
 
+pub fn isEnter(value: vaxis.Key) bool {
+    return value.matchExact(vaxis.Key.enter, .{}) or value.matchExact('j', .{ .ctrl = true });
+}
+
 fn classify(value: vaxis.Key) Press {
     // Every binding matches exact modifiers. Vaxis's looser match accepts a
     // key's associated text or shifted key and drops Shift, so Ctrl-Shift-J
     // with text j would send and Shift-Enter with text CR would too.
     if (named(value)) |key_name| return .{ .key = key_name };
-    if (value.matchExact(vaxis.Key.enter, .{}) or value.matchExact('j', .{ .ctrl = true })) return .enter;
+    if (isEnter(value)) return .enter;
     if (value.matchExact(vaxis.Key.tab, .{})) return .{ .edit = .tab };
     // Alt-Enter adds a line in every form: Ghostty and other terminals send
     // Shift-Enter as ESC CR, which decodes exactly as Kitty's Alt-Enter.

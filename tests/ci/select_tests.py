@@ -23,9 +23,19 @@ PTY_TARGETS = ("terminal-restoration-integration", "canonical-failure-integratio
 RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
                       "tests/integration/terminal_input_replay.py")
 
+# The upgrade fixture is standalone, including when a composed gate is selected.
+UPGRADE_PATHS = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
+                 "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
+                 "src/host_identity.c", "src/UpgradePanel.zig", "src/host_launch.c",
+                 "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/slash_commands.zig",
+                 "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
+                 "tests/integration/upgrade_integration.py", "release/*", "install.sh", "build.zig")
+
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
 RULES = (
+    (UPGRADE_PATHS, ("upgrade-integration",), ("upgrade-integration",),
+     "Stable upgrade: installed binary, lifecycle and installer boundary"),
     (("src/logic_tests.zig", "src/request_wait.zig", "src/core_boundary.zig", "src/word_search.zig", "src/execution_turn.zig", "src/request_encoding.zig",
       "src/AnswerRenderer.zig", "src/store/engine/mysql_refusal.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
@@ -382,7 +392,9 @@ def select(paths, phase, available):
     if phase == "development":
         # Development does not replace final boundary/native acceptance, but
         # keeps each matched live rule's own targets (`LIVE_RULES`).
-        targets = {"test-logic"} | live_targets if targets else set()
+        targets = ({"test-logic"} | live_targets |
+                   ({"upgrade-integration"} if any(matches(path, UPGRADE_PATHS) for path in paths) else set())
+                   if targets else set())
         native_targets = set()
     for reason, served_by in live_reasons:
         if not targets & served_by:

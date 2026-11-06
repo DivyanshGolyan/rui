@@ -732,7 +732,8 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | Limit and schema refusal under 5 s | `host-launch-integration` | 256/256 and minimum-1 refuse; exact minimum serves ten clients. Linux and Apple Silicon macOS |
-| [Installed upgrade](ARCHITECTURE.md#store-format-and-upgrades) | `previous-release-upgrade.yml`, `previous_release_upgrade.py` | Refusal until migrations exist |
+| [Installed upgrade](ARCHITECTURE.md#store-format-and-upgrades) | `previous-release-upgrade.yml`, `previous_release_upgrade.py` | Exercise supported startup migration and backup as well as unsupported formats; no reset policy |
+| [Standalone stable Upgrade](ARCHITECTURE.md#store-format-and-upgrades) | `upgrade-integration`, Installation, release, Host lifecycle, PATH and panel value tests | Offline metadata and a same-source synthetic release identity; real native Hosts and both PTY/tmux screens prove exact-instance activation and lease retirement, failure reporting and retained drafts without replay. Historical external installers are outside the guarantee |
 
 ### Canonical reads, retained output and SQLite
 
@@ -777,6 +778,11 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 | Failed-response export through authenticated `session inspect`: exact body and stored metadata, Session/Operation/Attempt binding, read-only snapshots, binary windows, partial and omitted bodies, missing/ambiguous/corrupt records, symlink rejection, clean stdout and fd256 caller. Mandatory scratch unlink failure fences dispatch, preserves the original failure and recovers on startup | `dispatch_integration.py failed-response-export` in `dispatch-integration` | Real fixture-produced `IncompleteProviderOutput` and binary HTTP 400 survive Host restart. Partial/omitted export negatives perturb that real record; retention creation has separate owner tests. Canonical values and retained bytes/write timestamps are compared, not filesystem atime or WAL housekeeping. No live provider or automatic upload |
 | General bounded rotated-log export | none located | Unimplemented |
 ## Release demonstrations
+
+`upgrade-integration` builds `rui-upgrade-release-fixture` from the current production sources with a synthetic release version and the actual source revision.
+Only the fixture's build identity differs; installation eligibility, publication, Host lifecycle and terminal code are the production owners.
+Ordinary untagged builds still report `unreleased`.
+`zig build upgrade-fixture` exposes that same native actor for focused terminal evidence without a network download or a stale tagged binary.
 
 Package under the Rui identity and verify executable and package names, state and credential identifiers, build and distribution references, and fixtures.
 Fixture recreation under the [Store format policy](ARCHITECTURE.md#store-format-and-upgrades) does not authorize changing user Stores; state packaging, state-path and credential-identifier obligations explicitly before release.

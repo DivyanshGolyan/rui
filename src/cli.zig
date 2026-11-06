@@ -110,6 +110,23 @@ fn run(init: std.process.Init) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
         return std.Io.File.stdout().writeStreamingAll(init.io, version_text);
     }
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "upgrade")) return runUpgrade(init, args[2..]);
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "--publish-install")) return publishInstall(init, args[2..]);
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path")) {
+        const advice = @import("installation_path.zig");
+        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+        var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+        defer observed.deinit(allocator);
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try advice.write(&output.writer, &observed, home);
+        return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
+    }
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-facts")) {
+        const schema = @import("store/schema.zig");
+        var output: [128]u8 = undefined;
+        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&output, "{{\"schema_version\":{d},\"minimum_schema_version\":{d}}}\n", .{ schema.schema_version, schema.migration_baseline }));
+    }
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
     if (cli_args.retired(args[1])) |replacement| {
         const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
@@ -527,6 +544,89 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
 // omitted destinations use the same saved/HOME rule in every CLI mode.
 // Missing HOME is an environment repair, not a Store or request outcome:
 // report what needed it before any capture or transmission.
+const upgrade_usage = "Usage: rui upgrade [--check] [--store PATH]\nInstall the latest published stable release in the managed user installation.\nRestart the selected Store's Host only if already running; affects ALL Sessions there.\n--check only observes, without installation, Host startup, restart or Store migration.\n";
+
+fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
+    failure_held.resource = "upgrade";
+    failure_held.operation = "install";
+    var checking = false;
+    var explicit: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (args.len == 1 and (std.mem.eql(u8, args[index], "--help") or std.mem.eql(u8, args[index], "-h"))) return std.Io.File.stdout().writeStreamingAll(init.io, upgrade_usage);
+        if (std.mem.eql(u8, args[index], "--check") and !checking) {
+            checking = true;
+        } else if (std.mem.eql(u8, args[index], "--store") and explicit == null and index + 1 < args.len) {
+            index += 1;
+            explicit = args[index];
+        } else {
+            stderr.diagnostic("rui: invalid upgrade arguments. Nothing installed or sent. {s}", .{upgrade_usage});
+            return error.InvalidInvocation;
+        }
+    }
+    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = explicit orelse if (init.environ_map.get("RUI_STORE")) |inherited| inherited else selected: {
+        const defaults = preferences.load(home) catch |err| return preferenceFailure(err);
+        if (defaults.store.len != 0) {
+            @memcpy(fallback[0..defaults.store.len], defaults.store.slice());
+            break :selected fallback[0..defaults.store.len];
+        }
+        break :selected try preferences.defaultStore(home, &fallback);
+    };
+    try validateStoreSpelling(store);
+    holdStore(store);
+    const upgrade = @import("upgrade.zig");
+    const allocator = std.heap.c_allocator;
+    var checked = upgrade.check(init, allocator, store, null) catch |err| {
+        stderr.diagnostic("rui: upgrade check failed; no installation or Host was changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
+        recordExit(.environment);
+        return error.Reported;
+    };
+    defer checked.deinit(allocator);
+    var buffer: [16384]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try upgrade.writeCheck(&writer, &checked);
+    try std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered());
+    if (checking) return;
+    if (!upgrade.canInstall(&checked)) {
+        recordExit(.environment);
+        return error.Reported;
+    }
+    var result = upgrade.install(init, allocator, &checked, null, null) catch |err| {
+        stderr.diagnostic("rui: upgrade failed before publication; the selected build and Host were not changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
+        recordExit(.environment);
+        return error.Reported;
+    };
+    defer result.deinit(allocator);
+    writer = .fixed(&buffer);
+    try upgrade.writeResult(&writer, &result);
+    try std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered());
+    switch (result.activation) {
+        .failed, .unconfirmed, .replacement_observed, .unsupported, .cancelled => recordExit(.environment),
+        else => {},
+    }
+    if (exit_status != .done) return error.Reported;
+}
+
+fn publishInstall(init: std.process.Init, args: []const []const u8) !void {
+    if (args.len != 3) return error.InvalidInvocation;
+    const Installation = @import("Installation.zig");
+    const intent: Installation.Intent = if (std.mem.eql(u8, args[2], "intentional-source")) .intentional_source else if (std.mem.eql(u8, args[2], "released-install")) .released_install else if (std.mem.eql(u8, args[2], "released-upgrade")) .released_upgrade else return error.InvalidInvocation;
+    var outcome = try Installation.publishExisting(std.heap.c_allocator, init.io, args[0], args[1], intent, null);
+    defer outcome.deinit(std.heap.c_allocator);
+    var output: JsonOutput = undefined;
+    const writer = output.init(init.io, .stdout);
+    try writer.writeAll("{\"outcome\":");
+    try std.json.Stringify.value(@tagName(outcome), .{}, writer);
+    try writer.writeAll(",\"operation_build\":");
+    try std.json.Stringify.value(outcome.receipt().operation_build, .{}, writer);
+    try writer.writeAll(",\"selected_after\":");
+    try std.json.Stringify.value(outcome.receipt().selected_after, .{}, writer);
+    try writer.writeAll("}\n");
+    try output.finish();
+}
+
 fn homeRequired(comptime _: []const u8) error{HomeUnavailable} {
     return error.HomeUnavailable;
 }
@@ -700,7 +800,7 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
             const writer = output.init(io, .stdout);
             try writer.print("{{\"version\":\"{s}\",\"type\":\"host_pause\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
             try std.json.Stringify.value(paths.store.slice(), .{}, writer);
-            const retired = try awaitRetirement(io, paths.store.slice());
+            const retired = try @import("HostLifecycle.zig").awaitRetirement(io, paths.store.slice());
             try writer.print(",\"instance\":\"{s}\",\"retirement\":\"{s}\"}}\n", .{ &hex, if (retired) "confirmed" else "unconfirmed" });
             try output.finish();
             if (!retired) stderr.diagnostic("rui: the Host acknowledged the pause but still holds this Store after {d} seconds, usually because cleanup is still running. A new Host can start once rui host status reports unavailable.\n", .{product_defaults.host_shutdown_seconds});
@@ -714,20 +814,6 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
             return error.HostStopUnconfirmed;
         },
     }
-}
-
-/// The old Host holds the Store's lease until it lets go of the Store, so a
-/// free lease confirms retirement. Only the lease is observed: asking the
-/// Host would add exchanges to the shutdown being watched. The wait shares
-/// the launched Host's drain bound.
-fn awaitRetirement(io: std.Io, store: []const u8) !bool {
-    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + product_defaults.host_shutdown_seconds * std.time.ns_per_s;
-    while (platform.StoreLease.observe(io, store) != .unowned) {
-        const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-        if (remaining <= 0) return false;
-        try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 50 * std.time.ns_per_ms))), .awake);
-    }
-    return true;
 }
 
 /// Null capacity leaves a new Host on product_defaults.active_capacity.
@@ -3864,6 +3950,8 @@ const usage_text =
     \\    Resources: session, request, action, host, defaults, auth, store.
     \\  rui RESOURCE COMMAND --help
     \\    Installed operation help owns exact options. Help needs no Host or credentials.
+    \\  rui upgrade [--check] [--store PATH]
+    \\    Check/install published stable; restart only an already-running managed Host.
     \\  rui --version
     \\    Print the release version and source revision.
     \\

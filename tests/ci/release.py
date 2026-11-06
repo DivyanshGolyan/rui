@@ -2,8 +2,8 @@
 """Plan and assemble a GitHub Release for a promoted stable SHA.
 
 Versions are 0.S.N: S is the Store schema version at the released commit and
-N counts earlier releases with that schema. Equal S means an existing Store
-opens; a new S means the Store must be reset. Runs from trusted main code.
+N counts earlier releases with that schema. The target build owns its supported
+startup migration range; version punctuation is not migration policy. Runs from trusted main code.
 """
 import argparse
 from pathlib import Path
@@ -107,6 +107,8 @@ def main():
     assembled.add_argument("version")
     assembled.add_argument("sums", type=Path)
     assembled.add_argument("output", type=Path)
+    assembled.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[2],
+                           help="checkout whose executable assets the installer will publish")
     args = parser.parse_args()
     if args.command == "plan":
         print(f"version={plan(args.sha) or ''}")
@@ -119,7 +121,7 @@ def main():
                 digests[platform] = digest
     if set(digests) != set(PLATFORMS):
         raise SystemExit(f"SHA256SUMS must list every platform archive for {args.version}")
-    root = Path(__file__).resolve().parents[2]
+    root = args.source_root
     template = (root / "release/install.sh").read_text()
     publish = (root / "release/publish.sh").read_text()
     args.output.write_text(installer(template, args.version, digests, publish))

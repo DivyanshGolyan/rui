@@ -556,6 +556,33 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
     };
 }
 
+pub const ObservedHost = struct {
+    ready: @FieldType(protocol_reply.HostStatus, "ready"),
+    pid: c_int,
+};
+
+pub fn observeHostProcess(io: std.Io, store_path: []const u8, deadline: ?i128) !ObservedHost {
+    const paths = try platform.resolveClientPaths(io, store_path);
+    var body: protocol.RequestBuffer = .{};
+    try body.appendShape(protocol.host_info_request, .{paths.store.slice()});
+    const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
+    const until = @min(probe_end, deadline orelse probe_end);
+    const requests: Requests = .{ .io = io };
+    const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
+    const fd = try connectRequest(requests, address, until);
+    defer closeSocket(io, fd);
+    const pid = try @import("host_identity.zig").peer(fd);
+    try uploadRequest(requests, fd, "/v1/host-info", .{}, body.len, null, body.slice(), null, null, until);
+    var reply_buffer: ReplyBuffer = .{};
+    const reply = try readCommandResponseRequest(requests, fd, &reply_buffer, .{}, until);
+    if (reply.status != 200) return error.InvalidHostInfo;
+    const ready = switch (try protocol_reply.parseHostInfo(reply.body, paths.store.slice())) {
+        .ready => |value| value,
+        else => return error.InvalidHostInfo,
+    };
+    return .{ .ready = ready, .pid = pid };
+}
+
 pub const HostLockState = enum { free, held, failure };
 
 /// Probe without contacting the Host; a failed probe proves neither absence

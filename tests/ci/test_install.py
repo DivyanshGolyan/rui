@@ -11,7 +11,7 @@ import release
 
 
 ROOT = Path(__file__).resolve().parents[2]
-NEXT = "Next: rui auth login codex (setup steps: https://github.com/DivyanshGolyan/rui#start-a-conversation)"
+NEXT = "Next: ~/.local/bin/rui auth login codex (setup steps: https://github.com/DivyanshGolyan/rui#start-a-conversation)"
 FAKE_ZIG = '''#!/usr/bin/env python3
 import json, os, pathlib, re, sys
 args = sys.argv[1:]
@@ -108,6 +108,7 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
             **os.environ, "HOME": str(self.home), "ZIG_GLOBAL_CACHE_DIR": str(self.cache),
             "PATH": f"{self.tools}:{self.bin}:{os.environ['PATH']}",
             "ZIG_LOCAL_PKG_DIR": str(self.root / "selected packages"),
+            "RUI_TEST_PUBLISH_HELPER": fake_rui.native_publisher(),
             # An unreleased build: the report names it by its revision file.
             "TEST_RUI_SCRIPT": fake_rui.script("rui unreleased (0000000)", "40", "GENERATION"),
         }
@@ -158,10 +159,11 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         (self.repo / "src/store/schema.zig").write_text(source)
         supported = int(release.SCHEMA.search(source)[1])
         fake_rui.saved_work(self.home, supported - 1)
-        self.assertEqual(self.report(self.install())[1:3], [
-            f"Rui source archive cannot open your saved work in ~/.local/share/rui/store: that Store uses format "
-            f"{supported - 1}, and this version uses format {supported}. Nothing was changed or deleted. Choose one:",
-            f"  Keep using it with a Rui build that opens format {supported - 1}. Earlier builds stay in ~/.local/lib/rui."])
+        script = fake_rui.script("rui unreleased (0000000)", str(supported), "GENERATION")
+        result = self.install(TEST_RUI_SCRIPT=script, TEST_MINIMUM_SCHEMA=str(supported - 1))
+        self.assertEqual(self.report(result)[1:2], [
+            f"Your defaults-selected SQLite Store uses format {supported - 1}. Host startup can back it up and migrate it "
+            f"to format {supported}; installing alone does not migrate it. MySQL schema changes remain operator-owned."])
 
     def test_missing_schema_declaration_refuses_before_building(self):
         (self.bin / "rui").write_text("previous rui")
@@ -314,10 +316,9 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         shadow.write_text("#!/bin/sh\nexit 0\n")
         shadow.chmod(0o755)
         self.assertEqual(self.report(self.install()), [
-            "Installed Rui source archive at ~/.local/bin/rui.",
-            f"Your PATH finds another rui first, at {shadow}. Put ~/.local/bin before it in your PATH, "
-            "then run hash -r (Bash) or rehash (Zsh).",
-            NEXT.replace("Next: rui", "Next: ~/.local/bin/rui")])
+            "Installed Rui source archive at ~/.local/bin/rui.", NEXT,
+            f"Your PATH finds another rui first, at {shadow}. Put {self.bin} before it in your PATH, "
+            "then run hash -r (Bash) or rehash (Zsh)."])
 
 
 if __name__ == "__main__":

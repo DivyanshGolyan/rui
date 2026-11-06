@@ -517,6 +517,7 @@ pub const Effect = union(enum) {
     /// Save the person's default for new Sessions, as `rui defaults
     /// configure --provider --model` does, and answer with `saved`.
     save_default: Default,
+    upgrade,
     /// Empty the line editor.
     clear_draft,
     /// Add these static bytes at the draft's end, as Tab does.
@@ -820,6 +821,8 @@ pub const State = struct {
     /// The Workspace the composer starts Sessions in, as an index in `workspaces`.
     cwd: u32,
     now_ms: u64 = 0,
+    upgrade_blocked: bool = false,
+    upgrade_pending: bool = false,
     /// The terminal's own last successful `rui auth login`, Unix seconds.
     login_at: ?u64 = null,
 
@@ -1668,6 +1671,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
         effects.add(.{ .notify = .{ .name = title(state, row).text, .kind = found.kind, .more = found.more } });
     }
     state.listing = false;
+    state.upgrade_pending = false;
     try readFirstLines(state, effects);
 }
 
@@ -1938,6 +1942,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             },
             .exit => effects.add(.exit),
             .stop => {
+                if (state.upgrade_blocked or state.upgrade_pending) return state.say(.attention, upgrade_recovery, .{});
                 state.closePanel();
                 const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
                 stopKey(state, prompt, row.reference, row.state.asOf(state.now_ms), effects);
@@ -2022,7 +2027,20 @@ fn select(state: *State, action: Action) void {
     move(state, action);
 }
 
+pub const upgrade_recovery = "! Host requests paused after Upgrade; draft retained. /upgrade or reopen with the selected Rui.";
+
 fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
+    if (state.upgrade_blocked or state.upgrade_pending) {
+        if (text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//")) switch (commands.parse(text)) {
+            .command => |command| switch (command.name) {
+                .upgrade => return effects.add(.upgrade),
+                .exit => return effects.add(.exit),
+                else => {},
+            },
+            else => {},
+        };
+        return state.say(.attention, upgrade_recovery, .{});
+    }
     // As in a conversation, the draft is sent byte for byte; only a blank
     // draft opens the selected row instead.
     if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
@@ -2048,6 +2066,10 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
     };
     switch (command.name) {
         .exit => effects.add(.exit),
+        .upgrade => {
+            state.upgrade_pending = true;
+            effects.add(.upgrade);
+        },
         .model => {
             state.picker = .{};
             // Visible equals actionable: a picker the screen cannot show never opens.
@@ -3871,7 +3893,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                 try std.testing.expectEqualStrings(command.text, got.command.text);
                 try std.testing.expectEqual(command.session, got.command.session);
             },
-            .list_models, .clear_draft, .exit => {},
+            .list_models, .clear_draft, .upgrade, .exit => {},
         }
     }
 }
@@ -4457,13 +4479,14 @@ test "typing / lists the overview's commands between the rule and the draft, as 
     defer state.deinit();
     const all = try draftLines(&state, try typeText(&state, "/"), 80, 24);
     defer std.testing.allocator.free(all);
-    try expectLines(all, 16, &.{
+    try expectLines(all, 15, &.{
         " /configure [OPTIONS]  hold settings for the next Session",
         " /exit                 leave; Host work continues",
         " /help                 keys and commands",
         " /model                choose the model new Sessions use",
         " /rename NAME          name the selected Session",
         " /setup [OPTIONS]      future defaults",
+        " /upgrade              check stable Rui; install restarts this Store's Host",
         " › /",
         " esc close",
     });
@@ -4567,7 +4590,7 @@ test "a short screen lists the commands it has rows for and counts the rest" {
     const text = try draftLines(&state, try typeText(&state, "/"), 80, 11);
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, " /configure [OPTIONS]  hold settings for the next Session") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, " +5 more · type to narrow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " +6 more · type to narrow") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "/exit ") == null);
 }
 
@@ -7173,6 +7196,7 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
         " /model                choose the model new Sessions use",
         " /rename NAME          name the selected Session",
         " /setup [OPTIONS]      future defaults",
+        " /upgrade              check stable Rui; install restarts this Store's Host",
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
     try std.testing.expect(std.mem.indexOf(u8, shown, label) == null);
     // The line under the input says Esc closes it, over held settings or a
@@ -7345,4 +7369,41 @@ test "a command the person did not see end is named on the way out" {
         try writeDeparture(&state, null, &departure);
         try std.testing.expectEqualStrings(case.expected, departure.buffered());
     }
+}
+
+test "upgrade emits only its local effect and preserves selection settings and unresolved handles" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    const selected = state.selected;
+    const configured = try typeText(&state, "/configure --permission-mode ask");
+    _ = try submit(&state, configured);
+    const settings = state.settings;
+    try std.testing.expect(state.request(.stop, selected));
+    state.answer(0, .unknown, "01234567-89ab-4cde-8012-0123456789ab");
+    const request = state.requests[0];
+    const draft = try typeText(&state, "/upgrade");
+    try expectEffects(&.{.upgrade}, try submit(&state, draft));
+    try std.testing.expectEqual(selected, state.selected);
+    try std.testing.expectEqualDeep(settings, state.settings);
+    try std.testing.expectEqual(@as(usize, 1), state.request_count);
+    try std.testing.expectEqualDeep(request, state.requests[0]);
+    try std.testing.expectEqualStrings("/upgrade", draft.bytes);
+    try std.testing.expect(state.command == null);
+}
+
+test "upgrade protocol hold refuses starts opens stops and Host commands but permits local recovery" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    state.upgrade_blocked = true;
+    const selected = state.selected;
+    for ([_][]const u8{ "new model work", "", "/rename new name", "/setup --model gpt-5.5" }) |text| {
+        try expectEffects(&.{}, try submit(&state, try typeText(&state, text)));
+        try std.testing.expectEqual(selected, state.selected);
+        try std.testing.expectEqual(@as(usize, 0), state.request_count);
+        try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
+    }
+    try expectEffects(&.{}, try press(&state, try typeText(&state, "draft"), .stop));
+    try std.testing.expectEqual(@as(usize, 0), state.request_count);
+    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
 }

@@ -66,6 +66,22 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_upgrade_owners_select_standalone_fixture_in_both_phases(self):
+        paths = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
+                 "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
+                 "src/host_identity.c", "src/UpgradePanel.zig", "src/host_launch.c",
+                 "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/slash_commands.zig",
+                 "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
+                 "tests/integration/upgrade_integration.py", "release/publish.sh", "release/install.sh",
+                 "install.sh", "build.zig")
+        for path in paths:
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    result = select([path], phase, AVAILABLE)
+                    self.assertIn("upgrade-integration", result["targets"])
+                    if phase == "review":
+                        self.assertIn("upgrade-integration", result["native_targets"])
+
     def test_request_wait_selects_its_native_oracle_and_portable_core(self):
         for path in ("src/client.zig", "src/cli_args.zig", "src/server.zig",
                      "src/TestObservation.zig", "tests/integration/request_wait_integration.py",
@@ -223,11 +239,11 @@ class SelectionTest(unittest.TestCase):
         pty = ["canonical-failure-integration", "terminal-restoration-integration"]
         for path, expected in (
                 # src/tests.zig, not the logic root, runs these owners' unit tests.
-                ("src/SessionFrontend.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
+                ("src/SessionFrontend.zig", ["admission-debug-integration", *pty, "test", "test-logic", "upgrade-integration"]),
                 ("src/SessionTerminal.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
                 ("src/ClientTask.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
                 ("src/ConversationViewport.zig", [*pty, "test-logic"]),
-                ("src/TerminalEditor.zig", ["admission-debug-integration", *pty, "test-logic"]),
+                ("src/TerminalEditor.zig", ["admission-debug-integration", *pty, "test-logic", "upgrade-integration"]),
                 ("src/TerminalText.zig", ["admission-debug-integration", *pty, "test-logic"]),
                 ("src/session_sequence_model_test.zig", ["test-logic"])):
             with self.subTest(path=path):
@@ -699,8 +715,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_installer_report_runs_the_fixture_that_pins_its_json_reader(self):
         result = select(["release/publish.sh"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["host-status-integration"])
-        self.assertEqual(result["native_targets"], ["host-status-integration"])
+        self.assertEqual(result["targets"], ["host-status-integration", "upgrade-integration"])
+        self.assertEqual(result["native_targets"], ["host-status-integration", "upgrade-integration"])
         self.assertTrue(result["mac_required"])
 
     def test_existing_fixture_target_and_new_fixture_fallback(self):

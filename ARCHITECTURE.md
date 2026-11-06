@@ -1333,7 +1333,7 @@ A caller may still escalate an ordinary outcome, such as a stale settlement, to 
 
 The Store's format version is the `format` row of `store_meta`, and SQLite's `PRAGMA user_version` repeats it so an older binary refuses the file cheaply.
 Before any write, open compares the format and then each table's and index's stored CREATE text with the DDL this binary renders, so a Store missing an object, holding an extra one, or carrying a changed column, CHECK or index is refused as the wrong schema.
-The Host opens schema 51 (41 let a failed, overflowed or retry-exhausted Turn outcome reference its report content; 42 saves each Model Output Item's replay rule, judged once at import, and replaces raw items with the neutral form: `model_output_item` keeps kind, phase, part count and an item bag; `model_output_part` keeps each part's array, kind, text and part bag; no answer or string projection tables remain; and content payloads are non-null with their recorded length; 43 certifies a Tool Call by its name, call ID and arguments only, since the provider item ID lives in the item bag, stores usage as four neutral counts beside the provider's report, pins each Session's codec (`openai-responses/1` for `codex`) and optional codec options of at most 512 bytes at creation, checks a provider label's syntax instead of a provider list, so adding a provider is no format change, and keeps each Session's [prefix seal](#prefix-seal); 44 stores a message's text once, as the item's message text row, with each text part keeping only its length into it, while a reasoning part keeps its own private row; 45 orders the index of Messages without a Session sender by Admission position; 46 names each Tool Call's Session on its row, and indexes every Activity row source by Session and position, so an Activity page is a range seek whatever the history's length; 47 makes the schema's tables expressible on SQLite, Postgres and MySQL and holds every statement to the reserved-name and `rowid` rules: no name any engine reserves outside its keyword place, no `rowid` (Sessions carry `created_seq` and Commands `command_seq`, each allocated max+1 in its creating transaction), a stored Workspace digest and key, foreign keys checked when each row is written rather than at commit, non-null key columns, byte-length checks, and the format marker in `store_meta`, while statements keep SQLite-only forms such as `unixepoch`, `GLOB`, `||`, `IS`, `INDEXED BY`, `ON CONFLICT`, `INSERT OR IGNORE` and `printf` until the typed statements bring their dialect rules; 48 and 49 record OpenAI web search; 50 drops the per-Session read-through position that 46 added; 51 makes a Command's `command_seq` its primary key and `command_key` unique, and indexes Commands by target, kind and `command_seq` in place of `command_seq`'s own index, so a Session's decisions, stops and interruptions are a range seek, and indexes Tool Calls by Session, Operation and call ordinal, and rejected Tool Calls and resolved Actions by Session, Operation and acceptance position, in place of the rejected calls' index by Operation, so a Session's calls and Tool Results are a range seek on their own tables, indexes revisions by Session and content so a Full report finds each content's first revision in SQL, and limits `store_meta`'s key to its three names, because MySQL keys only bounded text): a Store at any earlier version is rejected as unsupported, and its users must reset it.
+The Host opens schema 51 (41 let a failed, overflowed or retry-exhausted Turn outcome reference its report content; 42 saves each Model Output Item's replay rule, judged once at import, and replaces raw items with the neutral form: `model_output_item` keeps kind, phase, part count and an item bag; `model_output_part` keeps each part's array, kind, text and part bag; no answer or string projection tables remain; and content payloads are non-null with their recorded length; 43 certifies a Tool Call by its name, call ID and arguments only, since the provider item ID lives in the item bag, stores usage as four neutral counts beside the provider's report, pins each Session's codec (`openai-responses/1` for `codex`) and optional codec options of at most 512 bytes at creation, checks a provider label's syntax instead of a provider list, so adding a provider is no format change, and keeps each Session's [prefix seal](#prefix-seal); 44 stores a message's text once, as the item's message text row, with each text part keeping only its length into it, while a reasoning part keeps its own private row; 45 orders the index of Messages without a Session sender by Admission position; 46 names each Tool Call's Session on its row, and indexes every Activity row source by Session and position, so an Activity page is a range seek whatever the history's length; 47 makes the schema's tables expressible on SQLite, Postgres and MySQL and holds every statement to the reserved-name and `rowid` rules: no name any engine reserves outside its keyword place, no `rowid` (Sessions carry `created_seq` and Commands `command_seq`, each allocated max+1 in its creating transaction), a stored Workspace digest and key, foreign keys checked when each row is written rather than at commit, non-null key columns, byte-length checks, and the format marker in `store_meta`, while statements keep SQLite-only forms such as `unixepoch`, `GLOB`, `||`, `IS`, `INDEXED BY`, `ON CONFLICT`, `INSERT OR IGNORE` and `printf` until the typed statements bring their dialect rules; 48 and 49 record OpenAI web search; 50 drops the per-Session read-through position that 46 added; 51 makes a Command's `command_seq` its primary key and `command_key` unique, and indexes Commands by target, kind and `command_seq` in place of `command_seq`'s own index, so a Session's decisions, stops and interruptions are a range seek, and indexes Tool Calls by Session, Operation and call ordinal, and rejected Tool Calls and resolved Actions by Session, Operation and acceptance position, in place of the rejected calls' index by Operation, so a Session's calls and Tool Results are a range seek on their own tables, indexes revisions by Session and content so a Full report finds each content's first revision in SQL, and limits `store_meta`'s key to its three names, because MySQL keys only bounded text): a Store at any earlier version is rejected as unsupported and requires a compatible build or a separate fresh Store.
 Schema 51 is the migration baseline (Divyansh, D204): every later format change ships one forward step in `schema.migrations`, for SQLite and MySQL, and the build fails when `schema_version` and the steps disagree, and `tests/ci/test_store_schema_version.py` fails when a step whose `from` is below the released schema_version differs from its text at the release.
 A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
 Rui runs no DDL on MySQL (D203).
@@ -1400,28 +1400,41 @@ The Host runs a SQLite Store's pending migrations at startup under its Store own
 If the backup fails, nothing migrates and the Store is refused.
 The copy is as large as the Store and stays until the next migration replaces it or the user deletes it.
 On MySQL, backing the Store up before applying a migration's text is the DB team's job.
-At that stage, the installer will only check and report compatibility.
-Today both installers replace the command through one shell owner, `rui_publish` in [release/publish.sh](release/publish.sh), and then report only facts that need action.
-A first install reports the installed version, its location and the first command to run.
-An update or reinstall reports the replaced and new versions and that saved work and sign-in were kept.
-Any install also reports three conditions.
-If the selected Store's format is one the new build cannot open, it says nothing was changed and offers two choices: a build that still opens the Store, and the [reset guide](docs/store-reset.md).
-The format comes from the `user_version` bytes of the Store's database header, or from the replaced release's version while that header is unwritten.
-If a Host is running, it gives a command that can stop it, using the replaced build when only that build can reach the Host, or a status command when the Host does not answer.
-If `PATH` does not select the new `rui`, it says how to fix that, and it mentions `hash -r` and `rehash` only when another `rui` comes first on `PATH`.
-The report opens no SQLite connection, starts or stops nothing and prints no command output.
-It omits a fact it cannot read and says on stderr when it cannot check the Host.
-Nothing after the rename fails the installation.
-Compatibility is still enforced when a Host starts.
+Installation alone does not open the Store for writes, migrate it, reset it or change credentials.
+The schema owns `migration_baseline` and current format at Host startup; unequal formats are not necessarily incompatible, and version punctuation does not establish the supported range.
+The report distinguishes unchanged, supported through startup migration, unsupported and unknown compatibility.
+If candidate facts are absent, it reports unknown and leaves validation to Host startup without starting a candidate Host to probe it.
+The installer's read-only Store probe uses the defaults-selected Store, which is not necessarily the client's explicitly selected active Store.
+MySQL schema application and backup remain operator-owned.
+
+`rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
+`rui upgrade --check` is read-only and starts no Host.
+The shared local `UpgradePanel` offers explicit Install and Cancel from both overview and conversation, without sending `/upgrade` to the model or adding an updater service.
+It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
+Restart can interrupt work in every Session in that Store, not other Stores.
+No running Host means install only.
+
+The thin upgrade coordinator composes `InstallationOutcome` separately from HostLifecycle `ActivationOutcome`.
+After publication it pauses only the exact observed Host instance, waits for lease retirement, starts the pinned target identity with preserved settings and verifies readiness before claiming activation.
+A replacement race, failed stop or start, or unsupported or application-owned launch configuration must not blindly stop another process and is reported as installed but not activated or unconfirmed as appropriate.
+An already-installed target can still need activation of an older running Host.
+Manual source and release installation remain install-only.
+
+`src/Installation.zig` is the sole final publication owner; source and release shell installers invoke the same staged native helper.
+A `release_candidate` pins validated immutable release identity, assets and digest before download.
+The native bootstrap can download pinned SHA256SUMS and archive assets for historical v0.56.4 using the current native publication owner, without executing its old uncooperative installer.
+A permanent prefix-scoped lock serializes participating writers, with final managed eligibility and numeric release-order checks under the lock.
+External historical installers do not participate and have no new serialization or no-downgrade guarantee.
+Intentional source installation retains its distinct replacement policy.
+Automatic upgrade refuses selected source and unknown-identity builds; the standalone release installer can intentionally convert those managed selections without overwriting application-owned commands.
+`installation_path` owns read-only PATH observations and sanitized advice shared by native clients and modern shell installers.
+Complete builds remain available for running processes, but retained executables do not guarantee rollback after Store migration.
 
 A release version has the form `0.S.N`.
-`S` is the `schema_version` of the released commit, and `N` counts earlier releases with the same schema.
-Without migrations, the Store format is the only compatibility question an update raises, so the version answers it and nobody chooses version numbers.
+`S` is the released commit's `schema_version`, and `N` counts earlier releases with the same schema.
 The release workflow publishes each promoted `stable` SHA at most once, and versions never decrease.
 A build reports `unreleased` unless its commit has a matching release tag.
-The release installer uses the source installer's layout: each complete build gets its own directory under `~/.local/lib/rui`, and a rename replaces the command links.
-Once migrations keep old Stores usable across format changes, Rui should switch to ordinary semantic versioning.
-[Issue #523](https://github.com/DivyanshGolyan/rui/issues/523) records the approved decision and unresolved conversion and relocation work; it does not authorize a migration or reset now.
+[Issue #523](https://github.com/DivyanshGolyan/rui/issues/523) records the approved decision and unresolved conversion and relocation work; it does not authorize a new migration or reset policy.
 
 Development test Stores and associated configure captures are recreated for changed formats, not migrated.
 This does not authorize recreating user Stores.
