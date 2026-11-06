@@ -101,6 +101,18 @@ fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cell
         if (user and width >= 4 and std.mem.startsWith(u8, line, "  ")) return .{ .bytes = 2, .cells = 2 };
         return .{ .bytes = 0, .cells = 0 };
     }
+    // The final ASCII prefix space may carry combining marks. Include its
+    // whole cluster so prefix/body printing never cuts a grapheme in two.
+    if (bytes != 0) {
+        var clusters = unicode.graphemeIterator(line);
+        while (clusters.next()) |cluster| {
+            const end = cluster.start + cluster.len;
+            if (end >= bytes) {
+                bytes = end;
+                break;
+            }
+        }
+    }
     return .{ .bytes = bytes, .cells = @intCast(cells), .quoted = quoted };
 }
 
@@ -128,6 +140,11 @@ const sidenote_cells = 5;
 fn isSidenote(value: u8) bool {
     return value & (user_bit | summary_bit) == summary_bit;
 }
+const DisplayChannel = enum { body, note, address };
+fn displayChannel(style: u8) DisplayChannel {
+    return if (foregroundIndex(style) == address_index) .address else if (isSidenote(style)) .note else .body;
+}
+
 pub const CellStyle = struct { bold: bool = false, dim: bool = false, italic: bool = false, underline: bool = false, foreground: ?u8 = null };
 /// User text is dim and italic only with colour; without it, position alone
 /// sets it apart. Its summary and sidenotes are dim but never italic.
@@ -287,58 +304,94 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             self.dirty = false;
         }
 
-        fn escape(self: *Self) !void {
-            var search = unicode.graphemeIterator(self.text());
-            while (search.next()) |cluster| {
-                const raw_cluster = cluster.bytes(self.text());
-                if (std.mem.eql(u8, raw_cluster, "\n") or std.mem.eql(u8, raw_cluster, "\t") or representable(raw_cluster, self.width_method)) continue;
-                const length = self.length;
-                var bytes: [limit]u8 = undefined;
-                var styles: [if (styled) limit else 0]u8 = undefined;
-                @memcpy(bytes[0..length], self.bytes[0..length]);
-                if (styled) @memcpy(styles[0..length], self.styles[0..length]);
-                const complete = self.text().len;
-                const saved_style = self.style;
-                defer self.style = saved_style;
-                // Retained styles already carry their link marks.
-                const saved_link = self.link;
-                const saved_address = self.address_length;
-                self.link = .none;
-                defer {
-                    self.link = saved_link;
-                    self.address_length = saved_address;
+        // Metadata addresses and sidenotes are separate display channels.
+        // They cannot supply a base character for a visible combining mark.
+        fn channelEnd(styles: []const u8, start: usize, end: usize) usize {
+            if (!styled) return end;
+            const channel = displayChannel(styles[start]);
+            var stop = start + 1;
+            while (stop < end and displayChannel(styles[stop]) == channel) stop += 1;
+            return stop;
+        }
+
+        fn needsEscape(bytes: []const u8, styles: []const u8, method: gwidth.Method) bool {
+            var start: usize = 0;
+            while (start < bytes.len) {
+                const end = channelEnd(styles, start, bytes.len);
+                if (!styled or displayChannel(styles[start]) != .address) {
+                    var clusters = unicode.graphemeIterator(bytes[start..end]);
+                    while (clusters.next()) |cluster| if (!representable(cluster.bytes(bytes[start..end]), method)) return true;
                 }
-                self.length = 0;
-                var clusters = unicode.graphemeIterator(bytes[0..complete]);
+                start = end;
+            }
+            return false;
+        }
+
+        fn original(self: *Self, bytes: []const u8, styles: []const u8) !void {
+            if (bytes.len == 0) return;
+            if (styled) self.style = styles[0];
+            try self.appendText(bytes);
+            // Preserve structural metadata and intra-cluster style bytes.
+            // RangeRuns alone chooses the whole glyph's presentation style.
+            if (styled) @memcpy(self.styles[self.length - bytes.len .. self.length], styles);
+        }
+
+        fn escape(self: *Self) !void {
+            const complete = self.text().len;
+            if (!needsEscape(self.bytes[0..complete], if (styled) self.styles[0..complete] else &.{}, self.width_method)) return;
+            const length = self.length;
+            var bytes: [limit]u8 = undefined;
+            var styles: [if (styled) limit else 0]u8 = undefined;
+            @memcpy(bytes[0..length], self.bytes[0..length]);
+            if (styled) @memcpy(styles[0..length], self.styles[0..length]);
+            const saved_style = self.style;
+            defer self.style = saved_style;
+            const saved_link = self.link;
+            const saved_address = self.address_length;
+            self.link = .none;
+            defer {
+                self.link = saved_link;
+                self.address_length = saved_address;
+            }
+            self.length = 0;
+            var start: usize = 0;
+            while (start < complete) {
+                const end = channelEnd(&styles, start, complete);
+                if (styled and displayChannel(styles[start]) == .address) {
+                    try self.original(bytes[start..end], styles[start..end]);
+                    start = end;
+                    continue;
+                }
+                var clusters = unicode.graphemeIterator(bytes[start..end]);
                 while (clusters.next()) |value| {
-                    if (styled) self.style = styles[value.start];
-                    const raw = value.bytes(bytes[0..complete]);
-                    if (std.mem.eql(u8, raw, "\n") or std.mem.eql(u8, raw, "\t") or representable(raw, self.width_method)) {
-                        try self.appendText(raw);
-                    } else {
-                        // A run of one scalar is shown once with its count.
-                        var scalars = (try std.unicode.Utf8View.init(raw)).iterator();
-                        var run: ?u21 = null;
-                        var count: usize = 0;
-                        while (true) {
-                            const point = scalars.nextCodepoint();
-                            if (run != null and point == run) {
-                                count += 1;
-                                continue;
-                            }
-                            if (run) |previous| {
-                                var escaped: [40]u8 = undefined;
-                                try self.appendText(if (count == 1) try std.fmt.bufPrint(&escaped, "\\u{{{x}}}", .{previous}) else try std.fmt.bufPrint(&escaped, "\\u{{{x}}}×{d}", .{ previous, count }));
-                            }
-                            run = point orelse break;
-                            count = 1;
+                    const raw = value.bytes(bytes[start..end]);
+                    const first = start + value.start;
+                    if (representable(raw, self.width_method)) {
+                        try self.original(raw, if (styled) styles[first..][0..raw.len] else &.{});
+                        continue;
+                    }
+                    if (styled) self.style = styles[first];
+                    // A run of one scalar is shown once with its count.
+                    var scalars = (try std.unicode.Utf8View.init(raw)).iterator();
+                    var run: ?u21 = null;
+                    var count: usize = 0;
+                    while (true) {
+                        const point = scalars.nextCodepoint();
+                        if (run != null and point == run) {
+                            count += 1;
+                            continue;
                         }
+                        if (run) |previous| {
+                            var escaped: [40]u8 = undefined;
+                            try self.appendText(if (count == 1) try std.fmt.bufPrint(&escaped, "\\u{{{x}}}", .{previous}) else try std.fmt.bufPrint(&escaped, "\\u{{{x}}}×{d}", .{ previous, count }));
+                        }
+                        run = point orelse break;
+                        count = 1;
                     }
                 }
-                if (styled and complete < length) self.style = styles[complete];
-                try self.appendText(bytes[complete..length]);
-                return;
+                start = end;
             }
+            try self.original(bytes[complete..length], if (styled) styles[complete..length] else &.{});
         }
 
         /// Where the line starting at `offset` ends (its newline or the text end).
@@ -416,32 +469,51 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return rows;
         }
 
-        /// Prints bytes as style runs, a bounded batch of segments at a time:
-        /// sidenotes only, or the text's flow without them.
-        fn printRange(self: *const Self, window: vaxis.Window, from: usize, end: usize, wrap: @FieldType(vaxis.PrintOptions, "wrap"), notes: bool, commit: bool, colour: bool, plain: vaxis.Style) vaxis.Window.PrintResult {
-            var segments: [32]vaxis.Segment = undefined;
-            var count: usize = 0;
-            var result: vaxis.Window.PrintResult = .{ .row = 0, .col = 0, .overflow = false };
-            var start = from;
-            while (start < end) {
-                var stop = end;
-                if (styled) {
-                    stop = start + 1;
-                    while (stop < end and self.styles[stop] == self.styles[start]) stop += 1;
+        /// Replayable borrowed runs: Window owns word lookahead across every
+        /// style boundary; copied cursors never share mutable scratch/state.
+        const RangeRuns = struct {
+            document: *const Self,
+            at: usize,
+            end: usize,
+            channel_end: usize = 0,
+            notes: bool,
+            colour: bool,
+            plain: vaxis.Style,
+
+            pub fn next(self: *RangeRuns) ?vaxis.Segment {
+                while (self.at < self.end) {
+                    const start = self.at;
+                    if (start >= self.channel_end) self.channel_end = channelEnd(&self.document.styles, start, self.end);
+                    const channel_end = self.channel_end;
+                    if (styled and (displayChannel(self.document.styles[start]) == .address or isSidenote(self.document.styles[start]) != self.notes)) {
+                        self.at = channel_end;
+                        continue;
+                    }
+                    var stop = channel_end;
+                    if (styled) {
+                        var clusters = unicode.graphemeIterator(self.document.bytes[start..channel_end]);
+                        const first = clusters.next().?;
+                        stop = start + first.len;
+                        while (clusters.next()) |cluster| {
+                            if (self.document.styles[start + cluster.start] != self.document.styles[start]) break;
+                            stop = start + cluster.start + cluster.len;
+                        }
+                    }
+                    self.at = stop;
+                    return .{
+                        .text = self.document.bytes[start..stop],
+                        .style = self.document.segmentStyle(start, self.colour, self.plain),
+                        .link = .{ .uri = if (styled) self.document.address(start) else "" },
+                    };
                 }
-                const shown = !styled or (isSidenote(self.styles[start]) == notes and foregroundIndex(self.styles[start]) != address_index);
-                if (shown) {
-                    segments[count] = .{ .text = self.bytes[start..stop], .style = self.segmentStyle(start, colour, plain), .link = .{ .uri = if (styled) self.address(start) else "" } };
-                    count += 1;
-                }
-                start = stop;
-                if (count != 0 and (count == segments.len or start == end)) {
-                    result = window.print(segments[0..count], .{ .wrap = wrap, .row_offset = result.row, .col_offset = result.col, .commit = commit });
-                    count = 0;
-                    if (result.overflow) break;
-                }
+                return null;
             }
-            return result;
+        };
+
+        /// One print invocation per logical range: no batch boundary can lose
+        /// word lookahead or carry a caller-owned continuation offset.
+        fn printRange(self: *const Self, window: vaxis.Window, from: usize, end: usize, wrap: @FieldType(vaxis.PrintOptions, "wrap"), notes: bool, commit: bool, colour: bool, plain: vaxis.Style) vaxis.Window.PrintResult {
+            return window.printIterator(RangeRuns{ .document = self, .at = from, .end = end, .notes = notes, .colour = colour, .plain = plain }, .{ .wrap = wrap, .commit = commit });
         }
 
         fn segmentStyle(self: *const Self, position: usize, colour: bool, plain: vaxis.Style) vaxis.Style {
@@ -1281,4 +1353,170 @@ test "ScrollView translated printing keeps wrapped link cells and hanging indent
     try std.testing.expectEqualStrings("https://example.test", screen.screen.readCell(2, 0).?.link.uri);
     try std.testing.expectEqualStrings("d", screen.screen.readCell(2, 1).?.char.grapheme);
     try std.testing.expectEqualStrings("▐", screen.screen.readCell(12, 0).?.char.grapheme);
+}
+
+test "one logical word keeps its golden wrapping across more than 64 retained style runs" {
+    const word: [80]u8 = @splat('W');
+    for ([_][]const u8{ "", "p " }) |prefix| {
+        var doc: Sized(1024, true) = .{};
+        try doc.append(prefix);
+        for (word, 0..) |byte, index| {
+            try doc.append(if (index % 2 == 0) "\x1b[1m" else "\x1b[0m");
+            try doc.append(&.{byte});
+        }
+        try doc.append("\x1b[0m");
+        try doc.prepare();
+        var screen: TestScreen = undefined;
+        const result = doc.draw(screen.window(40, 3), .{}, true, true, .{});
+        var line: [64]u8 = undefined;
+        if (prefix.len == 0) {
+            try std.testing.expectEqual(@as(usize, 2), result.rows);
+            try std.testing.expectEqualStrings(&word[0..40].*, screen.row(0, &line));
+            try std.testing.expectEqualStrings(&word[0..40].*, screen.row(1, &line));
+        } else {
+            try std.testing.expectEqual(@as(usize, 3), result.rows);
+            try std.testing.expectEqualStrings("p " ++ @as([38]u8, @splat('W')), screen.row(0, &line));
+            try std.testing.expectEqualStrings(&word[0..40].*, screen.row(1, &line));
+            try std.testing.expectEqualStrings("WW", screen.row(2, &line));
+        }
+        try std.testing.expectEqual(Position.end, result.next);
+    }
+}
+
+test "lazy retained runs keep whitespace links and clipped hanging rows continuous" {
+    var doc: Sized(1024, true) = .{};
+    try doc.append("• " ++ TerminalText.link_open ++ "https://example.test" ++ TerminalText.link_end);
+    for (0..80) |index| {
+        try doc.append(if (index % 2 == 0) "\x1b[1m" else "\x1b[0m");
+        try doc.append("W");
+    }
+    try doc.append(TerminalText.link_close ++ "\x1b[0m a\x1b[1m \x1b[0mb\n");
+    try doc.prepare();
+    var screen: TestScreen = undefined;
+    _ = doc.draw(screen.window(40, 2), .{ .row = 1 }, true, true, .{});
+    var line: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("  " ++ @as([38]u8, @splat('W')), screen.row(0, &line));
+    try std.testing.expectEqualStrings("  WWWW a b", screen.row(1, &line));
+    try std.testing.expectEqualStrings("https://example.test", screen.screen.readCell(2, 0).?.link.uri);
+    try std.testing.expectEqualStrings("https://example.test", screen.screen.readCell(5, 1).?.link.uri);
+    try std.testing.expectEqualStrings("", screen.screen.readCell(7, 1).?.link.uri);
+}
+
+test "retained run lookahead copies advance independently and never split a styled grapheme" {
+    var doc: Sized(256, true) = .{};
+    try doc.append("A\x1b[1me\x1b[0ḿZ\x1b[1mB\x1b[0m");
+    try doc.prepare();
+    const Runs = @TypeOf(doc).RangeRuns;
+    var runs: Runs = .{ .document = &doc, .at = 0, .end = doc.length, .notes = false, .colour = true, .plain = .{} };
+    try std.testing.expectEqualStrings("A", runs.next().?.text);
+    var lookahead = runs;
+    try std.testing.expectEqualStrings("é", lookahead.next().?.text);
+    try std.testing.expectEqualStrings("Z", lookahead.next().?.text);
+    try std.testing.expectEqualStrings("é", runs.next().?.text);
+    try std.testing.expectEqualStrings("Z", runs.next().?.text);
+    try std.testing.expectEqualStrings("B", runs.next().?.text);
+    try std.testing.expect(runs.next() == null);
+}
+
+test "display channel boundaries cannot hide combining marks or change link metadata" {
+    const uri = "https://example.test";
+    const linked_orphan = comptime linkBytes(uri, "́Z");
+    for (0..linked_orphan.len + 1) |split| {
+        var doc: Sized(256, true) = .{};
+        try doc.append(linked_orphan[0..split]);
+        try doc.append(linked_orphan[split..]);
+        try doc.prepare();
+        try std.testing.expectEqualStrings(uri ++ "\\u{301}Z", doc.text());
+        try std.testing.expectEqualStrings(uri, doc.address(uri.len));
+        try expectLinks(&doc, .{}, 20, &.{ uri, uri, uri, uri, uri, uri, uri, uri });
+        var screen: TestScreen = undefined;
+        _ = doc.draw(screen.window(20, 1), .{}, true, true, .{});
+        var line: [64]u8 = undefined;
+        try std.testing.expectEqualStrings("\\u{301}Z", screen.row(0, &line));
+    }
+    var joined: Sized(256, true) = .{};
+    try joined.append(comptime linkBytes(uri, "e") ++ "́Z\u{200b}");
+    try joined.prepare();
+    // Link metadata isn't normalized onto the unlinked combining bytes.
+    try std.testing.expectEqual(@as(u8, 0), foregroundIndex(joined.styles[uri.len + 1]));
+    var runs: @TypeOf(joined).RangeRuns = .{ .document = &joined, .at = 0, .end = joined.length, .notes = false, .colour = true, .plain = .{} };
+    const glyph = runs.next().?;
+    try std.testing.expectEqualStrings("é", glyph.text);
+    try std.testing.expectEqualStrings(uri, glyph.link.uri);
+    try std.testing.expectEqualStrings("Z\\u{200b}", runs.next().?.text);
+    for ([_][]const u8{ "X\x1b[8ḿ12:34\x1b[0mY", "\x1b[8m12:34\x1b[0ḿY" }, 0..) |input, index| {
+        var doc: Sized(256, true) = .{};
+        try doc.append(input);
+        try doc.prepare();
+        var screen: TestScreen = undefined;
+        var line: [64]u8 = undefined;
+        _ = doc.printRange(screen.window(40, 1), 0, doc.length, .none, false, true, false, .{});
+        try std.testing.expectEqualStrings(if (index == 0) "XY" else "\\u{301}Y", screen.row(0, &line));
+        _ = doc.printRange(screen.window(40, 1), 0, doc.length, .none, true, true, false, .{});
+        try std.testing.expectEqualStrings(if (index == 0) "\\u{301}12:34" else "12:34", screen.row(0, &line));
+    }
+    var zwj: Sized(128, true) = .{};
+    try zwj.append("👩\x1b[1m‍🚀\x1b[0mZ");
+    try zwj.prepare();
+    var zwj_runs: @TypeOf(zwj).RangeRuns = .{ .document = &zwj, .at = 0, .end = zwj.length, .notes = false, .colour = true, .plain = .{} };
+    try std.testing.expectEqualStrings("👩‍🚀Z", zwj_runs.next().?.text);
+    try std.testing.expect(zwj_runs.next() == null);
+}
+
+test "replayable run CPU comparison with former fixed batches at retained capacity" {
+    const doc = try std.testing.allocator.create(Document);
+    defer std.testing.allocator.destroy(doc);
+    const Former = struct {
+        fn print(document: *const Document, window: vaxis.Window) vaxis.Window.PrintResult {
+            var segments: [32]vaxis.Segment = undefined;
+            var count: usize = 0;
+            var result: vaxis.Window.PrintResult = .{ .row = 0, .col = 0, .overflow = false };
+            var start: usize = 0;
+            while (start < document.length) {
+                var stop = start + 1;
+                while (stop < document.length and document.styles[stop] == document.styles[start]) stop += 1;
+                segments[count] = .{ .text = document.bytes[start..stop], .style = document.segmentStyle(start, false, .{}) };
+                count += 1;
+                start = stop;
+                if (count == segments.len or start == document.length) {
+                    result = window.print(segments[0..count], .{ .wrap = .word, .row_offset = result.row, .col_offset = result.col, .commit = false });
+                    count = 0;
+                }
+            }
+            return result;
+        }
+    };
+    const layout: Layout = .{ .width = 79, .method = .unicode };
+    var screen: vaxis.Screen = undefined;
+    const window = layout.measuring(&screen);
+    for ([_][]const u8{ "abcdefghijklmnopqrstuvwxyz", "\x1b[1m中\x1b[0m é " }, 0..) |line, index| {
+        doc.* = .{};
+        while (doc.length < 240 * 1024) try doc.append(line);
+        try doc.prepare();
+        const start = std.Io.Clock.awake.now(std.testing.io);
+        for (0..10) |_| std.mem.doNotOptimizeAway(Former.print(doc, window));
+        const middle = std.Io.Clock.awake.now(std.testing.io);
+        for (0..10) |_| std.mem.doNotOptimizeAway(doc.printRange(window, 0, doc.length, .word, false, false, false, .{}));
+        const end = std.Io.Clock.awake.now(std.testing.io);
+        std.debug.print("run CPU case{d}: former32={d}ns replayable={d}ns /10 (former layout is not correctness evidence)\n", .{ index, middle.nanoseconds - start.nanoseconds, end.nanoseconds - middle.nanoseconds });
+    }
+}
+
+test "hanging prefixes include combining marks on their final space before splitting a range" {
+    for ([_][]const u8{ "• ́X words wrap", "  ́X words wrap", "  $ ́X words wrap" }, [_]usize{ "• ́".len, "  ́".len, "  $ ́".len }) |line, expected| {
+        const split = hanging(line, 20, false);
+        try std.testing.expectEqual(expected, split.bytes);
+        var clusters = unicode.graphemeIterator(line);
+        var boundary = false;
+        while (clusters.next()) |cluster| if (cluster.start + cluster.len == split.bytes) {
+            boundary = true;
+            break;
+        };
+        try std.testing.expect(boundary);
+        var doc: Sized(128, true) = .{};
+        try doc.append(line);
+        try doc.prepare();
+        var screen: TestScreen = undefined;
+        _ = doc.draw(screen.window(20, 2), .{}, true, false, .{});
+    }
 }
