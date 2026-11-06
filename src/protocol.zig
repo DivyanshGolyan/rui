@@ -535,6 +535,7 @@ pub const ReadActionArguments = struct {
 };
 
 pub const ObserveCommand = struct {
+    since: ?change_ring.SessionToken = null,
     store: Bounded(max_store_bytes) = .{},
     key: Bounded(max_key_bytes) = .{},
 };
@@ -1640,7 +1641,7 @@ const Parser = struct {
             },
             .observe_command => {
                 out.* = .{ .observe_command = .{ .store = store } };
-                try self.parseKeyOnly(&out.observe_command.key, &members);
+                try self.parseObserveCommand(&out.observe_command, &members);
             },
             .read_result => {
                 out.* = .{ .read_result = .{ .store = store } };
@@ -1854,6 +1855,20 @@ const Parser = struct {
             .paused => out.paused = try self.readBoolean(),
         };
         try require(Field, seen, &.{.paused});
+    }
+
+    fn parseObserveCommand(self: *Parser, out: *ObserveCommand, members: *Members) !void {
+        const Field = enum { key, since };
+        var seen: std.EnumSet(Field) = .empty;
+        while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .key => try self.readSmallString(&out.key),
+            .since => if (!try self.readNull()) {
+                var token: Bounded(change_ring.SessionToken.max_bytes) = .{};
+                self.readSmallString(&token) catch return error.InvalidSince;
+                out.since = change_ring.SessionToken.parse(token.slice()) catch return error.InvalidSince;
+            },
+        };
+        try require(Field, seen, &.{.key});
     }
 
     fn parseKeyOnly(self: *Parser, key: *Bounded(max_key_bytes), members: *Members) !void {
@@ -2838,7 +2853,9 @@ pub const model_interruption_request = .{ "{\"version\":\"" ++ wire_version ++ "
 /// Holes: Store, key, Session, Action, decision.
 pub const permission_decision_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"permission_decision\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
 /// Holes: Store, key.
-pub const observe_command_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole, "}" };
+pub const observe_command_without_since_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole, "}" };
+/// Holes: Store, key, nullable Session token.
+pub const observe_command_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
 /// Holes: Store.
 pub const host_info_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_info\",\"store\":", store_hole, "}" };
 /// Holes: Store.
@@ -3041,10 +3058,12 @@ pub const MessageRecoveryJson = struct {
 pub const command_observation_reply = struct {
     const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"command_observation\",\"key\":";
     /// Hole: key.
-    pub const absent = .{ prefix, Hole{ .string = max_key_bytes }, ",\"observation\":{\"status\":\"absent\"}}" };
-    /// Holes: key, status, target Session.
-    pub fn head(comptime kind: CommandKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole } {
-        return .{ prefix, .{ .string = max_key_bytes }, ",\"observation\":{\"status\":\"", .{ .tag = CommandObservationStatus }, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":", .{ .string = max_session_bytes } };
+    pub const absent = .{ prefix, Hole{ .string = max_key_bytes }, ",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"absent\"}}" };
+    /// Holes: key, Session token.
+    pub const not_modified = .{ prefix, Hole{ .string = max_key_bytes }, ",\"delta\":\"not_modified\",\"since\":", Hole{ .string = change_ring.SessionToken.max_bytes }, "}" };
+    /// Holes: key, nullable token, status, target Session.
+    pub fn head(comptime kind: CommandKind) struct { []const u8, Hole, []const u8, Hole, []const u8, Hole, []const u8, Hole } {
+        return .{ prefix, .{ .string = max_key_bytes }, ",\"delta\":\"full\",\"since\":", .{ .optional_string = change_ring.SessionToken.max_bytes }, ",\"observation\":{\"status\":\"", .{ .tag = CommandObservationStatus }, "\",\"kind\":\"" ++ @tagName(kind) ++ "\",\"target\":", .{ .string = max_session_bytes } };
     }
     /// Hole: code.
     pub const code = .{ ",\"code\":", Hole{ .string = max_code_bytes } };
@@ -3116,7 +3135,7 @@ pub const command_observation_reply = struct {
     }
 
     pub const max_bytes = blk: {
-        var bytes = shapeBytes(absent);
+        var bytes: usize = @max(shapeBytes(absent), shapeBytes(not_modified));
         for (std.meta.tags(CommandKind)) |kind| bytes = @max(bytes, maxBytes(kind));
         break :blk bytes;
     };
@@ -4495,4 +4514,47 @@ test "presets allow partial creating configure in either field order" {
         try std.testing.expectEqual(index == 2, request.configure.require_model);
         try std.testing.expectEqual(if (index == 1) FieldState.explicit_null else FieldState.omitted, request.configure.configuration.reasoning_effort.state);
     }
+}
+
+test "Command observation since is optional nullable and rejects invalid tokens" {
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":\"s\",\"key\":\"k\"";
+    const cases = [_]struct { suffix: []const u8, generation: ?u64 = null, failure: ?anyerror = null }{
+        .{ .suffix = "}" },
+        .{ .suffix = ",\"since\":null}" },
+        .{ .suffix = ",\"since\":\"abababababababababababababababab.42.k7m2qx\"}", .generation = 42 },
+        .{ .suffix = ",\"since\":\"abababababababababababababababab.042.k7m2qx\"}", .failure = error.InvalidSince },
+        .{ .suffix = ",\"since\":\"abababababababababababababababab.42\"}", .failure = error.InvalidSince },
+        .{ .suffix = ",\"since\":17}", .failure = error.InvalidJsonShape },
+    };
+    for (cases) |case| {
+        var input: [256]u8 = undefined;
+        const json = try std.fmt.bufPrint(&input, "{s}{s}", .{ head, case.suffix });
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser = Parser{ .source = &source, .options = .{
+            .io = std.testing.io,
+            .content_length = json.len,
+            .scratch_path = "unused",
+            .request_number = 0,
+            .retained_scratch = &retained,
+        } };
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, parseForTest(&parser));
+        } else {
+            const request = (try parseForTest(&parser)).observe_command;
+            if (case.generation) |generation| {
+                try std.testing.expectEqual(generation, request.since.?.generation);
+                try std.testing.expectEqualStrings("k7m2qx", &request.since.?.session);
+            } else try std.testing.expect(request.since == null);
+        }
+    }
+}
+
+test "Command observation repeat shape is bounded independently of full replies" {
+    var out: CommandObservationBuffer = .{};
+    const token = "abababababababababababababababab.42.k7m2qx";
+    try out.appendShape(command_observation_reply.not_modified, .{ "k", token });
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"not_modified\",\"since\":\"" ++ token ++ "\"}", out.slice());
+    try std.testing.expect(shapeBytes(command_observation_reply.not_modified) < command_observation_reply.maxBytes(.message));
+    try std.testing.expect(shapeBytes(command_observation_reply.absent) < command_observation_reply.maxBytes(.message));
 }

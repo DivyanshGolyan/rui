@@ -651,7 +651,7 @@ pub const content_beside_tools = "SELECT count(*) FROM content WHERE (content_id
 
 /// Tests may own the large observation value; the Store entry returns only void.
 pub fn observeCommandForTesting(storage: *Store, key: []const u8) !command_domain.CommandObservation {
-    var out: command_domain.CommandObservation = undefined;
-    try storage.observeCommand(key, &out);
-    return out;
+    var out: store_core.Observed = undefined;
+    try storage.observeCommand(key, null, &out);
+    return out.full.observation;
 }

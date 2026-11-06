@@ -2629,7 +2629,7 @@ pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store
         if (!saved.store.eql(canonical.store.slice())) continue;
         if ((saved.kind == .configure or saved.kind == .message) and saved.session.len == 0) {
             var reply: client.ObservationBuffer = .{};
-            const observed = try checkedObservation(init.io, requester.observeCommand(store, saved.key.slice(), &reply) catch |err| return readTransportFailure(init.io, store, err), saved.key.slice());
+            const observed = try checkedObservation(init.io, requester.observeCommand(store, saved.key.slice(), null, &reply) catch |err| return readTransportFailure(init.io, store, err), saved.key.slice());
             if (observed.status != .accepted or saved.kind != observed.kind.? or !observed.target.?.eql(session_ref)) continue;
         } else if (!saved.session.eql(session_ref)) continue;
         try out.writeAll("  ");
@@ -2784,7 +2784,7 @@ fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
     var reply_buffer: client.ObservationBuffer = .{};
-    const reply = client.observeCommand(io, identity.store.slice(), target, &reply_buffer) catch |err| return readTransportFailure(io, identity.store.slice(), err);
+    const reply = client.observeCommand(io, identity.store.slice(), target, null, &reply_buffer) catch |err| return readTransportFailure(io, identity.store.slice(), err);
     const observation = try checkedObservation(io, reply, target);
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
@@ -2982,7 +2982,8 @@ fn writeReadFailure(io: std.Io, failure: protocol_reply.ReadFailure, key: []cons
 
 fn checkedObservation(io: std.Io, reply: protocol_reply.ObservationReply, key: []const u8) !protocol_reply.CommandObservation {
     return switch (reply) {
-        .observation => |observation| observation,
+        .observation => |observation| observation.facts,
+        .not_modified => error.InvalidObservation,
         .failure => |failure| {
             try writeReadFailure(io, failure, key, .stdout);
             return readFailureError(failure);

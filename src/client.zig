@@ -111,23 +111,24 @@ pub const Requests = struct {
         return .{ .done = result };
     }
 
-    pub fn observeCommand(self: Requests, store_path: []const u8, key: []const u8, reply_buffer: *ObservationBuffer) !protocol_reply.ObservationReply {
+    pub fn observeCommand(self: Requests, store_path: []const u8, key: []const u8, since: ?protocol_reply.SessionToken, reply_buffer: *ObservationBuffer) !protocol_reply.ObservationReply {
         reply_buffer.len = 0;
         try self.check();
         if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.observe_command_request, .{ paths.store.slice(), key });
+        var token_buffer: [protocol_reply.SessionToken.max_bytes]u8 = undefined;
+        try body.appendShape(protocol.observe_command_request, .{ paths.store.slice(), key, if (since) |token| token.format(&token_buffer) else null });
         const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, null).get();
-        if (reply.status != 200) return .{ .failure = try protocol_reply.decodeReadFailure(reply, false) };
-        return .{ .observation = try protocol_reply.CommandObservation.parse(reply, key) };
+        return protocol_reply.ObservationReply.parse(reply, key, since);
     }
 
     pub fn observeMessage(self: Requests, address: *const protocol_reply.MessageAddress) !protocol_reply.ObservationReply {
         var buffer: ObservationBuffer = .{};
-        const reply = try self.observeCommand(address.store.slice(), address.key.slice(), &buffer);
+        const reply = try self.observeCommand(address.store.slice(), address.key.slice(), null, &buffer);
         return switch (reply) {
-            .observation => |observation| .{ .observation = try observation.forMessage(address) },
+            .observation => |observation| .{ .observation = .{ .facts = try observation.facts.forMessage(address), .since = observation.since } },
+            .not_modified => error.InvalidObservation,
             .failure => reply,
         };
     }
@@ -689,9 +690,10 @@ pub fn observeCommand(
     io: std.Io,
     store_path: []const u8,
     key: []const u8,
+    since: ?protocol_reply.SessionToken,
     reply_buffer: *ObservationBuffer,
 ) !protocol_reply.ObservationReply {
-    return (Requests{ .io = io }).observeCommand(store_path, key, reply_buffer);
+    return (Requests{ .io = io }).observeCommand(store_path, key, since, reply_buffer);
 }
 
 pub fn observeMessage(io: std.Io, address: *const protocol_reply.MessageAddress) !protocol_reply.ObservationReply {
@@ -3263,10 +3265,11 @@ test "command reply borrows the caller buffer" {
 test "bounded read requests retain escaped key capacities and canonical Session bounds" {
     const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
+    const escaped_since = @as([protocol_reply.SessionToken.max_bytes]u8, @splat(1));
     const session = "k7m2qx";
     const session_encoding_slack = 6 * protocol.max_session_bytes - session.len;
     const cases = .{
-        .{ protocol.observe_command_request, .{ &escaped_store, &escaped_key }, protocol.max_observe_command_request_bytes },
+        .{ protocol.observe_command_request, .{ &escaped_store, &escaped_key, @as(?[]const u8, &escaped_since) }, protocol.max_observe_command_request_bytes },
         .{ protocol.read_result_request, .{ &escaped_store, &escaped_key }, protocol.max_read_result_request_bytes },
         .{ protocol.read_action_call_id_request, .{ &escaped_store, session, std.math.maxInt(u64) }, protocol.max_read_action_call_id_request_bytes - session_encoding_slack },
         .{ protocol.read_action_arguments_request, .{ &escaped_store, session, std.math.maxInt(u64) }, protocol.max_read_action_arguments_request_bytes - session_encoding_slack },
@@ -3291,6 +3294,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
     const session = @as([protocol.max_session_bytes]u8, @splat(1));
     const workspace = @as([protocol.max_workspace_bytes]u8, @splat(1));
     const token = @as([protocol.SinceToken.max_bytes]u8, @splat('9'));
+    const observation_token = @as([protocol_reply.SessionToken.max_bytes]u8, @splat(1));
     const reference = @as([protocol.session_id_bytes]u8, @splat(1));
     const id: u64 = std.math.maxInt(u64);
     const optional_id: ?u64 = std.math.maxInt(u64);
@@ -3299,7 +3303,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.session_stop_request, .{ &store, &key, &session }, protocol.max_session_stop_request_bytes },
         .{ protocol.model_interruption_request, .{ &store, &key, &session, id, id }, protocol.max_model_interruption_request_bytes },
         .{ protocol.permission_decision_request, .{ &store, &key, &session, id, protocol.PermissionDecision.allow_once }, protocol.max_permission_decision_request_bytes },
-        .{ protocol.observe_command_request, .{ &store, &key }, protocol.max_observe_command_request_bytes },
+        .{ protocol.observe_command_request, .{ &store, &key, @as(?[]const u8, &observation_token) }, protocol.max_observe_command_request_bytes },
         .{ protocol.host_info_request, .{&store}, protocol.max_host_info_request_bytes },
         .{ protocol.host_stop_request, .{&store}, protocol.max_host_stop_request_bytes },
         .{ protocol.read_result_request, .{ &store, &key }, protocol.max_read_result_request_bytes },
@@ -3717,7 +3721,7 @@ test "transport cancellation preserves caller capture and rejects before path ac
     const file = captured.file;
     const address = try protocol_reply.MessageAddress.init("/never-open", "k7m2qx", "k");
     var observation_buffer: ObservationBuffer = .{};
-    try std.testing.expectError(error.Cancelled, requests.observeCommand("/never-open", "k", &observation_buffer));
+    try std.testing.expectError(error.Cancelled, requests.observeCommand("/never-open", "k", null, &observation_buffer));
     try std.testing.expectError(error.Cancelled, requests.observeMessage(&address));
     try std.testing.expectError(error.Cancelled, requests.readResult("/never-open", "k", file, &buffer));
     try std.testing.expectError(error.Cancelled, requests.readResultStream("/never-open", "k", file, &buffer));

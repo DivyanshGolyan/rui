@@ -66,6 +66,16 @@ const SupersedingControl = action_domain.SupersedingControl;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 const Queue = @import("queue.zig").Queue;
 
+/// A repeat read owns only its token; a full read is filled in the caller's
+/// storage rather than copied through Store/worker frames.
+pub const Observed = union(enum) {
+    not_modified: change_ring.SessionToken,
+    full: struct {
+        token: ?change_ring.SessionToken,
+        observation: CommandObservation = undefined,
+    },
+};
+
 pub const Store = struct {
     io: std.Io,
     /// The connection, its prepared statements and an Entry's content
@@ -711,16 +721,37 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.decidePermission(&access, command, faults))) catch .infrastructure_failure;
     }
 
-    pub fn observeCommand(self: *Store, key: []const u8, out: *CommandObservation) !void {
-        return self.queue().run(observeCommandHeld, .{ self, key, out });
+    pub fn observeCommand(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed) !void {
+        // Tier 1: the existing atomics prove nothing committed anywhere. No
+        // holder or connection access; fencing still reports its failure.
+        if (since) |token| if (self.notModified(.{ .instance = token.instance, .generation = token.generation })) {
+            out.* = .{ .not_modified = token };
+            return;
+        };
+        return self.queue().run(observeCommandHeld, .{ self, key, since, out });
     }
 
-    fn observeCommandHeld(self: *Store, key: []const u8, out: *CommandObservation) !void {
+    fn observeCommandHeld(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed) !void {
         const entry = try enter(self, .none);
         defer entry.release();
+        // Capture before any reads, just as for a Session listing. The ring
+        // belongs to this holder; a sibling's commit needs no database read.
+        const generation = self.commitGeneration();
+        if (since) |token| if (std.mem.eql(u8, &token.instance, &self.instance) and
+            token.generation <= generation and
+            !self.changes.mayHaveChanged(&token.session, token.generation, generation))
+        {
+            out.* = .{ .not_modified = token.at(generation) };
+            return;
+        };
+        out.* = .{ .full = .{ .token = null } };
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, out));
+        try entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, &out.full.observation));
+        const observation = &out.full.observation;
+        if (observation.status != .absent and protocol.validSessionId(observation.target.slice())) {
+            out.full.token = .{ .instance = self.instance, .generation = generation, .session = observation.target.slice()[0..protocol.session_id_bytes].* };
+        }
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {

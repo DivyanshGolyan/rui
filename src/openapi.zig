@@ -153,7 +153,7 @@ pub const routes = [_]Route{
         .path = "/v1/observe-command",
         .kind = .observe_command,
         .summary = "What became of the command sent with this key.",
-        .variants = &.{variant(protocol.observe_command_request, .{})},
+        .variants = &.{ variant(protocol.observe_command_without_since_request, .{}), variant(protocol.observe_command_request, .{}) },
         .reply = .{ .json = observationSchema },
     },
     .{
@@ -405,8 +405,9 @@ const ToolNames = struct {
 /// whose parts depend on what became of the command.
 fn observationSchema(d: *Document) anyerror!Value {
     const o = protocol.command_observation_reply;
-    var kinds: [std.meta.tags(protocol.CommandKind).len + 1]Value = undefined;
+    var kinds: [std.meta.tags(protocol.CommandKind).len + 2]Value = undefined;
     kinds[0] = try d.shapeSchema(o.absent);
+    kinds[kinds.len - 1] = try d.shapeSchema(o.not_modified);
     inline for (comptime std.meta.tags(protocol.CommandKind), 1..) |kind, index| {
         const bodies = switch (kind) {
             .configure => .{ .{}, o.revision },
@@ -1303,7 +1304,7 @@ test "Message observation schema requires Host state and bounds recovery" {
     const built = try document.build();
     const schemas = built.object.get("components").?.object.get("schemas").?.object;
     const schema = schemas.get("ObserveCommandReply").?;
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{";
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{";
     const head = prefix ++ "\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",";
     const input = "\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ "0000000000000000000000000000000000000000000000000000000000000000" ++ "\"},\"queue\":{\"admission\":\"1\",\"admitted_at\":\"2\"}";
     const binding = ",\"binding\":{\"turn\":\"3\",\"operation\":\"4\",\"attempt\":\"1\"}";
@@ -1371,3 +1372,25 @@ test "statuses, media types and required headers match what the Host sends" {
 const ActivitySearchItem = struct {
     pub const openapi_shape = protocol.ActivitySearchFacts.Item.head ++ .{ ListOf(protocol.ActivitySearchFacts.Hit), "]}" };
 };
+
+test "Command observation schema requires full metadata or a token-only repeat" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var document: Document = .init(allocator);
+    const built = try document.build();
+    const schemas = built.object.get("components").?.object.get("schemas").?.object;
+    const schema = schemas.get("ObserveCommandReply").?;
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\"";
+    const cases = .{
+        .{ prefix ++ ",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"absent\"}}", true },
+        .{ prefix ++ ",\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42.k7m2qx\"}", true },
+        .{ prefix ++ ",\"observation\":{\"status\":\"absent\"}}", false },
+        .{ prefix ++ ",\"delta\":\"not_modified\",\"since\":null}", false },
+        .{ prefix ++ ",\"delta\":\"not_modified\",\"since\":\"token\",\"observation\":{\"status\":\"absent\"}}", false },
+    };
+    inline for (cases) |case| {
+        const value = try std.json.parseFromSliceLeaky(Value, allocator, case[0], .{});
+        try std.testing.expectEqual(case[1], conforms(schemas, schema, value));
+    }
+}
