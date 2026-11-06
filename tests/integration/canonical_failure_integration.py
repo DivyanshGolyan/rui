@@ -37,7 +37,7 @@ def invoke(home, *args, input=None):
 def announced(result):
     """Generated capture identity: the first stderr line, before transmission."""
     first = result.stderr.splitlines()[0] if result.stderr else ""
-    match = re.fullmatch(r"request: (\S+) \(inspect: rui request inspect \1; if unconfirmed: rui request recover \1\)", first)
+    match = re.fullmatch(r"request: (\S+) \(wait: rui request wait \1; if unconfirmed: rui request recover \1\)", first)
     assert match, result
     assert result.stderr.count("request: ") == 1, result
     return match[1]
@@ -180,17 +180,20 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         self.thread = threading.Thread(target=self.serve_forever)
         self.thread.start()
 
-    def close(self):
+    def close(self, *, after_restore=None):
         # New connections reach the Host first; accepted ones still forward
-        # through the backend name until their handlers join.
+        # through the backend name until their handlers join. A test may release
+        # an already-drained reply only after the direct socket is restored.
         restored = self.path.with_suffix(".canonical-restore")
         os.link(self.backend, restored)
         os.rename(restored, self.path)
-        self.shutdown()
-        self.server_close()  # Joins the bounded handlers.
-        self.thread.join(timeout=5)
-        assert not self.thread.is_alive(), "reply proxy did not join"
-        self.backend.unlink()
+        try:
+            if after_restore is not None:
+                after_restore()
+        finally:
+            host_process.dispose_all(self.shutdown, self.server_close,
+                                     lambda: self.thread.join(timeout=5), self.backend.unlink)
+            assert not self.thread.is_alive(), "reply proxy did not join"
 
 
 class Exchange(socketserver.BaseRequestHandler):

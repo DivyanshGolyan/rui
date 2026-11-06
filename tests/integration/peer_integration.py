@@ -346,7 +346,7 @@ def main(report_source):
         assert start_receipt["configuration"] == {"provider": "codex", "model": "gpt-6-sol",
             "reasoning_effort": "low", "effort_source": "model_default"}, start_receipt
         announcement = (workspace / "b-send.err").read_text()
-        handle = re.fullmatch(r"request: (\S+) \(inspect: rui request inspect \1; if unconfirmed: rui request recover \1\)\n", announcement)
+        handle = re.fullmatch(r"request: (\S+) \(wait: rui request wait \1; if unconfirmed: rui request recover \1\)\n", announcement)
         assert handle, announcement
         handle = handle.group(1)
         assert start_receipt["context"]["key"] == handle, start_receipt
@@ -702,7 +702,7 @@ def stdin_start_contract():
             observed = fixture.command("session", "inspect", "--store", store, "--session", new_session)["session"]
             assert observed["model"] == model and observed["reasoning_effort"] == effort, observed
             handle = start_receipt["context"]["key"]
-            assert f"request: {handle} (inspect: rui request inspect {handle}; if unconfirmed: rui request recover {handle})\n".encode() in started.stderr, started
+            assert f"request: {handle} (wait: rui request wait {handle}; if unconfirmed: rui request recover {handle})\n".encode() in started.stderr, started
             replay = json.loads(invoke("request", "recover", handle).stdout)
             assert replay["context"] == start_receipt["context"] and "configuration" not in replay, replay
             assert replay["answer"]["replayed"] is True, replay

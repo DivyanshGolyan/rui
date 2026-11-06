@@ -1890,14 +1890,15 @@ Driving is internal, not public `advance`.
 The live human conversation mode handles input, approvals and resume while attached.
 The non-interactive mode serves agents and scripts: mutations return admission receipts, reads observe once and content reads explicitly stream saved bytes.
 There is no `exec`, `follow` or `wait-session` command and no compatibility waiting mode.
-Caller scripts that need to wait repeat one-shot `request inspect` or `session inspect` and read answers with `request read-result`; no non-interactive command waits for future agent completion.
+`request wait` is a client-side observation loop for one fixed request, not a Host waiting route: it never starts, resumes or retargets work and holds neither the capture record nor any Host resource between reads.
+Caller scripts can wait for that request and then read its saved answer with `request read-result`; Sessions should use Message delivery and end their turn rather than hold a Bash execution slot waiting.
 
 The CLI uses shallow resource-first commands with one canonical spelling per operation:
 
 | Resource | Operations |
 | --- | --- |
 | `session` | `start`, `configure`, `send`, `inspect`, `list`, `stop`, `interrupt-model`, `read-conversation`, human `resume` |
-| `request` | `inspect`, `recover`, `read-result`, `list` |
+| `request` | `inspect`, `wait`, `recover`, `read-result`, `list` |
 | `action` | `inspect`, `allow`, `deny`, explicit saved-content reads |
 | `host` | `start`, `stop`, `status`, `serve` |
 | `defaults` | `inspect`, `configure` |
@@ -3232,13 +3233,24 @@ This is not a global cross-owner snapshot.
 Current supplies a Session's summary and one-time work selection.
 Repeated observation by the human frontend or caller-owned polling retains no connection between reads.
 
-Underlying adapter waits observe work; they do not start or resume it.
-These selection semantics are not non-interactive CLI commands:
+All waits observe work; they do not start or resume it.
+The adapter Session selections are not non-interactive CLI commands:
 
 | Caller | Fixed selection | Returns when |
 | --- | --- | --- |
+| CLI `request wait` | The original request key in its captured or explicit Store | Request `state` is `completed`, `failed`, `cancelled`, `rejected` or `waiting_for_permission`. |
 | Adapter default Session wait | Active Turn, otherwise oldest queued admission | Selected work is terminal or `waiting_for_permission`. |
 | Adapter terminal-only Session wait | Same selection | Selected work is terminal. |
+
+`rui request wait HANDLE` or `rui request wait --store PATH --key KEY` accepts optional `--timeout-seconds N`, a positive integer from 1 through 86400, default 300; other values are invalid arguments.
+Handle resolution is the same as `request inspect`, without keeping the capture open between reads.
+`client.waitCommand` owns the single poll loop, starting at 250 ms and rising to 2 s like the TypeScript feed follower.
+It passes the last full reply's `since` token to `observeCommand`; `not_modified` retains that full observation and updates the token.
+Busy or transient read replies matching the shared Host-unavailable classifier are retried within the timeout; transport disappearance and other read failures retain their existing failure path.
+There is no new Host thread, resident waiter or held connection, and the client adds no thread.
+Only this command installs SIGINT/SIGTERM handlers; the loop checks their flag between polls and sleeps interruptibly.
+It prints the same JSON as `request inspect`, including CLI `as_of`, never the opaque `since` token.
+Timeout or interruption leaves work unchanged and prints the latest full observation before returning exit 5 while still `queued` or `processing`.
 
 A Session wait returns idle if no work exists and returns immediately when its condition already holds.
 Later activity cannot retarget it.
@@ -3318,7 +3330,12 @@ Invocation errors retain the original Store, Session and key context and remain 
 Accepted mutation admission with complete successful delivery and disposal exits zero.
 Rejected, conflicting or unconfirmed mutation admission is nonzero with distinct structured facts when deliverable; a delivered rejection or conflict exits 1 with its saved answer on stdout.
 Its stderr names the replay the caller holds, which returns that same answer and never resubmits: `rui request recover HANDLE` for a generated capture, or `rui request recover --store PATH --record FILE --kind KIND` for an explicit one, because repeating the capture refuses the existing record.
-A successful observation of pending, rejected, failed or cancelled saved work exits zero because the read succeeded.
+A successful one-shot observation of pending, rejected, failed or cancelled saved work exits zero because the read succeeded.
+`request wait` exits 0 (`done`) for `completed`, `failed`, `cancelled`, `rejected` or `waiting_for_permission`: this reports the observed condition, not successful work or permission approval.
+It exits 5 (`later`, cause `wait_timed_out`, act `wait`) on timeout, or on SIGINT/SIGTERM while still `queued` or `processing`, after printing the latest full observation.
+An `absent` observation exits 4 (`unconfirmed`, cause `request_absent`, act `recover`); the next step is `rui request recover HANDLE`, never a fresh submission.
+Other read failures, including no serving Host, use the existing keyed read-error envelope and its exit status.
+The stderr announcement after `session start` or `session send` is `request: H (wait: rui request wait H; if unconfirmed: rui request recover H)`.
 Invocation, access, rendering, incomplete delivery and cleanup failure are nonzero.
 An accepted answer stays authoritative if later cleanup fails.
 Nonzero never proves noncommit.

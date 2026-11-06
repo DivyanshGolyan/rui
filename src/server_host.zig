@@ -634,6 +634,23 @@ noinline fn writeSubjectTrace(host: *Host, phase: []const u8, subject_kind: []co
     writeTestTrace(host, &trace, &publication);
 }
 
+/// Tier 1 returns the input token unchanged; tier 2 advances only its generation.
+pub inline fn traceCommandObservation(host: *Host, key: []const u8, phase: []const u8) void {
+    if (host.hooks.phase_trace) writeCommandObservationTrace(host, key, phase);
+}
+
+noinline fn writeCommandObservationTrace(host: *Host, key: []const u8, phase: []const u8) void {
+    var publication = beginTestObservation(host, phase, null);
+    defer if (publication) |*value| value.finish();
+    var trace: protocol.ResponseBuffer = .{};
+    trace.append("{\"rui_test_phase\":") catch return;
+    trace.appendJsonString(phase) catch return;
+    trace.append(",\"command_key\":") catch return;
+    trace.appendJsonString(key) catch return;
+    trace.append("}") catch return;
+    writeTestTrace(host, &trace, &publication);
+}
+
 pub inline fn traceRequest(host: *Host, phase: []const u8, request_number: u64, scratch_used_bytes: ?u64) void {
     if (host.hooks.phase_trace) writeRequestTrace(host, phase, request_number, scratch_used_bytes);
 }

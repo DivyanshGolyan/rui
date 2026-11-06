@@ -65,7 +65,7 @@ def capture(state, binary, label, size, repetition):
             assert process.returncode == 6 and "[host_not_serving]" in errors, (output, errors)
             # The candidate announces its generated capture on stderr only.
             assert output == "", output
-            announced = re.search(r"^request: (\S+) \(inspect: rui request inspect \1; "
+            announced = re.search(r"^request: (\S+) \(wait: rui request wait \1; "
                 r"if unconfirmed: rui request recover \1\)$", errors, re.MULTILINE)
             assert announced, errors
             handle = announced[1]

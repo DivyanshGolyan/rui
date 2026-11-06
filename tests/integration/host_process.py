@@ -161,7 +161,9 @@ OBSERVATION_LIMITS = {"list": 2 * (102 + 42), "status": 3 * (12 + 40 + 20) + 2 +
                       "transport": 2 * TRANSPORT_EXCHANGE_LIMIT,
                       "interrupt": 1, "recovery": 2 * 4 + 2, "managed": 9,
                       "bash_cleanup": 6 * 3 + 3 * 321 + 601 + 201 + 6,
-                      "bash_pipes": 1 + 2}
+                      "bash_pipes": 1 + 2,
+                      # One <=15s wait per Host, >=250ms poll interval, plus four probes.
+                      "request_wait": 64}
 OBSERVATION_STATE_BYTES = 5 * 8  # version, pid, run, reserved count/loss, active writers.
 OBSERVATION_SEALED = 1 << 63
 # Checked against native FieldId and the current schema by test_harness_contracts.py.
@@ -1065,7 +1067,9 @@ class HostDiagnostics:
 
     def require_native_receipt(self, phase):
         plans = None
-        if phase == "effect_stop_requested":
+        if phase in ("request_observation_full", "request_observation_tier1", "request_observation_tier2"):
+            plans = ("request_wait",)
+        elif phase == "effect_stop_requested":
             plans = ("interrupt",)
         elif phase in ("action_attempt_admitted", "action_result_ready", "action_result_committed"):
             plans = ("recovery", "status") if phase == "action_attempt_admitted" else ("recovery",)

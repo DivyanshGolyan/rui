@@ -112,6 +112,10 @@ pub const Requests = struct {
     }
 
     pub fn observeCommand(self: Requests, store_path: []const u8, key: []const u8, since: ?protocol_reply.SessionToken, reply_buffer: *ObservationBuffer) !protocol_reply.ObservationReply {
+        return self.observeCommandUntil(store_path, key, since, reply_buffer, null);
+    }
+
+    fn observeCommandUntil(self: Requests, store_path: []const u8, key: []const u8, since: ?protocol_reply.SessionToken, reply_buffer: *ObservationBuffer, until: ?i128) !protocol_reply.ObservationReply {
         reply_buffer.len = 0;
         try self.check();
         if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
@@ -119,7 +123,7 @@ pub const Requests = struct {
         var body: protocol.RequestBuffer = .{};
         var token_buffer: [protocol_reply.SessionToken.max_bytes]u8 = undefined;
         try body.appendShape(protocol.observe_command_request, .{ paths.store.slice(), key, if (since) |token| token.format(&token_buffer) else null });
-        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, null).get();
+        const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, until).get();
         return protocol_reply.ObservationReply.parse(reply, key, since);
     }
 
@@ -694,6 +698,89 @@ pub fn observeCommand(
     reply_buffer: *ObservationBuffer,
 ) !protocol_reply.ObservationReply {
     return (Requests{ .io = io }).observeCommand(store_path, key, since, reply_buffer);
+}
+
+pub const WaitDisposition = @import("request_wait.zig").Disposition;
+
+pub const WaitResult = union(enum) {
+    observed: struct {
+        disposition: WaitDisposition,
+        observation: ?protocol_reply.CommandObservation,
+    },
+    failure: protocol_reply.ReadFailure,
+};
+
+/// Polls one request without holding a socket, capture, or Host resource
+/// between reads. Cancellation and the absolute deadline bound transport as
+/// well as pauses. Neither a timeout nor cancellation invents observation facts.
+pub fn waitCommand(
+    io: std.Io,
+    store_path: []const u8,
+    key: []const u8,
+    timeout_seconds: u32,
+    cancellation: *const Cancellation,
+) !WaitResult {
+    const policy = @import("request_wait.zig");
+    if (timeout_seconds == 0 or timeout_seconds > policy.max_timeout_seconds) return error.InvalidArguments;
+    const requests: Requests = .{ .io = io, .cancellation = cancellation };
+    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + @as(i128, timeout_seconds) * std.time.ns_per_s;
+    var buffer: ObservationBuffer = .{};
+    var latest: ?protocol_reply.CommandObservation = null;
+    var since: ?protocol_reply.SessionToken = null;
+    var delay = policy.first_poll_ms;
+    while (true) {
+        if (cancellation.stopped.load(.acquire) or std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= until) {
+            return .{ .observed = .{ .disposition = .later, .observation = latest } };
+        }
+        const reply = requests.observeCommandUntil(store_path, key, since, &buffer, until) catch |err| {
+            // Preserve independent transport failures, even if stop/expiry
+            // races them. Only the transport's own stop/deadline errors can
+            // mean this wait ended without a new observation.
+            if (err == error.Cancelled or
+                ((err == error.TransferInactive or err == error.ResponseInactive) and
+                    std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= until))
+            {
+                return .{ .observed = .{ .disposition = .later, .observation = latest } };
+            }
+            return err;
+        };
+        switch (reply) {
+            .observation => |full| {
+                latest = full.facts;
+                since = full.since;
+                if (policy.disposition(full.facts)) |disposition| {
+                    return .{ .observed = .{ .disposition = disposition, .observation = latest } };
+                }
+            },
+            .not_modified => |token| since = token,
+            .failure => |failure| {
+                // Read refusals carry no new facts. Capacity and temporarily
+                // unavailable Hosts may answer a later one-shot read; all
+                // other failures retain the ordinary readers' failure lane.
+                if (failure.status != 503 or !protocol_reply.validHostUnavailable(buffer.slice()))
+                    return .{ .failure = failure };
+            },
+        }
+        try pauseWait(requests, @min(until, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + @as(i128, delay) * std.time.ns_per_ms));
+        delay = policy.nextPoll(delay);
+    }
+}
+
+/// No threads: polling an empty descriptor set makes signal interruption
+/// observable, and 100-ms quanta also bound flags set without a signal.
+fn pauseWait(requests: Requests, until: i128) !void {
+    while (true) {
+        requests.check() catch return;
+        const left = until - std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds;
+        if (left <= 0) return;
+        const milliseconds: c_int = @intCast(@min(100, @divTrunc(left + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
+        var none: [0]std.c.pollfd = .{};
+        const result = std.c.poll(&none, 0, milliseconds);
+        switch (std.posix.errno(result)) {
+            .SUCCESS, .INTR => {},
+            else => return error.PollFailed,
+        }
+    }
 }
 
 pub fn observeMessage(io: std.Io, address: *const protocol_reply.MessageAddress) !protocol_reply.ObservationReply {
@@ -4160,5 +4247,24 @@ test "capture loaded tools uses the tools comma-list grammar" {
             try std.testing.expectEqualStrings("bash", chosen[0].string);
             try std.testing.expectEqualStrings("web_search", chosen[1].string);
         }
+    }
+}
+
+// The core is generic to keep protocol's effectful codecs outside its import
+// boundary. Exercise the actual wire domain here so new states cannot bypass
+// the core's exhaustive switch or the independently specified expectations.
+test "request wait maps actual protocol state and kind domains" {
+    const policy = @import("request_wait.zig");
+    for (std.enums.values(protocol.MessageRequestState)) |state| {
+        const expected: ?WaitDisposition = switch (state) {
+            .queued, .processing => null,
+            .waiting_for_permission, .completed, .failed, .cancelled, .rejected => .done,
+        };
+        const observation: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = .message, .state = state };
+        try std.testing.expectEqual(expected, policy.disposition(observation));
+    }
+    for (std.enums.values(protocol.CommandKind)) |kind| {
+        const observation: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = kind, .state = .queued };
+        try std.testing.expectEqual(@as(?WaitDisposition, if (kind == .message) null else .done), policy.disposition(observation));
     }
 }

@@ -1625,6 +1625,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 fenceDispatch(host, "command observation", err);
                 return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
             };
+            switch (observation) {
+                .full => server_host.traceCommandObservation(host, command.key.slice(), "request_observation_full"),
+                .not_modified => |token| if (command.since) |since| {
+                    server_host.traceCommandObservation(host, command.key.slice(), if (token.generation > since.generation)
+                        "request_observation_tier2"
+                    else
+                        "request_observation_tier1");
+                },
+            }
             try fd.json(200, commandObservationBytes(&observation), renderCommandObservation, .{ command.key.slice(), &observation });
         },
         .read_result => |*command| {

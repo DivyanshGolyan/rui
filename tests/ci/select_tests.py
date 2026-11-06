@@ -26,7 +26,7 @@ RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integr
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
 RULES = (
-    (("src/logic_tests.zig", "src/core_boundary.zig", "src/word_search.zig", "src/execution_turn.zig", "src/request_encoding.zig",
+    (("src/logic_tests.zig", "src/request_wait.zig", "src/core_boundary.zig", "src/word_search.zig", "src/execution_turn.zig", "src/request_encoding.zig",
       "src/AnswerRenderer.zig", "src/store/engine/mysql_refusal.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
     (("src/ResponseTiming.zig",), ("test-logic",), ("test-logic",),
@@ -128,6 +128,18 @@ RULES = (
      ("test", "check", "dispatch-integration", "transport-h2-integration"),
      ("test", "check", "dispatch-integration", "transport-h2-integration"),
      "Shared peer facts: native request encoding and installed peer round trip"),
+    (("src/client.zig", "src/request_wait.zig", "src/cli.zig", "src/cli_args.zig",
+      "src/caller_error.zig", "src/caller_exit.zig", "src/server.zig", "src/server_host.zig",
+      "src/TestObservation.zig", "tests/integration/request_wait_integration.py",
+      "tests/integration/model_fixture.py", "tests/integration/host_process.py",
+      "tests/integration/canonical_failure_integration.py"),
+     ("request-wait-integration",), ("request-wait-integration",), "Request wait owner-boundary oracle"),
+    (("tests/integration/bash_integration.py",),
+     ("bash-integration", "request-wait-integration"),
+     ("bash-integration", "request-wait-integration"), "Bash fixture and request wait recovery consumer"),
+    (("tests/integration/bash_recovery_integration.py",),
+     ("bash-recovery-integration", "request-wait-integration"),
+     ("bash-recovery-integration", "request-wait-integration"), "Bash recovery fixture and request wait consumer"),
     (("tests/integration/dispatch_integration.py",),
      ("dispatch-integration", "dispatch-debug-integration"), ("dispatch-integration", "dispatch-debug-integration"),
      "Model scenarios, not shared fixture infrastructure"),
@@ -243,7 +255,7 @@ CHECK_COVERS = {
     "bash-owner-integration", "bash-lifecycle-integration", "bash-recovery-integration",
     "bash-integration", "bash-environment-integration", "codex-integration", "control-integration",
     "host-status-integration", "host-launch-integration", "host-stop-integration",
-    "descriptor-capacity-integration",
+    "descriptor-capacity-integration", "request-wait-integration",
     "activity-integration", "preference-policy-integration",
     "canonical-failure-integration",  # human_cli_integration.main executes all cases.
     "terminal-restoration-integration",  # Same full fixture in the human CLI gate.

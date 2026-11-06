@@ -21,6 +21,7 @@ pub const Command = enum {
     session_read_conversation,
     session_resume,
     request_inspect,
+    request_wait,
     request_recover,
     request_read_result,
     request_list,
@@ -57,6 +58,7 @@ pub const Command = enum {
             .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
             .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host.", .options = destination ++ session, .positional = "ID", .positional_conflicts = &.{.{ .code = .session_selector_repeated, .option = "session" }}, .requires = &.{&.{ "", "session" }} },
             .request_inspect => .{ .resource = .request, .name = "inspect", .description = "Observe the original submitted command once. HANDLE loads its saved identity; --store and --key address it explicitly. Never transmits captured intent.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
+            .request_wait => .{ .resource = .request, .name = "wait", .description = "Wait for the original request to end or need permission. Prints the latest request inspect JSON, never an answer or token. Polls without holding capture or Host resources and never starts, resumes or retargets work. --timeout-seconds defaults to 300 (1..86400). Exits 0 when ended or waiting for permission, 5 on timeout or signal while pending, 4 if absent: rui request recover HANDLE.", .options = destination ++ key ++ &[_]Option{value("timeout-seconds", "N")}, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_recover => .{ .resource = .request, .name = "recover", .description = "Retransmit the original saved command and inputs. This may first admit work if the original never committed. Use HANDLE, or --store PATH --record FILE --kind KIND.", .options = destination ++ &[_]Option{ value("record", "FILE"), choice("kind", cli_value.RecoveryKind) }, .positional = "HANDLE", .positional_conflicts = &.{ .{ .code = .handle_names_store_record_and_kind, .option = "store" }, .{ .code = .handle_names_store_record_and_kind, .option = "store-hex" }, .{ .code = .handle_names_store_record_and_kind, .option = "record" }, .{ .code = .handle_names_store_record_and_kind, .option = "kind" } }, .mutation = true, .requires = &.{&.{ "", "record" }} },
             .request_read_result => .{ .resource = .request, .name = "read-result", .description = "Stream only the originally bound saved answer, without waiting or substituting newer Session work. Use HANDLE or --store and --key.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_list => .{ .resource = .request, .name = "list", .description = "Enumerate local generated captures as JSON. This is not Store history or guaranteed correlation after all output from concurrent calls is lost." },
@@ -156,6 +158,7 @@ fn value(comptime name: []const u8, argument: []const u8) Option {
     if (comptime std.mem.eql(u8, name, "attempt")) return numeric(name, argument, 1, std.math.maxInt(i64), .count_malformed);
     if (comptime std.mem.eql(u8, name, "ordinal")) return numeric(name, argument, 0, std.math.maxInt(i64), .count_malformed);
     if (comptime std.mem.eql(u8, name, "active-capacity")) return numeric(name, argument, 0, std.math.maxInt(usize), .count_malformed);
+    if (comptime std.mem.eql(u8, name, "timeout-seconds")) return numeric(name, argument, 1, @import("request_wait.zig").max_timeout_seconds, .count_malformed);
     if (comptime std.mem.eql(u8, name, "bash-timeout-ms")) return numeric(name, argument, 1, std.math.maxInt(i64), .count_malformed);
     return .{ .name = name, .argument = argument };
 }
@@ -345,6 +348,7 @@ pub const Definition = struct {
             try writer.writeAll("Explicit capture uses --record FILE with --key KEY or --key-hex HEX; omit both for a generated handle.\n");
         try writer.writeAll(self.details);
         try writer.writeAll("--help or -h prints this help without accessing runtime state. Mutation receipts and metadata are JSON; explicit content reads stream bytes.\n");
+        if (self.resource == .request) try writer.writeAll("request inspect reads once; request wait polls the same request until ended or needing permission.\n");
         if (self.mutation and self.optionNamed("kind") == null) try writer.writeAll("Keep the pre-send recovery identity printed on stderr. Recover with rui request recover HANDLE, or --store PATH --record FILE --kind KIND. Nonzero exit can follow acceptance: inspect the original with rui request inspect; never infer permission to resubmit with a fresh key.\n");
     }
 
@@ -728,6 +732,7 @@ test "grammar rejects ambiguous invocations before any effect" {
     try expectValidation(.session_configure, &.{ "--output-schema", "f", "--text-output" }, error.ConflictingArguments);
     try expectValidation(.defaults_configure, &.{ "--model", "m", "--clear-model" }, error.ConflictingArguments);
     try expectValidation(.request_inspect, &.{ "--key", "k", "HANDLE" }, error.ConflictingArguments);
+    try expectValidation(.request_wait, &.{ "--key", "k", "HANDLE" }, error.ConflictingArguments);
     // --all stops every busy Session, each under its own generated capture.
     try expectValidation(.session_stop, &.{ "--store", "/s", "--all" }, false);
     for ([_][]const u8{ "--session", "--record", "--key", "--key-hex" }) |single|
@@ -1006,6 +1011,7 @@ test "numeric options reject malformed decimals and state their accepted range" 
         .{ .command = .session_read_conversation, .name = "position", .code = .id_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .session_read_conversation, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "9223372036854775807" },
         .{ .command = .session_inspect, .name = "attempt", .code = .count_malformed, .low = "1", .high = "9223372036854775807" },
+        .{ .command = .request_wait, .name = "timeout-seconds", .code = .count_malformed, .low = "1", .high = "86400" },
         .{ .command = .host_start, .name = "active-capacity", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{std.math.maxInt(usize)}) },
         .{ .command = .host_serve, .name = "test-retention-entry-capacity", .code = .count_malformed, .low = "2", .high = std.fmt.comptimePrint("{d}", .{retention_capacity.entries}) },
         .{ .command = .host_serve, .name = "bash-timeout-ms", .code = .count_malformed, .low = "1", .high = "9223372036854775807" },
@@ -1122,4 +1128,20 @@ test "Session IDs in positional argv name the missing selector flag" {
     inline for (.{ Command.session_inspect, Command.session_stop, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny }) |command| {
         _ = try expectRefusal(command, &.{"v948er"}, .session_id_needs_session, "v948er");
     }
+}
+
+test "request wait accepts only one original identity and a bounded timeout" {
+    try std.testing.expect(try expectMissing(.request_wait, &.{"HANDLE"}) == null);
+    try std.testing.expect(try expectMissing(.request_wait, &.{ "--store", "PATH", "--key", "k" }) == null);
+    try std.testing.expectEqualStrings("", (try expectMissing(.request_wait, &.{})).?);
+    for ([_][]const u8{ "store", "store-hex", "key", "key-hex" }) |option| {
+        var flag_buffer: [32]u8 = undefined;
+        const flag_name = try std.fmt.bufPrint(&flag_buffer, "--{s}", .{option});
+        _ = try expectRefusal(.request_wait, &.{ "HANDLE", flag_name, "P" }, .handle_names_store_and_key, option);
+    }
+    try expectValidation(.request_wait, &.{ "HANDLE", "--timeout-seconds", "1", "--timeout-seconds", "2" }, error.DuplicateArgument);
+    try expectValidation(.request_wait, &.{ "HANDLE", "--since", "TOKEN" }, error.UnknownArgument);
+    var storage: [1024]u8 = undefined;
+    const parsed = try testParse(Command.request_wait.definition(), &.{ "HANDLE", "--timeout-seconds", "86400" }, &storage);
+    try std.testing.expectEqual(@as(?u32, 86400), try parsed.number(u32, "timeout-seconds"));
 }

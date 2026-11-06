@@ -90,3 +90,8 @@ test "CLI aggregate exits are cautious in every order" {
         try std.testing.expectEqual(expected, b.merge(a));
     };
 }
+
+test "request wait catalog exits preserve the caller policy" {
+    try std.testing.expectEqual(Status.later, forCode(.confirmed, .wait_timed_out));
+    try std.testing.expectEqual(Status.unconfirmed, forCode(.confirmed, .request_absent));
+}
