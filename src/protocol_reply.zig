@@ -2453,6 +2453,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     const accepted = answer.status.eql("accepted");
     const conflict = answer.status.eql("conflict");
     if ((!accepted and !conflict and !answer.status.eql("rejected")) or (reply.status == 409) != conflict) return error.InvalidResponse;
+    if (answer.skills.value != null and (!accepted or target != .configure or answer.created.value != false)) return error.InvalidResponse;
     if (accepted) {
         if (!protocol.validSessionId(resolved_session.slice())) return error.InvalidResponse;
         if (answer.code.value != null) return error.InvalidResponse;
@@ -2569,6 +2570,107 @@ test "mutation decoder checks binding queue ambiguity and fixed reply bounds" {
     try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = conflicting_queue }, "k7m2qx", target).answer);
     const malformed = try std.fmt.bufPrint(&body, "{s}{s} trailing", .{ prefix, suffix });
     try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = malformed }, "k7m2qx", target).answer);
+}
+
+test "skills reload reply facts apply only to accepted existing Configure mutations" {
+    const input = ",\"input\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}";
+    const cases = [_]struct {
+        target: MutationTarget,
+        reply_type: []const u8,
+        binding: []const u8 = ",\"session\":\"k7m2qx\"",
+        accepted_fields: []const u8 = "",
+        accepted_tail: []const u8 = "",
+        rejected_tail: []const u8 = "",
+        conflict_tail: []const u8 = "",
+    }{
+        .{
+            .target = .configure,
+            .reply_type = "configuration_reply",
+            .accepted_fields = ",\"revision\":\"31\",\"created\":false",
+            .accepted_tail = ",\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}",
+            .rejected_tail = ",\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}",
+            .conflict_tail = ",\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}",
+        },
+        .{
+            .target = .{ .message = .{ .bytes = 0, .digest = @splat(0) } },
+            .reply_type = "message_reply",
+            .accepted_fields = ",\"admission\":\"7\"",
+            .accepted_tail = input ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}",
+            .rejected_tail = input ++ ",\"execution\":{\"status\":\"queued\"}",
+            .conflict_tail = ",\"execution\":{\"status\":\"queued\"}",
+        },
+        .{
+            .target = .session_stop,
+            .reply_type = "session_stop_reply",
+            .accepted_fields = ",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"}",
+            .accepted_tail = ",\"completion\":{\"status\":\"completed\"}",
+            .rejected_tail = ",\"completion\":{\"status\":\"unavailable\"}",
+            .conflict_tail = ",\"completion\":{\"status\":\"unavailable\"}",
+        },
+        .{
+            .target = .{ .model_interruption = .{ .turn = 3, .operation = 4 } },
+            .reply_type = "model_interruption_reply",
+            .binding = ",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"4\"}",
+        },
+        .{
+            .target = .{ .permission_decision = .{ .action = 9, .decision = .deny } },
+            .reply_type = "permission_decision_reply",
+            .binding = ",\"session\":\"k7m2qx\",\"action\":\"9\",\"decision\":\"deny\"",
+        },
+    };
+    const reload_fields = [_]struct { bytes: []const u8, expected: ?protocol.SkillsReloadStatus }{
+        .{ .bytes = "", .expected = null },
+        .{ .bytes = ",\"skills\":\"reloaded\"", .expected = .reloaded },
+        .{ .bytes = ",\"skills\":\"unchanged\"", .expected = .unchanged },
+    };
+    var buffer: [1024]u8 = undefined;
+    for (cases) |case| {
+        for ([_][]const u8{ "accepted", "rejected", "conflict" }) |status| {
+            const accepted = std.mem.eql(u8, status, "accepted");
+            const conflict = std.mem.eql(u8, status, "conflict");
+            const fields = if (accepted) case.accepted_fields else if (conflict) ",\"code\":\"idempotency_key_conflict\"" else ",\"code\":\"unknown_session\"";
+            const tail = if (accepted) case.accepted_tail else if (conflict) case.conflict_tail else case.rejected_tail;
+            for (reload_fields) |reload| {
+                const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"{s}\",\"replayed\":false{s}{s}{s}}}{s}}}", .{ protocol.wire_version, case.reply_type, status, case.binding, fields, reload.bytes, tail });
+                const reply = decodeMutationReply(.{ .status = if (conflict) 409 else 200, .body = body }, "k7m2qx", case.target);
+                if (reload.expected != null and (!accepted or case.target != .configure)) {
+                    try std.testing.expectError(error.InvalidResponse, reply.answer);
+                } else {
+                    const answer = try reply.answer;
+                    try std.testing.expect(!answer.replayed);
+                    try std.testing.expectEqualStrings(status, @tagName(answer.result));
+                    if (accepted) {
+                        try std.testing.expectEqualStrings(@tagName(case.target), @tagName(answer.result.accepted));
+                        if (case.target == .configure) {
+                            try std.testing.expectEqual(@as(u64, 31), answer.result.accepted.configure.revision);
+                            try std.testing.expect(!answer.result.accepted.configure.created);
+                            try std.testing.expectEqual(reload.expected, answer.result.accepted.configure.skills);
+                        }
+                    } else if (!conflict) try std.testing.expectEqualStrings("unknown_session", answer.result.rejected.slice());
+                }
+            }
+        }
+    }
+    // Ordinary creation remains valid; a reload cannot also create a Session.
+    for ([_][]const u8{ "false", "true" }) |created| {
+        for (reload_fields) |reload| {
+            const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"configuration_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"31\",\"created\":{s}{s}}}{s}}}", .{ protocol.wire_version, created, reload.bytes, cases[0].accepted_tail });
+            const creating = std.mem.eql(u8, created, "true");
+            const reply = decodeMutationReply(.{ .status = 200, .body = body }, if (creating) "" else "k7m2qx", .configure);
+            if (creating and reload.expected != null) {
+                try std.testing.expectError(error.InvalidResponse, reply.answer);
+            } else {
+                const answer = try reply.answer;
+                try std.testing.expectEqual(creating, answer.result.accepted.configure.created);
+                try std.testing.expectEqual(reload.expected, answer.result.accepted.configure.skills);
+                try std.testing.expectEqualStrings("k7m2qx", reply.context.session.slice());
+            }
+        }
+    }
+    for ([_][]const u8{ "null", "7", "true", "\"invented\"", "[]", "\"reloaded\",\"skills\":\"unchanged\"" }) |invalid| {
+        const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"configuration_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"31\",\"created\":false,\"skills\":{s}}}{s}}}", .{ protocol.wire_version, invalid, cases[0].accepted_tail });
+        try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .configure).answer);
+    }
 }
 
 test "mutation decoder preserves invalid-target domain rejection not false fatal certainty" {
