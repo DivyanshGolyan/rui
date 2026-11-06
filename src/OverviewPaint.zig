@@ -986,6 +986,35 @@ const test_now_s = view.Test.test_now_s;
 const typeText = view.Test.typeText;
 const writeDeparture = view.writeDeparture;
 
+/// Test-only oracle over the accepted domain tables, deliberately independent
+/// of cellStyle's production role/depth conversion. Attributes are literal
+/// expectations chosen by each test, not inferred from rendered cells.
+fn expectedStyle(caps: Caps, role: Style) vaxis.Style {
+    var expected: vaxis.Style = .{ .bold = role.bold, .reverse = role.reverse };
+    switch (caps.depth) {
+        .none => {},
+        .indexed => {
+            const accepted = view.indexed.get(caps.skin());
+            expected.fg = .{ .index = accepted.colours.get(role.colour) };
+            expected.bg = .{ .index = accepted.backgrounds.get(role.background) };
+        },
+        .direct => {
+            const accepted = view.palettes.get(caps.skin());
+            expected.fg = .{ .rgb = accepted.colours.get(role.colour) };
+            expected.bg = .{ .rgb = accepted.backgrounds.get(role.background) };
+        },
+    }
+    return expected;
+}
+
+test "expected overview styles use literal depth defaults and independent accepted palette roles" {
+    const emphasis: Style = .{ .colour = .failure, .background = .band, .bold = true, .reverse = true };
+    try std.testing.expectEqual(vaxis.Style{ .bold = true, .reverse = true }, expectedStyle(.{ .depth = .none }, emphasis));
+    try std.testing.expectEqual(vaxis.Style{ .fg = .{ .rgb = .{ 0xf6, 0xf1, 0xe4 } }, .bg = .{ .rgb = .{ 0x12, 0x18, 0x33 } } }, expectedStyle(.{ .depth = .direct }, .{ .colour = .strong }));
+    try std.testing.expectEqual(vaxis.Style{ .fg = .{ .rgb = .{ 0x53, 0x5c, 0x86 } }, .bg = .{ .rgb = .{ 0xdc, 0xdc, 0xec } } }, expectedStyle(.{ .depth = .direct, .background = .{ 255, 255, 255 } }, .{ .colour = .quiet, .background = .selection }));
+    try std.testing.expectEqual(vaxis.Style{ .fg = .{ .index = 255 }, .bg = .{ .index = 234 } }, expectedStyle(.{ .depth = .indexed }, .{ .colour = .strong }));
+}
+
 const Rendered = struct {
     backend: *Backend,
     width: u16,
@@ -1008,7 +1037,7 @@ const Rendered = struct {
     fn styleAt(self: *const Rendered, row: usize, column: usize) ?vaxis.Style {
         if (row >= self.height or column >= self.width) return null;
         const current = self.cell(column, row);
-        if (std.mem.eql(u8, current.char.grapheme, " ") and std.meta.eql(current.style, cellStyle(self.caps, .{}))) return null;
+        if (std.mem.eql(u8, current.char.grapheme, " ") and std.meta.eql(current.style, expectedStyle(self.caps, .{}))) return null;
         return current.style;
     }
     fn write(self: *const Rendered, writer: *std.Io.Writer) !void {
@@ -1139,16 +1168,16 @@ test "every work state follows the rules table, in Unicode and ASCII" {
         // the person or is quiet.
         var screen = try sizedRender(&state, .{}, 80, 24, .{}, 0);
         defer screen.deinit();
-        try std.testing.expectEqual(cellStyle(screen.caps, .{ .background = .selection }).bg, screen.styleAt(5, 1).?.bg);
+        try std.testing.expectEqual(expectedStyle(screen.caps, .{ .background = .selection }).bg, screen.styleAt(5, 1).?.bg);
         state.selected = null;
         var unselected = try sizedRender(&state, .{}, 80, 24, .{}, 0);
         defer unselected.deinit();
-        try std.testing.expectEqual(cellStyle(unselected.caps, Style{ .colour = case.colour }), unselected.styleAt(5, 2).?);
+        try std.testing.expectEqual(expectedStyle(unselected.caps, Style{ .colour = case.colour }), unselected.styleAt(5, 2).?);
         const tone: Colour = switch (case.colour) {
             .attention, .failure, .quiet => case.colour,
             else => .normal,
         };
-        if (unselected.styleAt(5, 53)) |style| try std.testing.expectEqual(cellStyle(unselected.caps, .{ .colour = tone }), style);
+        if (unselected.styleAt(5, 53)) |style| try std.testing.expectEqual(expectedStyle(unselected.caps, .{ .colour = tone }), style);
     }
 }
 
@@ -1177,7 +1206,7 @@ test "a retry that has fallen due reads as queued in its group, mark and colour"
     try std.testing.expect(std.mem.indexOf(u8, text, " Queued · 1\n") != null);
     var screen = try sizedRender(&state, .{}, 80, 24, .{ .depth = .none }, 0);
     defer screen.deinit();
-    try std.testing.expectEqual(cellStyle(screen.caps, Style{ .colour = .normal }), screen.styleAt(5, 2).?);
+    try std.testing.expectEqual(expectedStyle(screen.caps, Style{ .colour = .normal }), screen.styleAt(5, 2).?);
 }
 
 test "each heading counts its group, and Yours takes a Session from the group it would join" {
@@ -1220,7 +1249,7 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
         try std.testing.expect(screen.spins);
         // The spinner keeps its rule's colour.
         const mine = std.mem.count(u8, text[0..std.mem.indexOf(u8, text, "Mine, thinking").?], "\n");
-        try std.testing.expectEqual(cellStyle(screen.caps, Style{ .colour = .ink }), screen.styleAt(mine, 2).?);
+        try std.testing.expectEqual(expectedStyle(screen.caps, Style{ .colour = .ink }), screen.styleAt(mine, 2).?);
     }
     // A stop the person asked for holds the mark still before the Host
     // reports it.
@@ -1667,7 +1696,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
 fn expectStyle(state: *State, row: usize, column: usize, expected: Style) !void {
     var screen = try sizedRender(state, .{}, 80, 24, .{}, 0);
     defer screen.deinit();
-    try std.testing.expectEqual(cellStyle(screen.caps, expected), screen.styleAt(row, column).?);
+    try std.testing.expectEqual(expectedStyle(screen.caps, expected), screen.styleAt(row, column).?);
 }
 
 fn expectScreenLine(state: *State, line: usize, expected: []const u8) !void {
@@ -1932,7 +1961,7 @@ test "the overview lists once a second, one listing at a time" {
     try expectScreenLine(&state, 2, " Host not responding. Last update 1s ago.");
     var screen = try sizedRender(&state, .{}, 80, 24, .{}, 0);
     defer screen.deinit();
-    try std.testing.expectEqual(cellStyle(screen.caps, Style{ .colour = .quiet }), screen.styleAt(7, 2).?);
+    try std.testing.expectEqual(expectedStyle(screen.caps, Style{ .colour = .quiet }), screen.styleAt(7, 2).?);
     _ = try refresh(&state, .not_modified, testToken(1), &.{});
     try expectScreenLine(&state, 1, " Running. 20 Sessions. 2 failed.");
 }
@@ -1972,16 +2001,16 @@ fn expectStyles(state: *State, width: u16, height: u16, caps: Caps, expected: []
             const cell = screen.cell(col, row);
             if (mark == '.') {
                 try std.testing.expectEqualStrings(" ", cell.char.grapheme);
-                try std.testing.expectEqual(cellStyle(caps, .{}), cell.style);
+                try std.testing.expectEqual(expectedStyle(caps, .{}), cell.style);
                 continue;
             }
             const lower = std.ascii.toLower(mark);
             try std.testing.expectEqual(std.ascii.isUpper(mark), cell.style.bold);
             if (lower == 'r') {
-                if (caps.depth == .none) try std.testing.expect(cell.style.reverse) else try std.testing.expectEqual(cellStyle(caps, .{ .background = .selection }).bg, cell.style.bg);
+                if (caps.depth == .none) try std.testing.expect(cell.style.reverse) else try std.testing.expectEqual(expectedStyle(caps, .{ .background = .selection }).bg, cell.style.bg);
             } else {
                 const index = std.mem.indexOfScalar(u8, letters, lower) orelse return error.TestUnknownStyle;
-                const wanted = cellStyle(caps, .{ .colour = std.enums.values(Colour)[index] });
+                const wanted = expectedStyle(caps, .{ .colour = std.enums.values(Colour)[index] });
                 try std.testing.expectEqual(wanted.fg, cell.style.fg);
             }
         }
@@ -1989,7 +2018,7 @@ fn expectStyles(state: *State, width: u16, height: u16, caps: Caps, expected: []
         for (line.len..width) |col| {
             const cell = screen.cell(col, row);
             try std.testing.expectEqualStrings(" ", cell.char.grapheme);
-            try std.testing.expectEqual(cellStyle(caps, .{}), cell.style);
+            try std.testing.expectEqual(expectedStyle(caps, .{}), cell.style);
         }
     }
 }
@@ -2002,8 +2031,8 @@ fn expectBand(rows: []const Listed, small: []const u8, small_styles: []const u8,
     for ([_]Caps{ .{}, .{ .depth = .none } }, [_]Style{ .{ .colour = .on_band, .background = .band, .bold = true }, .{ .bold = true, .reverse = true } }) |caps, style| {
         var screen = try sizedRender(&state, .{}, 80, 24, caps, 0);
         defer screen.deinit();
-        try std.testing.expectEqual(cellStyle(caps, style), screen.styleAt(1, 0).?);
-        try std.testing.expectEqual(cellStyle(caps, style), screen.styleAt(1, 79).?);
+        try std.testing.expectEqual(expectedStyle(caps, style), screen.styleAt(1, 0).?);
+        try std.testing.expectEqual(expectedStyle(caps, style), screen.styleAt(1, 79).?);
     }
 }
 
@@ -2842,8 +2871,8 @@ test "your Sessions keep a bright title once they end" {
     state.selected = null;
     var screen = try sizedRender(&state, .{}, 80, 24, .{}, 0);
     defer screen.deinit();
-    try std.testing.expectEqual(cellStyle(screen.caps, Style{ .colour = .strong, .bold = true }), screen.styleAt(5, 4).?);
-    try std.testing.expectEqual(cellStyle(screen.caps, Style{ .colour = .quiet }), screen.styleAt(8, 4).?);
+    try std.testing.expectEqual(expectedStyle(screen.caps, Style{ .colour = .strong, .bold = true }), screen.styleAt(5, 4).?);
+    try std.testing.expectEqual(expectedStyle(screen.caps, Style{ .colour = .quiet }), screen.styleAt(8, 4).?);
 }
 
 fn expectPainted(state: *State, width: u16, height: u16, caps: Caps) !void {
@@ -2854,7 +2883,7 @@ fn expectPainted(state: *State, width: u16, height: u16, caps: Caps) !void {
         const palette = view.palettes.get(caps.skin());
         var ground_known = false;
         for (std.enums.values(Background)) |background| {
-            if (std.meta.eql(cell.style.bg, cellStyle(caps, .{ .background = background }).bg)) ground_known = true;
+            if (std.meta.eql(cell.style.bg, expectedStyle(caps, .{ .background = background }).bg)) ground_known = true;
         }
         try std.testing.expect(ground_known);
         if (caps.depth == .none) {
@@ -2862,7 +2891,7 @@ fn expectPainted(state: *State, width: u16, height: u16, caps: Caps) !void {
         } else {
             var ink_known = false;
             for (std.enums.values(Colour)) |colour| {
-                if (std.meta.eql(cell.style.fg, cellStyle(caps, .{ .colour = colour }).fg)) ink_known = true;
+                if (std.meta.eql(cell.style.fg, expectedStyle(caps, .{ .colour = colour }).fg)) ink_known = true;
             }
             try std.testing.expect(ink_known);
         }
@@ -2895,11 +2924,11 @@ test "direct row writes place text and domain styles in the shared grid" {
     const grid = &backend.storage.?.vx.screen;
     for ([_]u16{ 1, 2, 3, 4 }, "abcd") |col, byte| {
         try std.testing.expectEqual(byte, grid.readCell(col, 0).?.char.grapheme[0]);
-        try std.testing.expectEqual(cellStyle(caps, .{}), grid.readCell(col, 0).?.style);
+        try std.testing.expectEqual(expectedStyle(caps, .{}), grid.readCell(col, 0).?.style);
     }
     for ([_]u16{ 5, 8 }, "ef") |col, byte| {
         try std.testing.expectEqual(byte, grid.readCell(col, 0).?.char.grapheme[0]);
-        try std.testing.expectEqual(cellStyle(caps, .{ .colour = .ink }), grid.readCell(col, 0).?.style);
+        try std.testing.expectEqual(expectedStyle(caps, .{ .colour = .ink }), grid.readCell(col, 0).?.style);
     }
     const bytes = try backend.encode();
     try std.testing.expect(std.mem.endsWith(u8, bytes, vaxis.ctlseqs.osc8_clear ++ vaxis.ctlseqs.sgr_reset));
@@ -3309,7 +3338,7 @@ test "the Session row's highlight stays in view while the picker is open, even o
         defer screen.deinit();
         var highlighted: usize = 0;
         for (0..screen.height) |row| {
-            for (0..screen.width) |col| if (std.meta.eql(screen.cell(col, row).style.bg, cellStyle(screen.caps, .{ .background = .selection }).bg)) {
+            for (0..screen.width) |col| if (std.meta.eql(screen.cell(col, row).style.bg, expectedStyle(screen.caps, .{ .background = .selection }).bg)) {
                 highlighted += 1;
                 break;
             };
