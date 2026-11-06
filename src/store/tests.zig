@@ -7,6 +7,18 @@ const protocol = @import("../protocol.zig");
 const protocol_reply = @import("../protocol_reply.zig");
 const tool_catalog = @import("../tools.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
+
+// A stored Host catalog must contain every native tool. Keep that inventory
+// canonical while each fixture independently states its MCP schema and offer.
+fn testingCatalogRecords(comptime extras: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extras.len]tool_catalog.Record {
+    var records = tool_catalog.built_in.records[0..tool_catalog.built_in.records.len].* ++ extras[0..extras.len].*;
+    std.sort.heap(tool_catalog.Record, &records, {}, struct {
+        fn lessThan(_: void, left: tool_catalog.Record, right: tool_catalog.Record) bool {
+            return std.mem.lessThan(u8, left.name, right.name);
+        }
+    }.lessThan);
+    return records;
+}
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
 const output_format = @import("../output_format.zig");
@@ -4353,16 +4365,10 @@ test "loaded tools select saved records even after the Host catalog changes or r
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            var records = [_]tool_catalog.Record{
-                tool_catalog.bash_record,
+            var records = comptime testingCatalogRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "original", .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
-                tool_catalog.find_tools_record,
-                tool_catalog.message_agent_record,
                 .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
-                tool_catalog.read_transcript_record,
-                tool_catalog.start_agent_record,
-                tool_catalog.web_search_record,
-            };
+            });
             var digests: [records.len][32]u8 = undefined;
             for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
             const original: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
@@ -8932,6 +8938,9 @@ const EntryPoint = enum {
     readCatalogSet,
     readCatalogRecords,
     readCatalogText,
+    commandExists,
+    readSkills,
+    settleSkillTool,
     configure,
     submitMessageWithModel,
     stopSession,
@@ -9000,6 +9009,9 @@ const EntryPoint = enum {
 /// drives it. Content rounds (`readRaw` windows) differ by engine, so
 /// `content_round_budgets` holds them apart.
 const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
+    .commandExists = 1,
+    .readSkills = 2,
+    .settleSkillTool = 3,
     .configure = 3,
     .submitMessageWithModel = 2,
     .stopSession = 2,
@@ -9081,7 +9093,7 @@ fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     return switch (engine) {
         // One window holds the driven content.
         .sqlite, .mysql => switch (point) {
-            .readOwnedContent, .readCatalogText, .searchActivity, .findTools => 1,
+            .readOwnedContent, .readCatalogText, .searchActivity, .findTools, .readSkills => 1,
             else => 0,
         },
     };
@@ -9316,6 +9328,7 @@ test "each Store entry point takes its round budget on its common path" {
             try coreTurn(&storage, &tmp, &meter);
             try mcpTurn(case, &meter);
             try findTurn(&storage, &tmp, &meter);
+            try skillTurn(case, &meter);
             var failed = false;
             for (std.enums.values(EntryPoint)) |point| {
                 const measured = meter.measured.get(point) orelse {
@@ -9454,15 +9467,9 @@ test "each Store entry point takes its round budget on its common path" {
         /// Drive MCP through an actual frozen catalog offer, without changing
         /// the built-in catalog used by the other entry points' fixtures.
         fn mcpTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
-            const records = [_]tool_catalog.Record{
-                tool_catalog.bash_record,
+            const records = comptime testingCatalogRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
-                tool_catalog.find_tools_record,
-                tool_catalog.message_agent_record,
-                tool_catalog.read_transcript_record,
-                tool_catalog.start_agent_record,
-                tool_catalog.web_search_record,
-            };
+            });
             const digests = comptime blk: {
                 @setEvalBranchQuota(1_000_000);
                 var out: [records.len][32]u8 = undefined;
@@ -9510,6 +9517,52 @@ test "each Store entry point takes its round budget on its common path" {
             _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
             try std.testing.expect((try storage.nextMcpAction()) == null);
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
+        }
+
+        /// Replay preflight, captured catalog read and bound ordinary skill
+        /// settlement use their public entries, with real public metadata.
+        fn skillTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const previous_storage = meter.storage;
+            meter.storage = &storage;
+            defer meter.storage = previous_storage;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const skills = @import("../skills.zig");
+            const catalog: skills.Catalog = .{ .entries = &.{.{ .name = "demo", .description = "Budget skill", .path = "/budget/demo/SKILL.md" }} };
+            const initial: skills_fixture_domain.Initial = .{ .ready = .{
+                .encoded = try skills.encodeCatalog(arena.allocator(), catalog),
+                .instruction = try skills.initialInstruction(arena.allocator(), catalog),
+            } };
+            var path: [protocol.max_workspace_bytes]u8 = undefined;
+            var create = try completeConfiguration("budget-skill", "", try canonicalCwd(std.testing.io, &path), "model-a");
+            create.configuration.tools = try .of(&.{"skill"});
+            const session = storage.configureWithInitialSkills(&create, null, &initial, .{}).accepted.session;
+            meter.start();
+            try std.testing.expect(try storage.commandExists("budget-skill"));
+            meter.stop(.commandExists);
+            try std.testing.expect(!try storage.commandExists("budget-skill-absent"));
+            meter.start();
+            const saved = try storage.readSkills(arena.allocator(), session.slice());
+            meter.stop(.readSkills);
+            try std.testing.expectEqual(@as(usize, 1), saved.catalog.entries.len);
+            try std.testing.expectEqualStrings("demo", saved.catalog.entries[0].name);
+            try std.testing.expectEqualStrings("/budget/demo/SKILL.md", saved.catalog.entries[0].path);
+            try submitTestMessage(&storage, &tmp, "budget-skill-input", "budget-skill-key", session.slice(), "use demo");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{.{ .item_id = "skill-item", .name = "skill", .encoded_call_id = "skill-call", .decoded_call_id = "skill-call", .encoded_arguments = "{\\\"operation\\\":\\\"invoke\\\",\\\"name\\\":\\\"demo\\\"}", .decoded_arguments = "{\"operation\":\"invoke\",\"name\":\"demo\"}" }};
+            try settleCallsForTesting(&storage, &tmp, model, "budget-skill-calls", &calls);
+            const input = (try storage.nextCoreWork()).?.action;
+            try std.testing.expectEqual(action_domain.CoreTool.skill, input.tool);
+            const captured: skills_fixture_domain.Capture = .{ .invocation = "Skill file: \"/budget/demo/SKILL.md\"\n\nbudget bytes" };
+            meter.start();
+            try std.testing.expect(try storage.settleSkillTool(input.binding, arena.allocator(), &captured, .{}));
+            meter.stop(.settleSkillTool);
+            try std.testing.expect(!storage.isFenced());
         }
 
         /// SQL narrows one unloaded tool; eight matchers share one description
@@ -11191,15 +11244,9 @@ test "launch presets resolve MCP tools through the same catalog as configure" {
             try launch_frame.parse(std.testing.allocator,
                 \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"pages","url":"http://127.0.0.1:3000/mcp","bearerToken":"t","callTimeoutMs":1000}],"presets":{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["fetch_page"],"permissionMode":"ask"}}}
             , &frame, &refusal);
-            var records = [_]tool_catalog.Record{
-                tool_catalog.bash_record,
+            var records = comptime testingCatalogRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "pages", .description = "Fetch page", .input_schema = "{\"type\":\"object\"}" },
-                tool_catalog.find_tools_record,
-                tool_catalog.message_agent_record,
-                tool_catalog.read_transcript_record,
-                tool_catalog.start_agent_record,
-                tool_catalog.web_search_record,
-            };
+            });
             var digests: [records.len][32]u8 = undefined;
             for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
             const offered: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
