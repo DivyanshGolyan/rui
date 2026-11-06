@@ -195,7 +195,6 @@ pub const pending = .{
     "MissingArgumentValue",
     "MutationNotAccepted",
     "NameTooLong",
-    "NoSpaceLeft",
     "NotDir",
     "NullNotAllowed",
     "Overflow",
