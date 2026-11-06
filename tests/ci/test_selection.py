@@ -72,7 +72,7 @@ class SelectionTest(unittest.TestCase):
                  "src/host_identity.c", "src/UpgradePanel.zig", "src/host_launch.c",
                  "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/slash_commands.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
-                 "tests/integration/upgrade_integration.py", "release/publish.sh", "release/install.sh",
+                 "tests/integration/upgrade_integration.py", "tests/ci/test_upgrade_fixture.py", "release/publish.sh", "release/install.sh",
                  "install.sh", "build.zig")
         for path in paths:
             for phase in ("development", "review"):

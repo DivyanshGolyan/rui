@@ -97,9 +97,7 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
     } else {
         Progress.send(progress, .preparing);
         var prepared = try Installation.prepare(allocator, init.io, checked.home, &checked.candidate, cancellation);
-        defer prepared.dispose(allocator, init.io) catch |err| {
-            @import("stderr.zig").diagnostic("rui: could not clean upgrade staging ({s}); installation result is unchanged.\n", .{@errorName(err)});
-        };
+        defer prepared.dispose(allocator, init.io) catch {};
         Progress.send(progress, .publishing);
         installation = try Installation.publish(allocator, init.io, checked.home, &prepared, .released_upgrade, cancellation);
     }

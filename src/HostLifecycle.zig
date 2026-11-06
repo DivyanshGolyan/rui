@@ -251,6 +251,86 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
 
 extern "c" fn rui_launch_pinned(helper: [*:0]const u8, executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, envp: [*:null]const ?[*:0]const u8, startup_read: *c_int, launched_pid: *c_int, launched_started: *c_ulonglong) c_int;
 
+const PrivateLaunch = struct {
+    storage: []u8,
+    pointers: []?[*:0]const u8,
+    argv: [:null]?[*:0]const u8,
+    envp: [:null]?[*:0]const u8,
+
+    fn init(allocator: std.mem.Allocator, executable: []const u8, options: []const LaunchOption, store: []const u8, active_capacity: usize, environment: []const []const u8) !PrivateLaunch {
+        var capacity_buffer: [std.fmt.count("{d}", .{std.math.maxInt(usize)})]u8 = undefined;
+        const capacity = std.fmt.bufPrint(&capacity_buffer, "{d}", .{active_capacity}) catch unreachable;
+        const arguments = [_][]const u8{ executable, "host", "serve", "--store", store, "--active-capacity", capacity };
+        var argc: usize = arguments.len;
+        var byte_count: usize = 0;
+        for (arguments) |argument| {
+            byte_count = try addSize(byte_count, try addSize(argument.len, 1));
+        }
+        for (options) |option| {
+            argc = try addSize(argc, 1);
+            byte_count = try addSize(byte_count, try addSize(option.name.len, 3));
+            if (option.value) |value| {
+                argc = try addSize(argc, 1);
+                byte_count = try addSize(byte_count, try addSize(value.len, 1));
+            }
+        }
+        for (environment) |entry| {
+            byte_count = try addSize(byte_count, try addSize(entry.len, 1));
+        }
+        const pointer_count = try addSize(try addSize(argc, environment.len), 2);
+        const pointers = try allocator.alloc(?[*:0]const u8, pointer_count);
+        errdefer wipeAllocation(?[*:0]const u8, allocator, pointers);
+        const storage = try allocator.alloc(u8, byte_count);
+        @memset(pointers, null);
+        var result: PrivateLaunch = .{
+            .storage = storage,
+            .pointers = pointers,
+            .argv = pointers[0..argc :null],
+            .envp = pointers[argc + 1 .. pointer_count - 1 :null],
+        };
+        var slot: usize = 0;
+        var offset: usize = 0;
+        for (arguments[0..3]) |argument| result.put(&slot, &offset, "", argument);
+        for (options) |option| {
+            result.put(&slot, &offset, "--", option.name);
+            if (option.value) |value| result.put(&slot, &offset, "", value);
+        }
+        for (arguments[3..]) |argument| result.put(&slot, &offset, "", argument);
+        std.debug.assert(slot == argc);
+        slot += 1;
+        for (environment) |entry| result.put(&slot, &offset, "", entry);
+        std.debug.assert(slot == pointer_count - 1 and offset == storage.len);
+        return result;
+    }
+
+    fn addSize(left: usize, right: usize) error{OutOfMemory}!usize {
+        return std.math.add(usize, left, right) catch error.OutOfMemory;
+    }
+
+    fn put(self: *PrivateLaunch, slot: *usize, offset: *usize, prefix: []const u8, value: []const u8) void {
+        const start = offset.*;
+        @memcpy(self.storage[start..][0..prefix.len], prefix);
+        @memcpy(self.storage[start + prefix.len ..][0..value.len], value);
+        offset.* += prefix.len + value.len;
+        self.storage[offset.*] = 0;
+        self.pointers[slot.*] = self.storage[start..offset.* :0].ptr;
+        offset.* += 1;
+        slot.* += 1;
+    }
+
+    fn wipeAllocation(comptime T: type, allocator: std.mem.Allocator, allocation: []T) void {
+        const bytes = std.mem.sliceAsBytes(allocation);
+        std.crypto.secureZero(u8, bytes);
+        allocator.rawFree(bytes, .of(T), @returnAddress());
+    }
+
+    fn deinit(self: *PrivateLaunch, allocator: std.mem.Allocator) void {
+        wipeAllocation(u8, allocator, self.storage);
+        wipeAllocation(?[*:0]const u8, allocator, self.pointers);
+        self.* = undefined;
+    }
+};
+
 fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, target: []const u8, version: candidate.Version, progress: ?Progress) !ActivationOutcome {
     const io = init.io;
     const store = plan.observed.ready.store.slice();
@@ -261,40 +341,15 @@ fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *cons
     defer allocator.free(canonical);
     const helper = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(helper);
-    var arguments: std.ArrayList([:0]const u8) = .empty;
-    defer {
-        for (arguments.items) |arg| allocator.free(arg);
-        arguments.deinit(allocator);
-    }
-    try arguments.append(allocator, try allocator.dupeSentinel(u8, executable, 0));
-    try arguments.append(allocator, try allocator.dupeSentinel(u8, "host", 0));
-    try arguments.append(allocator, try allocator.dupeSentinel(u8, "serve", 0));
-    for (plan.launch.options) |option| {
-        try arguments.append(allocator, try std.fmt.allocPrintSentinel(allocator, "--{s}", .{option.name}, 0));
-        if (option.value) |value| try arguments.append(allocator, try allocator.dupeSentinel(u8, value, 0));
-    }
-    for ([_][]const u8{ "--store", store, "--active-capacity" }) |arg| try arguments.append(allocator, try allocator.dupeSentinel(u8, arg, 0));
-    try arguments.append(allocator, try std.fmt.allocPrintSentinel(allocator, "{d}", .{plan.observed.ready.active_capacity}, 0));
-    const argv = try allocator.allocSentinel(?[*:0]const u8, arguments.items.len, null);
-    defer allocator.free(argv);
-    for (arguments.items, argv) |arg, *ptr| ptr.* = arg.ptr;
-    const envp = try allocator.allocSentinel(?[*:0]const u8, plan.snapshot.environment.len, null);
-    defer allocator.free(envp);
-    var allocated: usize = 0;
-    defer for (envp[0..allocated]) |entry| {
-        const bytes = std.mem.span(entry.?);
-        std.crypto.secureZero(u8, @constCast(bytes));
-        allocator.free(bytes);
-    };
-    for (plan.snapshot.environment, envp) |entry, *ptr| {
-        ptr.* = (try allocator.dupeSentinel(u8, entry, 0)).ptr;
-        allocated += 1;
-    }
-    Progress.send(progress, .starting);
     var startup_read: c_int = -1;
     var launched_pid: c_int = -1;
     var launched_started: c_ulonglong = 0;
-    const launched = rui_launch_pinned(helper.ptr, executable.ptr, argv.ptr, argv.len, envp.ptr, &startup_read, &launched_pid, &launched_started);
+    const launched = launch: {
+        var buffers = try PrivateLaunch.init(allocator, executable, plan.launch.options, store, plan.observed.ready.active_capacity, plan.snapshot.environment);
+        defer buffers.deinit(allocator);
+        Progress.send(progress, .starting);
+        break :launch rui_launch_pinned(helper.ptr, executable.ptr, buffers.argv.ptr, buffers.argv.len, buffers.envp.ptr, &startup_read, &launched_pid, &launched_started);
+    };
     defer if (startup_read >= 0) {
         _ = std.c.close(startup_read);
     };
@@ -330,6 +385,99 @@ fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *cons
 
 fn matchesLaunch(pid: c_int, started: u64, snapshot: *const identity.Snapshot, executable: []const u8) bool {
     return pid > 0 and started != 0 and snapshot.pid == pid and snapshot.started == started and std.mem.eql(u8, snapshot.executable, executable);
+}
+
+test "upgrade private launch buffers wipe argv environment and sentinels on every construction exit" {
+    const Capturing = struct {
+        backing: std.mem.Allocator,
+        allocations: usize = 0,
+        frees: usize = 0,
+        allocated_bytes: usize = 0,
+        freed_bytes: usize = 0,
+        dirty_free: bool = false,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+        }
+
+        fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const memory = self.backing.rawAlloc(len, alignment, ret) orelse return null;
+            @memset(memory[0..len], 0xa5);
+            self.allocations += 1;
+            self.allocated_bytes += len;
+            return memory;
+        }
+
+        fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!std.mem.allEqual(u8, memory, 0)) self.dirty_free = true;
+            self.frees += 1;
+            self.freed_bytes += memory.len;
+            self.backing.rawFree(memory, alignment, ret);
+        }
+
+        fn expectWiped(self: *const @This()) !void {
+            try std.testing.expectEqual(false, self.dirty_free);
+            try std.testing.expectEqual(self.allocations, self.frees);
+            try std.testing.expectEqual(self.allocated_bytes, self.freed_bytes);
+        }
+
+        fn exercise(gpa: std.mem.Allocator, environment: []const []const u8, fail_after_construction: bool) !void {
+            const endpoint = "https://example.test/v1?token=synthetic-launch-only";
+            const options = [_]LaunchOption{
+                .{ .name = "provider-endpoint", .value = endpoint },
+                .{ .name = "synthetic-flag", .value = null },
+                .{ .name = "synthetic-empty", .value = "" },
+            };
+            var buffers = try PrivateLaunch.init(gpa, "/synthetic/bin/rui", &options, "/synthetic/private-store", 17, environment);
+            defer buffers.deinit(gpa);
+            const expected = [_][]const u8{ "/synthetic/bin/rui", "host", "serve", "--provider-endpoint", endpoint, "--synthetic-flag", "--synthetic-empty", "", "--store", "/synthetic/private-store", "--active-capacity", "17" };
+            try std.testing.expectEqual(expected.len, buffers.argv.len);
+            try std.testing.expectEqual(environment.len, buffers.envp.len);
+            for (expected, buffers.argv) |argument, pointer| {
+                try std.testing.expectEqualStrings(argument, std.mem.span(pointer.?));
+                try std.testing.expect(@intFromPtr(pointer.?) >= @intFromPtr(buffers.storage.ptr));
+                try std.testing.expect(@intFromPtr(pointer.?) + argument.len < @intFromPtr(buffers.storage.ptr) + buffers.storage.len);
+            }
+            for (environment, buffers.envp) |entry, pointer| try std.testing.expectEqualStrings(entry, std.mem.span(pointer.?));
+            try std.testing.expect(buffers.argv[buffers.argv.len] == null);
+            try std.testing.expect(buffers.envp[buffers.envp.len] == null);
+            try std.testing.expectEqual(buffers.argv.len + buffers.envp.len + 2, buffers.pointers.len);
+            try std.testing.expect(std.mem.indexOf(u8, buffers.storage, endpoint) != null);
+            if (environment.len > 0) try std.testing.expect(std.mem.indexOf(u8, buffers.storage, environment[0]) != null);
+            if (fail_after_construction) return error.SyntheticLaunchFailure;
+        }
+    };
+    const environment: []const []const u8 = &.{ "RUI_PRIVATE=synthetic-only", "EMPTY=" };
+    for ([_]bool{ false, true }) |arena_backed| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const backing = if (arena_backed) arena.allocator() else std.testing.allocator;
+        for ([_]bool{ false, true }) |fail_after_construction| {
+            for ([_][]const []const u8{ &.{}, environment }) |entries| {
+                var capture: Capturing = .{ .backing = backing };
+                if (fail_after_construction) {
+                    try std.testing.expectError(error.SyntheticLaunchFailure, Capturing.exercise(capture.allocator(), entries, true));
+                } else {
+                    try Capturing.exercise(capture.allocator(), entries, false);
+                }
+                try std.testing.expectEqual(@as(usize, 2), capture.allocations);
+                try capture.expectWiped();
+            }
+        }
+        var successful: Capturing = .{ .backing = backing };
+        try Capturing.exercise(successful.allocator(), environment, false);
+        try successful.expectWiped();
+        for (0..successful.allocations) |fail_index| {
+            var capture: Capturing = .{ .backing = backing };
+            var failing: std.testing.FailingAllocator = .init(capture.allocator(), .{ .fail_index = fail_index });
+            try std.testing.expectError(error.OutOfMemory, Capturing.exercise(failing.allocator(), environment, false));
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(fail_index, capture.allocations);
+            try capture.expectWiped();
+        }
+    }
 }
 
 test "upgrade launch identity rejects same PID with a replacement generation" {

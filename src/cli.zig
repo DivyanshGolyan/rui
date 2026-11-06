@@ -123,9 +123,9 @@ fn run(init: std.process.Init) !void {
         return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
     }
     if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-facts")) {
-        const schema = @import("store/schema.zig");
+        const schema = @import("store.zig");
         var output: [128]u8 = undefined;
-        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&output, "{{\"schema_version\":{d},\"minimum_schema_version\":{d}}}\n", .{ schema.schema_version, schema.migration_baseline }));
+        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&output, "{{\"schema_version\":{d},\"minimum_schema_version\":{d}}}\n", .{ schema.schema_version, schema.minimum_schema_version }));
     }
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
     if (cli_args.retired(args[1])) |replacement| {

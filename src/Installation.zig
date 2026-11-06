@@ -4,6 +4,8 @@ const releases = @import("release_candidate.zig");
 const process = @import("upgrade_process.zig");
 const Dir = std.Io.Dir;
 const Allocator = std.mem.Allocator;
+const TerminalText = @import("TerminalText.zig");
+const stderr = @import("stderr.zig");
 
 pub const Released = struct { build: []const u8, version: releases.Version };
 pub const Selection = union(enum) {
@@ -43,15 +45,96 @@ pub const InstallationOutcome = union(enum) {
     }
 };
 
+pub const CleanupFailure = struct {
+    primary: ?anyerror,
+    secondary: anyerror,
+    /// Borrowed only until the synchronous reporter returns.
+    retained_path: []const u8,
+};
+
+pub const CleanupReporter = struct {
+    context: ?*anyopaque = null,
+    report: *const fn (?*anyopaque, CleanupFailure) void = diagnosticCleanup,
+
+    fn emit(self: CleanupReporter, failure: CleanupFailure) void {
+        self.report(self.context, failure);
+    }
+};
+
+pub fn writeCleanupFailure(writer: *std.Io.Writer, failure: CleanupFailure) !void {
+    if (failure.primary) |primary| {
+        try writer.print("\nrui: installation failed ({s}); cleanup also failed ({s}). Retained installation files: ", .{ @errorName(primary), @errorName(failure.secondary) });
+    } else {
+        try writer.print("\nrui: installation cleanup failed ({s}). Retained installation files: ", .{@errorName(failure.secondary)});
+    }
+    try TerminalText.writeShellWord(writer, failure.retained_path);
+    try writer.writeAll(". Inspect or remove this path before retrying. Cleanup did not change the selected command.\n");
+}
+
+fn diagnosticCleanup(_: ?*anyopaque, failure: CleanupFailure) void {
+    const Output = struct {
+        fn drain(writer: *std.Io.Writer, parts: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            if (!stderr.writeHeld(writer.buffered())) return error.WriteFailed;
+            writer.end = 0;
+            var count: usize = 0;
+            for (parts[0 .. parts.len - 1]) |part| {
+                if (!stderr.writeHeld(part)) return error.WriteFailed;
+                count += part.len;
+            }
+            for (0..splat) |_| {
+                const part = parts[parts.len - 1];
+                if (!stderr.writeHeld(part)) return error.WriteFailed;
+                count += part.len;
+            }
+            return count;
+        }
+    };
+    if (!stderr.tryAcquire()) return;
+    defer stderr.release();
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .{ .vtable = &.{ .drain = Output.drain }, .buffer = &buffer };
+    writeCleanupFailure(&writer, failure) catch return;
+    writer.flush() catch return;
+}
+
+const CleanupFaults = struct {
+    remove_tree: ?anyerror = null,
+    remove_link: ?anyerror = null,
+};
+
+fn removeTree(io: std.Io, directory: []const u8, faults: CleanupFaults) !void {
+    if (faults.remove_tree) |err| return err;
+    try Dir.cwd().deleteTree(io, directory);
+}
+
+fn removeLink(io: std.Io, prefix: Dir, name: []const u8, faults: CleanupFaults) !void {
+    if (faults.remove_link) |err| return err;
+    try prefix.deleteFile(io, name);
+}
+
 pub const PreparedBuild = struct {
     path: []const u8,
     version: ?releases.Version,
     published: bool = false,
 
     pub fn dispose(self: *PreparedBuild, allocator: Allocator, io: std.Io) !void {
-        if (!self.published) try Dir.cwd().deleteTree(io, self.path);
-        allocator.free(self.path);
-        self.* = undefined;
+        return self.disposeWithReporter(allocator, io, .{});
+    }
+
+    pub fn disposeWithReporter(self: *PreparedBuild, allocator: Allocator, io: std.Io, reporter: CleanupReporter) !void {
+        if (self.disposeResult(allocator, io, null, reporter, .{})) |err| return err;
+    }
+
+    fn disposeResult(self: *PreparedBuild, allocator: Allocator, io: std.Io, primary: ?anyerror, reporter: CleanupReporter, faults: CleanupFaults) ?anyerror {
+        defer {
+            allocator.free(self.path);
+            self.* = undefined;
+        }
+        if (!self.published) removeTree(io, self.path, faults) catch |secondary| {
+            reporter.emit(.{ .primary = primary, .secondary = secondary, .retained_path = self.path });
+            return primary orelse secondary;
+        };
+        return primary;
     }
 };
 
@@ -174,11 +257,18 @@ fn newStage(allocator: Allocator, io: std.Io, home: []const u8) ![]u8 {
 }
 
 pub fn prepare(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation) !PreparedBuild {
+    return prepareWithReporter(allocator, io, home, candidate, cancellation, .{});
+}
+
+pub fn prepareWithReporter(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter) !PreparedBuild {
+    return prepareWithCleanup(allocator, io, home, candidate, cancellation, reporter, .{});
+}
+
+fn prepareWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, faults: CleanupFaults) !PreparedBuild {
     try process.check(cancellation);
     var prepared: PreparedBuild = .{ .path = try newStage(allocator, io, home), .version = candidate.version };
-    prepareInto(allocator, io, &prepared, candidate, cancellation) catch |err| {
-        try prepared.dispose(allocator, io);
-        return err;
+    prepareInto(allocator, io, &prepared, candidate, cancellation) catch |primary| {
+        return prepared.disposeResult(allocator, io, primary, reporter, faults).?;
     };
     return prepared;
 }
@@ -346,6 +436,14 @@ pub fn publishExisting(allocator: Allocator, io: std.Io, home: []const u8, build
 }
 
 pub fn publish(allocator: Allocator, io: std.Io, home: []const u8, prepared: *PreparedBuild, intent: Intent, cancellation: ?*const client.Cancellation) !InstallationOutcome {
+    return publishWithReporter(allocator, io, home, prepared, intent, cancellation, .{});
+}
+
+pub fn publishWithReporter(allocator: Allocator, io: std.Io, home: []const u8, prepared: *PreparedBuild, intent: Intent, cancellation: ?*const client.Cancellation, reporter: CleanupReporter) !InstallationOutcome {
+    return publishWithCleanup(allocator, io, home, prepared, intent, cancellation, reporter, .{});
+}
+
+fn publishWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, prepared: *PreparedBuild, intent: Intent, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, faults: CleanupFaults) !InstallationOutcome {
     try process.check(cancellation);
     const prefix_path = try path(allocator, home, "");
     defer allocator.free(prefix_path);
@@ -395,11 +493,15 @@ pub fn publish(allocator: Allocator, io: std.Io, home: []const u8, prepared: *Pr
     io.random(&random);
     const temporary = try std.fmt.allocPrint(allocator, "bin/.rui-install-{s}", .{std.fmt.bytesToHex(&random, .lower)});
     defer allocator.free(temporary);
+    const temporary_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix_path, temporary });
+    defer allocator.free(temporary_path);
     try process.check(cancellation);
     try prefix.symLink(io, binary, temporary, .{});
-    prefix.rename(temporary, prefix, "bin/rui", io) catch |err| {
-        try prefix.deleteFile(io, temporary);
-        return err;
+    prefix.rename(temporary, prefix, "bin/rui", io) catch |primary| {
+        removeLink(io, prefix, temporary, faults) catch |secondary| {
+            reporter.emit(.{ .primary = primary, .secondary = secondary, .retained_path = temporary_path });
+        };
+        return primary;
     };
     prepared.published = true;
     return .{ .installed = .{ .operation_build = operation, .selected_after = selected } };
@@ -720,4 +822,120 @@ test "installation source marker defeats tagged version and explicit release ins
     defer selected.deinit(allocator);
     try std.testing.expectEqualStrings(release, selected.released.build);
     try std.testing.expectError(error.InvalidReleaseExecutable, publishExisting(allocator, io, home, source, .released_install, null));
+}
+
+const CleanupCapture = struct {
+    allocator: Allocator,
+    io: std.Io,
+    calls: usize = 0,
+    primary: ?anyerror = null,
+    secondary: ?anyerror = null,
+    retained_path: ?[]const u8 = null,
+    existed_during_report: bool = false,
+
+    fn reporter(self: *CleanupCapture) CleanupReporter {
+        return .{ .context = self, .report = capture };
+    }
+
+    fn capture(context: ?*anyopaque, failure: CleanupFailure) void {
+        const self: *CleanupCapture = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        self.primary = failure.primary;
+        self.secondary = failure.secondary;
+        self.retained_path = self.allocator.dupe(u8, failure.retained_path) catch @panic("fixture capture failed");
+        self.existed_during_report = if (Dir.cwd().statFile(self.io, failure.retained_path, .{ .follow_symlinks = false })) |_| true else |_| false;
+    }
+
+    fn deinit(self: *CleanupCapture) void {
+        if (self.retained_path) |retained| self.allocator.free(retained);
+    }
+};
+
+test "installation preparation cleanup failure preserves download cause and retained stage custody" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(home);
+    var captured: CleanupCapture = .{ .allocator = allocator, .io = io };
+    defer captured.deinit();
+    const candidate: releases.ReleaseCandidate = .{ .version = .{ .schema = 56, .patch = 0 }, .tag = "v0.56.0", .archive_name = "rui-0.56.0-darwin-arm64.tar.gz", .archive_url = "http://127.0.0.1:1/archive", .checksum_url = "http://127.0.0.1:1/SHA256SUMS", .sha256 = @splat(0) };
+    try std.testing.expectError(error.UpgradeChildFailed, prepareWithCleanup(allocator, io, home, &candidate, null, captured.reporter(), .{ .remove_tree = error.AccessDenied }));
+    try std.testing.expectEqual(@as(usize, 1), captured.calls);
+    try std.testing.expectEqual(error.UpgradeChildFailed, captured.primary.?);
+    try std.testing.expectEqual(error.AccessDenied, captured.secondary.?);
+    try std.testing.expect(captured.existed_during_report);
+    const retained = captured.retained_path.?;
+    try std.testing.expect(std.mem.startsWith(u8, retained, home));
+    const stat = try Dir.cwd().statFile(io, retained, .{});
+    try std.testing.expectEqual(std.Io.File.Kind.directory, stat.kind);
+    var selected = try inspect(allocator, io, home);
+    defer selected.deinit(allocator);
+    try std.testing.expect(selected == .absent);
+    try Dir.cwd().deleteTree(io, retained);
+}
+
+test "installation preparation cleanup preserves checksum failure and frees its path allocation" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(home);
+    var prepared: PreparedBuild = .{ .path = try newStage(allocator, io, home), .version = .{ .schema = 56, .patch = 0 } };
+    const archive = try std.fmt.allocPrint(allocator, "{s}/archive.tar.gz", .{prepared.path});
+    defer allocator.free(archive);
+    try Dir.cwd().writeFile(io, .{ .sub_path = archive, .data = "checksum mismatch" });
+    const candidate: releases.ReleaseCandidate = .{ .version = .{ .schema = 56, .patch = 0 }, .tag = "v0.56.0", .archive_name = "rui-0.56.0-darwin-arm64.tar.gz", .archive_url = "unused", .checksum_url = "unused", .sha256 = @splat(0) };
+    const primary = if (verifyArchive(allocator, io, &prepared, &candidate, null, archive)) |_| return error.TestExpectedError else |err| err;
+    try std.testing.expectEqual(error.ReleaseChecksumMismatch, primary);
+    var captured: CleanupCapture = .{ .allocator = allocator, .io = io };
+    defer captured.deinit();
+    const failure = prepared.disposeResult(allocator, io, primary, captured.reporter(), .{ .remove_tree = error.AccessDenied });
+    try std.testing.expectEqual(error.ReleaseChecksumMismatch, failure.?);
+    try std.testing.expectEqual(error.ReleaseChecksumMismatch, captured.primary.?);
+    try std.testing.expectEqual(error.AccessDenied, captured.secondary.?);
+    try std.testing.expect(captured.existed_during_report);
+    try Dir.cwd().deleteTree(io, captured.retained_path.?);
+}
+
+test "installation publication cleanup failure preserves rename cause and retained link custody" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(home);
+    const build = try testBuild(allocator, io, home, "candidate", "0.56.0");
+    var prepared: PreparedBuild = .{ .path = build, .version = .{ .schema = 56, .patch = 0 } };
+    defer prepared.dispose(allocator, io) catch @panic("fixture cleanup failed");
+    try temporary.dir.createDirPath(io, ".local/bin/rui");
+    var captured: CleanupCapture = .{ .allocator = allocator, .io = io };
+    defer captured.deinit();
+    try std.testing.expectError(error.IsDir, publishWithCleanup(allocator, io, home, &prepared, .intentional_source, null, captured.reporter(), .{ .remove_link = error.AccessDenied }));
+    try std.testing.expectEqual(@as(usize, 1), captured.calls);
+    try std.testing.expectEqual(error.IsDir, captured.primary.?);
+    try std.testing.expectEqual(error.AccessDenied, captured.secondary.?);
+    try std.testing.expect(captured.existed_during_report);
+    try std.testing.expect(!prepared.published);
+    const retained = captured.retained_path.?;
+    try std.testing.expect(std.fs.path.isAbsolute(retained));
+    try std.testing.expect(std.mem.startsWith(u8, retained, home));
+    const link = try Dir.cwd().statFile(io, retained, .{ .follow_symlinks = false });
+    try std.testing.expectEqual(std.Io.File.Kind.sym_link, link.kind);
+    const selected = try temporary.dir.statFile(io, ".local/bin/rui", .{});
+    try std.testing.expectEqual(std.Io.File.Kind.directory, selected.kind);
+    try Dir.cwd().deleteFile(io, retained);
+}
+
+test "installation cleanup report renders both causes and an escaped actionable retained path" {
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try writeCleanupFailure(&output.writer, .{ .primary = error.ReleaseChecksumMismatch, .secondary = error.AccessDenied, .retained_path = "/home/quoted '\x1b[31m/stage" });
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "ReleaseChecksumMismatch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "AccessDenied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "Retained installation files: $") != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, output.written(), 0x1b) == null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\\033") != null);
 }

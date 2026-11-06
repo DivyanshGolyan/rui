@@ -61,12 +61,42 @@ pub fn run(init: std.process.Init, store: []const u8, terminal: *SessionTerminal
     const restored: anyerror!void = if (std.meta.isError(driven)) terminal.finish() else {};
     self.task.cancel();
     const joined = self.task.join();
-    joined catch |err| {
-        if (std.meta.isError(driven)) stderr.diagnostic("rui: Upgrade worker ended with {s}; installation and activation may require inspection.\n", .{@errorName(err)}) else return err;
+    var report: std.Io.Writer.Allocating = .init(allocator);
+    defer report.deinit();
+    const finalized = self.finalize(restored, driven, joined, &report.writer);
+    if (report.written().len != 0) stderr.diagnosticBytes(report.written());
+    if (finalized.report_failure) |err| stderr.diagnostic("rui: Upgrade exit receipt could not be completely rendered ({s}).\n", .{@errorName(err)});
+    return finalized.outcome;
+}
+
+const Finalization = struct {
+    outcome: anyerror!Outcome,
+    report_failure: ?anyerror,
+};
+
+fn finalize(self: *const Self, restored: anyerror!void, driven: anyerror!void, joined: anyerror!void, writer: *std.Io.Writer) Finalization {
+    std.debug.assert(self.task.thread == null);
+    const outcome: anyerror!Outcome = ended: {
+        driven catch |err| break :ended err;
+        restored catch |err| break :ended err;
+        joined catch |err| break :ended err;
+        break :ended self.outcome;
     };
-    try restored;
-    try driven;
-    return self.outcome;
+    const reported: anyerror!void = if (std.meta.isError(outcome)) self.writeExitReport(restored, joined, writer) else {};
+    return .{ .outcome = outcome, .report_failure = if (reported) |_| null else |err| err };
+}
+
+fn writeExitReport(self: *const Self, restored: anyerror!void, joined: anyerror!void, writer: *std.Io.Writer) !void {
+    if (self.result) |*result| {
+        try writer.writeAll("\n");
+        try upgrade.writeResult(writer, result);
+    }
+    restored catch |err| try writer.print("\nrui: Upgrade terminal restoration failed ({s}).\n", .{@errorName(err)});
+    const worker_error: ?anyerror = if (joined) |_| self.failure else |err| err;
+    if (worker_error) |err| {
+        try writer.print("\nrui: Upgrade worker ended with {s}.\n", .{@errorName(err)});
+        if (self.result == null and self.operation == .install) try writer.writeAll("No completed installation receipt is available; inspect the selected installation and Host.\n");
+    }
 }
 
 fn dispose(self: *Self) void {
@@ -406,4 +436,46 @@ test "upgrade panel accepts CR LF and exact Kitty ctrl-J through the terminal de
             try std.testing.expect(!self.offered);
         }
     }
+}
+
+const test_installed_result: upgrade.Result = .{
+    .installation = .{ .installed = .{ .operation_build = "/synthetic/installed", .selected_after = "/synthetic/installed" } },
+    .activation = .cancelled,
+    .store = "/synthetic/store",
+};
+
+test "upgrade panel failing exits report the actual joined installation receipt and preserve the primary failure" {
+    const Case = struct { restored: anyerror!void = {}, driven: anyerror!void, joined: anyerror!void = {}, failure: anyerror };
+    const cases = [_]Case{
+        .{ .driven = error.TerminalCleanupFailed, .failure = error.TerminalCleanupFailed },
+        .{ .driven = error.InteractiveInterrupted, .failure = error.InteractiveInterrupted },
+        .{ .restored = error.TerminalRestoreFailed, .driven = error.InteractiveInterrupted, .joined = error.Cancelled, .failure = error.InteractiveInterrupted },
+    };
+    const expected =
+        "\nInstalled Rui. Complete build: /synthetic/installed\n" ++
+        "Activation: cancelled after installation; publication was not rolled back.\n" ++
+        "Store: /synthetic/store\n" ++
+        "Next: inspect rui host status --store $'/synthetic/store'. Do not restore/reset the Store or replay uncertain requests.\n";
+    for (cases) |case| {
+        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = test_installed_result };
+        var bytes: [2048]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        const finalized = self.finalize(case.restored, case.driven, case.joined, &writer);
+        try std.testing.expectError(case.failure, finalized.outcome);
+        try std.testing.expect(finalized.report_failure == null);
+        if (std.meta.isError(case.joined)) {
+            try std.testing.expectEqualStrings(expected ++ "\nrui: Upgrade terminal restoration failed (TerminalRestoreFailed).\n\nrui: Upgrade worker ended with Cancelled.\n", writer.buffered());
+        } else try std.testing.expectEqualStrings(expected, writer.buffered());
+        try std.testing.expect(self.result != null);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "No completed installation receipt") == null);
+    }
+}
+
+test "upgrade panel receipt rendering failure never replaces the primary terminal failure" {
+    const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = test_installed_result };
+    var writer = std.Io.Writer.fixed(&.{});
+    const finalized = self.finalize({}, error.TerminalCleanupFailed, {}, &writer);
+    try std.testing.expectError(error.TerminalCleanupFailed, finalized.outcome);
+    try std.testing.expectEqual(error.WriteFailed, finalized.report_failure.?);
+    try std.testing.expect(self.result != null);
 }

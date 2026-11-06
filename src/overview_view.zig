@@ -7384,9 +7384,9 @@ test "upgrade emits only its local effect and preserves selection settings and u
     const draft = try typeText(&state, "/upgrade");
     try expectEffects(&.{.upgrade}, try submit(&state, draft));
     try std.testing.expectEqual(selected, state.selected);
-    try std.testing.expectEqualDeep(settings, state.settings);
+    try std.testing.expect(std.meta.eql(settings, state.settings));
     try std.testing.expectEqual(@as(usize, 1), state.request_count);
-    try std.testing.expectEqualDeep(request, state.requests[0]);
+    try std.testing.expect(std.meta.eql(request, state.requests[0]));
     try std.testing.expectEqualStrings("/upgrade", draft.bytes);
     try std.testing.expect(state.command == null);
 }

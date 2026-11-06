@@ -701,6 +701,69 @@ def signal_during_check(root, binary, releases, artifacts):
 
 
 
+def signal_after_publication(root, binary, releases, artifacts):
+    with case(root, binary, releases, "terminal-signal-after-publication") as c:
+        c.old_selection()
+        host, previous = c.start_host()
+        session, credential = terminal_setup(c)
+        gate = c.root / "after-publication.gate"
+        gate.touch()
+        c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
+        args = [str(binary), "session", "resume", "--store", str(c.store), "--", session]
+        with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
+            screen = TerminalScreen(master, process)
+            screen.contains("›")
+            screen.send("/upgrade\r")
+            screen.contains("enter Install")
+            screen.send("\r")
+            screen.until(lambda: c.link.resolve() != c.original, "publication before SIGINT")
+            installed = c.link.resolve()
+            assert installed.exists() and gate.exists()
+            assert host.poll() is None and c.status()["instance"] == previous["instance"]
+            process.send_signal(signal.SIGINT)
+
+            def exited():
+                screen.read_output()
+                return process.poll() is not None
+
+            wait_for(exited, "joined publication receipt and terminal exit after SIGINT")
+            output = bytes(screen.tail)
+            restored = output.rfind(b"\x1b[?1049l")
+            receipt = output.find(b"Installed Rui. Complete build:")
+            assert restored >= 0, "SIGINT after publication did not restore the terminal"
+            assert receipt > restored, ("joined installation receipt was lost after interruption", output.decode())
+            assert b"cancelled after installation; publication was not rolled back" in output, output.decode()
+            assert os.fsencode(installed.parent.parent) in output, "receipt lost the published build identity"
+            assert gate.exists(), "signal exit required releasing the post-publication gate"
+            assert c.link.resolve() == installed and installed.exists(), "signal rolled back publication"
+            assert host.poll() is None and c.status()["instance"] == previous["instance"]
+            assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+            if artifacts is not None:
+                (artifacts / "signal-after-publication.txt").write_text(screen.capture.plain)
+
+
+
+def stop_tmux(base, env, server_pid):
+    """Retire this fixture's observed server; unsuccessful kills are not success."""
+    result = subprocess.run([*base, "kill-server"], env=env, capture_output=True,
+                            text=True, timeout=5)
+    assert server_pid is not None, ("tmux server identity was not observed; disposal unconfirmed", result)
+
+    def retired():
+        observed = subprocess.run(["ps", "-p", str(server_pid), "-o", "stat="],
+                                  env=env, capture_output=True, text=True, timeout=5)
+        if observed.returncode == 1 and not observed.stdout and not observed.stderr:
+            return True  # The independently observed server PID is absent.
+        assert observed.returncode == 0 and observed.stdout.strip(), ("tmux server census failed", observed)
+        # An exited orphan may await its OS reaper but owns no live resources.
+        return observed.stdout.strip().startswith("Z")
+
+    if result.returncode != 0:
+        assert retired(), ("tmux kill-server failed with a live server", result)
+    else:
+        wait_for(retired, "exact tmux server retirement")
+
+
 def tmux_cases(root, binary, releases, artifacts):
     """Real tmux cells supplement, rather than replace, PTY process evidence."""
     tmux = shutil.which("tmux")
@@ -716,11 +779,10 @@ def tmux_cases(root, binary, releases, artifacts):
             socket_path = root / "tmux.sock"
             base = [tmux, "-S", str(socket_path), "-f", "/dev/null"]
 
-            def command(*args, check=True):
+            def command(*args):
                 result = subprocess.run([*base, *args], env=c.env, capture_output=True,
                                         text=True, timeout=5)
-                if check:
-                    assert result.returncode == 0, (args, result.stdout, result.stderr)
+                assert result.returncode == 0, (args, result.stdout, result.stderr)
                 return result.stdout
 
             def capture():
@@ -736,9 +798,12 @@ def tmux_cases(root, binary, releases, artifacts):
 
             args = ([str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-luna"]
                     if entry == "overview" else [str(binary), "session", "resume", "--store", str(c.store), "--", session])
+            server_pid = None
             try:
                 command("new-session", "-d", "-x", str(COLUMNS), "-y", str(ROWS),
                         "-s", "upgrade", "-c", str(c.root), "exec " + shlex.join(args))
+                server_pid = int(command("display-message", "-p", "#{pid}").strip())
+                assert server_pid > 0
                 reached("›")
                 command("send-keys", "-t", "upgrade:0.0", "-l", "/upgrade")
                 command("send-keys", "-t", "upgrade:0.0", "Enter")
@@ -757,7 +822,7 @@ def tmux_cases(root, binary, releases, artifacts):
                 save("returned", reached("unsent tmux draft"))
                 assert (c.home / ".config/rui/codex.json").read_bytes() == credential
             finally:
-                dispose_all(lambda: command("kill-server", check=False))
+                dispose_all(lambda: stop_tmux(base, c.env, server_pid))
             assert c.json("session", "inspect", "--store", c.store, "--session", session)["session"] == before["session"]
             assert {p.name: p.read_bytes() for p in request_directory.glob("*.json")} == captures
 
@@ -790,6 +855,8 @@ def main():
         print("upgrade native: both terminal /upgrade entry points passed", flush=True)
         cancel_after_publication(root, binary, releases, artifacts)
         print("upgrade native: cancellation after publication preserved installation and Host", flush=True)
+        signal_after_publication(root, binary, releases, artifacts)
+        print("upgrade native: SIGINT after publication preserved and reported the installed receipt", flush=True)
         signal_during_check(root, binary, releases, artifacts)
         print("upgrade native: terminal signal restored during held release check", flush=True)
         tmux_cases(root, binary, releases, artifacts)

@@ -29,7 +29,7 @@ UPGRADE_PATHS = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEd
                  "src/host_identity.c", "src/UpgradePanel.zig", "src/host_launch.c",
                  "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/slash_commands.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
-                 "tests/integration/upgrade_integration.py", "release/*", "install.sh", "build.zig")
+                 "tests/integration/upgrade_integration.py", "tests/ci/test_upgrade_fixture.py", "release/*", "install.sh", "build.zig")
 
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
