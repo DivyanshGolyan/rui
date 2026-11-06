@@ -2150,7 +2150,6 @@ The shell asks the terminal for its background with OSC 11, followed by DA1 so t
 The core chooses night unless the answer is light.
 Each frame clears every line to the skin's ground, draws its spans in 24-bit colour under `COLORTERM=truecolor` or `24bit` and in the nearest 256-colour entries otherwise, and ends in an SGR reset, so no exit path has colours to restore.
 `NO_COLOR` frames carry no colour at all: the band and the selection are reverse video.
-The shell feeds each keypress's time as an event; the core keeps it with the Host restarts seen since, and the "Since you looked" line is derived from them and the rows.
 
 Typing in the overview's composer and pressing Enter starts a new Session with that text as its first Message, through one captured `session start` command: atomic configuration plus Message admission with the full Workspace, exact provider/model, Bash and `bypass` unless the composer's `/configure` start settings select otherwise.
 The Store returns the allocated ID, and the overview opens that Session.
