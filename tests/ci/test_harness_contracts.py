@@ -606,6 +606,7 @@ class FixtureEntryTest(unittest.TestCase):
             self.assertNotIn("PYTHONPATH", child)
             self.assertEqual({name: child.get(name) for name in named}, named)
             self.assertEqual(child["TERM"], "xterm-256color")
+            self.assertEqual(child["RUI_TEST_MODELS_DEV_URL"], "")
 
     def test_exec_entry_runs_its_command_only_inside_the_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -615,7 +616,7 @@ class FixtureEntryTest(unittest.TestCase):
                        "import json, os, sys; open(sys.argv[1], 'w').write(json.dumps(dict(os.environ)))",
                        str(ran)]
             caller = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "RUI_STORE": "inherited",
-                      "GOFLAGS": "-mod=mod"}
+                      "GOFLAGS": "-mod=mod", "RUI_TEST_MODELS_DEV_URL": "https://models.dev/api.json"}
             refused = subprocess.run(command, env={**caller, "PYTHONPATH": self.simulated_user(directory, 0)},
                                      capture_output=True, text=True, timeout=30)
             self.assertNotEqual(refused.returncode, 0)
@@ -625,7 +626,7 @@ class FixtureEntryTest(unittest.TestCase):
                                       capture_output=True, text=True, timeout=30)
             self.assertEqual(admitted.returncode, 0, admitted.stderr)
             self.assertEqual(json.loads(ran.read_text()),
-                             {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "TERM": "xterm-256color"})
+                             {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "TERM": "xterm-256color", "RUI_TEST_MODELS_DEV_URL": ""})
 
     def test_go_measurements_run_through_the_exec_entry(self):
         build = (ROOT / "build.zig").read_text()

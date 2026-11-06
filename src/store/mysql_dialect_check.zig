@@ -489,7 +489,11 @@ test "schema 53 migrates recovery index and wire 8 together to schema 54 wire 9 
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
     try std.testing.expectEqualStrings("\n 1:9", result.written());
-    // The complete catalog includes the recovery index and its generated lead.
+    // Check wire 9 at step 54 before taking the catalog step to the current
+    // format. The complete catalog includes recovery and model facts.
+    inline for (schema.migrations) |step| {
+        if (step.from >= 54) try load(migrated_database, schema.mysqlMigration(step.from), false);
+    }
     try expectCatalog(migrated_database);
     done.migrations += 1;
     writeRecord();

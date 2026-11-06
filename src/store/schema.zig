@@ -16,12 +16,11 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 54;
-/// `digest()` of each schema_version, oldest first. A change to what
-/// `bootstrap` executes changes the last row's digest: in place while that
-/// version is unreleased, so concurrent PRs share it, and as a new row and
-/// schema_version once it has shipped. tests/ci/test_store_schema_version.py
-/// refuses an edited released row and a second unreleased number.
+pub const schema_version: u32 = 55;
+/// `digest()` of each schema_version, oldest first. Each format PR appends
+/// its own version and forward step (D226); main's digests and steps are
+/// immutable even before release. tests/ci/test_store_schema_version.py
+/// checks both main's prefix and every released format.
 pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 45, .digest = 0xcc384bb0b78d3949 },
     .{ .schema_version = 46, .digest = 0xf3129842e4a7d447 },
@@ -32,7 +31,9 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
+    // PR #995 merge: unreleased 54 includes recovery/wire 9; 55 adds C2a.
     .{ .schema_version = 54, .digest = 0x1093a2102a263fe3 },
+    .{ .schema_version = 55, .digest = 0xf898158fb670be9e },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -44,7 +45,7 @@ comptime {
         .{ schema_version, digest() },
     ));
     if (current.digest != digest()) @compileError(std.fmt.comptimePrint(
-        "the Store's bootstrap changed: set the last row's digest to 0x{x:0>16} if schema_version is unreleased, else bump it and append a row",
+        "the Store's bootstrap changed: the new format's digest is 0x{x:0>16}; append a version and step instead of changing main's rows (D226)",
         .{digest()},
     ));
 }
@@ -197,6 +198,19 @@ pub const migrations = [_]Migration{
             "CREATE INDEX session_forward_feed ON session_forward(target_ref,position)",
             "ALTER TABLE action_operation ADD COLUMN action_operation_indeterminate_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN resolution_code='indeterminate' THEN session_ref END) STORED, ADD INDEX action_operation_indeterminate(action_operation_indeterminate_lead,parent_operation_id,call_ordinal)",
             "UPDATE store_meta SET meta_value='9' WHERE meta_key='wire_version' AND meta_value='8'",
+        },
+    },
+    // Schema 55 (C2a, D226): saved model facts and their publication source.
+    // Both tables start empty until the first successful catalog refresh.
+    .{
+        .from = 54,
+        .sqlite = &.{
+            "CREATE TABLE model_fact(\n model_id TEXT PRIMARY KEY NOT NULL CHECK(length(CAST(model_id AS BLOB)) BETWEEN 1 AND 256),\n context_window INTEGER,\n efforts INTEGER NOT NULL CHECK(efforts BETWEEN 0 AND 63),\n openai_listed INTEGER NOT NULL CHECK(openai_listed IN (0,1)),\n generation INTEGER NOT NULL\n) STRICT",
+            "CREATE TABLE model_catalog_source(\n slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1),\n etag TEXT CHECK(etag IS NULL OR length(CAST(etag AS BLOB))<=512),\n generation INTEGER NOT NULL,\n fetched_at INTEGER NOT NULL\n) STRICT",
+        },
+        .mysql = &.{
+            "CREATE TABLE model_fact(\n model_id VARCHAR(256) NOT NULL,\n context_window BIGINT,\n efforts BIGINT NOT NULL,\n openai_listed TINYINT NOT NULL,\n generation BIGINT NOT NULL,\n PRIMARY KEY(model_id),\n CHECK(OCTET_LENGTH(model_id) BETWEEN 1 AND 256),\n CHECK(efforts BETWEEN 0 AND 63),\n CHECK(openai_listed IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE model_catalog_source(\n slot BIGINT NOT NULL,\n etag TEXT,\n generation BIGINT NOT NULL,\n fetched_at BIGINT NOT NULL,\n PRIMARY KEY(slot),\n CHECK(slot=1),\n CHECK(etag IS NULL OR OCTET_LENGTH(etag)<=512)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
         },
     },
 };
@@ -496,6 +510,28 @@ pub const tables = [_]Table{
         .foreign_keys = &.{
             references("tool_set_id", "tool_set", &.{"tool_set_id"}),
         },
+    },
+    // models.dev facts are published with their source generation atomically.
+    .{
+        .name = "model_fact",
+        .columns = &.{
+            .{ .name = "model_id", .type = .{ .text = .{ .min = 1, .max = 256 } } },
+            .{ .name = "context_window", .type = .int, .nullable = true },
+            .{ .name = "efforts", .type = .int, .check = "efforts BETWEEN 0 AND 63" },
+            .{ .name = "openai_listed", .type = .flag },
+            .{ .name = "generation", .type = .int },
+        },
+        .primary_key = &.{"model_id"},
+    },
+    .{
+        .name = "model_catalog_source",
+        .columns = &.{
+            .{ .name = "slot", .type = .int, .check = "slot=1" },
+            .{ .name = "etag", .type = .{ .text = .{ .min = 0, .max = 512 } }, .nullable = true },
+            .{ .name = "generation", .type = .int },
+            .{ .name = "fetched_at", .type = .int },
+        },
+        .primary_key = &.{"slot"},
     },
     .{
         .name = "session",
@@ -1106,9 +1142,16 @@ pub const indexes = [_]Index{
 /// unknown target is recorded with its rejection). The tests' touch oracle
 /// watches exactly these tables.
 pub fn carriesSessions(comptime table: []const u8) bool {
-    @setEvalBranchQuota(2000);
-    return tableCarriesSessions(tables[tablePosition(&tables, table)]);
+    return comptime session_ownership.get(table) orelse @compileError("schema: no table named " ++ table);
 }
+
+// Compute once, rather than rescanning every table for every touch-oracle
+// assertion as the schema grows. This map is used only at comptime.
+const session_ownership = std.StaticStringMap(bool).initComptime(blk: {
+    var entries: [tables.len]struct { []const u8, bool } = undefined;
+    for (tables, &entries) |table, *entry| entry.* = .{ table.name, tableCarriesSessions(table) };
+    break :blk entries;
+});
 
 /// The columns that name a Session, in the order `sessionColumns` lists them.
 pub const session_column_names = [_][]const u8{ "session_ref", "sender_session_ref" };

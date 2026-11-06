@@ -15,6 +15,8 @@ const store_schema = @import("store/schema.zig");
 const store_testing = @import("store/testing.zig");
 const store_test_fixtures = @import("store/tests.zig");
 
+pub const ModelFact = @import("store/domain/model_facts.zig").Fact;
+pub const ModelCatalogSource = @import("store/domain/model_facts.zig").Source;
 pub const Store = store_core.Store;
 pub const MysqlStartError = @import("store/engine/mysql_refusal.zig").StartError;
 

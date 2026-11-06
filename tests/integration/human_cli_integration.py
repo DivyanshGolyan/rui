@@ -350,7 +350,7 @@ def compiled_model_cases():
     import host_launch_integration as launch
     # The generated shipped snapshot is the source, not a second hand list.
     snapshot = (fixture.ROOT / "src/model_catalog_snapshot.zig").read_text()
-    facts = re.findall(r'\.id = "([^"\n]+)"[^\n]*\.context_window = (null|\d+)[^\n]*\.openai = true', snapshot)
+    facts = re.findall(r'\.id = "([^"\n]+)"[^\n]*\.context_window = (null|\d+)[^\n]*\.openai_listed = true', snapshot)
     models = tuple(model for model, _ in facts)
     windows = {model: None if window == "null" else int(window) for model, window in facts}
     assert models and "gpt-6.1-sol" in models

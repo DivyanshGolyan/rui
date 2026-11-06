@@ -32,7 +32,7 @@ pub const ids_without_max_effort = blk: {
     @setEvalBranchQuota(20000);
     var text: []const u8 = "";
     for (catalog.shipped) |row| {
-        if (row.openai and !row.efforts.contains(.max)) text = text ++ (if (text.len == 0) "" else ", ") ++ row.id;
+        if (row.openai_listed and !row.efforts.contains(.max)) text = text ++ (if (text.len == 0) "" else ", ") ++ row.id;
     }
     break :blk text;
 };
@@ -132,7 +132,7 @@ test "model help lists only OpenAI catalog ids in catalog order" {
     try help.writer.writeAll("Supported model IDs: ");
     var count: usize = 0;
     var without_max: usize = 0;
-    for (catalog.shipped) |row| if (row.openai) {
+    for (catalog.shipped) |row| if (row.openai_listed) {
         try help.writer.print("{s}{s}", .{ if (count == 0) "" else ", ", row.id });
         try std.testing.expectEqualStrings(row.id, catalog.openai_ids[count]);
         count += 1;
