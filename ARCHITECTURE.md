@@ -2201,7 +2201,6 @@ The shell asks the terminal for its background with OSC 11, followed by DA1 so t
 The core chooses night unless the answer is light.
 Each frame clears every line to the skin's ground, draws its spans in 24-bit colour under `COLORTERM=truecolor` or `24bit` and in the nearest 256-colour entries otherwise, and ends in an SGR reset, so no exit path has colours to restore.
 `NO_COLOR` frames carry no colour at all: the band and the selection are reverse video.
-The shell feeds each keypress's time as an event; the core keeps it with the Host restarts seen since, and the "Since you looked" line is derived from them and the rows.
 
 Typing in the overview's composer and pressing Enter starts a new Session with that text as its first Message, through one captured `session start` command: atomic configuration plus Message admission with the full Workspace, exact provider/model, Bash and `bypass` unless the composer's `/configure` start settings select otherwise.
 The Store returns the allocated ID, and the overview opens that Session.
@@ -2862,8 +2861,11 @@ Content cannot select a style, and all escaping, exact permission text and termi
 Historical applied Admissions are suppressed in favor of their User rows; live Admissions display once and their later User projections are suppressed.
 Successful outcome aggregates do not repeat assistant rows.
 Assistant opening, live, history and human keyed-result text use `AnswerRenderer`; User, Tool Result and inspection fields use terminal escaping without Markdown interpretation.
-`AnswerRenderer` shows a Markdown link to an `http` or `https` address as its underlined text and a bare address as itself, each an OSC 8 hyperlink, so the terminal opens it on click and the address is not laid out (Divyansh asked for this on 2026-11-02).
-Other link targets, links inside code or emphasis, Markdown link titles and addresses longer than 2,048 bytes stay literal, and `/copy` still sends the Markdown with every address.
+`AnswerRenderer` shows a Markdown link to an `http` or `https` address as its underlined text and a bare web address or local path as itself, each an OSC 8 hyperlink, so the terminal opens it on click and the address is not laid out (Divyansh asked for web links on 2026-11-02 and local paths without sentence semicolons on 2026-11-06).
+Bare local paths start at a prose-token boundary with a single `/` or `~/` and a nonempty path payload; only `~/` needs the process's explicitly borrowed, valid absolute HOME, and neither form resolves the filesystem or interprets line or column suffixes.
+Local links percent-encode the expanded path's bytes into a `file:///` URI, preserving only slashes and URI-unreserved ASCII; malformed UTF-8, controls or bidi controls leave the candidate literal.
+Bare links omit trailing sentence punctuation, including `;` and unmatched final `)`, from the clickable span without changing the visible text or internal punctuation; local filenames also keep trailing `_`, `~` and `*`.
+Other link targets (including Markdown file targets), links inside code or emphasis, Markdown link titles and complete addresses longer than 2,048 bytes after local expansion and encoding stay literal, and `/copy` still sends the original Markdown with every address.
 The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
 A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.
 Normal tool presentation shows the canonical outcome header, omitting routine zero exit codes and stdout/stderr tails.

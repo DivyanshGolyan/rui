@@ -15,12 +15,15 @@ const Style = packed struct {
 const InlineKind = enum { none, emphasis, strong, code };
 const InlineRetention = enum { candidate, literal };
 /// A link waiting for its last byte. `[text](address)` shows its text and
-/// a bare `http://` or `https://` address shows itself, both as OSC 8 links.
+/// a bare web address or local path shows itself, each as an OSC 8 link.
 /// A candidate never crosses a line, so it shares `held` with fences, which
 /// begin and end only at line starts.
-const Link = enum { none, text, text_closed, target, bare };
+const Link = enum { none, text, text_closed, target, bare, local, local_literal };
+const Boundary = enum { word, prose, other };
 
 out: *std.Io.Writer,
+/// Borrowed process HOME; only a valid absolute path enables `~/` links.
+home: []const u8 = "",
 prefix: [prefix_limit]u8 = undefined,
 prefix_len: usize = 0,
 span: [span_limit]u8 = undefined,
@@ -50,8 +53,7 @@ link_text_end: usize = 0,
 link_escape: bool = false,
 /// The link text is being shown: no link starts inside it.
 in_link: bool = false,
-/// The previous prose byte continues a word, so `h` there starts no address.
-after_word: bool = false,
+boundary: Boundary = .prose,
 fence_len: usize = 0,
 fence_body_start: usize = 0,
 fence_line_start: usize = 0,
@@ -85,7 +87,7 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
         }
         if (byte == '\n') {
             try self.endLink();
-            self.after_word = false;
+            self.boundary = .prose;
             try self.flushSpan();
             self.escape_next = false;
             self.literal_run = null;
@@ -301,10 +303,14 @@ fn proseSlice(self: *Renderer, bytes: []const u8) !void {
 }
 
 fn prose(self: *Renderer, byte: u8) (std.Io.Writer.Error || error{NoSpaceLeft})!void {
+    return self.proseWithLocal(byte, true);
+}
+
+fn proseWithLocal(self: *Renderer, byte: u8, local: bool) (std.Io.Writer.Error || error{NoSpaceLeft})!void {
     if (self.literal_line) return self.safe(byte);
     if (self.link != .none) return self.linkByte(byte);
-    const after_word = self.after_word;
-    self.after_word = std.ascii.isAlphanumeric(byte) or byte >= 0x80;
+    const before = self.boundary;
+    self.boundary = boundaryAfter(byte);
     if (self.code_closer and byte != '`') try self.renderInline();
     if (self.star_run != 0 and byte != '*') {
         // Lookahead belongs to the following recognizer, not the closer.
@@ -329,8 +335,10 @@ fn prose(self: *Renderer, byte: u8) (std.Io.Writer.Error || error{NoSpaceLeft})!
             self.span_len = 0;
             self.inline_count = 0;
             try self.retainInline(byte);
-        } else if (!self.in_link and (byte == '[' or (!after_word and (byte == 'h' or byte == 'H')))) {
-            self.link = if (byte == '[') .text else .bare;
+        } else if (!self.in_link and (byte == '[' or (before != .word and (byte == 'h' or byte == 'H')) or
+            (local and before == .prose and (byte == '/' or byte == '~'))))
+        {
+            self.link = if (byte == '[') .text else if (byte == '/' or byte == '~') .local else .bare;
             self.held[0] = byte;
             self.link_len = 1;
             self.link_depth = 0;
@@ -477,6 +485,27 @@ fn linkByte(self: *Renderer, byte: u8) !void {
                 return self.prose(byte);
             } else if (self.link_len == TerminalText.max_link_bytes) return self.dropLink(byte);
         },
+        .local => {
+            if (localEnds(byte)) {
+                try self.showLocal();
+                return self.prose(byte);
+            }
+            if ((self.link_len == 1 and ((self.held[0] == '~' and byte != '/') or
+                (self.held[0] == '/' and byte == '/'))) or self.link_len == TerminalText.max_link_bytes)
+            {
+                try self.literalLocal();
+                self.link = .local_literal;
+                return self.safe(byte);
+            }
+        },
+        .local_literal => {
+            if (localEnds(byte)) {
+                self.link = .none;
+                self.boundary = .other;
+                return self.prose(byte);
+            }
+            return self.safe(byte);
+        },
         .text => if (self.link_escape) {
             self.link_escape = false;
         } else switch (byte) {
@@ -514,7 +543,12 @@ fn linkByte(self: *Renderer, byte: u8) !void {
 fn endLink(self: *Renderer) !void {
     // Dropped text can hold a bare address, which ends here too.
     while (self.link != .none) {
-        if (self.link == .bare) try self.showBare() else try self.dropHeld();
+        switch (self.link) {
+            .bare => try self.showBare(),
+            .local => try self.showLocal(),
+            .local_literal => self.link = .none,
+            else => try self.dropHeld(),
+        }
     }
 }
 
@@ -532,27 +566,17 @@ fn dropHeld(self: *Renderer) !void {
     self.link = .none;
     self.link_len = 0;
     try self.safe(self.held[0]);
-    self.after_word = std.ascii.isAlphanumeric(self.held[0]);
+    self.boundary = boundaryAfter(self.held[0]);
     for (1..length) |index| {
         const byte = self.held[index];
-        try self.prose(byte);
+        try self.proseWithLocal(byte, false);
     }
 }
 
 /// A bare address ends before trailing punctuation, which reads as the
 /// sentence's, and before a `)` it did not open.
 fn showBare(self: *Renderer) !void {
-    var end = self.link_len;
-    // Unopened `)`s: a trimmed `)` closes one fewer, a trimmed `(` one more.
-    var unopened = @as(isize, @intCast(std.mem.count(u8, self.held[0..end], ")"))) - @as(isize, @intCast(std.mem.count(u8, self.held[0..end], "(")));
-    while (end > "http://".len) : (end -= 1) {
-        const last = self.held[end - 1];
-        if (last == ')' and unopened > 0) {
-            unopened -= 1;
-            continue;
-        }
-        if (std.mem.indexOfScalar(u8, ".,:;!?'\"*_~]", last) == null) break;
-    }
+    const end = trimmedEnd(self.held[0..self.link_len], "http://".len, ".,:;!?'\"*_~]");
     const address = self.held[0..end];
     if (!TerminalText.linkTarget(address)) return self.dropHeld();
     const length = self.link_len;
@@ -562,6 +586,97 @@ fn showBare(self: *Renderer) !void {
     try self.safeSlice(address);
     try self.closeLink();
     for (self.held[end..length]) |byte| try self.prose(byte);
+}
+
+fn trimmedEnd(bytes: []const u8, minimum: usize, punctuation: []const u8) usize {
+    var end = bytes.len;
+    // Unopened `)`s: a trimmed `)` closes one fewer, a trimmed `(` one more.
+    var unopened = @as(isize, @intCast(std.mem.count(u8, bytes, ")"))) - @as(isize, @intCast(std.mem.count(u8, bytes, "(")));
+    while (end > minimum) : (end -= 1) {
+        const last = bytes[end - 1];
+        if (last == ')' and unopened > 0) {
+            unopened -= 1;
+            continue;
+        }
+        if (std.mem.indexOfScalar(u8, punctuation, last) == null) break;
+    }
+    return end;
+}
+
+fn literalLocal(self: *Renderer) !void {
+    const length = self.link_len;
+    self.link = .none;
+    self.link_len = 0;
+    try self.safeSlice(self.held[0..length]);
+    self.boundary = boundaryAfter(self.held[length - 1]);
+}
+
+fn showLocal(self: *Renderer) !void {
+    const length = self.link_len;
+    const end = trimmedEnd(self.held[0..length], 1, ".,:;!?'\"]");
+    const path = self.held[0..end];
+    const tilde = path[0] == '~';
+    if (path.len <= @as(usize, if (tilde) 2 else 1)) return self.literalLocal();
+    if (!validPath(path, tilde)) return self.literalLocal();
+    var home = if (tilde) self.home else "";
+    if (tilde and !validPath(home, false)) return self.literalLocal();
+    while (home.len > 0 and home[home.len - 1] == '/') home = home[0 .. home.len - 1];
+    const tail = if (tilde) path[1..] else path;
+    const home_bytes = encodedSize(home) orelse return self.literalLocal();
+    const tail_bytes = encodedSize(tail) orelse return self.literalLocal();
+    if ("file://".len + home_bytes + tail_bytes > TerminalText.max_link_bytes) return self.literalLocal();
+    self.link = .none;
+    self.link_len = 0;
+    try self.terminal_text.finish(self.out);
+    try self.out.writeAll(TerminalText.link_open ++ "file://");
+    try writeEncoded(self.out, home);
+    try writeEncoded(self.out, tail);
+    try self.out.writeAll(TerminalText.link_end);
+    self.in_link = true;
+    try self.transition(self.base());
+    try self.safeSlice(path);
+    try self.closeLink();
+    for (self.held[end..length]) |byte| try self.prose(byte);
+}
+
+fn validPath(path: []const u8, tilde: bool) bool {
+    if (tilde) {
+        if (!std.mem.startsWith(u8, path, "~/")) return false;
+    } else if (path.len == 0 or path[0] != '/' or std.mem.startsWith(u8, path, "//")) return false;
+    const view = std.unicode.Utf8View.init(path) catch return false;
+    var iterator = view.iterator();
+    while (iterator.nextCodepoint()) |scalar| if (TerminalText.isControl(scalar)) return false;
+    return true;
+}
+
+fn uriPlain(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or std.mem.indexOfScalar(u8, "/-._~", byte) != null;
+}
+
+fn encodedSize(bytes: []const u8) ?usize {
+    var size: usize = 0;
+    for (bytes) |byte| {
+        size += if (uriPlain(byte)) @as(usize, 1) else 3;
+        if (size > TerminalText.max_link_bytes) return null;
+    }
+    return size;
+}
+
+fn writeEncoded(out: *std.Io.Writer, bytes: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (bytes) |byte| {
+        if (uriPlain(byte)) try out.writeByte(byte) else try out.writeAll(&.{ '%', hex[byte >> 4], hex[byte & 15] });
+    }
+}
+
+fn boundaryAfter(byte: u8) Boundary {
+    if (std.ascii.isAlphanumeric(byte) or byte >= 0x80) return .word;
+    if (std.ascii.isWhitespace(byte) or std.mem.indexOfScalar(u8, "(<'\"[", byte) != null) return .prose;
+    return .other;
+}
+
+fn localEnds(byte: u8) bool {
+    return byte == ' ' or byte == '\t' or std.mem.indexOfScalar(u8, "<>\"`[", byte) != null;
 }
 
 /// Shows `[text](address)`'s text, with its own markup, as the link.
@@ -592,7 +707,7 @@ fn closeLink(self: *Renderer) !void {
     try self.transition(self.base());
     try self.terminal_text.finish(self.out);
     try self.out.writeAll(TerminalText.link_close);
-    self.after_word = true;
+    self.boundary = .word;
 }
 
 /// Where a bare address ends: at a space, a control, non-ASCII text or
@@ -1325,10 +1440,14 @@ test "the last code block is the last complete fenced block" {
 }
 
 fn expectRendered(input: []const u8, expected: []const u8) !void {
+    try expectRenderedHome(input, expected, "");
+}
+
+fn expectRenderedHome(input: []const u8, expected: []const u8, home: []const u8) !void {
     for (0..input.len + 1) |split| {
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
-        var renderer: Renderer = .{ .out = &output.writer };
+        var renderer: Renderer = .{ .out = &output.writer, .home = home };
         try renderer.feed(input[0..split]);
         for (input[split..]) |byte| try renderer.feed(&.{byte});
         try renderer.finish();
@@ -1410,4 +1529,81 @@ test "a bare address longer than a link may carry stays plain text" {
     // Each `)` past the host is trimmed in constant time.
     const closers = "https://a" ++ @as([2000]u8, @splat(')'));
     try expectRendered(closers ++ " ", comptime linked("https://a", "https://a") ++ @as([2000]u8, @splat(')')) ++ " ");
+}
+
+test "a bare local path excludes the sentence semicolon from its OSC 8 link" {
+    try expectRendered("The report is at /tmp/report.md;", "The report is at " ++ comptime linked("file:///tmp/report.md", "/tmp/report.md") ++ ";");
+}
+
+test "bare local paths expand borrowed HOME without linking sentence punctuation" {
+    try expectRenderedHome("The report is at ~/code/personal/rui-implicit-state-machines.md;", "The report is at " ++ comptime linked("file:///Users/test/code/personal/rui-implicit-state-machines.md", "~/code/personal/rui-implicit-state-machines.md") ++ ";", "/Users/test");
+    try expectRendered("(/tmp/a;b(c)). /tmp/x?y#z%q;", "(" ++ comptime linked("file:///tmp/a%3Bb%28c%29", "/tmp/a;b(c)") ++ "). " ++ linked("file:///tmp/x%3Fy%23z%25q", "/tmp/x?y#z%q") ++ ";");
+    try expectRenderedHome("~/é🙂;", comptime linked("file:///home/a%20b%25%23%3F/%C3%A9%F0%9F%99%82", "~/é🙂") ++ ";", "/home/a b%#?/");
+    try expectRenderedHome("~/x", comptime linked("file:///x", "~/x"), "/");
+    try expectRenderedHome("~/x", comptime linked("file:///home/%C3%A9/x", "~/x"), "/home/é///");
+}
+
+test "bare local paths require valid HOME only for tilde paths" {
+    inline for (.{ "", "relative", "//host/home", "/bad\xff", "/bad\x1b", "/bad\u{202e}" }) |home| {
+        try expectRenderedHome("~/a; /tmp/a;", "~/a; " ++ comptime linked("file:///tmp/a", "/tmp/a") ++ ";", home);
+    }
+}
+
+test "bare local paths are prose tokens not relative paths or Markdown targets" {
+    inline for (.{
+        "a/b x/tmp/a x~/a ./a ../a ~user/a //host/a ///tmp/a ftp://x/a httpx:/x file:///tmp/a",
+        "[label](/tmp/a) [label](~/a) [label](file:///tmp/a)",
+        "\\/tmp/a \\~/a",
+    }) |input| try expectRenderedHome(input, input, "/home/test");
+    try expectRenderedHome("~user/a;/tmp/b //host/~/b /tmp/ok;", "~user/a;/tmp/b //host/~/b " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", "/home/test");
+    try expectRenderedHome("`~/a` *~/b* **/tmp/c**\n```\n/tmp/d ~/e\n```\n", "\x1b[4m~/a\x1b[0m \x1b[3m~/b\x1b[0m \x1b[1m/tmp/c\x1b[0m\n/tmp/d ~/e\n", "/home/test");
+    try expectRendered("[a](https://x y)", "[a](" ++ comptime linked("https://x", "https://x") ++ " y)");
+}
+
+test "bare local paths reject unsafe complete filenames instead of linking an ASCII prefix" {
+    inline for (.{
+        .{ "/tmp/a\xff;", "/tmp/a\\xff;" },
+        .{ "/tmp/a\xc3;", "/tmp/a\\xc3;" },
+        .{ "/tmp/a\x1b\\b;", "/tmp/a\\x1b\\b;" },
+        .{ "/tmp/a\x7f;", "/tmp/a\\x7f;" },
+        .{ "/tmp/a\u{0085};", "/tmp/a\\u0085;" },
+        .{ "/tmp/a\u{202e};", "/tmp/a\\u202e;" },
+        .{ "/tmp/a\u{2066};", "/tmp/a\\u2066;" },
+    }) |case| try expectRendered(case[0] ++ " /tmp/ok;", case[1] ++ " " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";");
+}
+
+test "bare local paths bound the complete encoded URI after HOME expansion" {
+    const prefix = "file:///home/a%20%C3%A9/";
+    const body = @as([TerminalText.max_link_bytes - prefix.len]u8, @splat('a'));
+    try expectRenderedHome("~/" ++ body ++ ";", comptime linked(prefix ++ body, "~/" ++ body) ++ ";", "/home/a é");
+    try expectRenderedHome("~/" ++ body ++ "a; /tmp/ok", "~/" ++ body ++ "a; " ++ comptime linked("file:///tmp/ok", "/tmp/ok"), "/home/a é");
+    const absolute = "/" ++ @as([TerminalText.max_link_bytes - "file:///".len]u8, @splat('a'));
+    try expectRendered(absolute ++ ";", comptime linked("file://" ++ absolute, absolute) ++ ";");
+    try expectRendered(absolute ++ "a;", absolute ++ "a;");
+}
+
+test "bare local paths overflow literally through the token and resume after a delimiter" {
+    const long = "/" ++ @as([TerminalText.max_link_bytes]u8, @splat('a')) ++ "/tmp/no;~/no";
+    try expectRenderedHome(long ++ " /tmp/ok;", long ++ " " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", "/home/test");
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var renderer: Renderer = .{ .out = &output.writer };
+    try renderer.feed("/");
+    const chunk = @as([4096]u8, @splat('a'));
+    for (0..32) |_| try renderer.feed(&chunk);
+    try renderer.feed("/tmp/no /tmp/ok;");
+    try renderer.finish();
+    try std.testing.expectEqual(@as(u8, '/'), output.written()[0]);
+    for (output.written()[1..][0 .. 32 * chunk.len]) |byte| try std.testing.expectEqual(@as(u8, 'a'), byte);
+    try std.testing.expectEqualStrings("/tmp/no " ++ comptime linked("file:///tmp/ok", "/tmp/ok") ++ ";", output.written()[1 + 32 * chunk.len ..]);
+}
+
+test "local path filename suffixes survive trimming the sentence semicolon" {
+    try expectRendered("/tmp/report_;", comptime linked("file:///tmp/report_", "/tmp/report_") ++ ";");
+    try expectRendered("/tmp/backup~;", comptime linked("file:///tmp/backup~", "/tmp/backup~") ++ ";");
+    try expectRendered("/tmp/name*;", comptime linked("file:///tmp/name%2A", "/tmp/name*") ++ ";");
+}
+
+test "a lone slash or tilde slash is not a local path link" {
+    try expectRenderedHome("/ ~/ /; ~/;", "/ ~/ /; ~/;", "/home/test");
 }

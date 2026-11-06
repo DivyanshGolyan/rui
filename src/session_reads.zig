@@ -198,6 +198,8 @@ pub const Target = union(enum) {
 
 pub const Job = struct {
     init: std.process.Init = undefined,
+    /// Borrowed from the frontend until this read joins.
+    home: []const u8 = "",
     store: []const u8 = "",
     session: []const u8 = "",
     files: Files = undefined,
@@ -512,7 +514,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // A stop searches only from the oldest Message that waited at the last
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
-    job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) });
+    job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) }, job.home);
     // One shown at its Admission is delivered too.
     job.result.delivered = @max(job.result.delivered, job.drawn.admission);
     job.result.output_length = output.offset;
@@ -557,7 +559,7 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     try job.files.inspection.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour);
+    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home);
     if (!latest) job.result.history_cursor = prepared.page.continuation();
 }
 

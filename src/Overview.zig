@@ -917,7 +917,6 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
             error.InputDeadline => {
                 const expired = try self.input.expire();
                 if (expired != .none) {
-                    if (try self.look()) |next| return next;
                     if (try self.compose(expired)) |next| return next;
                 }
                 continue;
@@ -930,10 +929,6 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
                 // An answer applies whenever it comes; a late one repaints.
                 .color_report => |report| if (report.kind == .bg) {
                     self.caps.background = report.value;
-                },
-                .key_press => {
-                    if (try self.look()) |next| return next;
-                    if (try self.compose(decoded)) |next| return next;
                 },
                 else => if (try self.compose(decoded)) |next| return next,
             },
@@ -958,11 +953,6 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
         };
     }
     return null;
-}
-
-/// Tells the core the person pressed a key now, before the key itself.
-fn look(self: *Self) !?Next {
-    return self.event(.{ .looked = self.realMs() });
 }
 
 /// The wall clock in Unix milliseconds, as the core's times are.

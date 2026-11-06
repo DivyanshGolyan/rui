@@ -92,7 +92,6 @@ It uses 24-bit colour when `COLORTERM` is `truecolor` or `24bit`, and the neares
 A conversation you open shows your terminal's own colours, and so does the shell after you leave.
 
 The top of the overview says whether anything works and what failed, the Host's uptime and slots in use, and how many Sessions are in each state.
-When a Session fails or the Host restarts while you are not touching the keyboard, a "Since you looked" line says so until your next key.
 Counts are grouped the Indian way (1,00,000).
 
 The title reads रुई rui.
