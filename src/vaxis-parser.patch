@@ -478,17 +478,22 @@ diff --git a/src/Vaxis.zig b/src/Vaxis.zig
          // If we have explicit width and our width is greater than 1, let's use it
          if (self.caps.explicit_width and w > 1) {
              try tty.print(ctlseqs.explicit_width, .{ w, cell.char.grapheme });
-@@ -806,6 +822,9 @@
+@@ -806,6 +822,14 @@
          }
          cursor_pos.col = col + w;
          cursor_pos.row = row;
 +        // The physical cursor may trail the allocated span. Reposition only
 +        // when another cell is emitted: never CUP one past the right edge.
-+        if (bounded_joined) reposition = true;
++        if (bounded_joined) {
++            // CUP does not end OSC8. Balance the physical candidate link now,
++            // before reposition resets the deferred logical link tracker.
++            if (cell.link.uri.len > 0) try tty.writeAll(ctlseqs.osc8_clear);
++            reposition = true;
++        }
      }
      if (!started) return;
      if (self.screen.cursor_vis) {
-@@ -866,6 +885,21 @@
+@@ -866,6 +890,21 @@
  
      try tty.writeAll(ctlseqs.sync_reset);
      try tty.flush();
@@ -510,7 +515,7 @@ diff --git a/src/Vaxis.zig b/src/Vaxis.zig
  }
  
  fn enableKittyKeyboard(self: *Vaxis, tty: *std.Io.Writer, flags: Key.KittyFlags) !void {
-@@ -1690,6 +1724,32 @@ test "queryCursorPosition: failed write does not leave a pending request" {
+@@ -1690,6 +1729,32 @@ test "queryCursorPosition: failed write does not leave a pending request" {
      try std.testing.expectEqual(@as(usize, 1), vx.cursor_position_requests.pending());
  }
  

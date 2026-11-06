@@ -640,3 +640,67 @@ test "render contract: excluded width lanes retain exact encoder bytes" {
         try testing.expectEqualStrings(case.encoded, try fixture.render());
     }
 }
+
+test "render contract: bounded joined link closes before adjacent unlinked cell" {
+    const Boundary = enum { emitted, skipped, last };
+    for ([_]Boundary{ .emitted, .skipped, .last }) |boundary| {
+        for ([_]bool{ false, true }) |inferred| {
+            var fixture: RenderFixture = undefined;
+            try fixture.init();
+            defer fixture.deinit();
+            var terminal: PhysicalRow = .{};
+            for (0..32) |i| fixture.vx.screen.writeCell(@intCast(i % 16), @intCast(i / 16), .{ .char = .{ .grapheme = "x", .width = 1 } });
+            const neighbor: vaxis.Cell = .{ .char = .{ .grapheme = "N", .width = 1 }, .style = .{ .bg = .{ .index = 5 } } };
+            if (boundary == .skipped) fixture.vx.screen.writeCell(6, 0, neighbor);
+            try terminal.apply(try fixture.render());
+            fixture.vx.screen.cursor_vis = true;
+            fixture.vx.screen.cursor = .{ .row = 1, .col = 14 };
+            const row: u16 = if (boundary == .last) 1 else 0;
+            const col: u16 = if (boundary == .last) 12 else 2;
+            if (boundary == .last) {
+                fixture.vx.window().clear();
+                fixture.vx.screen.writeCell(col, row, .{
+                    .char = .{ .grapheme = joined, .width = if (inferred) 0 else 4 },
+                    .style = .{ .bg = .{ .index = 1 }, .bold = true },
+                    .link = .{ .uri = "contract:cluster", .params = "id=cluster" },
+                });
+            } else {
+                fixture.paint(row, inferred);
+                // Exactly the NEXT visited cell after the owned four-column
+                // cluster, not a different nonempty link that masks leakage.
+                fixture.vx.screen.writeCell(6, row, neighbor);
+            }
+            const encoded = try fixture.render();
+            try testing.expectEqual(@as(usize, 1), std.mem.count(u8, encoded, joined));
+            try terminal.apply(encoded);
+            if (boundary != .last) {
+                const actual = terminal.cells[6];
+                try testing.expectEqualStrings("", std.mem.sliceTo(&actual.uri, 0));
+                try testing.expectEqualStrings("", std.mem.sliceTo(&actual.params, 0));
+                try testing.expectEqual(@as(u8, 5), actual.bg);
+                try testing.expect(!actual.bold);
+                try terminal.expectRow(0, physical_golden);
+                try terminal.expectRow(1, @splat(' '));
+            } else {
+                try terminal.expectRow(0, @splat(' '));
+                try terminal.expectRow(1, .{ ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', 0x1f469, 0, ' ', ' ' });
+            }
+            // The physical link is balanced even with no subsequent cell.
+            // Cursor positioning and deferred logical tracking cannot close it.
+            try testing.expectEqualStrings("", std.mem.sliceTo(&terminal.pen.uri, 0));
+            try testing.expectEqualStrings("", std.mem.sliceTo(&terminal.pen.params, 0));
+            for (col..col + 4) |owned_col| {
+                const owned = terminal.cells[@as(usize, row) * 16 + owned_col];
+                try testing.expectEqualStrings("contract:cluster", std.mem.sliceTo(&owned.uri, 0));
+                try testing.expectEqualStrings("id=cluster", std.mem.sliceTo(&owned.params, 0));
+                try testing.expectEqual(@as(u8, 1), owned.bg);
+                try testing.expect(owned.bold);
+            }
+            try testing.expectEqualStrings(joined, fixture.vx.screen.readCell(col, row).?.char.grapheme);
+            try testing.expectEqual(@as(u8, if (inferred) 0 else 4), fixture.vx.screen.readCell(col, row).?.char.width);
+            try testing.expectEqual(@as(usize, 1), terminal.row);
+            try testing.expectEqual(@as(usize, 14), terminal.col);
+            try testing.expectEqual(@as(usize, 0), (try fixture.render()).len);
+        }
+    }
+}
