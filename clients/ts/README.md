@@ -17,11 +17,15 @@ await rui.close();
 
 ## Install
 
-The `rui` package carries the client. The `rui` executable comes from the platform package beside it
+The `rui` package carries the client.
+The `rui` executable comes from the platform package beside it
 (`rui-linux-x64`, `rui-linux-arm64` or `rui-darwin-arm64`, installed as optional dependencies), else from `rui` on `PATH`.
 Pass `binary` to `Rui.connect` to name one yourself.
 
-`Rui.connect` writes the Store, the provider key, MCP bearer tokens and a private runtime directory to the child's stdin.
+`Rui.connect` writes the Store, the provider settings, MCP bearer tokens and a private runtime directory to the child's stdin.
+The optional `provider.caFile` names a PEM file to trust exclusively for that provider instead of system CAs, on macOS as on Linux (for example `provider: { baseUrl: "https://localhost:8443/v1", key: "local-key", caFile: "/path/to/ca.pem" }`).
+It travels in the launch frame, not argv or the environment; do not add `--provider-ca-file` to a launched Host.
+The path must be nonempty, contain no NUL bytes and fit the platform's path limit; relative paths use the Host's working directory, and a file that cannot be loaded or a peer that cannot be verified fails without falling back to system trust.
 `database` accepts a SQLite directory or a `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE` URL.
 For a Unix socket, use its percent-encoded absolute path in place of HOST; TCP verifies TLS.
 The MySQL database must already contain the DDL from `rui store schema --engine mysql`.

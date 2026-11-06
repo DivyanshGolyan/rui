@@ -3605,7 +3605,10 @@ Remote effects and duplicate model cost remain possible.
 Orphan tools may retain each bounded unlinked stdin file until exit; replacement Hosts cannot reclaim it, and no aggregate scratch bound spans dead-Host generations.
 
 A launched Host (`rui host serve --launch-frame`) is the exception: its shutdown is bounded.
-The program that starts it writes one frame to its stdin, a 4-byte big-endian length and then UTF-8 JSON naming `v` (1), the Store directory, the OpenAI key provider `{kind: "openai_key", baseUrl, key}`, the `runtimeDir` that holds its socket `rui.sock`, and optionally `activeCapacity`.
+The program that starts it writes one frame to its stdin, a 4-byte big-endian length and then UTF-8 JSON naming `v` (1), the Store directory, the OpenAI key provider `{kind: "openai_key", baseUrl, key, caFile?}`, the `runtimeDir` that holds its socket `rui.sock`, and optionally `activeCapacity`.
+The frame is the sole source of a launched Host's settings; `--launch-frame` refuses separate provider settings, including `--provider-ca-file`.
+The provider's optional `caFile` names a PEM file trusted exclusively for that provider, on macOS as on Linux, with the same trust semantics as `--provider-ca-file`; omitted or null uses system trust.
+A supplied `caFile` must be a nonempty UTF-8 path without NUL bytes and shorter than the platform's path limit; a relative path is relative to the Host's working directory, and an unloadable file or failed verification never falls back to system trust.
 The optional `presets` object maps at most 64 names (1–64 bytes of `[a-z0-9_-]`) to complete agent specs, checked by the shared agent-spec parser and held only in Host memory (D22, D112).
 A `start_agent` call may name a preset and override its fields, but still refuses provider or Workspace fields, including those supplied by the preset (D221).
 The key stays in memory only, never on disk, in argv or in the environment.

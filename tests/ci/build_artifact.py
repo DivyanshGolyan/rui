@@ -36,12 +36,17 @@ def roots():
             "packages": Path("zig-pkg").resolve()}
 
 
+def pr_ci():
+    return (os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
+            and platform.system() == "Linux" and platform.machine() == "x86_64")
+
+
 def identity(targets, part):
     # Everything the transferred executables depend on that can differ inside
     # one run. Runner image versions and tool listings are logged, not compared:
     # a rollout that keeps these fields still executes the producer's binaries.
     # build.zig rejects a foreign baseline-CPU manifest before any gate runs.
-    return dict(format=4, tree=git("rev-parse", "HEAD^{tree}"), targets=targets, part=part,
+    return dict(format=5, pr_ci=pr_ci(), tree=git("rev-parse", "HEAD^{tree}"), targets=targets, part=part,
                 system=platform.system(), machine=platform.machine(),
                 compiler=digest(shutil.which("zig")))
 
@@ -55,7 +60,10 @@ def build(targets, part="all"):
     # A prior failed build must not supply extra or stale installed binaries.
     if prefix.exists():
         shutil.rmtree(prefix)
-    subprocess.run(["zig", "build", "ci-build", "-Dci-targets=" + ",".join(targets), "-Dci-part=" + part,
+    # Zig async slots also wait for subprocesses; eight avoids serializing the
+    # independent compiles behind those waits on the four-core Linux producer.
+    mode = ["-Dpr-ci=true", "-j8"] if pr_ci() else []
+    subprocess.run(["zig", "build", "ci-build", *mode, "-Dci-targets=" + ",".join(targets), "-Dci-part=" + part,
                     "--prefix", str(prefix), "--summary", "all"], check=True)
     return prefix / "bin"
 

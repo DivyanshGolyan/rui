@@ -2,10 +2,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { createSecureServer } from "node:http2";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { test } from "node:test";
 
@@ -31,11 +31,6 @@ test("follow wakes for two local sends and makes no requests between them while 
 	const cert = join(root, "cert.pem");
 	const key = join(root, "key.pem");
 	execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1", "-days", "1"], { stdio: "pipe" });
-	// The launched client intentionally does not pass through TLS environment overrides.
-	// This test-only executable trusts just the local certificate, then execs the real binary.
-	const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
-	const wrapper = join(root, "rui-with-test-ca");
-	writeFileSync(wrapper, `#!/bin/sh\nexport SSL_CERT_FILE=${quote(cert)}\nexec ${quote(resolve(binary ?? "rui"))} "$@"\n`, { mode: 0o700 });
 	const provider = createSecureServer({ key: readFileSync(key), cert: readFileSync(cert) });
 	const requests: string[] = [];
 	const paths: string[] = [];
@@ -69,8 +64,8 @@ test("follow wakes for two local sends and makes no requests between them while 
 	let consume: Promise<void> | undefined;
 	try {
 		rui = await Rui.connect({
-			database: join(root, "store"), binary: wrapper,
-			provider: { baseUrl: `https://127.0.0.1:${address.port}/v1`, key: "local-fixture-only" },
+			database: join(root, "store"), binary: binary ?? "rui",
+			provider: { baseUrl: `https://127.0.0.1:${address.port}/v1`, key: "local-fixture-only", caFile: cert },
 		});
 		const session = await rui.sessions.create({
 			provider: "openai", model: "model-a", effort: null, compactAt: 100000,
@@ -97,7 +92,11 @@ test("follow wakes for two local sends and makes no requests between them while 
 		const firstIdle = once(events, "idle", { signal: controller.signal });
 		consume = (async () => {
 			for await (const entry of session.listActivity({ follow: true, signal: controller.signal })) {
-				if (entry.kind === "assistant") texts.push(entry.text ?? "");
+				if (entry.kind === "assistant") {
+					texts.push(entry.text ?? "");
+					events.emit("answer");
+				}
+				if (entry.kind === "turn_ended") assert.equal(entry.ending, "done", `unexpected turn ending: ${JSON.stringify(entry)}`);
 			}
 		})();
 		const unexpectedEnd = consume.then(() => {
@@ -109,15 +108,18 @@ test("follow wakes for two local sends and makes no requests between them while 
 		assert.equal(pages, initialPages, "initial idle follower must not poll");
 
 		for (let index = 1; index <= 2; index++) {
+			const answered = once(events, "answer", { signal: controller.signal });
 			const idle = once(events, "idle", { signal: controller.signal });
 			// Deliberately use a new handle, not the handle the follower belongs to.
 			await rui.getSession(session.id).send(`message ${index}`, { idempotencyKey: `feed:message:${index}` });
-			await Promise.race([idle, unexpectedEnd]);
+			// An empty dormant page is not proof that the follower yielded the answer.
+			await Promise.race([Promise.all([answered, idle]), unexpectedEnd]);
 			assert.deepEqual(texts, Array.from({ length: index }, (_, i) => `answer ${i + 1}`));
 			const atIdle = pages;
 			await sleep(2_200); // Also catches the old implementation's capped 2 s polling.
 			assert.equal(pages, atIdle, "completed idle follower must not poll");
 		}
+		assert.deepEqual(texts, ["answer 1", "answer 2"]);
 		assert.equal(requests.length, 2);
 		assert.ok(paths.every((path) => path === "/v1/models" || path === "/v1/responses"));
 		assert.equal(idlePages, 3);
