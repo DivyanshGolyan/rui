@@ -2486,7 +2486,8 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
             };
         },
         .skill => {
-            var captured = try client.captureMessage(init.io, .{ .store = destination, .session = reference, .text_path = "", .skill = argument }, .{ .generated = destination }).get();
+            var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            var captured = try client.captureMessage(init.io, .{ .store = destination, .session = reference, .text_path = "", .skill = argument }, .{ .generated = try requestDirectory(init, &directory_buffer) }).get();
             var step: ?client.Step = null;
             try sendCapturedMutation(requests_context, &captured, .{ .map = init.environ_map }, &step, .json);
         },
