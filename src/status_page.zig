@@ -13,6 +13,7 @@ const TerminalText = @import("TerminalText.zig");
 const shortPath = @import("home_path.zig").shortPath;
 const ReasoningEffort = model_capability.ReasoningEffort;
 const WorkKind = @import("session_work.zig").Kind;
+const ArchiveState = @import("session_archive.zig").State;
 
 pub const Setting = enum {
     effort,
@@ -122,6 +123,7 @@ pub const Session = struct {
     output_reservation: u64,
     reservation_override: bool,
     work: Work,
+    archive_state: ArchiveState = .active,
 
     /// The page shows the same Session and work.
     pub fn eql(self: *const Session, other: *const Session) bool {
@@ -227,6 +229,7 @@ pub fn render(facts: Facts, selected: Setting, out: *std.Io.Writer) !void {
         try out.writeAll(" · ");
     }
     try writeText(out, session.session.slice());
+    if (archiveBadge(session.archive_state)) |badge| try out.print(" · {s}", .{badge});
     try out.writeByte('\n');
     var group: ?Group = null;
     for (std.enums.values(Setting)) |setting| {
@@ -248,6 +251,15 @@ pub fn render(facts: Facts, selected: Setting, out: *std.Io.Writer) !void {
         try writeText(out, message.slice());
         try out.writeByte('\n');
     }
+}
+
+/// The Host's archive lifecycle, separate from its work state.
+pub fn archiveBadge(state: ArchiveState) ?[]const u8 {
+    return switch (state) {
+        .active => null,
+        .archiving => "Stopping and archiving",
+        .archived => "Archived · /unarchive",
+    };
 }
 
 /// One Action awaiting approval, after `render`.
@@ -531,6 +543,35 @@ test "the page shows the approved rows, `›` on the selected one, then the work
         };
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.buffered(), "›"));
     }
+}
+
+test "archive badges name pending and completed archive independently of every work state" {
+    const held = testSample();
+    var bytes: [4096]u8 = undefined;
+    for ([_]struct { state: ArchiveState, title: []const u8 }{
+        .{ .state = .active, .title = " Status · fix-safari-export · k7m2qx\n" },
+        .{ .state = .archiving, .title = " Status · fix-safari-export · k7m2qx · Stopping and archiving\n" },
+        .{ .state = .archived, .title = " Status · fix-safari-export · k7m2qx · Archived · /unarchive\n" },
+    }) |case| {
+        held.session.archive_state = case.state;
+        for (std.enums.values(WorkKind)) |work| {
+            held.session.work.state = work;
+            var out = std.Io.Writer.fixed(&bytes);
+            try render(held.facts(), .effort, &out);
+            try std.testing.expect(std.mem.startsWith(u8, out.buffered(), case.title));
+            var expected: [64]u8 = undefined;
+            const name = @tagName(work);
+            try std.testing.expect(std.mem.endsWith(u8, out.buffered(), try std.fmt.bufPrint(&expected, " Work\n   {c}{s}\n", .{ std.ascii.toUpper(name[0]), name[1..] })));
+        }
+    }
+    var other: Session = undefined;
+    sample(&other);
+    sample(&held.session);
+    try std.testing.expect(held.session.eql(&other));
+    other.archive_state = .archiving;
+    try std.testing.expect(!held.session.eql(&other));
+    other.archive_state = .archived;
+    try std.testing.expect(!held.session.eql(&other));
 }
 
 test "the work names its state, its current message, every Action awaiting approval, what may have run and recent answers" {

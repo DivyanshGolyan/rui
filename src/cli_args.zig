@@ -17,6 +17,8 @@ pub const Command = enum {
     session_inspect,
     session_list,
     session_stop,
+    session_archive,
+    session_unarchive,
     session_interrupt_model,
     session_read_conversation,
     session_resume,
@@ -52,8 +54,10 @@ pub const Command = enum {
             .session_configure => .{ .resource = .session, .name = "configure", .description = "Capture settings, including the Session's Label (its name or title), then admit configuration only. Omit the Session selector to create a fresh address with concrete defaults; addressed changes preserve omitted settings.", .details = compaction_help, .options = destination ++ session ++ capture ++ binding ++ settings, .conflicts = settings_conflicts, .mutation = true },
             .session_send => .{ .resource = .session, .name = "send", .description = "Read exact Message text from stdin and admit it to --to ID, exactly six lowercase Crockford characters (for example k7m2qx). Peers use their sender's Store and reject a conflicting --store. Without a sender, --store or saved Store defaults apply. Returns an admission receipt, before the recipient completes. Empty stdin sends nothing.", .options = destination ++ capture ++ &[_]Option{value("to", "ID")}, .mutation = true, .requires = &.{&.{"to"}} },
             .session_inspect => .{ .resource = .session, .name = "inspect", .description = "Read saved Session settings and work as JSON, or export exact retained failed-response bytes. Inspection never admits work.", .details = "--failed-response body|metadata requires --operation ID and --attempt N, excludes --profile, and writes only that stored byte stream to stdout. Redirect body output to a file; it can contain binary or private data. Missing records or omitted bodies fail on stderr. Partial bodies export their retained prefix; inspect metadata for status. No Host is started and no provider is contacted.\n", .options = destination ++ session ++ &[_]Option{ choice("profile", cli_value.ReportProfile), choice("failed-response", cli_value.FailedResponsePart), value("operation", "ID"), value("attempt", "N") }, .conflicts = &.{.{ .code = .profile_excludes_failed_response, .a = "profile", .b = "failed-response" }}, .requires = need_session },
-            .session_list => .{ .resource = .session, .name = "list", .description = "List configured Sessions in the current Workspace, or all Workspaces with --all, as one JSON value. --since TOKEN, the since of an earlier listing, lists only the Sessions that may have changed since it (delta changed), nothing (not_modified), or every Session (full).", .options = destination ++ &[_]Option{ flag("all"), value("since", "TOKEN") } },
+            .session_list => .{ .resource = .session, .name = "list", .description = "List active Sessions in the current Workspace, or all Workspaces with --all, as one JSON value. --archived lists only archived Sessions; --include-archived includes both. --since TOKEN, the since of an earlier listing, lists only the Sessions that may have changed since it (delta changed), nothing (not_modified), or every Session (full).", .options = destination ++ &[_]Option{ flag("all"), flag("archived"), flag("include-archived"), value("since", "TOKEN") }, .conflicts = &.{.{ .code = .archive_visibility_conflict, .a = "archived", .b = "include-archived" }} },
             .session_stop => .{ .resource = .session, .name = "stop", .description = "Admit a stop for selected Session work. The stop is saved, so a restarted Host does not resume that work. The address remains reusable by later input; acknowledgment is not physical retirement. --all stops every Session in the Store that is pending, working, retrying, running Bash or awaiting approval, as overview Ctrl-X would, each as its own recoverable request with one JSON reply line and a recovery handle on stderr; it needs a running Host.", .options = destination ++ session ++ capture ++ &[_]Option{flag("all")}, .conflicts = &.{ .{ .code = .all_excludes_session, .a = "all", .b = "session" }, .{ .code = .all_excludes_record, .a = "all", .b = "record" }, .{ .code = .all_excludes_key, .a = "all", .b = "key" }, .{ .code = .all_excludes_key, .a = "all", .b = "key-hex" } }, .mutation = true, .requires = &.{&.{ "session", "all" }} },
+            .session_archive => .{ .resource = .session, .name = "archive", .description = "Stop current and queued work, then archive once it has settled. The saved intent survives Host restart. Pending archival rejects new Messages; a later Message to an archived Session restores it. The receipt reports pending or completed archival.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
+            .session_unarchive => .{ .resource = .session, .name = "unarchive", .description = "Restore an archived Session to active lists without resuming stopped work. Refused while archival is still settling.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_interrupt_model => .{ .resource = .session, .name = "interrupt-model", .description = "Interrupt the exact model Operation after inspecting its Session and Turn.", .options = destination ++ session ++ capture ++ &[_]Option{ value("turn", "ID"), value("operation", "ID") }, .mutation = true, .requires = need_session ++ &[_][]const []const u8{ &.{"turn"}, &.{"operation"} } },
             .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
             .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host.", .options = destination ++ session, .positional = "ID", .positional_conflicts = &.{.{ .code = .session_selector_repeated, .option = "session" }}, .requires = &.{&.{ "", "session" }} },
@@ -977,7 +981,7 @@ test "typed choices share enum names with help and refuse unknown values" {
         .{ .command = .session_start, .name = "provider", .choices = &.{ "codex", "openai" } },
         .{ .command = .session_configure, .name = "reasoning-effort", .choices = &.{ "none", "low", "medium", "high", "xhigh", "max", "default" } },
         .{ .command = .defaults_configure, .name = "notifications", .choices = &.{ "on", "off" } },
-        .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "model-interruption", "permission-decision" } },
+        .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision" } },
         .{ .command = .session_inspect, .name = "profile", .choices = &.{ "current", "full" } },
         .{ .command = .session_inspect, .name = "failed-response", .choices = &.{ "body", "metadata" } },
         .{ .command = .host_serve, .name = "provider", .choices = &.{ "codex", "openai" } },
@@ -1126,7 +1130,7 @@ test "Session IDs in positional argv name the missing selector flag" {
     _ = try expectRefusal(.session_send, &.{ "--to", "k7m2qx", "v948er" }, .message_not_stdin, "v948er");
     _ = try expectRefusal(.session_send, &.{ "--record", "--to", "v948er" }, .session_id_needs_to, "v948er");
     _ = try expectRefusal(.session_send, &.{"message text"}, .message_not_stdin, "message text");
-    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny }) |command| {
+    inline for (.{ Command.session_inspect, Command.session_stop, Command.session_archive, Command.session_unarchive, Command.session_interrupt_model, Command.session_read_conversation, Command.action_allow, Command.action_deny }) |command| {
         _ = try expectRefusal(command, &.{"v948er"}, .session_id_needs_session, "v948er");
     }
 }
@@ -1145,4 +1149,19 @@ test "request wait accepts only one original identity and a bounded timeout" {
     var storage: [1024]u8 = undefined;
     const parsed = try testParse(Command.request_wait.definition(), &.{ "HANDLE", "--timeout-seconds", "86400" }, &storage);
     try std.testing.expectEqual(@as(?u32, 86400), try parsed.number(u32, "timeout-seconds"));
+}
+
+test "archive commands require a Session and retain capture recovery options" {
+    inline for (.{ Command.session_archive, Command.session_unarchive }) |command| {
+        try std.testing.expect(try expectMissing(command, &.{}) != null);
+        try std.testing.expect(try expectMissing(command, &.{ "--session", "k7m2qx" }) == null);
+        try expectValidation(command, &.{ "--session", "k7m2qx", "--store", "/s", "--key", "key", "--record", "saved.json" }, false);
+        try expectValidation(command, &.{ "--session", "k7m2qx", "--all" }, error.UnknownArgument);
+    }
+}
+
+test "archive list visibility is independent of all Workspaces" {
+    try expectValidation(.session_list, &.{ "--all", "--archived" }, false);
+    try expectValidation(.session_list, &.{ "--all", "--include-archived" }, false);
+    _ = try expectRefusal(.session_list, &.{ "--archived", "--include-archived" }, .archive_visibility_conflict, "archived");
 }

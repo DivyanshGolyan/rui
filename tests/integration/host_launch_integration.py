@@ -894,7 +894,7 @@ def main():
             until = time.monotonic() + COMMAND_TIMEOUT
             # The committed screen, not a byte match, establishes the overview:
             # the empty Store's hint has drawn and the cursor sits at the composer.
-            while not (screen.completed and "No Sessions yet" in screen.completed
+            while not (screen.completed and "No unarchived Sessions. /sessions archived shows the archive." in screen.completed
                     and screen.screen.display[screen.screen.cursor.y].startswith(" ›")):
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], (screen.completed, output)

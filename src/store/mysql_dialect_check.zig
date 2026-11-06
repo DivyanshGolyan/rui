@@ -21,6 +21,7 @@
 //! nothing, so literal typing, guards, row counts, transactions and query
 //! plans are not checked here.
 const std = @import("std");
+const protocol = @import("../protocol.zig");
 const rsql = @import("rsql.zig");
 const schema = @import("schema.zig");
 const sqlite = @import("sqlite.zig");
@@ -471,7 +472,7 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     writeRecord();
 }
 
-test "schema 55 migrates recovery index and wire 8 together to schema 56 wire 9" {
+test "schema 55 migrates recovery index and wire 8 together to the current schema and wire" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
@@ -484,11 +485,13 @@ test "schema 55 migrates recovery index and wire 8 together to schema 56 wire 9"
         if (step.from < 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
     }
     try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('format','55')", false);
-    try load(migrated_database, schema.mysqlMigration(55), false);
+    inline for (schema.migrations) |step| {
+        if (step.from >= 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
+    }
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
-    try std.testing.expectEqualStrings("\n 1:9", result.written());
+    try std.testing.expectEqualStrings("\n 1:" ++ protocol.wire_version, result.written());
     try expectCatalog(migrated_database);
     done.migrations += 1;
     writeRecord();

@@ -156,11 +156,11 @@ pub const CoreWork = union(enum) {
     mcp: McpAction,
 };
 
-/// Whether a stop selected the owed ending `e`'s Turn, and whether that
-/// stop is one its parent caused: an owed stop's key starts
-/// `rui.core/stop/`, and the bytewise range finds one on any engine (D139).
+/// A stopped Turn keeps the causal stop fact even when an ordinary stop
+/// discharges its parent's obligation. Archive suppression belongs to the
+/// ending record, so restoring the parent never replays old work.
 pub const ending_stop_sql = "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id) AS stopped," ++
-    "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id AND st.command_key>='rui.core/stop/' AND st.command_key<'rui.core/stop0') AS quiet";
+    "(e.suppress_message=1 OR EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id AND st.parent_caused=1)) AS quiet";
 
 /// The oldest owed ending.
 const owed_ending = rsql.Read(.{

@@ -336,6 +336,69 @@
         }
       }
     },
+    "/v1/control/session-archive": {
+      "post": {
+        "operationId": "sessionArchive",
+        "summary": "Archives or restores a Session. Archiving stops current and queued work. Retried by its key.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/WireVersion"
+          },
+          {
+            "$ref": "#/components/parameters/HostInstance"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionArchiveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The reply.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionArchiveReply"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/SessionArchiveConflictReply"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ErrorReply"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "A refusal or failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorReply"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/control/model-interruption": {
       "post": {
         "operationId": "modelInterruption",
@@ -4598,6 +4661,14 @@
               "session": {
                 "$ref": "#/components/schemas/domainreportCurrentJsonSettings"
               },
+              "archive_state": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "archiving",
+                  "archived"
+                ]
+              },
               "pending_messages": {
                 "$ref": "#/components/schemas/Decimal"
               },
@@ -4658,6 +4729,7 @@
               "since",
               "profile",
               "session",
+              "archive_state",
               "pending_messages",
               "work",
               "peers",
@@ -4685,6 +4757,14 @@
               },
               "session": {
                 "$ref": "#/components/schemas/domainreportCurrentJsonSettings"
+              },
+              "archive_state": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "archiving",
+                  "archived"
+                ]
               },
               "pending_messages": {
                 "$ref": "#/components/schemas/Decimal"
@@ -4747,6 +4827,7 @@
               "type",
               "profile",
               "session",
+              "archive_state",
               "pending_messages",
               "work",
               "peers",
@@ -5290,6 +5371,14 @@
                   }
                 ]
               },
+              "archive": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "archived",
+                  "all"
+                ]
+              },
               "after": {
                 "$ref": "#/components/schemas/Decimal"
               },
@@ -5302,6 +5391,7 @@
               "kind",
               "store",
               "workspace",
+              "archive",
               "after",
               "ceiling"
             ],
@@ -5333,6 +5423,14 @@
                   }
                 ]
               },
+              "archive": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "archived",
+                  "all"
+                ]
+              },
               "after": {
                 "$ref": "#/components/schemas/Decimal"
               },
@@ -5349,6 +5447,7 @@
               "kind",
               "store",
               "workspace",
+              "archive",
               "after",
               "ceiling",
               "since"
@@ -5381,6 +5480,14 @@
                   }
                 ]
               },
+              "archive": {
+                "type": "string",
+                "enum": [
+                  "active",
+                  "archived",
+                  "all"
+                ]
+              },
               "after": {
                 "$ref": "#/components/schemas/Decimal"
               },
@@ -5405,6 +5512,7 @@
               "kind",
               "store",
               "workspace",
+              "archive",
               "after",
               "ceiling",
               "since",
@@ -6107,6 +6215,7 @@
                   "code": {
                     "type": "string",
                     "enum": [
+                      "session_archiving",
                       "invalid_session_reference",
                       "unknown_session",
                       "invalid_sender_handle",
@@ -10648,6 +10757,212 @@
                         ]
                       },
                       "kind": {
+                        "const": "session_archive"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "session_archive"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "session_archive"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "archived": {
+                        "type": "boolean"
+                      },
+                      "completion": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "pending",
+                              "completed"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "archived",
+                      "completion"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
+                        "const": "session_archive"
+                      },
+                      "target": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "x-rui-max-bytes": 128
+                      },
+                      "code": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "archived": {
+                        "type": "boolean"
+                      },
+                      "completion": {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "pending",
+                              "completed"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "status",
+                      "kind",
+                      "target",
+                      "code",
+                      "archived",
+                      "completion"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "key",
+              "delta",
+              "since",
+              "observation"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "9"
+              },
+              "type": {
+                "const": "command_observation"
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "delta": {
+                "const": "full"
+              },
+              "since": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 60,
+                    "x-rui-max-bytes": 60
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "observation": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "absent",
+                          "accepted",
+                          "rejected"
+                        ]
+                      },
+                      "kind": {
                         "const": "model_interruption"
                       },
                       "target": {
@@ -11551,9 +11866,236 @@
         ],
         "additionalProperties": false
       },
+      "SessionArchiveConflictReply": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "9"
+          },
+          "type": {
+            "const": "session_archive_reply"
+          },
+          "answer": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "conflict"
+              },
+              "replayed": {
+                "const": false
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "code": {
+                "const": "idempotency_key_conflict"
+              }
+            },
+            "required": [
+              "status",
+              "replayed",
+              "session",
+              "code"
+            ],
+            "additionalProperties": false
+          },
+          "completion": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "version",
+          "type",
+          "answer",
+          "completion"
+        ],
+        "additionalProperties": false
+      },
+      "SessionArchiveReply": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "9"
+              },
+              "type": {
+                "const": "session_archive_reply"
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "accepted"
+                  },
+                  "replayed": {
+                    "type": "boolean"
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  "archived": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "status",
+                  "replayed",
+                  "session",
+                  "archived"
+                ],
+                "additionalProperties": false
+              },
+              "completion": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "completed"
+                    ]
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "answer",
+              "completion"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "9"
+              },
+              "type": {
+                "const": "session_archive_reply"
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "rejected"
+                  },
+                  "replayed": {
+                    "type": "boolean"
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  "code": {
+                    "type": "string",
+                    "enum": [
+                      "invalid_session_reference",
+                      "unknown_session",
+                      "archive_pending"
+                    ]
+                  }
+                },
+                "required": [
+                  "status",
+                  "replayed",
+                  "session",
+                  "code"
+                ],
+                "additionalProperties": false
+              },
+              "completion": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "unavailable"
+                  }
+                },
+                "required": [
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "answer",
+              "completion"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "SessionArchiveRequest": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "9"
+          },
+          "kind": {
+            "const": "session_archive"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "session": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "archived": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "key",
+          "session",
+          "archived"
+        ],
+        "additionalProperties": false
+      },
       "SessionRow": {
         "type": "object",
         "properties": {
+          "archive_state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "archiving",
+              "archived"
+            ]
+          },
           "reference": {
             "type": "string",
             "maxLength": 128,
@@ -11645,6 +12187,7 @@
           }
         },
         "required": [
+          "archive_state",
           "reference",
           "workspace",
           "provider",

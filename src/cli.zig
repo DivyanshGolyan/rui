@@ -268,6 +268,8 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .session_inspect => try inspect(init, parsed),
         .session_list => try sessions(init, parsed),
         .session_stop => try stopSession(init, parsed),
+        .session_archive => try archiveSession(init, parsed, true),
+        .session_unarchive => try archiveSession(init, parsed, false),
         .session_interrupt_model => try interruptModel(init, parsed),
         .session_read_conversation => try readConversation(init, parsed),
         .session_resume => try resumeSession(init, parsed),
@@ -2050,7 +2052,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try takeCapture(step, client.captureMessage(io, input, target));
     const sender: client.Requests = .{ .io = io, .drop_reply = parsed.get("test-drop-reply") };
-    if (configuration == null) return sendCapturedMutation(sender, &captured, .{ .map = init.environ_map }, step);
+    if (configuration == null) return sendCapturedMutation(sender, &captured, .{ .map = init.environ_map }, step, .json);
     defer captured.close(io);
     try announceCapture(io, &captured);
     var reply_buffer: client.ReplyBuffer = .{};
@@ -2175,11 +2177,13 @@ test "/status takes the Session's facts from Current, lists every Action awaitin
     defer file.close(io);
     const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
     defer listed.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
-    const reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
+    var reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     const taken = try std.testing.allocator.create([2]status_page.Session);
     defer std.testing.allocator.destroy(taken);
+    taken[0].archive_state = .active;
+    taken[1].archive_state = .active;
     try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[0], null, listed));
     var defaults: status_page.Defaults = error.AccessDenied;
     var bytes: [4096]u8 = undefined;
@@ -2210,12 +2214,17 @@ test "/status takes the Session's facts from Current, lists every Action awaitin
     taken[0].work.recent_count = 0;
     try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
     try std.testing.expectEqual(@as(u64, 0), try listed.length(io));
+    taken[0].work.recent_count = 1;
+    reply.current.archive_state = .archived;
+    try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
+    try std.testing.expectEqual(protocol.SessionArchiveState.archived, taken[1].archive_state);
 }
 
 /// The Session's settings and work as the page shows them, its Actions'
 /// digest aside.
 fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Current) !void {
     const settings = &current.settings;
+    taken.archive_state = current.archive_state;
     try taken.session.set(settings.reference.slice());
     taken.label.len = 0;
     if (settings.label) |label| try taken.label.set(label.slice());
@@ -2689,9 +2698,19 @@ fn stopSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     try sendSessionStop(init, parsed, .{ .store = store, .session = session }, try captureTarget(init, parsed, &directory_buffer));
 }
 
+fn archiveSession(init: std.process.Init, parsed: *const cli_args.Parsed, archived: bool) !void {
+    const session = parsed.get("session").?;
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const target = try captureTarget(init, parsed, &directory_buffer);
+    var captured = try client.captureSessionArchive(init.io, .{ .store = store, .session = session, .archived = archived }, target);
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
+}
+
 fn sendSessionStop(init: std.process.Init, parsed: *const cli_args.Parsed, input: client.SessionStopInput, target: client.CaptureTarget) !void {
     var captured = try client.captureSessionStop(init.io, input, target);
-    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
+    try sendCapturedMutation(.{ .io = init.io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
 }
 
 /// Stops every Session in the Store that Ctrl-X could stop, a listing page at
@@ -2709,7 +2728,7 @@ fn stopAllSessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void
     var failed: usize = 0;
 
     while (true) {
-        const page = readSessionPage(init, store, null, traversal.cursor) catch |err| {
+        const page = readSessionPage(init, store, null, .active, traversal.cursor) catch |err| {
             if (asked != 0) stderr.diagnostic("rui: the Session listing failed after {d} stops ({s}); Sessions it had not listed yet were not stopped.\n", .{ asked, @tagName(caller_error.of(err)) });
             return err;
         };
@@ -2744,12 +2763,12 @@ fn interruptModel(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.captureModelInterruption(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
 }
 
 // One-shot mutations announce a generated handle on stderr before original
 // transmission; failed announcement leaves the durable capture unsent.
-fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, environment: client.Environment, reported: ?*?client.Step) !void {
+fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecord, environment: client.Environment, reported: ?*?client.Step, presentation: MutationPresentation) !void {
     const io = sender.io;
     var unreported: ?client.Step = null;
     const step = reported orelse &unreported;
@@ -2760,7 +2779,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
         try announceCapture(io, captured);
         break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured.identity().*, captured.replay);
     };
-    try writeMutationReply(io, reply, .json, replay);
+    try writeMutationReply(io, reply, presentation, replay);
 }
 
 fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision: @FieldType(client.PermissionDecisionInput, "decision")) !void {
@@ -2777,7 +2796,7 @@ fn decideAction(init: std.process.Init, parsed: *const cli_args.Parsed, decision
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const target = try captureTarget(init, parsed, &directory_buffer);
     var captured = try client.capturePermissionDecision(io, input, target);
-    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null);
+    try sendCapturedMutation(.{ .io = io, .drop_reply = parsed.get("test-drop-reply") }, &captured, .{ .map = init.environ_map }, null, .json);
 }
 
 fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -3160,6 +3179,7 @@ fn writeSavedRejection(out: *std.Io.Writer, reply: protocol_reply.MutationReply)
         .configure => "configure",
         .message => |target| if (target.creates_session) "start" else "send",
         .session_stop => "stop",
+        .session_archive => |target| if (target.archived) "archive" else "unarchive",
         .model_interruption => "interrupt-model",
         .permission_decision => |target| if (target.decision == .allow_once) "allow" else "deny",
     };
@@ -3261,6 +3281,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
             if (value.turn) |turn| try writer.print("selected Turn: {d}\n", .{turn}) else try writeMutationField(writer, "selected Turn: ", "none");
             try writer.print("admission cutoff: {d}; completion: {s}\n", .{ value.admission_cutoff, @tagName(value.completion) });
         },
+        .session_archive => |value| try writer.print("archived: {}; completion: {s}\n", .{ value.archived, @tagName(value.completion) }),
         .model_interruption, .permission_decision => {},
     };
     try writer.flush();
@@ -3333,6 +3354,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
                 if (value.turn) |turn| try writer.print("\"{d}\"", .{turn}) else try writer.writeAll("null");
                 try writer.print(",\"admission_cutoff\":\"{d}\"}}", .{value.admission_cutoff});
             },
+            .session_archive => |value| try writer.print(",\"archived\":{}", .{value.archived}),
             .model_interruption, .permission_decision => {},
         },
         .rejected => |code| {
@@ -3348,6 +3370,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
         if (answer.result == .accepted) try writer.print(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{answer.result.accepted.message.admission});
     }
     if (reply.target == .session_stop) try writer.print(",\"completion\":{{\"status\":\"{s}\"}}", .{if (answer.result == .accepted) @tagName(answer.result.accepted.session_stop.completion) else "unavailable"});
+    if (reply.target == .session_archive) try writer.print(",\"completion\":{{\"status\":\"{s}\"}}", .{if (answer.result == .accepted) @tagName(answer.result.accepted.session_archive.completion) else "unavailable"});
     try writer.writeByte('}');
 }
 
@@ -3532,8 +3555,8 @@ fn requestIdentity(init: std.process.Init, parsed: *const cli_args.Parsed) !Requ
 /// Reads the traversal's next page and appends its rows to `rows`; a page
 /// that restarts the traversal replaces the rows there. Returns whether
 /// another page follows.
-fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, traversal: *protocol_reply.SessionTraversal, rows: *std.Io.File.Writer) !bool {
-    const page = &try readSessionPage(init, store, workspace, traversal.cursor);
+fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, archive: protocol.SessionArchiveFilter, traversal: *protocol_reply.SessionTraversal, rows: *std.Io.File.Writer) !bool {
+    const page = &try readSessionPage(init, store, workspace, archive, traversal.cursor);
     if (traversal.restarts(page)) {
         try rows.seekTo(0);
         try rows.end();
@@ -3544,11 +3567,11 @@ fn sessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8
 }
 
 /// One listing page; a failure reply is reported on stderr and returned as its error.
-fn readSessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor) !protocol_reply.SessionListPage {
+fn readSessionPage(init: std.process.Init, store: []const u8, workspace: ?[]const u8, archive: protocol.SessionArchiveFilter, cursor: protocol_reply.SessionListCursor) !protocol_reply.SessionListPage {
     const file = try renderScratch(init);
     defer file.close(init.io);
     var buffer: client.ReplyBuffer = .{};
-    const reply = client.listSessions(init.io, store, workspace, cursor, file, &buffer) catch |err| return readTransportFailure(init.io, store, err);
+    const reply = client.listSessionsFiltered(init.io, store, workspace, archive, cursor, file, &buffer) catch |err| return readTransportFailure(init.io, store, err);
     return switch (try protocol_reply.SessionListReply.decode(init.io, file, workspace, cursor, reply)) {
         .page => |page| page,
         .failure => |failure| {
@@ -3590,7 +3613,8 @@ fn sessions(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     defer scratch.close(init.io);
     var rows_buffer: [protocol.content_window_bytes]u8 = undefined;
     var rows = scratch.writer(init.io, &rows_buffer);
-    while (try sessionPage(init, store, workspace, &traversal, &rows)) {}
+    const archive: protocol.SessionArchiveFilter = if (parsed.has("archived")) .archived else if (parsed.has("include-archived")) .all else .active;
+    while (try sessionPage(init, store, workspace, archive, &traversal, &rows)) {}
     try rows.end();
     var output: JsonOutput = undefined;
     const writer = output.init(init.io, .stdout);
@@ -4279,4 +4303,21 @@ test "CLI boundary preserves Store selector provenance for Host administration" 
     }
     failure_held = .{ .resource = "session", .operation = "list", .not_sent = false };
     try std.testing.expectError(error.StoreUnavailable, rememberStore(init, path, false));
+}
+
+test "archive mutation presentation preserves requested intent and pending settlement" {
+    inline for (.{ true, false }) |archived| {
+        const wire = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_archive_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"archived\":" ++ (if (archived) "true" else "false") ++ "},\"completion\":{\"status\":\"" ++ (if (archived) "pending" else "completed") ++ "\"}}";
+        var reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "k7m2qx", .{ .session_archive = .{ .archived = archived } });
+        try reply.context.store.set("/store");
+        try reply.context.key.set("archive-key");
+        reply.context.kind = .session_archive;
+        var buffer: [1024]u8 = undefined;
+        var json = std.Io.Writer.fixed(&buffer);
+        try presentMutationReply(&json, reply, .json);
+        try std.testing.expectEqualStrings("{\"context\":{\"store\":\"/store\",\"session\":\"k7m2qx\",\"key\":\"archive-key\",\"kind\":\"session_archive\"},\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"archived\":" ++ (if (archived) "true" else "false") ++ "},\"completion\":{\"status\":\"" ++ (if (archived) "pending" else "completed") ++ "\"}}\n", json.buffered());
+        var human = std.Io.Writer.fixed(&buffer);
+        try presentMutationReply(&human, reply, .human);
+        try std.testing.expect(std.mem.endsWith(u8, human.buffered(), if (archived) "archived: true; completion: pending\n" else "archived: false; completion: completed\n"));
+    }
 }

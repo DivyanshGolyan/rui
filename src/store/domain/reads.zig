@@ -393,6 +393,7 @@ pub const AcceptedMessageQueue = struct {
 
 pub const SessionObservation = struct {
     found: bool = false,
+    archive_state: protocol.SessionArchiveState = .active,
     session: protocol.Bounded(protocol.max_session_bytes) = .{},
     workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{},
     provider: ?protocol.Provider = null,
@@ -479,10 +480,13 @@ pub fn inspectSession(a: *ReadAccess, session_ref: []const u8, observation: *Ses
     var instructions: content_metadata.Row = undefined;
     var output_schema: content_metadata.Row = undefined;
     var counts: report_domain.SessionCounts = .{ .session = session_ref };
+    var archive: report_domain.archive_state.Result = undefined;
+    a.read(report_domain.archive_state, .{ .session = session_ref }, &archive);
     a.read(content_metadata, .{ .content_id = @intCast(instructions_id) }, &instructions);
     if (current.output_schema_id) |content_id| a.read(content_metadata, .{ .content_id = @intCast(content_id) }, &output_schema);
     counts.queue(a);
     try runCounts(a);
+    observation.archive_state = if (archive) |row| row.archive_state else .active;
     observation.instructions = .{ .length = instructions.byte_length, .digest = instructions.digest };
     if (current.output_schema_id != null) observation.output_schema = .{ .length = output_schema.byte_length, .digest = output_schema.digest };
     counts.queuePending(a);
@@ -1532,7 +1536,8 @@ const turn_outcome = rsql.Read(.{
 /// agree with it.
 const session_stop = rsql.Read(.{
     .sql = "SELECT s.command_key,s.selected_turn_id,s.admission_cutoff,t.outcome_position," ++
-        "c.kind=3 AND c.accepted=1 AND c.target=s.session_ref AND (s.selected_turn_id IS NULL OR t.session_ref=s.session_ref) AS consistent,s.stopped_at " ++
+        "(c.kind=3 OR (c.kind=6 AND EXISTS(SELECT 1 FROM session_archive_command archived WHERE archived.command_key=c.command_key AND archived.archived=1))) " ++
+        "AND c.accepted=1 AND c.target=s.session_ref AND (s.selected_turn_id IS NULL OR t.session_ref=s.session_ref) AS consistent,s.stopped_at " ++
         "FROM session_stop s LEFT JOIN core_command c ON c.command_key=s.command_key LEFT JOIN turn t ON t.turn_id=s.selected_turn_id WHERE s.session_ref=?1 AND s.position=?2",
     .Args = struct { session: []const u8, position: u64 },
     .Row = struct {

@@ -11,6 +11,7 @@
 //! The rows are a client view over `session list`; the Host keeps no
 //! overview state.
 const std = @import("std");
+const session_archive = @import("session_archive.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const session_line = @import("session_line.zig");
 const attention = @import("attention.zig");
@@ -37,6 +38,16 @@ const Allocator = std.mem.Allocator;
 pub const Kind = session_work.Kind;
 pub const WorkState = session_work.WorkState;
 pub const Token = change_ring.Token;
+pub const ArchiveState = session_archive.State;
+pub const ArchiveFilter = session_archive.Filter;
+
+fn archiveViewName(filter: ArchiveFilter) []const u8 {
+    return switch (filter) {
+        .active => "Unarchived",
+        .archived => "Archived",
+        .all => "All",
+    };
+}
 /// A Session reference: six characters of the Session alphabet.
 pub const Reference = change_ring.Id;
 
@@ -147,7 +158,7 @@ pub const groups = std.enums.EnumArray(Group, struct { title: []const u8, help: 
 /// What a key does in the overview. `clear` empties the draft, else the
 /// held start settings. `select_*` choose a Session even while the picker
 /// shows; `previous` and `next` move the picker's highlight there.
-pub const Action = enum { previous, next, select_previous, select_next, first, last, clear, exit, stop };
+pub const Action = enum { previous, next, select_previous, select_next, first, last, clear, exit, stop, archive };
 
 /// The one key table.
 pub const keys: keymap.Keymap(Action) = .init(.{
@@ -160,6 +171,7 @@ pub const keys: keymap.Keymap(Action) = .init(.{
     .ctrl_p = null,
     .ctrl_r = null,
     .ctrl_x = .stop,
+    .alt_a = .archive,
     .up = .previous,
     .down = .next,
     .shift_up = .select_previous,
@@ -228,6 +240,7 @@ pub const First = struct {
 /// One list row as the shell decoded it. Slices borrow the page.
 pub const Listed = struct {
     reference: Reference,
+    archive_state: ArchiveState = .active,
     workspace: []const u8,
     label: ?[]const u8 = null,
     state: WorkState,
@@ -243,6 +256,7 @@ pub const Listed = struct {
     pub fn of(row: anytype) Listed {
         return .{
             .reference = referenceOf(row.reference.slice()),
+            .archive_state = row.archive_state,
             .workspace = row.workspace.slice(),
             .label = if (row.label) |*text| text.slice() else null,
             .state = row.work.state,
@@ -318,6 +332,20 @@ pub const StopOutcome = union(enum) {
     unconfirmed: []const u8,
 };
 
+pub const ArchiveRequest = struct {
+    reference: Reference,
+    archived: bool = true,
+};
+
+pub const ArchiveResult = struct {
+    request: ArchiveRequest,
+    outcome: union(enum) {
+        requested: enum { pending, completed },
+        failed: []const u8,
+        unconfirmed: []const u8,
+    },
+};
+
 pub const StopResult = struct {
     reference: Reference,
     outcome: StopOutcome,
@@ -342,6 +370,7 @@ pub const Event = union(enum) {
     list: ListReply,
     first_line: FirstLine,
     stop: StopResult,
+    archive: ArchiveResult,
     start: StartResult,
     /// The overview ended: later results are kept for `writeDeparture`.
     leave,
@@ -417,13 +446,10 @@ pub const Panel = union(enum) {
 
 /// What /help shows under its heading: the overview's keys, then its
 /// commands, which its table lists.
-const help_text = "Up/Down select a Session past the draft's lines · Shift-Up/Down always\n" ++
-    "Home/End select the first or last Session while the draft is empty\n" ++
-    "Enter on an empty draft opens the selected Session · Ctrl-X twice stops it\n" ++
-    "A message and Enter starts a new Session with it\n" ++
-    "/ lists the commands · Up/Down move the highlight · Tab or Enter takes it\n" ++
-    "Esc or Ctrl-G closes the list, this panel, the draft, then held settings\n" ++
-    "Ctrl-C, or Ctrl-D on an empty draft, leaves; Host work continues\n" ++
+const help_text = "Up/Down select · Shift-Up/Down always · Home/End first/last on empty draft\n" ++
+    "Enter opens · Alt-A archives · Ctrl-X twice stops · Type a task to start\n" ++
+    "/ lists commands · Up/Down choose · Tab or Enter takes it\n" ++
+    "Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves\n" ++
     "\n" ++ std.mem.trimEnd(u8, commands.help, "\n");
 
 /// How a model-list read ended.
@@ -492,7 +518,8 @@ pub const Observed = struct { reference: Reference, work: session_work.Work, nam
 /// An input in the open conversation of `reference`, whose work it shows as
 /// `work`: Ctrl-X there asks for and confirms a stop as Ctrl-X on the
 /// Session's row does, and any other input cancels the prompt.
-pub const Conversed = struct { reference: Reference, work: Kind, stop: bool };
+pub const ConversationInput = union(enum) { other, stop, archive: ArchiveState, unarchive, confirm_archive };
+pub const Conversed = struct { reference: Reference, work: Kind, input: ConversationInput };
 
 pub const Read = struct { reference: Reference, position: u64, admission: u64 };
 pub const Reads = struct {
@@ -512,6 +539,7 @@ pub const Effect = union(enum) {
     start: StartRequest,
     open: Reference,
     stop: Reference,
+    archive: ArchiveRequest,
     /// Read the Host's model lists.
     list_models,
     /// Save the person's default for new Sessions, as `rui defaults
@@ -722,32 +750,36 @@ pub const OwnedStart = struct {
     }
 };
 
-pub const Prompt = struct { stop: Reference };
+pub const Prompt = struct {
+    pub const Action = enum { stop, archive };
+    stop: Reference,
+    action: Prompt.Action = .stop,
+};
+const archive_prompt = "Stop and archive {s}? enter yes {s} esc no";
 
 /// What both screens say while a stop waits for its second Ctrl-X: the
 /// Session's reference and a separator dot.
 const stop_prompt = "Stop {s}? ctrl+x yes {s} esc no";
 
-/// The bytes the conversation's stop prompt takes.
-pub const max_prompt_bytes = stop_prompt.len - 2 * "{s}".len + @typeInfo(Reference).array.len + "·".len;
+/// Room for either conversation confirmation prompt.
+pub const max_prompt_bytes = @max(stop_prompt.len, archive_prompt.len) - 2 * "{s}".len + @typeInfo(Reference).array.len + "·".len;
 
-/// What the overview says under the input of the conversation of `ref`,
-/// whose work shows as `work`: its stop prompt for that Session, else its
-/// notice, and whether Ctrl-X would ask to stop the work.
+/// The exact conversation's prompt or notice, and whether Ctrl-X asks to stop.
 pub const Said = struct {
     /// Null when the overview says nothing; the conversation's own notice
     /// then shows.
     text: ?[]const u8,
-    /// The text is the stop prompt, which Esc or Ctrl-G only cancels.
-    asking: bool,
+    /// The confirmation shown; Esc or Ctrl-G only cancels.
+    asking: ?Prompt.Action,
     stoppable: bool,
 };
 
 pub fn conversation(state: *const State, ref: Reference, work: Kind, buffer: *[max_prompt_bytes]u8) Said {
-    const asking = if (state.prompt) |open| std.mem.eql(u8, &open.stop, &ref) else false;
-    const text: ?[]const u8 = if (asking)
-        std.fmt.bufPrint(buffer, stop_prompt, .{ &ref, "·" }) catch unreachable
-    else if (state.notice) |*notice| notice.text() else null;
+    const asking: ?Prompt.Action = if (state.prompt) |open| (if (std.mem.eql(u8, &open.stop, &ref)) open.action else null) else null;
+    const text: ?[]const u8 = if (asking) |action| switch (action) {
+        .stop => std.fmt.bufPrint(buffer, stop_prompt, .{ &ref, "·" }) catch unreachable,
+        .archive => std.fmt.bufPrint(buffer, archive_prompt, .{ &ref, "·" }) catch unreachable,
+    } else if (state.notice) |*notice| notice.text() else null;
     return .{ .text = text, .asking = asking, .stoppable = stoppable(state, ref, work) };
 }
 
@@ -756,7 +788,7 @@ pub fn conversation(state: *const State, ref: Reference, work: Kind, buffer: *[m
 /// reached the Host keeps its recover handle until departure. Nothing is
 /// evicted: a full ledger refuses new requests.
 pub const Request = struct {
-    kind: enum { start, stop },
+    kind: enum { start, stop, archive, unarchive },
     /// The Session a stop names, or the one an accepted start made.
     session: ?Reference = null,
     status: enum { pending, done, failed, unknown } = .pending,
@@ -787,6 +819,7 @@ pub const Line = union(enum) { unread, requested, unavailable, read: u32 };
 /// What the overview keeps of one Session.
 pub const Row = struct {
     reference: Reference,
+    archive_state: ArchiveState = .active,
     /// Index of its Workspace in `State.workspaces`.
     workspace: u32,
     label: ?Bounded(max_label_bytes),
@@ -823,6 +856,11 @@ pub const State = struct {
     /// The terminal's own last successful `rui auth login`, Unix seconds.
     login_at: ?u64 = null,
 
+    archive: ArchiveFilter = .active,
+    /// The in-flight traversal's filter, or null once a view change
+    /// invalidates it. Returning to that filter cannot revive its pages.
+    listing_archive: ?ArchiveFilter = .active,
+    last_archived: ?Reference = null,
     rows: Vec(Row) = .{},
     /// Row indices by reference.
     by_reference: Vec(Keyed) = .{},
@@ -1415,7 +1453,38 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             state.notice = null;
             const prompt = state.prompt;
             state.prompt = null;
-            if (input.stop) stopKey(state, prompt, input.reference, input.work, &effects);
+            switch (input.input) {
+                .other => {},
+                .stop => stopKey(state, prompt, input.reference, input.work, &effects),
+                .archive => |archive| askArchive(state, input.reference, input.work, archive, .keep, &effects),
+                .unarchive => archiveSession(state, .{ .reference = input.reference, .archived = false }, &effects),
+                .confirm_archive => if (prompt) |open| {
+                    if (open.action == .archive and std.mem.eql(u8, &open.stop, &input.reference)) archiveSession(state, .{ .reference = open.stop }, &effects);
+                },
+            }
+        },
+        .archive => |result| {
+            const kind: @FieldType(Request, "kind") = if (result.request.archived) .archive else .unarchive;
+            const at = state.pendingAt(kind, result.request.reference).?;
+            const ref = result.request.reference;
+            switch (result.outcome) {
+                .requested => |completion| {
+                    state.answer(at, .done, "");
+                    if (result.request.archived) {
+                        state.last_archived = ref;
+                        if (completion == .pending) state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref}) else state.say(.quiet, "Archived {s}. /undo restores it.", .{&ref});
+                    } else state.say(.quiet, "Restored {s}; work was not restarted.", .{&ref});
+                },
+                .failed => |code| {
+                    state.answer(at, .failed, code);
+                    state.say(.attention, "! {s} not {s}: {s}", .{ &ref, if (result.request.archived) "archived" else "restored", code });
+                },
+                .unconfirmed => |handle| {
+                    state.answer(at, .unknown, handle);
+                    state.say(.attention, "! {s} {s} unsure; recover {s}. Nothing hidden locally.", .{ &ref, if (result.request.archived) "archive" else "restore", handle });
+                },
+            }
+            state.next_list_ms = 0;
         },
         .stop => |result| {
             const at = state.pendingAt(.stop, result.reference).?;
@@ -1598,6 +1667,12 @@ pub fn writeDeparture(state: *const State, saved_effort: ?ReasoningEffort, write
                 .unknown => try writer.print("rui: Not sure the new Session started. Check with: rui request recover {s}\n", .{text}),
                 .done => try writer.print("rui: Started {s}.\n", .{&request.session.?}),
             },
+            .archive, .unarchive => switch (request.status) {
+                .pending => try writer.print("rui: {s} request for {s} did not run.\n", .{ if (request.kind == .archive) "Archive" else "Restore", &request.session.? }),
+                .failed => try writer.print("rui: Could not {s} {s}: {s}\n", .{ if (request.kind == .archive) "archive" else "restore", &request.session.?, text }),
+                .unknown => try writer.print("rui: Not sure {s} {s}. Check with: rui request recover {s}\n", .{ &request.session.?, if (request.kind == .archive) "archived" else "restored", text }),
+                .done => try writer.print("rui: {s} request accepted for {s}.\n", .{ if (request.kind == .archive) "Archive" else "Restore", &request.session.? }),
+            },
             .stop => switch (request.status) {
                 .pending => try writer.print("rui: {s} was not stopped.\n", .{&request.session.?}),
                 .failed => try writer.print("rui: Could not stop {s}: {s}\n", .{ &request.session.?, text }),
@@ -1620,6 +1695,7 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
     if (changed) try arrange(state);
     if (!state.listing and now_ms >= state.next_list_ms) {
         state.listing = true;
+        state.listing_archive = state.archive;
         state.next_list_ms = now_ms + list_interval_ms;
         effects.add(.{ .list = state.token });
         // A list still loading is read again with the next listing.
@@ -1644,6 +1720,15 @@ fn startSave(state: *State, effects: *Effects) void {
 
 fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!void {
     std.debug.assert(state.listing);
+    if (state.listing_archive == null) {
+        if (page.answer != null) {
+            state.listing = false;
+            state.next_list_ms = 0;
+            try tick(state, state.now_ms, effects);
+        }
+        return;
+    }
+    std.debug.assert(state.listing_archive.? == state.archive);
     if (page.restarts) state.pending.items.len = 0;
     try state.pending.ensure(state.gpa, state.pending.items.len + page.rows.len);
     for (page.rows) |listed| {
@@ -1651,6 +1736,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
         // A row new to the overview takes its state's start as its mark's.
         state.pending.appendAssumeCapacity(.{
             .reference = listed.reference,
+            .archive_state = listed.archive_state,
             .workspace = try state.intern(listed.workspace),
             .label = if (listed.label) |text| labelOf(text) else null,
             .state = shown,
@@ -1682,6 +1768,7 @@ fn newsworthy(state: *State) error{OutOfMemory}!?Newsworthy {
     // Left by a listing that failed to settle them.
     state.arrivals.items.len = 0;
     for (state.pending.items) |*incoming| {
+        if (!state.archive.includes(incoming.archive_state)) continue;
         const kind = try state.readListed(incoming.reference, incoming.work(), opening) orelse continue;
         if (opening) continue;
         if (found) |*held| {
@@ -1706,6 +1793,14 @@ fn labelOf(text: []const u8) Bounded(max_label_bytes) {
 /// Applies a completed listing: `changed` replaces rows by reference, `full`
 /// replaces the set, `not_modified` keeps every row.
 fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
+    const selected_at = if (state.selected) |ref| position(state, ref) orelse 0 else 0;
+    var completed_archive: ?Reference = null;
+    if (state.last_archived) |ref| for (state.pending.items) |incoming| {
+        if (!std.mem.eql(u8, &incoming.reference, &ref) or incoming.archive_state != .archived) continue;
+        if (state.find(ref)) |old| if (old.archive_state != .archived) {
+            completed_archive = ref;
+        };
+    };
     switch (answer.delta) {
         .not_modified => {},
         .changed => {
@@ -1730,11 +1825,32 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
             }
         },
     }
+    var kept: usize = 0;
+    for (state.rows.items) |row| {
+        if (!state.archive.includes(row.archive_state)) {
+            if (state.entryOf(row.reference)) |entry| {
+                state.want(entry, null, false);
+                entry.listed = null;
+            }
+            continue;
+        }
+        state.rows.items[kept] = row;
+        kept += 1;
+    }
+    if (kept != state.rows.items.len) {
+        state.rows.items.len = kept;
+        try reindex(state);
+    }
     state.pending.items.len = 0;
     state.token = answer.since;
     state.listed_at_ms = state.now_ms;
     state.unreachable_since_ms = null;
     try arrange(state);
+    if (completed_archive) |ref| state.say(.quiet, "Archived {s}. /undo restores it.", .{&ref});
+    if (state.selectedRow() == null) {
+        state.selected = if (state.order.items.len == 0) null else state.rows.items[state.order.items[@min(selected_at, state.order.items.len - 1)]].reference;
+        if (state.selectedRow()) |row| state.unfolded.insert(row.group());
+    }
 }
 
 /// What a listing's row keeps of the row it replaces.
@@ -1880,7 +1996,7 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
     retitle(state, row, was);
 }
 
-/// Any input clears the notice and cancels a stop prompt. Ctrl-X confirms
+/// Any input clears the notice and cancels a prompt. Ctrl-X confirms
 /// the prompt and Esc only cancels it. Keys act on the picker only while
 /// the screen shows it. A key that acts on a Session closes a panel, so it
 /// acts where the Sessions show.
@@ -1888,6 +2004,13 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
     state.notice = null;
     const prompt = state.prompt;
     state.prompt = null;
+    if (prompt != null and prompt.?.action == .archive) {
+        const confirms = switch (value.input) {
+            .choice => |choice| choice == .enter,
+            .composer => |outcome| outcome == .submit,
+        };
+        if (confirms) return archiveSession(state, .{ .reference = prompt.?.stop }, effects);
+    }
     const mode = state.inputMode();
     const outcome: keymap.Outcome(Action) = switch (value.input) {
         .choice => |choice| choice: {
@@ -1937,6 +2060,11 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
                 state.settings = .{};
             },
             .exit => effects.add(.exit),
+            .archive => {
+                state.closePanel();
+                const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
+                askArchive(state, row.reference, row.state.asOf(state.now_ms), row.archive_state, .keep, effects);
+            },
             .stop => {
                 state.closePanel();
                 const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
@@ -1978,7 +2106,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
 fn stopKey(state: *State, prompt: ?Prompt, ref: Reference, work: Kind, effects: *Effects) void {
     const kind = kindShown(state, ref, work);
     if (!rules.get(kind).stoppable) return refuseStop(state, ref, kind);
-    const asked = if (prompt) |open| std.mem.eql(u8, &open.stop, &ref) else false;
+    const asked = if (prompt) |open| open.action == .stop and std.mem.eql(u8, &open.stop, &ref) else false;
     if (!asked) {
         state.prompt = .{ .stop = ref };
     } else if (state.request(.stop, ref)) effects.add(.{ .stop = ref });
@@ -2047,6 +2175,31 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         .command => |command| command,
     };
     switch (command.name) {
+        .archive => {
+            state.closePanel();
+            const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
+            askArchive(state, row.reference, row.state.asOf(state.now_ms), row.archive_state, .submitted, effects);
+        },
+        .unarchive => {
+            state.closePanel();
+            const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
+            archiveSession(state, .{ .reference = row.reference, .archived = false }, effects);
+            effects.add(.clear_draft);
+        },
+        .undo => {
+            const ref = state.last_archived orelse return state.say(.quiet, "No archive to undo here. /sessions archived shows the archive.", .{});
+            archiveSession(state, .{ .reference = ref, .archived = false }, effects);
+            effects.add(.clear_draft);
+        },
+        .sessions => {
+            const filter: ArchiveFilter = if (std.mem.eql(u8, command.argument, "archived")) .archived else if (std.mem.eql(u8, command.argument, "all")) .all else if (std.mem.eql(u8, command.argument, "unarchived")) .active else {
+                state.say(.quiet, "Sessions: {s}. /sessions unarchived|archived|all", .{archiveViewName(state.archive)});
+                effects.add(.clear_draft);
+                return;
+            };
+            effects.add(.clear_draft);
+            try changeArchiveView(state, filter, effects);
+        },
         .exit => effects.add(.exit),
         .model => {
             state.picker = .{};
@@ -2076,6 +2229,58 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         },
         .setup => try requestCommand(state, .setup, null, text, effects),
     }
+}
+
+/// Slash commands consume their submitted line; a key leaves its draft alone.
+fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, draft: enum { keep, submitted }, effects: *Effects) void {
+    if (archive == .archiving) {
+        state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref});
+        return;
+    }
+    if (archive == .archived) {
+        state.say(.quiet, "{s} is already archived. /unarchive restores it.", .{&ref});
+        return;
+    }
+    if (draft == .submitted) effects.add(.clear_draft);
+    if (groups.get(rules.get(work).group).under_way or work == .approval) {
+        state.prompt = .{ .stop = ref, .action = .archive };
+    } else archiveSession(state, .{ .reference = ref }, effects);
+}
+
+fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) void {
+    for (state.requests[0..state.request_count]) |held| {
+        if (held.kind != .archive and held.kind != .unarchive) continue;
+        if (held.status != .pending and held.status != .unknown) continue;
+        if (std.mem.eql(u8, &held.session.?, &request.reference)) {
+            state.say(.attention, "! {s} archive request {s}; details on exit.", .{ &request.reference, if (held.status == .pending) "pending" else "unsure" });
+            return;
+        }
+    }
+    if (state.request(if (request.archived) .archive else .unarchive, request.reference)) {
+        effects.add(.{ .archive = request });
+        state.say(.quiet, "{s} request pending for {s}; waiting for the Host.", .{ if (request.archived) "Archive" else "Restore", &request.reference });
+    }
+}
+
+fn changeArchiveView(state: *State, filter: ArchiveFilter, effects: *Effects) error{OutOfMemory}!void {
+    state.closePanel();
+    if (state.archive == filter) return;
+    state.archive = filter;
+    if (state.listing) state.listing_archive = null;
+    state.token = null;
+    state.rows.items.len = 0;
+    state.by_reference.items.len = 0;
+    state.pending.items.len = 0;
+    state.lines.items.len = 0;
+    state.selected = null;
+    state.listed_at_ms = null;
+    state.next_list_ms = 0;
+    for (state.seen.items) |*entry| {
+        state.want(entry, null, false);
+        entry.listed = null;
+    }
+    try arrange(state);
+    if (!state.listing) try tick(state, state.now_ms, effects);
 }
 
 /// Asks the shell to run `text`, the line of command `name`, once no other
@@ -3051,7 +3256,11 @@ fn header(painter: *Painter, state: *const State) error{OutOfMemory}![]const Spa
     column += try painter.put(column, "rui", 3, bar) + 2;
     const path = shortPath(state.home, state.workspaces.items[state.cwd]);
     const joined = try std.mem.concat(painter.arena, u8, &.{ path.prefix, path.rest });
-    _ = try painter.putTail(column, joined, painter.width -| column -| 1, .{ .background = .bar });
+    const view_name = try std.fmt.allocPrint(painter.arena, "{s} {s} /sessions", .{ archiveViewName(state.archive), painter.glyphs.dot });
+    const view_cells = painter.measure(view_name);
+    _ = try painter.putTail(column, joined, painter.width -| column -| view_cells -| 3, .{ .background = .bar });
+    try painter.pad(@max(painter.column, painter.width -| 1 -| view_cells), .{ .background = .bar });
+    try painter.putRight(painter.width -| 1, view_name, .{ .background = .bar, .colour = .ink });
     try painter.pad(painter.width, .{ .background = .bar });
     return painter.finish();
 }
@@ -3065,7 +3274,7 @@ fn headline(painter: *Painter, state: *const State) error{OutOfMemory}![]const S
         return painter.finish();
     }
     if (state.rows.items.len == 0) {
-        _ = try painter.put(1, "No Sessions yet. Type a task below.", painter.width -| 2, .{ .colour = .quiet });
+        _ = try painter.put(1, if (state.archive == .archived) "No archived Sessions. /sessions changes the view." else if (state.archive == .all) "No Sessions yet. Type a task below." else "No unarchived Sessions. /sessions archived shows the archive.", painter.width -| 2, .{ .colour = .quiet });
         return painter.finish();
     }
     var span: [16]u8 = undefined;
@@ -3257,7 +3466,10 @@ fn hints(painter: *Painter, state: *const State, draft: Draft, listed: bool) err
     // before the draft and the held settings clear.
     const esc_does: ?[]const u8 = if (listed or state.panel != null) "esc close" else if (draft.bytes.len != 0 or !state.settings.empty()) "esc clear" else null;
     if (state.prompt) |prompt| {
-        const text = try std.fmt.allocPrint(painter.arena, stop_prompt, .{ &prompt.stop, dot });
+        const text = if (prompt.action == .archive)
+            try std.fmt.allocPrint(painter.arena, archive_prompt, .{ &prompt.stop, dot })
+        else
+            try std.fmt.allocPrint(painter.arena, stop_prompt, .{ &prompt.stop, dot });
         _ = try painter.put(1, text, room, .{ .colour = .attention });
     } else if (state.shownPicker()) |picker| {
         // A notice shares the row, so the picker's keys stay in view.
@@ -3627,6 +3839,11 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     const yours = row.group() == .yours;
     const ended = rule.group == .finished or rule.group == .ended;
     const named = title(state, row);
+    const row_title = switch (row.archive_state) {
+        .active => named.text,
+        .archiving => try std.fmt.allocPrint(painter.arena, "[Archiving] {s}", .{named.text}),
+        .archived => try std.fmt.allocPrint(painter.arena, "[Archived] {s}", .{named.text}),
+    };
     const title_colour: Colour = if (faded) .quiet else if (yours) .strong else if (named.hint or ended) .quiet else .ink;
     // Only a row outside the working directory names its Workspace, at the
     // end of its title's room.
@@ -3643,7 +3860,7 @@ fn rowLine(painter: *Painter, state: *const State, at: usize, columns: Columns) 
     const word_column = @max(columns.word -| overflow, @min(columns.word, Columns.title + Columns.min_title + 2));
     const workspace_cells = if (word_column < columns.word) 0 else @min(painter.measure(workspace), columns.workspace);
     const title_end = (word_column -| 2) -| (if (workspace_cells == 0) 0 else workspace_cells + 2);
-    _ = try painter.put(Columns.title, named.text, title_end -| Columns.title, .{ .colour = title_colour, .bold = yours and !faded });
+    _ = try painter.put(Columns.title, row_title, title_end -| Columns.title, .{ .colour = title_colour, .bold = yours and !faded });
     _ = try painter.putTail(title_end + 2, workspace, workspace_cells, .{ .colour = if (faded) .quiet else .normal });
 
     if (columns.word != columns.end) {
@@ -3688,6 +3905,7 @@ const max_word_bytes = max: {
 /// the conversation's words, or the Session that started a failed or
 /// stopped one. Otherwise nothing.
 fn word(buffer: *[max_word_bytes]u8, state: *const State, row: *const Row, rule: Rule, line: ?work_line.Line, script: work_line.Script) []const u8 {
+    if (row.archive_state == .archiving) return "Stopping and archiving";
     if (line) |shown| {
         if (!rule.says) return "";
         var clock: [work_line.max_clock_bytes]u8 = undefined;
@@ -3728,6 +3946,7 @@ fn bounded(comptime capacity: usize, text: []const u8) Bounded(capacity) {
 }
 
 const TestSession = struct {
+    archive_state: ArchiveState = .active,
     label: ?[]const u8 = null,
     workspace: []const u8 = "/home/d/code/rui",
     first: ?First = .{ .position = 1, .admission = 4, .sender = null },
@@ -3739,6 +3958,7 @@ const TestSession = struct {
 fn session(ref: *const [6]u8, state: WorkState, options: TestSession) Listed {
     return .{
         .reference = ref.*,
+        .archive_state = options.archive_state,
         .workspace = options.workspace,
         .label = options.label,
         .state = state,
@@ -3855,6 +4075,10 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
             },
             .open => |ref| try std.testing.expectEqualStrings(&ref, &got.open),
             .stop => |ref| try std.testing.expectEqualStrings(&ref, &got.stop),
+            .archive => |request| {
+                try std.testing.expectEqualStrings(&request.reference, &got.archive.reference);
+                try std.testing.expectEqual(request.archived, got.archive.archived);
+            },
             .save_default => |binding| {
                 try std.testing.expectEqual(binding.provider, got.save_default.provider);
                 try std.testing.expectEqualStrings(binding.model.slice(), got.save_default.model.slice());
@@ -4248,7 +4472,7 @@ test "ctrl-x asks to stop only a row its rule lets it stop, and a second ctrl-x 
 fn expectSaid(text: ?[]const u8, asking: bool, stoppable_: bool, said: Said) !void {
     try std.testing.expectEqualStrings(text orelse "", said.text orelse "");
     try std.testing.expectEqual(text == null, said.text == null);
-    try std.testing.expectEqual(asking, said.asking);
+    try std.testing.expectEqual(if (asking) @as(?Prompt.Action, .stop) else null, said.asking);
     try std.testing.expectEqual(stoppable_, said.stoppable);
 }
 
@@ -4256,15 +4480,15 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     var state = try testState();
     defer state.deinit();
     const ref = "k7m2qx".*;
-    const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .stop = true };
+    const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .input = .stop };
     var buffer: [max_prompt_bytes]u8 = undefined;
     try expectSaid(null, false, true, conversation(&state, ref, .working, &buffer));
     try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
     try expectSaid("Stop k7m2qx? ctrl+x yes · esc no", true, true, conversation(&state, ref, .working, &buffer));
     // Another Session's conversation does not show the prompt.
-    try std.testing.expect(!conversation(&state, "b4n8wd".*, .working, &buffer).asking);
+    try std.testing.expect(conversation(&state, "b4n8wd".*, .working, &buffer).asking == null);
     // Any other input there cancels, and the next ctrl-x asks afresh.
-    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .stop = false } }));
+    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .other } }));
     try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working, &buffer).text);
     try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
     try expectEffects(&.{.{ .stop = ref }}, try step(&state, .{ .conversed = ctrl_x }));
@@ -4277,7 +4501,7 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     try expectNoticeWithData(&state, "! k7m2qx not stopped: session_not_found");
     // Ended work takes no stop.
     try std.testing.expect(conversation(&state, ref, .working, &buffer).stoppable and !conversation(&state, ref, .finished, &buffer).stoppable);
-    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .stop = true } }));
+    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .input = .stop } }));
     try expectNotice(&state, "k7m2qx is already finished.");
 }
 
@@ -4457,13 +4681,14 @@ test "typing / lists the overview's commands between the rule and the draft, as 
     defer state.deinit();
     const all = try draftLines(&state, try typeText(&state, "/"), 80, 24);
     defer std.testing.allocator.free(all);
-    try expectLines(all, 16, &.{
+    try expectLines(all, 15, &.{
+        " /archive              archive the selected Session; stop active work first",
         " /configure [OPTIONS]  hold settings for the next Session",
         " /exit                 leave; Host work continues",
         " /help                 keys and commands",
         " /model                choose the model new Sessions use",
         " /rename NAME          name the selected Session",
-        " /setup [OPTIONS]      future defaults",
+        " +4 more · type to narrow",
         " › /",
         " esc close",
     });
@@ -4536,10 +4761,11 @@ test "arrows move the command list's highlight, and Enter takes it: a word anoth
     try std.testing.expectEqual(@as(usize, 1), state.commands.?.highlight);
     try std.testing.expectEqual(selected, state.selected);
     // Enter on /exit, highlighted, runs it.
+    _ = try press(&state, draft, .next);
     try expectEffects(&.{.exit}, try submit(&state, draft));
     // /configure alone only says its usage: Enter adds its word and a
     // space, for an option.
-    state.commands.?.highlight = 0;
+    state.commands.?.highlight = 1;
     try expectEffects(&.{.{ .append = "configure " }}, try submit(&state, draft));
     // An option that takes a value is added for it, and the next list
     // starts at its top, however far down the highlight was.
@@ -4566,8 +4792,8 @@ test "a short screen lists the commands it has rows for and counts the rest" {
     // the second counting the rest.
     const text = try draftLines(&state, try typeText(&state, "/"), 80, 11);
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, " /configure [OPTIONS]  hold settings for the next Session") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, " +5 more · type to narrow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " /archive              archive the selected Session; stop active work first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " +9 more · type to narrow") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "/exit ") == null);
 }
 
@@ -5443,7 +5669,7 @@ test "a quota reset far in the future still draws its band" {
 test "render draws each band" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Summarize the CI failures" });
     try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_sign_in_refresh_token_expired", null) },
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
         \\ Sign-in expired. Run rui auth login codex.
         \\
         \\
@@ -5469,7 +5695,7 @@ test "render draws each band" {
         \\ ↑↓ select · enter open
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\
         \\
@@ -5495,7 +5721,7 @@ test "render draws each band" {
         \\.qqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
         \\ Sign-in expired. Run rui auth login codex.
         \\
         \\
@@ -5558,7 +5784,7 @@ test "render draws each band" {
         \\
     );
     try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 20 * 60) },
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
         \\ Quota used up. Resets in 20m.
         \\
         \\
@@ -5584,7 +5810,7 @@ test "render draws each band" {
         \\ ↑↓ select · enter open
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\
         \\
@@ -5610,7 +5836,7 @@ test "render draws each band" {
         \\.qqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
         \\ Quota used up. Resets in 20m.
         \\
         \\
@@ -5673,7 +5899,7 @@ test "render draws each band" {
         \\
     );
     try expectBand(&.{ retryRow("aaaaaa", "provider_temporary_http_429", 10), retryRow("bbbbbb", "provider_temporary_http_429", 20) },
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
         \\ Rate limited. 2 Sessions will retry.
         \\
         \\
@@ -5699,7 +5925,7 @@ test "render draws each band" {
         \\ ↑↓ select · enter open · ctrl+x stop
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\
         \\
@@ -5725,7 +5951,7 @@ test "render draws each band" {
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
         \\ Rate limited. 2 Sessions will retry.
         \\
         \\
@@ -5793,8 +6019,8 @@ test "render draws an empty Store" {
     var state = try opened(&.{});
     defer state.deinit();
     try expectScreens(&state, .{},
-        \\ रुई rui  ~/code/rui
-        \\ No Sessions yet. Type a task below.
+        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
+        \\ No unarchived Sessions. /sessions archived shows the archive.
         \\
         \\
         \\
@@ -5819,8 +6045,8 @@ test "render draws an empty Store" {
         \\
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
-        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
+        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
         \\
         \\
@@ -5845,8 +6071,8 @@ test "render draws an empty Store" {
         \\
         \\
     ,
-        \\ रुई rui  ~/code/rui
-        \\ No Sessions yet. Type a task below.
+        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
+        \\ No unarchived Sessions. /sessions archived shows the archive.
         \\
         \\
         \\
@@ -5913,7 +6139,7 @@ test "render draws twenty mixed rows" {
     var state = try opened(&mixed);
     defer state.deinit();
     try expectScreens(&state, .{},
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
         \\ Running. 20 Sessions. 2 failed.
         \\
         \\
@@ -5939,7 +6165,7 @@ test "render draws twenty mixed rows" {
         \\ ↑↓ select · enter open · ctrl+x stop
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
         \\.SSSSSSSS.nnnnnnnnnnnnnnnnnnnnnn
         \\
         \\
@@ -5965,7 +6191,7 @@ test "render draws twenty mixed rows" {
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
         \\ Running. 20 Sessions. 2 failed.
         \\
         \\
@@ -6035,7 +6261,7 @@ test "render draws ASCII without colour" {
     _ = try step(&state, .{ .first_line = .{ .reference = "h8q2mz".*, .admission = 4, .line = "résumé the naïve café ☕ notes" } });
     const caps: Caps = .{ .unicode = false, .depth = .none };
     try expectScreens(&state, caps,
-        \\ rui  ~/code/rui
+        \\ rui  ~/code/rui                                         Unarchived - /sessions
         \\ Running. 20 Sessions. 2 failed.
         \\
         \\
@@ -6061,7 +6287,7 @@ test "render draws ASCII without colour" {
         \\ ^v select - enter open - ctrl+x stop
         \\
     ,
-        \\.NNN..nnnnnnnnnn
+        \\.NNN..nnnnnnnnnn.........................................nnnnnnnnnnnnnnnnnnnnnn
         \\.NNNNNNNN.nnnnnnnnnnnnnnnnnnnnnn
         \\
         \\
@@ -6087,7 +6313,7 @@ test "render draws ASCII without colour" {
         \\.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\
     ,
-        \\ rui  ~/code/rui
+        \\ rui  ~/code/rui                                                                                                                                                                 Unarchived - /sessions
         \\ Running. 20 Sessions. 2 failed.
         \\
         \\
@@ -6477,7 +6703,7 @@ test "the top reads as the mock: wordmark, headline, health, then the counted gr
     var state = try opened(&mixed);
     defer state.deinit();
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 7500, .slots = 100, .slots_in_use = 3 } });
-    try expectScreenLine(&state, 0, " रुई rui  ~/code/rui");
+    try expectScreenLine(&state, 0, " रुई rui  ~/code/rui                                      Unarchived · /sessions");
     try expectScreenLine(&state, 1, " Running. 20 Sessions. 2 failed.");
     try expectScreenLine(&state, 2, " Host up 2h05m   slots 3/100");
     // The headings count the rows, so no line above them does.
@@ -6492,7 +6718,7 @@ test "the top reads as the mock: wordmark, headline, health, then the counted gr
     // ASCII has rui alone.
     const text = try screenText(&state, 80, 24, .{ .unicode = false });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.startsWith(u8, text, " rui  ~/code/rui\n Running. 20 Sessions. 2 failed.\n Host up 2h05m   slots 3/100\n\n Yours - 3\n"));
+    try std.testing.expect(std.mem.startsWith(u8, text, " rui  ~/code/rui                                         Unarchived - /sessions\n Running. 20 Sessions. 2 failed.\n Host up 2h05m   slots 3/100\n\n Yours - 3\n"));
 }
 
 test "the headline says whether anything works, and counts failures" {
@@ -6510,7 +6736,7 @@ test "the headline says whether anything works, and counts failures" {
         .{ .rows = &.{yours_done}, .line = " Quiet for 5m. Your conversation has answered." },
         .{ .rows = &.{ yours_done, failed }, .line = " Quiet for 1m. 1 failed." },
         .{ .rows = &.{session("g7h8j9", .{ .idle = ago(7200) }, .{ .label = "Wait" })}, .line = " Quiet for 2h00m. Nothing is working or waiting." },
-        .{ .rows = &.{}, .line = " No Sessions yet. Type a task below." },
+        .{ .rows = &.{}, .line = " No unarchived Sessions. /sessions archived shows the archive." },
     }) |case| {
         var state = try opened(case.rows);
         defer state.deinit();
@@ -6526,7 +6752,7 @@ test "overview top stays compact through completion failure Host changes and inp
             const text = try screenText(state, 80, 24, .{});
             defer std.testing.allocator.free(text);
             var lines = std.mem.splitScalar(u8, text, '\n');
-            for ([_][]const u8{ " रुई rui  ~/code/rui", headline_text, health, "", group }) |expected| {
+            for ([_][]const u8{ " रुई rui  ~/code/rui                                      Unarchived · /sessions", headline_text, health, "", group }) |expected| {
                 try std.testing.expectEqualStrings(expected, lines.next().?);
             }
             try std.testing.expect(std.mem.indexOf(u8, text, "Since you looked") == null);
@@ -6578,7 +6804,7 @@ test "overview compact top leaves a failed row visible in a narrow viewport" {
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     for ([_][]const u8{
-        " रुई rui  ~/code/rui",
+        " रुई rui  …e/rui  Unarchived · /sessions",
         " Quiet for 0s. 1 failed.",
         "",
         "",
@@ -6601,7 +6827,7 @@ test "overview compact top preserves both alarm bands before health and the list
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     for ([_][]const u8{
-        " रुई rui  ~/code/rui",
+        " रुई rui  ~/code/rui                                      Unarchived · /sessions",
         " Host stopped 1m ago. Run rui host start.",
         " Sign-in expired. Run rui auth login codex.",
         " Host not responding. Last update 1m ago.",
@@ -7159,20 +7385,21 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
     try std.testing.expect(std.mem.endsWith(u8, top, "Esc returns"));
     try std.testing.expectEqual(@as(usize, 79), top.len);
     for ([_][]const u8{
-        " Up/Down select a Session past the draft's lines · Shift-Up/Down always",
-        " Home/End select the first or last Session while the draft is empty",
-        " Enter on an empty draft opens the selected Session · Ctrl-X twice stops it",
-        " A message and Enter starts a new Session with it",
-        " / lists the commands · Up/Down move the highlight · Tab or Enter takes it",
-        " Esc or Ctrl-G closes the list, this panel, the draft, then held settings",
-        " Ctrl-C, or Ctrl-D on an empty draft, leaves; Host work continues",
+        " Up/Down select · Shift-Up/Down always · Home/End first/last on empty draft",
+        " Enter opens · Alt-A archives · Ctrl-X twice stops · Type a task to start",
+        " / lists commands · Up/Down choose · Tab or Enter takes it",
+        " Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves",
         "",
+        " /archive              archive the selected Session; stop active work first",
         " /configure [OPTIONS]  hold settings for the next Session",
         " /exit                 leave; Host work continues",
         " /help                 keys and commands",
         " /model                choose the model new Sessions use",
         " /rename NAME          name the selected Session",
+        " /sessions [VIEW]      view Unarchived, Archived or All Sessions",
         " /setup [OPTIONS]      future defaults",
+        " /unarchive            restore the selected Session without restarting work",
+        " /undo                 restore the last Session archived here",
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
     try std.testing.expect(std.mem.indexOf(u8, shown, label) == null);
     // The line under the input says Esc closes it, over held settings or a
@@ -7344,5 +7571,225 @@ test "a command the person did not see end is named on the way out" {
         var departure = std.Io.Writer.fixed(&bytes);
         try writeDeparture(&state, null, &departure);
         try std.testing.expectEqualStrings(case.expected, departure.buffered());
+    }
+}
+
+test "archive views remove changed rows outside the server filter and select the nearest Session" {
+    const a = session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" });
+    var b = session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" });
+    const c = session("cccccc", .{ .finished = ago(3) }, .{ .label = "third" });
+    var state = try opened(&.{ a, b, c });
+    defer state.deinit();
+    try std.testing.expectEqual(ArchiveFilter.active, state.archive);
+    state.selected = b.reference;
+    b.archive_state = .archived;
+    _ = try refresh(&state, .changed, testToken(2), &.{b});
+    try std.testing.expectEqual(@as(usize, 2), state.rows.items.len);
+    try std.testing.expect(state.find(b.reference) == null);
+    try std.testing.expectEqualStrings(&c.reference, &state.selected.?);
+    var effects: Effects = .{};
+    try enter(&state, "/sessions archived", &effects);
+    try std.testing.expectEqual(ArchiveFilter.archived, state.listing_archive.?);
+    try std.testing.expect(state.token == null);
+    try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
+    _ = try respond(&state, .full, testToken(3), &.{ a, b });
+    try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Archived") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "[Archived] second") != null);
+    b.archive_state = .active;
+    _ = try refresh(&state, .changed, testToken(4), &.{b});
+    try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
+    try std.testing.expect(state.selected == null);
+}
+
+test "archive filter switch clears hidden data and discards every stale traversal page" {
+    const row = session("aaaaaa", .{ .idle = ago(1) }, .{ .label = "private active title" });
+    const archived = session("bbbbbb", .{ .stopped = .{ .since = test_now_s - 1, .cause = .stop } }, .{ .label = "saved title", .archive_state = .archived });
+    var state = try opened(&.{row});
+    defer state.deinit();
+    _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+    var effects: Effects = .{};
+    try enter(&state, "/sessions archived", &effects);
+    try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
+    try std.testing.expect(state.token == null);
+    try std.testing.expect(state.listing_archive == null);
+    _ = try step(&state, .{ .list = .{ .page = .{ .rows = &.{row}, .answer = null } } });
+    try std.testing.expectEqual(@as(usize, 0), state.pending.items.len);
+    const restarted = try respond(&state, .changed, testToken(2), &.{row});
+    try expectEffects(&.{.{ .list = null }}, restarted);
+    try std.testing.expectEqual(ArchiveFilter.archived, state.listing_archive.?);
+    _ = try respond(&state, .full, testToken(3), &.{archived});
+    try std.testing.expect(state.find(row.reference) == null);
+    try std.testing.expect(state.find(archived.reference) != null);
+    effects = .{};
+    try enter(&state, "/sessions all", &effects);
+    _ = try respond(&state, .full, testToken(4), &.{ row, archived });
+    try std.testing.expectEqual(@as(usize, 2), state.rows.items.len);
+}
+
+test "busy archive confirms Stop and archive and never hides before settled server state" {
+    var row = session("aaaaaa", .{ .working = ago(1) }, .{ .label = "busy" });
+    var state = try opened(&.{row});
+    defer state.deinit();
+    var effects: Effects = .{};
+    try enter(&state, "/archive", &effects);
+    try expectEffects(&.{.clear_draft}, effects);
+    try std.testing.expectEqual(.archive, state.prompt.?.action);
+    const asking = try screenText(&state, 100, 24, .{});
+    defer std.testing.allocator.free(asking);
+    try std.testing.expect(std.mem.indexOf(u8, asking, "Stop and archive aaaaaa?") != null);
+    _ = try press(&state, .{}, .clear);
+    try std.testing.expect(state.prompt == null);
+    effects = .{};
+    try enter(&state, "/archive", &effects);
+    try expectEffects(&.{.{ .archive = .{ .reference = row.reference } }}, try submit(&state, .{}));
+    try std.testing.expectEqual(ArchiveState.active, state.find(row.reference).?.archive_state);
+    _ = try step(&state, .{ .archive = .{ .request = .{ .reference = row.reference }, .outcome = .{ .requested = .pending } } });
+    try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+    row.archive_state = .archiving;
+    row.state = .{ .stopping = ago(0) };
+    _ = try refresh(&state, .changed, testToken(2), &.{row});
+    const settling = try screenText(&state, 100, 24, .{});
+    defer std.testing.allocator.free(settling);
+    try std.testing.expect(std.mem.indexOf(u8, settling, "Stopping and archiving") != null);
+    try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+    row.archive_state = .archived;
+    row.state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } };
+    _ = try refresh(&state, .changed, testToken(3), &.{row});
+    try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
+    try std.testing.expectEqualStrings("Archived aaaaaa. /undo restores it.", state.notice.?.text());
+    effects = .{};
+    try enter(&state, "/undo", &effects);
+    try expectEffects(&.{ .{ .archive = .{ .reference = row.reference, .archived = false } }, .clear_draft }, effects);
+    _ = try step(&state, .{ .archive = .{ .request = .{ .reference = row.reference, .archived = false }, .outcome = .{ .requested = .completed } } });
+    try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
+    row.archive_state = .active;
+    _ = try refresh(&state, .changed, testToken(4), &.{row});
+    try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+    try std.testing.expectEqual(Kind.stopped, std.meta.activeTag(state.find(row.reference).?.state));
+}
+
+test "archive failure and unconfirmed requests stay visible and surface recoverable errors" {
+    const row = session("aaaaaa", .{ .idle = ago(1) }, .{ .label = "kept" });
+    var state = try opened(&.{row});
+    defer state.deinit();
+    var effects: Effects = .{};
+    try enter(&state, "/archive", &effects);
+    try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+    _ = try step(&state, .{ .archive = .{ .request = .{ .reference = row.reference }, .outcome = .{ .failed = "archive_pending" } } });
+    try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "not archived: archive_pending") != null);
+    try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+    effects = .{};
+    try enter(&state, "/archive", &effects);
+    _ = try step(&state, .{ .archive = .{ .request = .{ .reference = row.reference }, .outcome = .{ .unconfirmed = "saved-handle" } } });
+    try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "recover saved-handle") != null);
+    try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
+    effects = .{};
+    try enter(&state, "/archive", &effects);
+    for (effects.slice()) |effect| try std.testing.expect(effect != .archive);
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try writeDeparture(&state, null, &output.writer);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "rui request recover saved-handle") != null);
+}
+
+test "archive traversal stays invalid after switching away and back between pages" {
+    var rows: [max_page_rows + 1]Listed = undefined;
+    for (&rows, 0..) |*row, at| row.* = session(&.{ 'a', 'a', 'a', 'a', 'a', '0' + @as(u8, @intCast(at)) }, .{ .idle = ago(1) }, .{ .label = "kept" });
+    var state = try opened(&rows);
+    defer state.deinit();
+    _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+    _ = try step(&state, .{ .list = .{ .page = .{ .rows = rows[0..max_page_rows], .answer = null } } });
+    try std.testing.expectEqual(max_page_rows, state.pending.items.len);
+    var effects: Effects = .{};
+    try enter(&state, "/sessions archived", &effects);
+    try enter(&state, "/sessions unarchived", &effects);
+    const old_tail = try respond(&state, .full, testToken(2), rows[max_page_rows..]);
+    try expectEffects(&.{.{ .list = null }}, old_tail);
+    try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.pending.items.len);
+    try std.testing.expect(state.token == null);
+    _ = try respond(&state, .full, testToken(3), &rows);
+    try std.testing.expectEqual(rows.len, state.rows.items.len);
+    for (rows) |row| try std.testing.expect(state.find(row.reference) != null);
+    try std.testing.expectEqual(testToken(3), state.token.?);
+}
+
+test "archive traversal stays invalid after switching away and back before not_modified" {
+    const row = session("aaaaaa", .{ .idle = ago(1) }, .{ .label = "kept" });
+    var state = try opened(&.{row});
+    defer state.deinit();
+    _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+    var effects: Effects = .{};
+    try enter(&state, "/sessions archived", &effects);
+    try enter(&state, "/sessions unarchived", &effects);
+    try expectEffects(&.{.{ .list = null }}, try respond(&state, .not_modified, testToken(1), &.{}));
+    try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
+    try std.testing.expect(state.token == null);
+    _ = try respond(&state, .full, testToken(2), &.{row});
+    try std.testing.expect(state.find(row.reference) != null);
+    try std.testing.expectEqual(testToken(2), state.token.?);
+}
+
+test "Alt-A archive keeps the draft and confirms its captured row before draft or picker Enter" {
+    const a = session("aaaaaa", .{ .working = ago(1) }, .{});
+    const b = session("bbbbbb", .{ .idle = ago(2) }, .{});
+    const draft: Draft = .{ .bytes = "/rename unfinished", .cursor = 4, .edits = 17 };
+    for ([_]bool{ false, true }) |choice| {
+        var state = try opened(&.{ a, b });
+        defer state.deinit();
+        state.selected = a.reference;
+        try expectEffects(&.{}, try step(&state, .{ .composed = .{ .draft = draft, .input = .{ .composer = .{ .action = .archive } } } }));
+        try std.testing.expectEqual(Prompt.Action.archive, state.prompt.?.action);
+        state.selected = b.reference;
+        // Listing/selection changes do not retarget the captured confirmation.
+        const input: Input = if (choice) .{ .choice = .enter } else .{ .composer = .submit };
+        try expectEffects(&.{.{ .archive = .{ .reference = a.reference } }}, try step(&state, .{ .composed = .{ .draft = draft, .input = input } }));
+        try std.testing.expectEqual(ArchiveState.active, state.find(a.reference).?.archive_state);
+        try std.testing.expectEqualStrings(&b.reference, &state.selected.?);
+        _ = try step(&state, .{ .archive = .{ .request = .{ .reference = a.reference }, .outcome = .{ .failed = "archive_pending" } } });
+        try std.testing.expect(state.find(a.reference) != null);
+    }
+}
+
+test "Alt-A conversation archive uses exact unlisted Session and shares guards ledger and cancellation" {
+    const ref = "k7m2qx".*;
+    for ([_]Kind{ .idle, .working, .approval }) |work| {
+        var state = try testState();
+        defer state.deinit();
+        const ask: Event = .{ .conversed = .{ .reference = ref, .work = work, .input = .{ .archive = .active } } };
+        const confirm: Event = .{ .conversed = .{ .reference = ref, .work = work, .input = .confirm_archive } };
+        if (work != .idle) {
+            try expectEffects(&.{}, try step(&state, ask));
+            var buffer: [max_prompt_bytes]u8 = undefined;
+            const said = conversation(&state, ref, work, &buffer);
+            try std.testing.expectEqual(Prompt.Action.archive, said.asking.?);
+            try std.testing.expectEqualStrings("Stop and archive k7m2qx? enter yes · esc no", said.text.?);
+            try std.testing.expect(conversation(&state, "aaaaaa".*, work, &buffer).asking == null);
+            try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = work, .input = .other } }));
+            try expectEffects(&.{}, try step(&state, confirm));
+            try expectEffects(&.{}, try step(&state, ask));
+            // A different open conversation cannot approve the captured target.
+            try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = "aaaaaa".*, .work = work, .input = .confirm_archive } }));
+            try expectEffects(&.{}, try step(&state, ask));
+            try expectEffects(&.{.{ .archive = .{ .reference = ref } }}, try step(&state, confirm));
+        } else try expectEffects(&.{.{ .archive = .{ .reference = ref } }}, try step(&state, ask));
+        _ = try step(&state, ask);
+        try expectEffects(&.{}, try step(&state, confirm));
+        try std.testing.expectEqual(@as(usize, 1), state.request_count);
+        _ = try step(&state, .{ .archive = .{ .request = .{ .reference = ref }, .outcome = .{ .unconfirmed = "saved-handle" } } });
+        _ = try step(&state, ask);
+        try expectEffects(&.{}, try step(&state, confirm));
+        try std.testing.expectEqual(@as(usize, 1), state.request_count);
+    }
+    for ([_]ArchiveState{ .archived, .archiving }) |archive| {
+        var state = try testState();
+        defer state.deinit();
+        try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .{ .archive = archive } } }));
+        try std.testing.expect(state.prompt == null);
+        try std.testing.expect(state.notice != null);
+        try std.testing.expectEqual(@as(usize, 0), state.request_count);
     }
 }

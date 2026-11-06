@@ -7,6 +7,7 @@ import { RuiUnavailableError } from "../src/errors.ts";
 import { listActivity, type FeedEntry } from "../src/feed.ts";
 import { SessionNotifications } from "../src/notifications.ts";
 import { Session, type Link } from "../src/sessions.ts";
+import { WIRE_VERSION } from "../src/transport.ts";
 import type { components } from "../src/wire.ts";
 
 type Schemas = components["schemas"];
@@ -130,7 +131,7 @@ function fakeSession(state: Schemas["WorkStateJson"]["kind"] = "idle", queued = 
 	let deliver = false;
 	const link: Link = {
 		activity: new SessionNotifications(),
-		exchange: async (path) => {
+		exchange: async (path, build) => {
 			if (path === "/v1/inspect-session") return Buffer.from(JSON.stringify({
 				session: { parent: null, label: null, model: "model-a", reasoning_effort: null, tools: [], permission_mode: "ask" },
 				pending_messages: queued,
@@ -138,7 +139,7 @@ function fakeSession(state: Schemas["WorkStateJson"]["kind"] = "idle", queued = 
 			}));
 			if (path !== "/v1/activity-page") {
 				deliver = true;
-				return Buffer.from(JSON.stringify({ answer: { status: "accepted", admission: "1" } }));
+				return Buffer.from(JSON.stringify({ answer: { status: "accepted", admission: "1", archived: JSON.parse(build("/s")).archived }, completion: { status: "completed" } }));
 			}
 			pages++;
 			const items = deliver ? [{ position: String(pages), ordinal: "0", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }] : [];
@@ -179,7 +180,7 @@ for (const state of ["idle", "finished", "failed", "stopped"] as const) {
 	});
 }
 
-for (const kind of ["send", "update", "decide", "interrupt", "stop"] as const) {
+for (const kind of ["send", "update", "decide", "interrupt", "stop", "archive", "unarchive"] as const) {
 	test(`${kind} wakes every sleeping follower for the same Session`, async () => {
 		const fake = fakeSession();
 		const controller = new AbortController();
@@ -195,6 +196,8 @@ for (const kind of ["send", "update", "decide", "interrupt", "stop"] as const) {
 				case "decide": await writer.decide("1", "allow"); break;
 				case "interrupt": await writer.interrupt(); break;
 				case "stop": await writer.stop(); break;
+				case "archive": await writer.archive(); break;
+				case "unarchive": await writer.unarchive(); break;
 			}
 			await turn();
 			assert.ok(fake.pages() >= 4, "both followers must re-read");
@@ -340,7 +343,7 @@ test("follow retains its exhausted cursor and backoff across not_modified, and c
 	const requests: Schemas["ActivityPageRequest"][] = [];
 	const replies = [
 		{ delta: "full", since: "token-a", items: [], more: false, end: "9", queued: { count: "0" }, work: { state: { kind: "working" } } },
-		{ version: "9", type: "activity_page", delta: "not_modified", since: "token-b" },
+		{ version: WIRE_VERSION, type: "activity_page", delta: "not_modified", since: "token-b" },
 		{ delta: "full", since: null, items: [], more: false, end: "12", queued: { count: "0" }, work: { state: { kind: "working" } } },
 		{ delta: "full", since: "token-c", items: [{ position: "13", ordinal: "2", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }], more: false, end: "14", queued: { count: "0" }, work: { state: { kind: "working" } } },
 	];
