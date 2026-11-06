@@ -721,13 +721,37 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.decidePermission(&access, command, faults))) catch .infrastructure_failure;
     }
 
+    /// Tier 1: atomics only, with no holder or connection access.
+    fn unchangedSession(self: *const Store, since: ?change_ring.SessionToken) ?change_ring.SessionToken {
+        const token = since orelse return null;
+        return if (self.notModified(.{ .instance = token.instance, .generation = token.generation })) token else null;
+    }
+
+    /// Tier 2: called only under the holder, before opening read access.
+    fn unchangedSessionHeld(self: *const Store, since: ?change_ring.SessionToken, generation: u64) ?change_ring.SessionToken {
+        const token = since orelse return null;
+        if (std.mem.eql(u8, &token.instance, &self.instance) and token.generation <= generation and
+            !self.changes.mayHaveChanged(&token.session, token.generation, generation)) return token.at(generation);
+        return null;
+    }
+
+    fn sessionSince(session: []const u8, since: ?change_ring.SessionToken) ?change_ring.SessionToken {
+        const token = since orelse return null;
+        return if (std.mem.eql(u8, session, &token.session)) token else null;
+    }
+
+    /// Tokens cover follow polling after the unpinned forward page is drained,
+    /// not another slice of a bounded, backward or intra-position traversal.
+    fn activitySince(request: *const protocol.ActivityPage) ?change_ring.SessionToken {
+        if (request.direction != .forward or request.end != null or request.ordinal != null) return null;
+        return sessionSince(request.session.slice(), request.since);
+    }
+
     pub fn observeCommand(self: *Store, key: []const u8, since: ?change_ring.SessionToken, out: *Observed) !void {
-        // Tier 1: the existing atomics prove nothing committed anywhere. No
-        // holder or connection access; fencing still reports its failure.
-        if (since) |token| if (self.notModified(.{ .instance = token.instance, .generation = token.generation })) {
+        if (self.unchangedSession(since)) |token| {
             out.* = .{ .not_modified = token };
             return;
-        };
+        }
         return self.queue().run(observeCommandHeld, .{ self, key, since, out });
     }
 
@@ -737,13 +761,10 @@ pub const Store = struct {
         // Capture before any reads, just as for a Session listing. The ring
         // belongs to this holder; a sibling's commit needs no database read.
         const generation = self.commitGeneration();
-        if (since) |token| if (std.mem.eql(u8, &token.instance, &self.instance) and
-            token.generation <= generation and
-            !self.changes.mayHaveChanged(&token.session, token.generation, generation))
-        {
-            out.* = .{ .not_modified = token.at(generation) };
+        if (self.unchangedSessionHeld(since, generation)) |token| {
+            out.* = .{ .not_modified = token };
             return;
-        };
+        }
         out.* = .{ .full = .{ .token = null } };
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
@@ -809,6 +830,12 @@ pub const Store = struct {
     }
 
     pub fn activityPage(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
+        try request.validate();
+        if (self.unchangedSession(activitySince(request))) |token| {
+            out.not_modified = true;
+            out.token = token;
+            return;
+        }
         return self.queue().run(activityPageHeld, .{ self, request, out });
     }
 
@@ -816,9 +843,25 @@ pub const Store = struct {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
+        const generation = self.commitGeneration();
+        if (self.unchangedSessionHeld(activitySince(request), generation)) |token| {
+            out.not_modified = true;
+            out.token = token;
+            return;
+        }
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.page, reads_domain.activityPage(&access, request, out));
+        try entry.finish(Ordinary.page, reads_domain.activityPage(&access, request, out));
+        // Retry deadlines change the footer without a commit. Pending may be
+        // an elapsed retry and become retrying again after a wall-clock step.
+        // Exclude both states rather than retain another copy of retry facts.
+        // Only a drained, unpinned forward page grants a follow token.
+        if (request.direction == .forward and request.end == null and !out.more and
+            out.work.work.state != .retrying and out.work.work.state != .pending) out.token = .{
+            .instance = self.instance,
+            .generation = generation,
+            .session = request.session.slice()[0..protocol.session_id_bytes].*,
+        };
     }
 
     pub fn searchActivity(self: *Store, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {

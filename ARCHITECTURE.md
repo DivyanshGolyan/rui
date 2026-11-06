@@ -298,9 +298,9 @@ Supported metadata for CLI consumers is:
 | Model Interruption / Permission Decision | Original Session/Turn/Operation or Action/decision, including retained rejected targets |
 
 **Unchanged observations.**
-`observe-command` accepts an optional `since` hint, `<32-hex instance>.<generation>.<6-character Session>`.
+`observe-command`, `activity-page`, and the Current profile of `inspect-session` accept an optional `since` hint, `<32-hex instance>.<generation>.<6-character Session>`.
 Malformed token strings return 400 `invalid_since`.
-Every full reply has `delta:"full"` and `since` beside `observation`; `since` is null for absent keys or non-Session targets.
+Every full observation has `delta:"full"` and `since` beside `observation`; `since` is null for absent keys or non-Session targets.
 A repeat read can instead return only the version, type, key, `delta:"not_modified"` and its token.
 Store owns both unchanged tiers: the opening identity and unchanged commit-generation atomics answer without a holder; otherwise, under the Store holder and before read access, the existing change ring walks backward only through entries after the token.
 If that covered history names no change to its Session, the token advances to the current generation without SQLite.
@@ -311,6 +311,12 @@ Nothing is retained per reader and no Host thread is added.
 Each reply reserves its own shape's bound, not the global observation maximum.
 A retry becoming past due commits nothing: readers apply `WorkState.asOf`, as Session listing does.
 `request inspect` always asks for full facts; it exposes neither a `--since` flag nor the token in its output.
+An exhausted, unpinned forward activity page grants the same Session token; the TypeScript follow loop sends it only after consuming all matching items through that page's `end`.
+An unchanged activity reply contains only version, type, `delta:"not_modified"`, and `since`; the follower keeps its end cursor and footer and sleeps on its existing schedule.
+Unread, pinned, and backward pages grant no token.
+Activity pages in `retrying` or `pending` grant no token: a retry deadline can change the footer without a commit, including when the wall clock steps backward.
+Current is excluded from unchanged replies: its Host-global execution custody and scratch counters can change without a commit to the inspected Session, and its work also applies the retry clock.
+Current validates `since` but always returns `delta:"full",since:null`; the human frontend therefore continues its existing Current reads instead of caching stale execution facts.
 
 One bounded parse validates the entire keyed envelope, consumed duplicates, string-only named statuses/kinds, canonical decimal IDs, content-reference syntax and operation applicability.
 An omitted field is distinct from invalid present null; only fields declared nullable, such as selection Turn and `work.first_action`, accept null.

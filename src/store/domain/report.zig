@@ -745,12 +745,13 @@ pub fn renderSessionReport(
 pub const json_shapes = struct {
     const H = protocol.Hole;
     const head = .{"{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\""};
+    const current_head = .{"{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\""};
     const facts = .{ "\",\"session\":", H{ .json = CurrentJson.Settings }, ",\"pending_messages\":\"", H.decimal, "\",\"work\":", H{ .json = CurrentJson.Work }, ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = protocol.max_key_bytes }, ",\"recent_messages\":", ListOf(CurrentJson.Recent), ",\"actions\":", H{ .json = CurrentJson.Actions }, ",\"rejected_calls\":", H{ .json = CurrentJson.RejectedCalls }, ",\"actionable_permissions\":", ListOf(CurrentJson.Actionable) };
     const tail = .{ ",\"execution\":", H{ .json = ExecutionJson }, "}" };
     const missing = "\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}";
-    pub const current = head ++ .{"current"} ++ facts ++ tail;
+    pub const current = current_head ++ .{"current"} ++ facts ++ tail;
     pub const full = head ++ .{"full"} ++ facts ++ .{ ",\"full\":", H{ .json = @import("report_full_shape.zig").Full } } ++ tail;
-    pub const missing_current = head ++ .{"current" ++ missing};
+    pub const missing_current = current_head ++ .{"current" ++ missing};
     pub const missing_full = head ++ .{"full" ++ missing};
 };
 
@@ -776,7 +777,10 @@ pub noinline fn renderHead(a: *ReadAccess, session_ref: []const u8, profile: pro
     configuration_domain.readSaved(a, session_ref, &current, &found);
     try a.run();
     if (found.get()) try configuration_domain.checkSaved(&current);
-    try capture.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\"");
+    try capture.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\"");
+    // Host-global execution counters and retry clocks are not Session-token facts.
+    if (profile == .current) try capture.append(",\"delta\":\"full\",\"since\":null");
+    try capture.append(",\"profile\":\"");
     try capture.append(@tagName(profile));
     try capture.append("\",\"session\":");
     if (!found.get()) {

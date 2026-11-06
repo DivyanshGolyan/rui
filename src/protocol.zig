@@ -555,6 +555,7 @@ pub const FailedResponseExport = struct {
 };
 
 pub const InspectSession = struct {
+    since: ?change_ring.SessionToken = null,
     store: Bounded(max_store_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
     profile: ReportProfile = .current,
@@ -661,6 +662,7 @@ pub const ProposalMetadata = struct {
 };
 
 pub const ActivityPage = struct {
+    since: ?change_ring.SessionToken = null,
     store: Bounded(max_store_bytes) = .{},
     session: Bounded(max_session_bytes) = .{},
     end: ?u64 = null,
@@ -1230,6 +1232,8 @@ pub const session_list_reply = struct {
 };
 
 pub const ActivityFacts = struct {
+    token: ?change_ring.SessionToken = null,
+    not_modified: bool = false,
     end: u64,
     direction: @FieldType(ActivityPage, "direction") = .forward,
     items: [16]ActivityItem = undefined,
@@ -1243,16 +1247,24 @@ pub const ActivityFacts = struct {
     /// Holes: end, direction; then the items, then `tail`.
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"end\":\"", Hole.decimal, "\",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"items\":[" };
     /// Holes: more, call activity, queued, work.
-    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"queued\":", Hole{ .json = Queued }, ",\"work\":", Hole{ .json = PageWork }, "}" };
+    pub const tail = .{ "],\"more\":", Hole.boolean, ",\"call_activity\":", Hole{ .json = CallActivity }, ",\"queued\":", Hole{ .json = Queued }, ",\"work\":", Hole{ .json = PageWork }, ",\"delta\":\"full\",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
+    pub const unchanged = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"not_modified\",\"since\":", Hole{ .string = change_ring.SessionToken.max_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(head) + jsonListBytes(@typeInfo(@FieldType(ActivityFacts, "items")).array.len, ActivityItem.max_json_bytes) + shapeBytes(tail);
 
     pub fn writeJson(self: *const ActivityFacts, out: *std.Io.Writer) !void {
+        var token_buffer: [change_ring.SessionToken.max_bytes]u8 = undefined;
+        const token = if (self.token) |value| value.format(&token_buffer) else null;
+        if (self.not_modified) return writeShape(out, unchanged, .{token.?});
+        try self.writeFullJson(out, token);
+    }
+
+    pub fn writeFullJson(self: *const ActivityFacts, out: *std.Io.Writer, token: ?[]const u8) !void {
         try writeShape(out, head, .{ self.end, self.direction });
         for (self.items[0..self.count], 0..) |*item, index| {
             if (index != 0) try out.writeByte(',');
             try item.writeJson(out);
         }
-        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.queued, &self.work });
+        try writeShape(out, tail, .{ self.more, &self.call_activity, &self.queued, &self.work, token });
     }
 };
 
@@ -1857,16 +1869,19 @@ const Parser = struct {
         try require(Field, seen, &.{.paused});
     }
 
+    fn readSessionToken(self: *Parser) !?change_ring.SessionToken {
+        if (try self.readNull()) return null;
+        var token: Bounded(change_ring.SessionToken.max_bytes) = .{};
+        self.readSmallString(&token) catch return error.InvalidSince;
+        return change_ring.SessionToken.parse(token.slice()) catch return error.InvalidSince;
+    }
+
     fn parseObserveCommand(self: *Parser, out: *ObserveCommand, members: *Members) !void {
         const Field = enum { key, since };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
             .key => try self.readSmallString(&out.key),
-            .since => if (!try self.readNull()) {
-                var token: Bounded(change_ring.SessionToken.max_bytes) = .{};
-                self.readSmallString(&token) catch return error.InvalidSince;
-                out.since = change_ring.SessionToken.parse(token.slice()) catch return error.InvalidSince;
-            },
+            .since => out.since = try self.readSessionToken(),
         };
         try require(Field, seen, &.{.key});
     }
@@ -2059,7 +2074,7 @@ const Parser = struct {
     }
 
     fn parseInspect(self: *Parser, out: *InspectSession, members: *Members) !void {
-        const Field = enum { session, profile, failed_response, operation, attempt };
+        const Field = enum { session, profile, failed_response, operation, attempt, since };
         var seen: std.EnumSet(Field) = .empty;
         var part: ?FailedResponsePart = null;
         var operation: u64 = 0;
@@ -2078,8 +2093,10 @@ const Parser = struct {
             },
             .operation => operation = try self.readCanonicalU64(),
             .attempt => attempt = try self.readCanonicalU64(),
+            .since => out.since = try self.readSessionToken(),
         };
         try require(Field, seen, &.{.session});
+        if (seen.contains(.since) and (seen.contains(.profile) or seen.contains(.failed_response))) return error.UnexpectedField;
         // A report profile or one failed response stream, never both; the
         // stream is named by its Operation and attempt.
         const selected = part orelse {
@@ -2161,10 +2178,11 @@ const Parser = struct {
     }
 
     fn parseActivityPage(self: *Parser, out: *ActivityPage, members: *Members) !void {
-        const Field = enum { session, end, position, ordinal, direction, kinds, limit };
+        const Field = enum { session, end, position, ordinal, direction, kinds, limit, since };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
             .session => try self.readSmallString(&out.session),
+            .since => out.since = try self.readSessionToken(),
             .end => if (!try self.readNull()) {
                 out.end = try self.readCanonicalU64();
             },
@@ -2868,12 +2886,14 @@ pub const host_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind
 pub const read_result_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_result\",\"store\":", store_hole, ",\"key\":", key_hole, "}" };
 pub const inspect_session_request = struct {
     /// Holes: Store, Session.
-    pub const current = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole, "}" };
+    const current_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole };
+    pub const current = current_head ++ .{"}"};
     /// Holes: Store, Session.
     pub const full = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"profile\":\"full\"}" };
     /// Holes: Store, Session, part, operation, attempt.
     pub const failed_response = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"failed_response\":\"", Hole{ .tag = FailedResponsePart }, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
-    pub const max_bytes = maxShapeBytes(.{ current, full, failed_response });
+    pub const current_since = current_head ++ .{ ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
+    pub const max_bytes = maxShapeBytes(.{ current, current_since, full, failed_response });
 };
 /// Holes: Store, Workspace, after, ceiling.
 const list_sessions_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .optional_string = max_workspace_bytes }, ",\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"" };
@@ -2895,7 +2915,8 @@ pub const conversation_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\
 pub const activity_search_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"query\":", Hole{ .string = 256 }, ",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"before_position\":", Hole.optional_id, ",\"before_ordinal\":", Hole.optional_id, ",\"limit\":\"", Hole.decimal, "\"}" };
 pub const max_activity_search_request_bytes = shapeBytes(activity_search_request);
 pub const max_activity_search_response_bytes = ActivitySearchFacts.max_json_bytes;
-pub const activity_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"limit\":\"", Hole.decimal, "\"}" };
+const activity_page_request_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"limit\":\"", Hole.decimal };
+pub const activity_page_request = activity_page_request_head ++ .{"\"}"};
 /// Holes: Store, Session, position, ordinal.
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
 /// Configure and Message carry content of unbounded size, so only their
@@ -2938,7 +2959,8 @@ pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_argum
 pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
 pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request);
 pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
-pub const max_activity_page_request_bytes = shapeBytes(activity_page_request);
+pub const activity_page_since_request = activity_page_request_head ++ .{ "\",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
+pub const max_activity_page_request_bytes = shapeBytes(activity_page_since_request);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
@@ -2946,7 +2968,7 @@ pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, max
     observe_command_request,       host_info_request,           host_stop_request,
     host_pause_request,            read_result_request,         list_sessions_changed_request,
     read_action_arguments_request, read_action_call_id_request, conversation_content_request,
-    conversation_page_request,     activity_search_request,     activity_page_request,
+    conversation_page_request,     activity_search_request,     activity_page_since_request,
     activity_content_request,      model_list_request,
 }));
 
@@ -4516,8 +4538,12 @@ test "presets allow partial creating configure in either field order" {
     }
 }
 
-test "Command observation since is optional nullable and rejects invalid tokens" {
-    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":\"s\",\"key\":\"k\"";
+test "Session reader since is optional nullable and rejects invalid tokens" {
+    const heads = [_][]const u8{
+        "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":\"s\",\"key\":\"k\"",
+        "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":\"s\",\"session\":\"k7m2qx\",\"end\":null,\"position\":\"0\",\"ordinal\":null,\"direction\":\"forward\",\"kinds\":[\"admission\"],\"limit\":\"16\"",
+        "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":\"s\",\"session\":\"k7m2qx\"",
+    };
     const cases = [_]struct { suffix: []const u8, generation: ?u64 = null, failure: ?anyerror = null }{
         .{ .suffix = "}" },
         .{ .suffix = ",\"since\":null}" },
@@ -4526,8 +4552,8 @@ test "Command observation since is optional nullable and rejects invalid tokens"
         .{ .suffix = ",\"since\":\"abababababababababababababababab.42\"}", .failure = error.InvalidSince },
         .{ .suffix = ",\"since\":17}", .failure = error.InvalidJsonShape },
     };
-    for (cases) |case| {
-        var input: [256]u8 = undefined;
+    for (heads) |head| for (cases) |case| {
+        var input: [512]u8 = undefined;
         const json = try std.fmt.bufPrint(&input, "{s}{s}", .{ head, case.suffix });
         var source: MetadataSource = .{ .input = json };
         var retained: ?named_scratch.Owner = null;
@@ -4541,13 +4567,19 @@ test "Command observation since is optional nullable and rejects invalid tokens"
         if (case.failure) |failure| {
             try std.testing.expectError(failure, parseForTest(&parser));
         } else {
-            const request = (try parseForTest(&parser)).observe_command;
+            const parsed = try parseForTest(&parser);
+            const since = switch (parsed) {
+                .observe_command => |request| request.since,
+                .activity_page => |request| request.since,
+                .inspect_session => |request| request.since,
+                else => unreachable,
+            };
             if (case.generation) |generation| {
-                try std.testing.expectEqual(generation, request.since.?.generation);
-                try std.testing.expectEqualStrings("k7m2qx", &request.since.?.session);
-            } else try std.testing.expect(request.since == null);
+                try std.testing.expectEqual(generation, since.?.generation);
+                try std.testing.expectEqualStrings("k7m2qx", &since.?.session);
+            } else try std.testing.expect(since == null);
         }
-    }
+    };
 }
 
 test "Command observation repeat shape is bounded independently of full replies" {

@@ -2382,7 +2382,7 @@ test "response framing rejects ambiguous or malformed fields before interpreting
 test "client activity peer boundary rejects noncanonical IDs and owns canonical labels" {
     for ([_][]const u8{ "k7m2qx", "09azvw", "", "short", "1234567", "K7m2qx", "k7m2qi", "k7m2ql", "k7m2qo", "k7m2qu", "k7\x00qx", "雪雪", "old/name", "01234567-89ab-4cde-8012-3456789abcde" }, 0..) |session, index| {
         var body: protocol.RequestBuffer = .{};
-        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
+        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
         try body.appendJsonString(session);
         try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (index < 2) {
@@ -3360,7 +3360,8 @@ test "bounded read requests retain escaped key capacities and canonical Session 
         .{ protocol.read_result_request, .{ &escaped_store, &escaped_key }, protocol.max_read_result_request_bytes },
         .{ protocol.read_action_call_id_request, .{ &escaped_store, session, std.math.maxInt(u64) }, protocol.max_read_action_call_id_request_bytes - session_encoding_slack },
         .{ protocol.read_action_arguments_request, .{ &escaped_store, session, std.math.maxInt(u64) }, protocol.max_read_action_arguments_request_bytes - session_encoding_slack },
-        .{ protocol.inspect_session_request.failed_response, .{ &escaped_store, session, protocol.FailedResponsePart.metadata, std.math.maxInt(u64), std.math.maxInt(u64) }, protocol.max_inspect_session_request_bytes - session_encoding_slack },
+        .{ protocol.inspect_session_request.failed_response, .{ &escaped_store, session, protocol.FailedResponsePart.metadata, std.math.maxInt(u64), std.math.maxInt(u64) }, protocol.shapeBytes(protocol.inspect_session_request.failed_response) - session_encoding_slack },
+        .{ protocol.inspect_session_request.current_since, .{ &escaped_store, session, @as(?[]const u8, &escaped_since) }, protocol.max_inspect_session_request_bytes - session_encoding_slack },
     };
     inline for (cases) |case| {
         var body: protocol.RequestBuffer = .{};
@@ -3394,13 +3395,15 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.host_info_request, .{&store}, protocol.max_host_info_request_bytes },
         .{ protocol.host_stop_request, .{&store}, protocol.max_host_stop_request_bytes },
         .{ protocol.read_result_request, .{ &store, &key }, protocol.max_read_result_request_bytes },
-        .{ protocol.inspect_session_request.failed_response, .{ &store, &session, protocol.FailedResponsePart.metadata, id, id }, protocol.max_inspect_session_request_bytes },
+        .{ protocol.inspect_session_request.failed_response, .{ &store, &session, protocol.FailedResponsePart.metadata, id, id }, comptime protocol.shapeBytes(protocol.inspect_session_request.failed_response) },
+        .{ protocol.inspect_session_request.current_since, .{ &store, &session, @as(?[]const u8, &observation_token) }, comptime protocol.shapeBytes(protocol.inspect_session_request.current_since) },
         .{ protocol.list_sessions_changed_request, .{ &store, @as(?[]const u8, &workspace), id, id, &token, id, &reference }, protocol.max_list_sessions_request_bytes },
         .{ protocol.read_action_arguments_request, .{ &store, &session, id }, protocol.max_read_action_arguments_request_bytes },
         .{ protocol.read_action_call_id_request, .{ &store, &session, id }, protocol.max_read_action_call_id_request_bytes },
         .{ protocol.conversation_content_request, .{ &store, &session, id, id }, protocol.max_conversation_content_request_bytes },
         .{ protocol.conversation_page_request, .{ &store, &session, id, id, id }, protocol.max_conversation_page_request_bytes },
-        .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id }, protocol.max_activity_page_request_bytes },
+        .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id }, comptime protocol.shapeBytes(protocol.activity_page_request) },
+        .{ protocol.activity_page_since_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id, @as(?[]const u8, &observation_token) }, protocol.max_activity_page_request_bytes },
         .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
         .{ protocol.model_list_request, .{&store}, protocol.max_model_list_request_bytes },
     };

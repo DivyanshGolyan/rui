@@ -556,6 +556,17 @@ export interface components {
             call_activity: components["schemas"]["CallActivity"];
             queued: components["schemas"]["Queued"];
             work: components["schemas"]["PageWork"];
+            /** @constant */
+            delta: "full";
+            since: string | null;
+        } | {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            type: "activity_page";
+            /** @constant */
+            delta: "not_modified";
+            since: string;
         };
         ActivityPageRequest: {
             /** @constant */
@@ -572,6 +583,22 @@ export interface components {
             /** @description Each at most once, in the order the enum lists them. */
             kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
             limit: components["schemas"]["Decimal"];
+        } | {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            kind: "activity_page";
+            store: string;
+            session: string;
+            end: components["schemas"]["Decimal"] | null;
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"] | null;
+            /** @enum {string} */
+            direction: "forward" | "backward";
+            /** @description Each at most once, in the order the enum lists them. */
+            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
+            limit: components["schemas"]["Decimal"];
+            since: string | null;
         };
         ActivitySearchFactsCursor: {
             position: components["schemas"]["Decimal"];
@@ -1156,6 +1183,9 @@ export interface components {
             /** @constant */
             type: "session_report";
             /** @constant */
+            delta: "full";
+            since: null;
+            /** @constant */
             profile: "current";
             session: components["schemas"]["domainreportCurrentJsonSettings"];
             pending_messages: components["schemas"]["Decimal"];
@@ -1193,6 +1223,9 @@ export interface components {
             /** @constant */
             type: "session_report";
             /** @constant */
+            delta: "full";
+            since: null;
+            /** @constant */
             profile: "current";
             session: null;
             /** @constant */
@@ -1227,6 +1260,14 @@ export interface components {
             kind: "inspect_session";
             store: string;
             session: string;
+        } | {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            kind: "inspect_session";
+            store: string;
+            session: string;
+            since: string | null;
         } | {
             /** @constant */
             version: "9";

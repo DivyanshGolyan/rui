@@ -232,7 +232,7 @@ def main():
                     stop_process(process)
                     process = None
             saved.close()
-            valid = {"version": host_process.WIRE_VERSION, "type": "activity_page", "end": str(2**63-1), "direction": "forward", "more": False,
+            valid = {"version": host_process.WIRE_VERSION, "type": "activity_page", "delta": "full", "since": None, "end": str(2**63-1), "direction": "forward", "more": False,
                 "call_activity": {"total": "0", "entries": []},
                 "queued": {"count": "0", "oldest_position": "0", "newest_admission": "0", "newest_position": "0"},
                 "work": {"state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "revision": "1", "workspace": "/w"},
