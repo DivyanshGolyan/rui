@@ -3664,3 +3664,22 @@ test "Alt-A overview ignores paste and modified confirmation without submitting 
         if (rig.overview.state.prompt) |prompt| try std.testing.expectEqual(view.Prompt.Action.stop, prompt.action);
     }
 }
+
+test "conversation archive and restore use the exact unlisted opened reference through the existing worker" {
+    const rig = try openListed();
+    defer rig.close();
+    rig.overview.opened = "x9y8z7".*;
+    const selected = rig.overview.state.selected.?;
+    try conversed(rig.overview, .idle, .{ .archive = .active });
+    try rig.lend();
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
+    try std.testing.expectEqualStrings("x9y8z7", &Seen.now.archive_session);
+    try std.testing.expect(Seen.now.archive_requested);
+    try conversed(rig.overview, .idle, .unarchive);
+    try rig.lend();
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.archives);
+    try std.testing.expect(!Seen.now.archive_requested);
+    try std.testing.expectEqualStrings("x9y8z7", &Seen.now.archive_session);
+    try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.?);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+}

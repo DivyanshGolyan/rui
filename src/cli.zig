@@ -2386,15 +2386,6 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
                 stderr.diagnostic("rui: result: {s}\n", .{@tagName(caller_error.of(err))});
             };
         },
-        .archive, .unarchive => {
-            var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            var captured = try client.captureSessionArchive(init.io, .{
-                .store = destination,
-                .session = reference,
-                .archived = command.name == .archive,
-            }, .{ .generated = try requestDirectory(init, &directory_buffer) });
-            try sendCapturedMutation(requests_context, &captured, .{ .map = init.environ_map }, null, .interactive_archive);
-        },
         .configure, .effort, .rename => {
             const typed_usage = liveUsage(command.name);
             var arguments: [live_capacity][]const u8 = undefined;
@@ -2785,7 +2776,7 @@ fn sendCapturedMutation(sender: client.Requests, captured: *client.CapturedRecor
     var reply_buffer: client.ReplyBuffer = .{};
     const reply = blk: {
         defer captured.close(io);
-        if (presentation != .interactive_archive) try announceCapture(io, captured);
+        try announceCapture(io, captured);
         break :blk try takeReply(step, sender.sendCaptured(captured, environment, &reply_buffer), captured.identity().*, captured.replay);
     };
     try writeMutationReply(io, reply, presentation, replay);
@@ -3134,7 +3125,6 @@ const MutationPresentation = enum {
     json,
     human,
     interactive_configuration,
-    interactive_archive,
 };
 
 fn writeMutationReply(io: std.Io, reply: protocol_reply.MutationReply, presentation: MutationPresentation, replay: client.Replay) !void {
@@ -3247,16 +3237,6 @@ fn writeMutationField(writer: *std.Io.Writer, label: []const u8, value: []const 
 fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationReply, presentation: MutationPresentation) !void {
     if (presentation == .interactive_configuration and reply.isAccepted()) {
         try writer.writeAll("Rui: Configured.\n");
-        return writer.flush();
-    }
-    if (presentation == .interactive_archive and reply.isAccepted()) {
-        const result = (try reply.answer).result.accepted.session_archive;
-        try writer.writeAll(if (!result.archived)
-            "Rui: Unarchived. Work was not restarted.\n"
-        else if (result.completion == .pending)
-            "Rui: Stopping and archiving.\n"
-        else
-            "Rui: Archived.\n");
         return writer.flush();
     }
     if (presentation == .json) {
@@ -4339,69 +4319,5 @@ test "archive mutation presentation preserves requested intent and pending settl
         var human = std.Io.Writer.fixed(&buffer);
         try presentMutationReply(&human, reply, .human);
         try std.testing.expect(std.mem.endsWith(u8, human.buffered(), if (archived) "archived: true; completion: pending\n" else "archived: false; completion: completed\n"));
-    }
-}
-
-test "conversation archive bridge captures the real command before cancelled transport" {
-    const io = std.testing.io;
-    for ([_]struct { text: []const u8, archived: bool }{
-        .{ .text = "/archive", .archived = true },
-        .{ .text = "/unarchive", .archived = false },
-    }) |case| {
-        var tmp = std.testing.tmpDir(.{ .iterate = true });
-        defer tmp.cleanup();
-        try tmp.dir.setPermissions(io, .fromMode(0o700));
-        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
-        var environment = std.process.Environ.Map.init(std.testing.allocator);
-        defer environment.deinit();
-        try environment.put("HOME", home);
-        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena.deinit();
-        const argv = [_][*:0]const u8{"rui"};
-        const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
-        const page = try tmp.dir.createFile(io, "page", .{ .read = true });
-        defer page.close(io);
-        var token: client.Cancellation = .{};
-        token.requestStop();
-        var line: [16]u8 = undefined;
-        @memcpy(line[0..case.text.len], case.text);
-        const command: session_reads.CommandRun = .{ .command = sessionCommand, .init = init, .requests = .{ .io = io, .cancellation = &token }, .store = home, .session = "k7m2qx", .line = line[0..case.text.len] };
-        try std.testing.expectError(error.Cancelled, command.into(page).outcome);
-        var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const directory = try requestDirectory(init, &directory_buffer);
-        var captures = try std.Io.Dir.openDirAbsolute(io, directory, .{ .iterate = true });
-        defer captures.close(io);
-        var iterator = captures.iterate();
-        var count: usize = 0;
-        while (try iterator.next(io)) |entry| {
-            if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
-            var captured = try client.openCaptured(io, .{ .generated = .{ .directory = directory, .handle = entry.name[0 .. entry.name.len - 5] } });
-            defer captured.close(io);
-            try std.testing.expectEqualStrings("k7m2qx", captured.identity().session.slice());
-            try std.testing.expectEqual(case.archived, captured.target.session_archive.archived);
-            count += 1;
-        }
-        try std.testing.expectEqual(@as(usize, 1), count);
-    }
-}
-
-test "interactive archive presentation distinguishes restore and pending settlement" {
-    const head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_archive_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"archived\":";
-    for ([_]struct { archived: bool, completion: []const u8, said: []const u8 }{
-        .{ .archived = true, .completion = "completed", .said = "Rui: Archived.\n" },
-        .{ .archived = true, .completion = "pending", .said = "Rui: Stopping and archiving.\n" },
-        .{ .archived = false, .completion = "completed", .said = "Rui: Unarchived. Work was not restarted.\n" },
-    }) |case| {
-        var wire: [512]u8 = undefined;
-        var encoded = std.Io.Writer.fixed(&wire);
-        try encoded.writeAll(head);
-        try encoded.print("{s}}},\"completion\":{{\"status\":\"{s}\"}}}}", .{ if (case.archived) "true" else "false", case.completion });
-        const body = encoded.buffered();
-        const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .{ .session_archive = .{ .archived = case.archived } });
-        var bytes: [512]u8 = undefined;
-        var out = std.Io.Writer.fixed(&bytes);
-        try presentMutationReply(&out, reply, .interactive_archive);
-        try std.testing.expectEqualStrings(case.said, out.buffered());
     }
 }

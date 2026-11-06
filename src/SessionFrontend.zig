@@ -519,6 +519,8 @@ const History = enum { older, latest };
 /// What each slash command does here.
 const Slash = union(enum) {
     exit,
+    archive,
+    unarchive,
     history: History,
     /// Waits for the reader, then shows its page; Host commands included.
     inspection: Inspection,
@@ -540,6 +542,8 @@ fn parse(text: []const u8) Slash {
     };
     return switch (command.name) {
         .exit => .exit,
+        .archive => .archive,
+        .unarchive => .unarchive,
         .history => .{ .history = .older },
         .details => .{ .history = .latest },
         .status => .{ .inspection = .status },
@@ -547,7 +551,7 @@ fn parse(text: []const u8) Slash {
         .help => .{ .inspection = .help },
         // The table's /copy words are `reads.Copy`'s own names.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
-        .@"inspect-action", .setup, .configure, .result, .rename, .effort, .archive, .unarchive => .{ .inspection = .command },
+        .@"inspect-action", .setup, .configure, .result, .rename, .effort => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
         .discard => .discard,
         .wait => .wait,
@@ -565,8 +569,10 @@ fn requestHistory(self: *Self, history: History) void {
 
 /// Runs one slash command the draft admitted; it never decides. Local
 /// commands answer at once; an inspection queues for the reader.
-fn slashCommand(self: *Self, text: []const u8) void {
+fn slashCommand(self: *Self, text: []const u8) !void {
     switch (parse(text)) {
+        .archive => try self.perform(.archive),
+        .unarchive => try self.converse(.unarchive),
         .exit => self.leaving = .detached,
         .history => |history| self.requestHistory(history),
         .inspection => self.input.queueCommand(text),
@@ -635,8 +641,6 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/configure --permission-mode ask", "" },
         .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
         .{ "/inspect-action", "" },
-        .{ "/archive", "" },
-        .{ "/unarchive", "" },
         .{ "/archive other", "! Usage: /archive" },
         .{ "/unarchive other", "! Usage: /unarchive" },
         .{ "/status", "" },
@@ -647,7 +651,7 @@ test "frontend answers local and unknown commands in place and keeps Host comman
     };
     inline for (cases) |case| {
         self.notice = null;
-        self.slashCommand(case[0]);
+        try self.slashCommand(case[0]);
         if (case[1].len != 0) {
             try std.testing.expectEqualStrings(case[1], self.notice.?);
             try std.testing.expect(self.input.queuedCommand() == null);
@@ -658,51 +662,6 @@ test "frontend answers local and unknown commands in place and keeps Host comman
     }
 }
 
-test "archive commands use one existing hook for the exact open Session without changing its archive badge" {
-    const Hook = struct {
-        var calls: usize = 0;
-        var expected: []const u8 = undefined;
-
-        fn command(_: std.process.Init, _: client.Requests, store: []const u8, session: []const u8, text: []u8) anyerror!void {
-            calls += 1;
-            try std.testing.expectEqualStrings("archive-store", store);
-            try std.testing.expectEqualStrings("k7m2qx", session);
-            try std.testing.expectEqualStrings(expected, text);
-        }
-    };
-    const held = try HeldFrontend.create();
-    defer held.destroy();
-    const self = &held.self;
-    const page = try held.tmp.dir.createFile(std.testing.io, "command", .{ .read = true });
-    defer page.close(std.testing.io);
-    self.files = .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } };
-    self.store = "archive-store";
-    self.session = "k7m2qx";
-    self.command = Hook.command;
-    self.live.work.state = .{ .working = .{ .since = 1 } };
-    for ([_]struct { text: []const u8, state: protocol.SessionArchiveState }{
-        .{ .text = "/archive", .state = .active },
-        .{ .text = "/unarchive", .state = .archived },
-    }) |case| {
-        Hook.calls = 0;
-        Hook.expected = case.text;
-        self.line.archive_state = case.state;
-        self.slashCommand(case.text);
-        try std.testing.expect(parse(case.text).inspection == .command);
-        const text = self.input.takeCommand().?;
-        const job = self.freeze(.inspection);
-        @memcpy(job.command_text[0..text.len], text);
-        job.command_text_length = text.len;
-        var task: Task = .{ .io = std.testing.io };
-        try reads.runCommand(job, &task);
-        try std.testing.expectEqual(@as(usize, 1), Hook.calls);
-        try std.testing.expectEqual(case.state, self.line.archive_state);
-        try std.testing.expect(self.live.work.state == .working);
-        try std.testing.expect(self.submission.view() == null);
-        try std.testing.expectEqualStrings("k7m2qx", self.session);
-    }
-}
-
 test "frontend /model shows the Session's model and sign-in within 60 columns and offers no pick" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
     self.input.init();
@@ -710,7 +669,7 @@ test "frontend /model shows the Session's model and sign-in within 60 columns an
         self.line = .{ .read = .{ .revision = 1, .end = 1 }, .provider = provider };
         try self.line.model.set(id);
         self.notice = null;
-        self.slashCommand("/model");
+        try self.slashCommand("/model");
         const said = self.notice.?;
         // The model, then the sign-in, lead the line.
         try std.testing.expect(std.mem.startsWith(u8, said, id));
@@ -1297,8 +1256,6 @@ fn perform(self: *Self, action: ConversationAction) !void {
             self.notice = "Ctrl-P recalls sent messages once the draft is empty.";
         },
         .latest, .back, .close => {
-            // Esc and Ctrl-G only cancel a stop prompt, as on the overview.
-            if (action == .close and self.overviewSays().asking != null) return;
             // Esc closes only a list the person saw.
             if (action == .close and screen.inputRow() == .draft) if (self.shownCommands()) |shown| {
                 shown.close();
@@ -1341,7 +1298,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
             self.notice = "Ctrl-X stops the Session once it opens.";
         } else try self.converse(.stop),
         .archive => if (self.reading.opening) {
-            self.notice = "Alt-A archives the Session once it opens.";
+            self.notice = "Archive is available once the Session opens.";
         } else try self.converse(.{ .archive = self.line.archive_state }),
     }
     self.dirty = true;
@@ -1508,24 +1465,27 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
 /// the Action, may use it. The input row the latest frame shows takes the
 /// input.
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
-    // Ordinary input cancels after routing so Esc can still see the prompt.
-    const asked = self.overviewSays().asking;
-    if (asked == null) try self.converse(.other);
     const screen = self.terminal.screen;
     const offer = screen.spendOffer();
     const selected = Editor.select(conversation_keys, decoded);
-    const stepped_prompt = !self.reading.opening and switch (selected) {
-        .action => |action| action == .stop or action == .archive,
-        else => false,
-    };
+    const asked = self.overviewSays().asking;
     if (asked == .archive and selected == .enter) {
         try self.converse(if (Editor.plainEnter(decoded)) .confirm_archive else .other);
         self.dirty = true;
         return;
     }
+    if (asked != null and selected == .action and selected.action == .close) {
+        try self.converse(.other);
+        self.dirty = true;
+        return;
+    }
+    const controls_prompt = !self.reading.opening and switch (selected) {
+        .action => |action| action == .stop or action == .archive,
+        else => false,
+    };
+    // Cancel the old context before ordinary input can create a new prompt.
+    if (!controls_prompt) try self.converse(.other);
     if (screen.inputRow() == .selector) try self.choiceEvent(decoded, offer) else try self.draftEvent(decoded, offer);
-    // Stop/archive already consumed the old prompt; keep the core's replacement.
-    if (asked != null and !stepped_prompt and self.overviewSays().asking != null) try self.converse(.other);
     if (self.leaving != null) screen.interruptConsent();
 }
 
@@ -1624,14 +1584,14 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
             screen.releaseAction();
             try self.beginMessage(.{ .message_then_deny = .{ .ticket = ticket, .action = denial.action } });
         } else try self.beginMessage(.{ .message = ticket }),
-        .command => self.commandLine(),
+        .command => try self.commandLine(),
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (screen.consent != null) self.reasonNotice(letter) else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |outcome| switch (outcome) {
             .action => |action| try self.perform(action),
             .refused => |why| self.notice = refusedNotice(why),
             // Enter on an empty draft takes a /requests row the frame drew.
             .submit => if (self.shownCommands() != null) {
-                if (self.input.queuedCommand() != null) self.notice = "! Command still running." else self.commandLine();
+                if (self.input.queuedCommand() != null) self.notice = "! Command still running." else try self.commandLine();
             },
             .none, .append, .redraw => {},
         },
@@ -1643,19 +1603,19 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
 /// another follows. Only a list the latest frame drew for this draft: a
 /// screen too short for one shows none, and Enter there runs the line as
 /// typed.
-fn commandLine(self: *Self) void {
+fn commandLine(self: *Self) !void {
     if (self.shownCommands()) |shown| {
         const taken = shown.list.enter(shown.highlight);
         switch (self.input.append(taken.rest)) {
             .refused => |why| self.notice = refusedNotice(why),
             else => if (taken.runs) {
-                self.slashCommand(self.input.composition().bytes);
-                self.input.clear();
+                defer self.input.clear();
+                try self.slashCommand(self.input.composition().bytes);
             },
         }
     } else {
-        self.slashCommand(self.input.composition().bytes);
-        self.input.clear();
+        defer self.input.clear();
+        try self.slashCommand(self.input.composition().bytes);
     }
 }
 
@@ -3960,6 +3920,7 @@ const ArchiveOverview = struct {
     archives: usize = 0,
     stops: usize = 0,
     archived: ?overview_view.Reference = null,
+    requested: bool = true,
 
     fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !void {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
@@ -3968,6 +3929,7 @@ const ArchiveOverview = struct {
             .archive => |request| {
                 self.archives += 1;
                 self.archived = request.reference;
+                self.requested = request.archived;
             },
             .stop => self.stops += 1,
             else => return error.TestUnexpectedEffect,
@@ -4142,4 +4104,129 @@ test "Alt-A and Ctrl-X during opening still cancel an old prompt without forward
         try std.testing.expectEqual(cursor, held.self.input.composition().cursor);
         try std.testing.expectEqual(revision, held.self.input.revision);
     };
+}
+
+const UnusedArchiveCommand = struct {
+    var calls: usize = 0;
+
+    fn command(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, _: []u8) !void {
+        calls += 1;
+        return error.TestUnexpectedCommand;
+    }
+};
+
+test "conversation slash archive shares busy confirmation and consumes only its submitted command without approving" {
+    for ([_]bool{ false, true }) |approval| for ([_][]const u8{ "\r", "\n" }) |confirmation| for ([_]bool{ false, true }) |completion| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        held.self.lender = overview.lender();
+        held.self.command = UnusedArchiveCommand.command;
+        UnusedArchiveCommand.calls = 0;
+        held.self.live.work.state = if (approval) .{ .approval = .{ .since = 1 } } else .{ .working = .{ .since = 1 } };
+        const file: ?std.Io.File = if (approval) try held.adopt(3) else null;
+        defer if (file) |opened| opened.close(std.testing.io);
+        if (approval) try held.settle();
+        const original = held.self.input.submitText("retained original");
+        for (0..2) |attempt| {
+            errdefer std.debug.print("slash archive approval={} completion={} attempt={d} enter={any} draft={s} notice={s}\n", .{ approval, completion, attempt, confirmation, held.self.input.composition().bytes, held.self.notice orelse "" });
+            try sendKeys(&held.self, if (completion) "/arch" else "/archive");
+            if (completion) try held.settle();
+            const consent = held.screen.consent;
+            try sendKeys(&held.self, confirmation);
+            try std.testing.expectEqual(@as(?overview_view.Prompt.Action, .archive), held.self.overviewSays().asking);
+            try std.testing.expectEqual(@as(usize, 0), overview.archives);
+            try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+            try std.testing.expect(held.self.input.queuedCommand() == null);
+            try std.testing.expectEqual(consent, held.screen.consent);
+            const inputs = held.screen.inputs;
+            try sendKeys(&held.self, if (attempt == 0) "\x07" else confirmation);
+            try std.testing.expectEqual(inputs + 1, held.screen.inputs);
+            try std.testing.expectEqual(@as(usize, attempt), overview.archives);
+            try std.testing.expect(held.self.overviewSays().asking == null);
+            try std.testing.expectEqual(consent, held.screen.consent);
+            try std.testing.expect(held.screen.offered() == null);
+        }
+        try std.testing.expectEqual(@as(usize, 0), UnusedArchiveCommand.calls);
+        try std.testing.expectEqualStrings("k7m2qx", &overview.archived.?);
+        try std.testing.expect(overview.requested);
+        try std.testing.expectEqual(protocol.SessionArchiveState.active, held.self.line.archive_state);
+        try std.testing.expectEqualStrings("retained original", try held.self.input.message(original));
+        try std.testing.expect(held.self.submission.view() == null);
+    };
+}
+
+test "conversation slash and shortcut archive restore share one pending or unknown ledger and recovery handle" {
+    for ([_]bool{ false, true }) |restore| for ([_]bool{ false, true }) |unknown| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        held.self.lender = overview.lender();
+        held.self.command = UnusedArchiveCommand.command;
+        UnusedArchiveCommand.calls = 0;
+        try sendKeys(&held.self, if (restore) "/unarchive\n" else "/archive\n");
+        try std.testing.expectEqual(@as(usize, 1), overview.archives);
+        try std.testing.expectEqual(!restore, overview.requested);
+        try std.testing.expectEqualStrings("k7m2qx", &overview.archived.?);
+        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+        if (unknown) _ = try overview_view.step(&overview.state, .{ .archive = .{ .request = .{ .reference = "k7m2qx".*, .archived = !restore }, .outcome = .{ .unconfirmed = "saved-archive-handle" } } });
+        try sendKeys(&held.self, if (restore) "/archive\n" else "/unarchive\n");
+        try sendKeys(&held.self, "\x1ba");
+        try std.testing.expectEqual(@as(usize, 1), overview.archives);
+        try std.testing.expectEqual(@as(usize, 1), overview.state.request_count);
+        try std.testing.expect(held.self.input.queuedCommand() == null);
+        try std.testing.expect(held.self.input.submitted == null);
+        try std.testing.expect(held.self.submission.view() == null);
+        try std.testing.expectEqual(@as(usize, 0), UnusedArchiveCommand.calls);
+        if (unknown) {
+            var bytes: [1024]u8 = undefined;
+            var out = std.Io.Writer.fixed(&bytes);
+            try overview_view.writeDeparture(&overview.state, null, &out);
+            try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "saved-archive-handle") != null);
+        }
+    };
+}
+
+test "conversation stop prompt is cancelled before submitting slash archive creates its own confirmation" {
+    for ([_][]const u8{ "\r", "\n" }) |confirmation| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        held.self.lender = overview.lender();
+        held.self.live.work.state = .{ .working = .{ .since = 1 } };
+        try sendKeys(&held.self, "/archive\x18");
+        try std.testing.expectEqual(@as(?overview_view.Prompt.Action, .stop), held.self.overviewSays().asking);
+        try sendKeys(&held.self, confirmation);
+        try std.testing.expectEqual(@as(?overview_view.Prompt.Action, .archive), held.self.overviewSays().asking);
+        try std.testing.expectEqual(@as(usize, 0), overview.archives);
+        try std.testing.expectEqual(@as(usize, 0), overview.stops);
+        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+        try sendKeys(&held.self, confirmation);
+        try std.testing.expectEqual(@as(usize, 1), overview.archives);
+        try std.testing.expectEqual(@as(usize, 0), overview.stops);
+    }
+}
+
+test "conversation slash archive errors propagate and consume only the submitted line" {
+    const Failed = struct {
+        fn step(_: *anyopaque, _: protocol.session_work.Kind, input: overview_view.ConversationInput) !void {
+            if (input == .archive or input == .unarchive) return error.TestArchiveDispatchFailed;
+        }
+    };
+    for ([_][]const u8{ "/archive\n", "/unarchive\n" }) |command| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.self.lender.step = Failed.step;
+        const original = held.self.input.submitText("original");
+        try std.testing.expectError(error.TestArchiveDispatchFailed, sendKeys(&held.self, command));
+        try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+        try std.testing.expectEqualStrings("original", try held.self.input.message(original));
+        try std.testing.expect(held.self.input.queuedCommand() == null);
+    }
 }

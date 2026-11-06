@@ -518,7 +518,7 @@ pub const Observed = struct { reference: Reference, work: session_work.Work, nam
 /// An input in the open conversation of `reference`, whose work it shows as
 /// `work`: Ctrl-X there asks for and confirms a stop as Ctrl-X on the
 /// Session's row does, and any other input cancels the prompt.
-pub const ConversationInput = union(enum) { other, stop, archive: ArchiveState, confirm_archive };
+pub const ConversationInput = union(enum) { other, stop, archive: ArchiveState, unarchive, confirm_archive };
 pub const Conversed = struct { reference: Reference, work: Kind, input: ConversationInput };
 
 pub const Read = struct { reference: Reference, position: u64, admission: u64 };
@@ -1457,6 +1457,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .other => {},
                 .stop => stopKey(state, prompt, input.reference, input.work, &effects),
                 .archive => |archive| askArchive(state, input.reference, input.work, archive, .keep, &effects),
+                .unarchive => archiveSession(state, .{ .reference = input.reference, .archived = false }, &effects),
                 .confirm_archive => if (prompt) |open| {
                     if (open.action == .archive and std.mem.eql(u8, &open.stop, &input.reference)) archiveSession(state, .{ .reference = open.stop }, &effects);
                 },
@@ -6751,7 +6752,7 @@ test "overview top stays compact through completion failure Host changes and inp
             const text = try screenText(state, 80, 24, .{});
             defer std.testing.allocator.free(text);
             var lines = std.mem.splitScalar(u8, text, '\n');
-            for ([_][]const u8{ " रुई rui  ~/code/rui", headline_text, health, "", group }) |expected| {
+            for ([_][]const u8{ " रुई rui  ~/code/rui                                      Unarchived · /sessions", headline_text, health, "", group }) |expected| {
                 try std.testing.expectEqualStrings(expected, lines.next().?);
             }
             try std.testing.expect(std.mem.indexOf(u8, text, "Since you looked") == null);
@@ -6803,7 +6804,7 @@ test "overview compact top leaves a failed row visible in a narrow viewport" {
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     for ([_][]const u8{
-        " रुई rui  ~/code/rui",
+        " रुई rui  …e/rui  Unarchived · /sessions",
         " Quiet for 0s. 1 failed.",
         "",
         "",
@@ -6826,7 +6827,7 @@ test "overview compact top preserves both alarm bands before health and the list
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     for ([_][]const u8{
-        " रुई rui  ~/code/rui",
+        " रुई rui  ~/code/rui                                      Unarchived · /sessions",
         " Host stopped 1m ago. Run rui host start.",
         " Sign-in expired. Run rui auth login codex.",
         " Host not responding. Last update 1m ago.",

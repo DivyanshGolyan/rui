@@ -2160,7 +2160,8 @@ The header names the view; changing it clears the previous traversal.
 `/undo` restores the last Session explicitly archived from this overview.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
-Conversations also expose `/archive` and `/unarchive`; Alt-A archives the exact open Session even when it is absent from the listing.
+Conversations also expose `/archive` and `/unarchive`; these validated commands and Alt-A forward semantic intents for the exact open Session even when it is absent from the listing.
+The overview core owns their shared confirmation, archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
 Alt-A leaves the draft, caret and retained original unchanged.
 The shared Stop and archive prompt captures its Session reference; unpasted, unmodified Enter confirms it before any draft, picker or permission choice, and Esc cancels it without clearing or sending the draft.
 Archive confirmation spends any permission offer without deciding the Action.
