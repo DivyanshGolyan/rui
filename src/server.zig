@@ -845,6 +845,13 @@ fn descriptorTransport(served: *const providers.Providers) descriptor_capacity.T
 
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
 
+// MCP sockets run beside, not inside, the Bash/model slot population.
+fn reserveMcpDescriptors(requirement: *descriptor_capacity.Requirement) !void {
+    const sockets = @import("server_mcp.zig").capacity;
+    requirement.execution = try std.math.add(usize, requirement.execution, sockets);
+    requirement.total = try std.math.add(usize, requirement.total, sockets);
+}
+
 /// A Host started with a launch frame: its socket path, in the caller's
 /// runtime directory, and the stdin whose close stops it.
 pub const Launch = struct {
@@ -901,6 +908,7 @@ pub fn serve(
     home: ?[]const u8,
     launch: ?Launch,
 ) !void {
+    const mcp_servers: []const launch_frame.Frame.McpServer = if (launch) |value| value.mcp_servers else &.{};
     // The Host owns child waits. Automatic reaping or an inherited handler
     // would release process identities before their signal owners retire.
     const child_action: std.posix.Sigaction = .{
@@ -919,6 +927,7 @@ pub fn serve(
         served.leasedSignIn() != null,
         os.tag,
     );
+    if (mcp_servers.len != 0) try reserveMcpDescriptors(&descriptor_requirement);
     if (descriptor_observation.soft_limit) |limit| {
         if (limit < descriptor_requirement.total) {
             descriptor_limit.raise(descriptor_requirement.total);
@@ -957,6 +966,7 @@ pub fn serve(
         served.leasedSignIn() != null,
         os.tag,
     );
+    if (mcp_servers.len != 0) try reserveMcpDescriptors(&descriptor_requirement);
     var descriptor_limit_buffer: [32]u8 = undefined;
     const descriptor_limit_text = if (descriptor_observation.soft_limit) |limit|
         try std.fmt.bufPrint(&descriptor_limit_buffer, "{d}", .{limit})
@@ -984,7 +994,6 @@ pub fn serve(
     // catalog for its life, so it outlives the Store.
     var catalog_memory = std.heap.ArenaAllocator.init(allocator);
     defer catalog_memory.deinit();
-    const mcp_servers: []const launch_frame.Frame.McpServer = if (launch) |value| value.mcp_servers else &.{};
     var storage: store_module.Store = undefined;
     storage.openWithOptions(
         io,
@@ -1060,6 +1069,8 @@ pub fn serve(
         .custody = execution.CustodyPool.initialize(custody_records),
         .turns_paused = .init(if (launch) |value| value.paused else false),
     };
+    try host.mcp_servers.init(allocator, mcp_servers);
+    defer host.mcp_servers.deinit(allocator);
     var observation: ?TestObservation = if (hooks.observation_fd) |fd|
         try TestObservation.init(fd, hooks.observation_state_fd orelse return error.MissingTestObservationState, hooks.observation_plan orelse return error.MissingTestObservationPlan, host.trace_run_ns)
     else
@@ -4257,6 +4268,16 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(retained_fd, std.c.F.GETFL));
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "request-7-1.tmp", .{}));
     }
+}
+
+test "MCP socket capacity is reserved beside model and Bash descriptors" {
+    var requirement = try descriptor_capacity.calculate(3, 2, 10, 3, .requests, false, os.tag);
+    const before = requirement;
+    try reserveMcpDescriptors(&requirement);
+    try std.testing.expectEqual(before.execution + @import("server_mcp.zig").capacity, requirement.execution);
+    try std.testing.expectEqual(before.total + @import("server_mcp.zig").capacity, requirement.total);
+    try std.testing.expectEqual(before.clients, requirement.clients);
+    try std.testing.expectEqual(before.inherited, requirement.inherited);
 }
 
 test "presets seed configure before Store validation and idempotency" {

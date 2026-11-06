@@ -195,15 +195,15 @@ pub fn owedStopKey(buffer: []u8, child: []const u8, cause: []const u8, position:
     return std.fmt.bufPrint(buffer, "rui.core/stop/{s}/{s}/{d}", .{ child, cause, position });
 }
 
-pub fn nextCoreWork(a: anytype) !?CoreWork {
+pub fn nextCoreWork(a: anytype, include_mcp: bool) !?CoreWork {
     var stop: owed_stop.Result = undefined;
     var next: next_core_action.Result = undefined;
-    var mcp: next_mcp_action.Result = undefined;
+    var mcp: next_mcp_action.Result = null;
     const names: CoreNames = .of();
     var ending: owed_ending.Result = undefined;
     var forward: forward_domain.next.Result = undefined;
     a.read(owed_stop, .{}, &stop);
-    a.read(next_mcp_action, .{}, &mcp);
+    if (include_mcp) a.read(next_mcp_action, .{}, &mcp);
     a.read(owed_ending, .{}, &ending);
     a.read(forward_domain.next, .{}, &forward);
     a.read(next_core_action, .{ .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools }, &next);
@@ -228,7 +228,7 @@ pub fn nextCoreWork(a: anytype) !?CoreWork {
     // After owed stops and endings, service both slot-free runners in Action order.
     if (mcp) |call| {
         if (next == null or call.action_id.get() < next.?.action_id.get())
-            return .{ .mcp = .{ .action_id = call.action_id.get() } };
+            return .{ .mcp = .{ .action_id = call.action_id.get(), .server = call.server } };
     }
     const found = next orelse return null;
     return .{ .action = .{
@@ -278,6 +278,18 @@ pub const BashExecutionInput = struct {
     session: protocol.Bounded(protocol.max_session_bytes),
     sender_handle: protocol.Bounded(32),
     workspace: protocol.Bounded(protocol.max_workspace_bytes),
+    arguments: ContentReference,
+    timeout_ms: u64,
+};
+
+pub const McpExecutionInput = struct {
+    session: protocol.Bounded(protocol.max_session_bytes),
+    parent: ?protocol.Bounded(protocol.max_session_bytes),
+    root: protocol.Bounded(protocol.max_session_bytes),
+    name: protocol.Bounded(protocol.max_tool_name_bytes),
+    server: protocol.Bounded(tool_catalog.max_server_bytes),
+    input_schema: ContentReference,
+    sender_handle: protocol.Bounded(32),
     arguments: ContentReference,
     timeout_ms: u64,
 };
@@ -513,12 +525,13 @@ pub fn validateActionDispatch(a: anytype, binding: ActionAttemptBinding) !void {
 /// Turn, and whether a Session stop selected that Turn.
 const settle_facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,operation.turn_id," ++
+        mcpCallSql("action", "operation") ++ " AS mcp," ++
         "EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) AS stopped " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL",
     .Args = struct { action_id: u64, parent_operation_id: u64 },
-    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, stopped: bool },
+    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, mcp: bool, stopped: bool },
     .cardinality = .optional,
 });
 
@@ -551,8 +564,8 @@ pub fn settleActionAttempt(
 
     // A stop that selected the Turn cancels whatever the Action did.
     const settled: struct { code: ActionResolutionCode, text: []const u8 } =
-        if (found.stopped) .{ .code = .cancelled, .text = content_domain.stop_cancellation_text } else .{ .code = code, .text = result };
-    var content: content_domain.Import = if (found.stopped) content_domain.stop_cancellation else .ofBytes(result, false);
+        if (found.stopped) .{ .code = .cancelled, .text = if (found.mcp) (if (code == .cancelled) result else if (code == .spawn_failed) mcp_stop_not_sent_text else mcp_stop_unknown_text) else content_domain.stop_cancellation_text } else .{ .code = code, .text = result };
+    var content: content_domain.Import = .ofBytes(settled.text, false);
     var completion: turn_domain.stopped_turn.Result = null;
     content_domain.lookup(a, &content);
     if (found.stopped) a.read(turn_domain.stopped_turn, .{ .turn_id = binding.turn_id, .resolving_action_id = binding.action_id }, &completion);
@@ -587,11 +600,11 @@ const uncertain_actions = rsql.Read(.{
 
 /// The Session and Turn of the Attempt `action_id`, while it is unresolved.
 const uncertain_facts = rsql.Read(.{
-    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,operation.turn_id FROM action_operation action " ++
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,operation.turn_id," ++ mcpCallSql("action", "operation") ++ " AS mcp FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.resolution_code IS NULL AND action." ++ action_attempted_sql,
     .Args = struct { action_id: u64 },
-    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive },
+    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, mcp: bool },
     .cardinality = .optional,
 });
 
@@ -602,12 +615,21 @@ const resolve_uncertain = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
 });
 
+pub const mcp_stop_not_sent_text = "Cancelled by Session stop. Failed, not run: the MCP request was not sent.";
+pub const mcp_stop_unknown_text = "Cancelled by Session stop. Outcome unknown: the MCP request was sent; it may still be running.";
+pub const mcp_indeterminate_text = "Outcome unknown: the Host stopped while this MCP call was running; it was not retried.";
+
 const indeterminate_text = "Bash outcome is indeterminate after Host recovery; the command was not replayed.";
 
 /// `indeterminate_text`'s identity, hashed when the Host is built.
 const indeterminate: content_domain.Import = blk: {
     @setEvalBranchQuota(1_000_000);
     break :blk .ofBytes(indeterminate_text, false);
+};
+
+const mcp_indeterminate: content_domain.Import = blk: {
+    @setEvalBranchQuota(1_000_000);
+    break :blk .ofBytes(mcp_indeterminate_text, false);
 };
 
 /// Picks the first scanned Attempt no execution slot holds.
@@ -635,18 +657,20 @@ pub fn recoverOneUncertainAction(candidate: anytype, a: anytype, active: ActiveO
     const action_id = choice.chosen orelse return false;
 
     var facts: uncertain_facts.Result = undefined;
-    var content = indeterminate;
+    var content: content_domain.Import = undefined;
     a.read(uncertain_facts, .{ .action_id = action_id }, &facts);
-    content_domain.lookup(a, &content);
     try a.run();
     const found = facts orelse return error.ActionSelectionChanged;
+    const text = if (found.mcp) mcp_indeterminate_text else indeterminate_text;
+    content = if (found.mcp) mcp_indeterminate else indeterminate;
+    content_domain.lookup(a, &content);
     const turn_id = found.turn_id.get();
     var completion: turn_domain.stopped_turn.Result = undefined;
     a.read(turn_domain.stopped_turn, .{ .turn_id = turn_id, .resolving_action_id = action_id }, &completion);
     try a.run();
 
     const positions = try a.positions(found.session);
-    const content_id = try content_domain.importBytes(a, &content, indeterminate_text);
+    const content_id = try content_domain.importBytes(a, &content, text);
     a.write(resolve_uncertain, .{ .action_id = action_id, .content_id = content_id, .position = try positions.take(1), .session = found.session });
     try turn_domain.queueStopCompletion(a, completion, turn_id);
     turn_domain.queueContinuation(a, turn_id, found.session);
@@ -654,19 +678,23 @@ pub fn recoverOneUncertainAction(candidate: anytype, a: anytype, active: ActiveO
     return true;
 }
 
+const mcp_serial_sql = "NOT EXISTS(SELECT 1 FROM action_operation earlier JOIN model_operation earlier_operation ON earlier_operation.operation_id=earlier.parent_operation_id " ++
+    "WHERE earlier.session_ref=action.session_ref AND earlier.resolution_code IS NULL " ++
+    "AND (earlier.action_id<action.action_id OR earlier.attempt_ordinal>0) AND " ++ mcpCallSql("earlier", "earlier_operation") ++ ")";
+
 const mcp_facts_sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position " ++
     "FROM action_operation action @index(action_operation_executable) " ++
     "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
     "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
     "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
     "AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0) " ++
-    "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ mcpCallSql("action", "operation");
+    "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ mcpCallSql("action", "operation") ++ " AND " ++ mcp_serial_sql;
 const McpFacts = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: rsql.SessionHead };
 // Start with open Turns' frozen MCP offers, not executable Actions. Bash-only
 // offers never open their call ranges; candidate calls seek their Action by
 // parent and ordinal. CROSS JOIN keeps that bound before the Action lookup.
 const next_mcp_action = rsql.Read(.{
-    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position " ++
+    .sql = "SELECT action.action_id,tool.server " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
         "CROSS JOIN session_revision revision ON revision.session_ref=operation.session_ref AND revision.revision=operation.settings_revision " ++
@@ -679,18 +707,19 @@ const next_mcp_action = rsql.Read(.{
         "WHERE active.outcome_code IS NULL AND action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
         "AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0) " ++
         "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
-        "ORDER BY action.action_id LIMIT 1",
+        "AND " ++ mcp_serial_sql ++ " ORDER BY action.action_id LIMIT 1",
     .Args = struct {},
-    .Row = McpFacts,
+    .Row = struct { action_id: rsql.Positive, server: protocol.Bounded(tool_catalog.max_server_bytes) },
     .cardinality = .optional,
 });
 pub const next_mcp_action_sql = next_mcp_action.sql;
-pub const McpAction = struct { action_id: u64 };
+pub const McpAction = struct { action_id: u64, server: protocol.Bounded(tool_catalog.max_server_bytes) };
 pub fn nextMcpAction(a: anytype) !?McpAction {
     var row: next_mcp_action.Result = undefined;
     a.read(next_mcp_action, .{}, &row);
     try a.run();
-    return .{ .action_id = (row orelse return null).action_id.get() };
+    const found = row orelse return null;
+    return .{ .action_id = found.action_id.get(), .server = found.server };
 }
 const mcp_facts = rsql.Read(.{
     .sql = mcp_facts_sql ++ " AND action.action_id=?1",
@@ -715,4 +744,87 @@ pub fn resolveMcpAction(a: anytype, action_id: u64, code: ActionResolutionCode, 
     try queueCoreResolution(a, .{ .action_id = action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() }, found.session, code, content_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
+}
+
+/// Admission commits the attempt and sender before any network effect.
+pub fn admitMcpActionAttempt(a: anytype, io: std.Io, action_id: u64, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
+    var facts: mcp_facts.Result = undefined;
+    a.read(mcp_facts, .{ .action_id = action_id }, &facts);
+    try a.run();
+    const found = facts orelse {
+        try a.commit();
+        return null;
+    };
+    var random: [16]u8 = undefined;
+    try std.Io.randomSecure(io, &random);
+    const sender = std.fmt.bytesToHex(random, .lower);
+    a.write(attempt_mcp, .{ .action_id = action_id, .sender = &sender, .session = found.session, .timeout_ms = timeout_ms });
+    if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
+    try a.commit();
+    return .{ .action_id = action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() };
+}
+// The column records the timeout this attempt runs under, including MCP.
+// The Host resolves it from the server configuration before admission.
+const attempt_mcp = rsql.Write(.{
+    .sql = "UPDATE action_operation SET " ++ action_attempted_sql ++ ",attempt_at=@now,bash_timeout_ms=?4,sender_handle=?2 WHERE action_id=?1 AND session_ref=@session(?3) AND attempt_ordinal=0 AND resolution_code IS NULL",
+    .Args = struct { action_id: u64, sender: []const u8, session: rsql.SessionHead, timeout_ms: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
+});
+const mcp_input = rsql.Read(.{
+    .sql = "SELECT item.session_position AS position,action.session_ref AS session,action.sender_handle,@payload(name) AS name,tool.server,schema_content.digest,schema_content.byte_length AS length,action.bash_timeout_ms AS timeout_ms FROM action_operation action " ++
+        "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
+        "JOIN content name ON name.content_id=tool_call.name_content_id " ++
+        "JOIN session_revision revision ON revision.session_ref=operation.session_ref AND revision.revision=operation.settings_revision " ++
+        "JOIN tool_set_member member ON member.tool_set_id=coalesce(revision.loaded_tool_set_id,revision.tool_set_id) " ++
+        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp' " ++
+        "JOIN content schema_content ON schema_content.content_id=tool.input_schema_content_id " ++
+        "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
+        "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 AND action." ++ action_attempted_sql ++
+        " AND action.resolution_code IS NULL AND " ++ mcpCallSql("action", "operation"),
+    .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64 },
+    .Row = struct { position: ?rsql.Positive, session: *protocol.Bounded(protocol.max_session_bytes), sender_handle: *protocol.Bounded(32), name: *protocol.Bounded(protocol.max_tool_name_bytes), server: *protocol.Bounded(tool_catalog.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive },
+    .cardinality = .optional,
+});
+test "MCP execution input uses each engine's tool-name content layout" {
+    const mysql = comptime mcp_input.mysql.prepared();
+    // A tool name fits one content chunk. Both its projection and catalog
+    // comparison must use that chunk on MySQL, not SQLite's payload column.
+    const name_bytes = "coalesce((SELECT bytes FROM content_chunk WHERE content_chunk.content_id=name.content_id AND content_chunk.chunk_index=0),X'')";
+    try std.testing.expect(std.mem.indexOf(u8, mcp_input.sql, "name.payload AS name") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mcp_input.sql, "CAST(tool.name AS BLOB)=name.payload") != null);
+    try std.testing.expectEqual(@as(?usize, null), std.mem.indexOf(u8, mysql, "name.payload"));
+    try std.testing.expect(std.mem.indexOf(u8, mysql, name_bytes ++ " AS name") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mysql, "CAST(tool.name AS BINARY)=" ++ name_bytes) != null);
+}
+
+const session_parent = rsql.Read(.{
+    .sql = "SELECT parent_ref AS parent FROM session WHERE session_ref=?1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { parent: ?protocol.Bounded(protocol.max_session_bytes) },
+    .cardinality = .optional,
+});
+pub fn readMcpExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *McpExecutionInput) !void {
+    var row: mcp_input.Row = .{ .position = null, .session = &out.session, .sender_handle = &out.sender_handle, .name = &out.name, .server = &out.server, .digest = undefined, .length = undefined, .timeout_ms = undefined };
+    var found: store_access.Found = undefined;
+    a.readInto(mcp_input, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }, &row, &found);
+    try a.run();
+    if (!found.get()) return error.StaleActionAttemptBinding;
+    out.input_schema = .{ .length = row.length, .digest = row.digest };
+    out.timeout_ms = row.timeout_ms.get();
+    const position = (row.position orelse return error.CorruptStore).get();
+    const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(protocol.ProposalField.arguments)];
+    out.arguments = .{ .length = reference.length, .digest = reference.digest };
+    out.root = out.session;
+    out.parent = null;
+    var first = true;
+    while (true) {
+        var ancestry: session_parent.Result = undefined;
+        a.read(session_parent, .{ .session = out.root.slice() }, &ancestry);
+        try a.run();
+        const parent = (ancestry orelse return error.CorruptStore).parent;
+        if (first) out.parent = parent;
+        first = false;
+        out.root = parent orelse break;
+    }
 }

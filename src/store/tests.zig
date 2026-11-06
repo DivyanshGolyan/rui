@@ -8617,6 +8617,8 @@ const EntryPoint = enum {
     admitModelAttempt,
     admitNextActionAttempt,
     readBashExecutionInput,
+    admitMcpActionAttempt,
+    readMcpExecutionInput,
     revokeActionSender,
     nextCoreWork,
     nextMcpAction,
@@ -8682,6 +8684,8 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .admitModelAttempt = 3,
     .admitNextActionAttempt = 2,
     .readBashExecutionInput = 2,
+    .admitMcpActionAttempt = 2,
+    .readMcpExecutionInput = 3,
     .revokeActionSender = 2,
     .nextCoreWork = 3,
     .nextMcpAction = 1,
@@ -9139,6 +9143,7 @@ test "each Store entry point takes its round budget on its common path" {
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             try settleCallsForTesting(&storage, &tmp, model, "budget-mcp-calls", &.{
                 .{ .item_id = "mcp-item", .name = "fetch_page", .encoded_call_id = "mcp-call", .decoded_call_id = "mcp-call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                .{ .item_id = "mcp-item-two", .name = "fetch_page", .encoded_call_id = "mcp-call-two", .decoded_call_id = "mcp-call-two", .encoded_arguments = "{}", .decoded_arguments = "{}" },
             });
             meter.start();
             const action = (try storage.nextMcpAction()).?;
@@ -9146,6 +9151,15 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try storage.resolveMcpAction(action.action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", .{});
             meter.stop(.resolveMcpAction);
+            const second = (try storage.nextMcpAction()).?;
+            meter.start();
+            const binding = (try storage.admitMcpActionAttempt(second.action_id, 600_000, .{})).?;
+            meter.stop(.admitMcpActionAttempt);
+            var input: action_domain.McpExecutionInput = undefined;
+            meter.start();
+            try storage.readMcpExecutionInput(binding, &input);
+            meter.stop(.readMcpExecutionInput);
+            _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
             try std.testing.expect((try storage.nextMcpAction()) == null);
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
         }

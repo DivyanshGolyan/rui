@@ -1,4 +1,5 @@
 const std = @import("std");
+const server_mcp = @import("server_mcp.zig");
 const bash = @import("bash.zig");
 const codecs = @import("codecs.zig");
 const execution = @import("execution.zig");
@@ -530,7 +531,9 @@ pub fn executionMain(host: *Host) void {
     };
     if (reactor != null) host.scratch_budget = budget;
     defer host.scratch_budget = null;
+    var mcp_calls: server_mcp.Calls = .{};
     defer shutdownExecution(host, slots, workspace);
+    defer mcp_calls.shutdown(host);
 
     var turn_state = execution_turn.State{ .capacity_was_full = slots.len == 0 };
     var measurement: LifecycleMeasurement = .{};
@@ -542,6 +545,7 @@ pub fn executionMain(host: *Host) void {
             .slots = slots,
             .workspace = workspace,
             .measurement = &measurement,
+            .mcp = &mcp_calls,
             .fenced = false,
         };
         switch (execution_turn.run(&turn_state, &native)) {
@@ -550,7 +554,7 @@ pub fn executionMain(host: *Host) void {
                 if (heap_release.due(slots, if (reactor) |active| active.listingPending() else false)) process.releaseFreeHeap();
                 const wait_started = std.Io.Clock.Timestamp.now(host.io, .awake);
                 switch (kind) {
-                    .transport => reactor.?.wait(transportWaitMs(slots)) catch |err| {
+                    .transport => reactor.?.wait(if (mcp_calls.any()) 25 else transportWaitMs(slots)) catch |err| {
                         fenceDispatch(host, "transport wait", err);
                         break;
                     },
@@ -586,6 +590,7 @@ const NativeTurn = struct {
     slots: []ExecutionSlot,
     workspace: *Workspace,
     measurement: *LifecycleMeasurement,
+    mcp: *server_mcp.Calls,
     fenced: bool,
 
     pub fn now(self: *NativeTurn) std.Io.Clock.Timestamp {
@@ -647,7 +652,8 @@ const NativeTurn = struct {
     }
 
     pub fn advanceLiveBash(self: *NativeTurn) bool {
-        return advanceBash(self.host, self.slots, self.workspace);
+        const mcp_progress = self.mcp.service(self.host);
+        return advanceBash(self.host, self.slots, self.workspace) or mcp_progress;
     }
 
     pub fn advanceRetainedCleanup(self: *NativeTurn, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
@@ -690,18 +696,18 @@ const NativeTurn = struct {
     }
 
     pub fn hasBash(self: *const NativeTurn) bool {
-        return slotsHaveBash(self.slots);
+        return slotsHaveBash(self.slots) or self.mcp.any();
     }
 
     pub fn recoverUncertainAction(self: *NativeTurn) error{Fence}!bool {
-        const active_slots = ActiveSlots{ .slots = self.slots };
+        const active_slots = ActiveSlots{ .slots = self.slots, .mcp = self.mcp };
         const active_actions = store_module.ActiveOperationFilter{
             .context = &active_slots,
             .containsFn = activeActionContains,
-            .maximum_exclusions = self.slots.len,
+            .maximum_exclusions = self.slots.len + server_mcp.capacity,
         };
         return self.host.store.recoverOneUncertainAction(active_actions) catch |err| {
-            fenceDispatch(self.host, "uncertain Bash recovery", err);
+            fenceDispatch(self.host, "uncertain Action recovery", err);
             self.fenced = true;
             return error.Fence;
         };
@@ -732,7 +738,7 @@ const NativeTurn = struct {
     }
 
     pub fn runCoreAction(self: *NativeTurn) execution_turn.Admission {
-        return runNextCoreAction(self.host);
+        return runNextCoreAction(self.host, self.mcp);
     }
 
     pub fn admitBash(self: *NativeTurn) execution_turn.Admission {
@@ -1120,6 +1126,7 @@ fn slotIsFree(slot: *const ExecutionSlot) bool {
 
 const ActiveSlots = struct {
     slots: []ExecutionSlot,
+    mcp: ?*const server_mcp.Calls = null,
 };
 
 fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
@@ -1136,6 +1143,7 @@ fn activeOperationContains(context: *const anyopaque, operation_id: u64) bool {
 
 fn activeActionContains(context: *const anyopaque, action_id: u64) bool {
     const active: *const ActiveSlots = @ptrCast(@alignCast(context));
+    if (active.mcp) |mcp| if (mcp.contains(action_id)) return true;
     for (active.slots) |slot| switch (slot) {
         .bash_preparing => |value| if (value.binding.action_id == action_id) return true,
         .bash => |value| if (value.binding.action_id == action_id) return true,
@@ -1199,14 +1207,14 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
 /// a call this stops short of is simply run again. The arguments are read
 /// whole onto the heap, so its frame stays small: every Store call may run
 /// other threads' queued writes on this stack.
-noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
-    const work = (host.store.nextCoreWork() catch |err| {
+noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_turn.Admission {
+    const work = (host.store.nextCoreWorkForHost(!mcp.full()) catch |err| {
         fenceDispatch(host, "core tool selection", err);
         return .retry_later;
     }) orelse return .no_work;
     return switch (work) {
         .stop => |*owed| runOwedStop(host, owed),
-        .mcp => |call| runMcpAction(host, call.action_id),
+        .mcp => |call| mcp.admit(host, call),
         .ending => |*owed| runOwedEnding(host, owed),
         .forward => |id| runSessionForward(host, id),
         .action => |*input| switch (input.tool) {
@@ -1216,15 +1224,6 @@ noinline fn runNextCoreAction(host: *Host) execution_turn.Admission {
             .start_agent => runStartAgent(host, input),
         },
     };
-}
-
-/// Until the MCP runner lands, resolve without taking execution custody.
-noinline fn runMcpAction(host: *Host, action_id: u64) execution_turn.Admission {
-    host.store.resolveMcpAction(action_id, .spawn_failed, "Failed, not run: this Host does not run MCP tool calls yet.", host.hooks.storeFaults(.action_result)) catch |err| {
-        fenceDispatch(host, "MCP resolution", err);
-        return .retry_later;
-    };
-    return .admitted;
 }
 
 /// Stops an attached child whose parent stopped or ran out of context
@@ -4108,7 +4107,10 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         .store = &storage,
         .custody = execution.CustodyPool.initialize(&custody),
     };
+    var mcp_calls: server_mcp.Calls = .{};
+    defer mcp_calls.shutdown(&host);
     var native: NativeTurn = .{
+        .mcp = &mcp_calls,
         .host = &host,
         .reactor = null,
         .slots = &.{},
@@ -4122,7 +4124,7 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     const report = try store_module.testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
     defer std.testing.allocator.free(report);
-    try std.testing.expect(std.mem.indexOf(u8, report, "Failed, not run: this Host does not run MCP tool calls yet.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, "mcp_server_unavailable") != null);
     const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
 }

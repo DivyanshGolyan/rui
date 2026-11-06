@@ -95,6 +95,11 @@ pub fn events(self: *const Running) i16 {
     return if (self.state == .active) self.call.events() else 0;
 }
 
+/// Whether cancellation must report an unknown remote outcome.
+pub fn requestSent(self: *const Running) bool {
+    return self.state == .active and self.call.requestSent();
+}
+
 pub fn deadlineMs(self: *const Running) u64 {
     return self.deadline_ms;
 }
