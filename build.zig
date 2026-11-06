@@ -746,6 +746,23 @@ pub fn build(b: *std.Build) void {
         "cross-check-linux",
         "Compile Linux x86-64 and experimental Linux ARM64",
     );
+    const yaml_linux_step = b.step(
+        "yaml-linux-compile",
+        "Compile pinned libyaml as strict C99 for Linux x86-64 and ARM64 without running it",
+    );
+    for ([_]std.Target.Cpu.Arch{ .x86_64, .aarch64 }) |arch| {
+        const yaml_linux = b.addLibrary(.{
+            .name = b.fmt("yaml-linux-{s}", .{@tagName(arch)}),
+            .linkage = .static,
+            .root_module = b.createModule(.{
+                .target = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux, .abi = .gnu }),
+                .optimize = .ReleaseSafe,
+                .link_libc = true,
+            }),
+        });
+        configureYaml(b, yaml_linux);
+        yaml_linux_step.dependOn(&yaml_linux.step);
+    }
     const macos_cross_step = b.step(
         "cross-check-macos",
         "Compile Apple Silicon macOS and experimental Intel macOS (requires Xcode/Command Line Tools)",
@@ -1287,8 +1304,10 @@ fn transportEnabled(target: std.Build.ResolvedTarget) bool {
 fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile) void {
     const module = compile.root_module;
     const yaml = b.dependency("yaml", .{});
-    const yaml_bindings = addBindings(b, module, "yaml", "#include <yaml.h>\n");
-    yaml_bindings.addIncludePath(yaml.path("include"));
+    if (module.root_source_file != null) {
+        const yaml_bindings = addBindings(b, module, "yaml", "#include <yaml.h>\n");
+        yaml_bindings.addIncludePath(yaml.path("include"));
+    }
     module.addIncludePath(yaml.path("include"));
     module.addIncludePath(yaml.path("src"));
     module.addCMacro("YAML_VERSION_STRING", "\"0.2.5\"");
@@ -1296,7 +1315,12 @@ fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile) void {
     module.addCMacro("YAML_VERSION_MINOR", "2");
     module.addCMacro("YAML_VERSION_PATCH", "5");
     for ([_][]const u8{ "api.c", "reader.c", "scanner.c", "parser.c", "loader.c", "writer.c", "emitter.c", "dumper.c" }) |source| {
-        module.addCSourceFile(.{ .file = yaml.path(b.fmt("src/{s}", .{source})), .flags = &.{"-std=c99"} });
+        // api.c uses POSIX strdup; expose its declaration in strict C99 only
+        // for these dependency sources, never the consumer's other C files.
+        module.addCSourceFile(.{
+            .file = yaml.path(b.fmt("src/{s}", .{source})),
+            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" },
+        });
     }
 }
 

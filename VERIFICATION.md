@@ -807,6 +807,10 @@ The [small Host memory trial](research/memory-trial/README.md) is a collection e
 It exercises Host-owned Configure and initial-Message creation, default and explicitly restricted tools, full raw invocation/path, idle no-op and metadata reload, keyed replay after file deletion and process restart, bound model invocation and child `start_agent` discovery.
 The fixture uses native public readers and actual provider inputs, not direct Store edits or terminal excerpts.
 
+`zig build yaml-linux-compile` compiles all pinned libyaml sources as strict C99 against Linux glibc headers for x86-64 and ARM64 without linking or executing a Host.
+It reuses `configureYaml`, whose POSIX feature exposure is scoped to the dependency's C sources; removing it must fail at libyaml's `strdup` declaration, not witness setup.
+The ordinary Linux CI builds retain the same dependency compile boundary; this focused target does not add work to an ordinary build.
+
 Focused `skills ` tests cover real YAML scalars/ignored nested metadata, repository-over-home precedence, worktree and non-git roots, symlinks, unreadability, explicit caps, malformed UTF-8 and metadata-only deltas.
 A result-arena plus independently reclaiming scratch high-water regression exercises many near-limit project and shadowed home bodies; unsupported native invalid-byte filenames skip only on filesystems that reject their creation.
 The actual Ingress tests cover text-free skill custody transfer, fragmented input and invalid text-plus-skill cleanup alongside the existing ordinary text-capture tests.
