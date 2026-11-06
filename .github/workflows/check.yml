@@ -199,8 +199,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   linux_build_unit:
-    # The unit test binary compiles on one core for about four minutes; on its
-    # own runner it no longer queues behind every other compile.
+    # Unit roots compile in parallel without queueing behind other gates.
     needs: plan
     if: ${{ needs.plan.outputs.linux_split == 'true' }}
     runs-on: ubuntu-24.04
@@ -212,7 +211,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           check-part: compiled-unit
-      - name: Compile the unit test binary once, never test acceptance
+      - name: Compile the unit test roots once, never test acceptance
         env:
           TARGETS: ${{ needs.plan.outputs.targets }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part unit
@@ -264,7 +263,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   macos_build_unit:
-    # Keep the slow unit compile off the three cores building the other gates.
+    # Keep the parallel unit roots off the cores building the other gates.
     # One extra Mac briefly; suites still use at most three of the five Macs.
     needs: plan
     if: ${{ needs.plan.outputs.macos_split == 'true' }}
@@ -277,7 +276,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           check-part: compiled-unit
-      - name: Compile the unit test binary once, never test acceptance
+      - name: Compile the unit test roots once, never test acceptance
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
         run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part unit
