@@ -491,7 +491,7 @@ test "schema 55 migrates recovery index and wire 8 together to the current schem
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
-    try std.testing.expectEqualStrings("\n 1:" ++ protocol.wire_version, result.written());
+    try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n {d}:{s}", .{ protocol.wire_version.len, protocol.wire_version }), result.written());
     try expectCatalog(migrated_database);
     done.migrations += 1;
     writeRecord();
