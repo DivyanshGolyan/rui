@@ -68,6 +68,7 @@ const cores = .{
     .{ "status_page.zig", @import("status_page.zig") },
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
+    .{ "table_row.zig", @import("table_row.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
@@ -119,7 +120,7 @@ test "functional cores stay within the core boundary" {
 /// Every core as `importer` spells its import: relative within its own
 /// directory, else up to `src/` and down.
 fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(20_000);
     const directory = importer[0..if (std.mem.lastIndexOfScalar(u8, importer, '/')) |slash| slash + 1 else 0];
     var up: []const u8 = "";
     for (0..std.mem.count(u8, directory, "/")) |_| up = up ++ "../";
