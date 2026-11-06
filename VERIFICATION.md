@@ -831,6 +831,7 @@ The Store tests exercise six distinct content imports in child creation, `conten
 Reload fault tests preserve catalog, instruction, position and command-result atomicity through both failure points, then verify same-key replay and no-op behavior after reopen.
 Populated format-56/wire-9 and format-58/wire-10 SQLite fixtures upgrade through the production Store and preserve ordinary content; corresponding MySQL migrations run when a live test server is configured.
 Archive composition tests retain archive intent on skill refusal and idle reload, unarchive only a fresh admitted invocation, and preserve archive state on keyed replay.
+Creation refusal tests cover both Configure and initial Message: a missing Workspace remains `invalid_workspace`, a valid Workspace with inaccessible skills roots remains `skills_unavailable`, and each keyed refusal replays unchanged after repair without allocating a Session or model work.
 The adapter lifecycle test checks complete >10,000-byte CRLF/Unicode skill results in saved ordinary content and actual sealed provider input, metadata-only body edits, revision-one/authored-baseline preservation, idle nullable-Turn reports, frozen admitted Operations, serialized history prefixes, memo/cold reconstruction and real reopen after source deletion.
 Negative controls revert each boundary fix and must fail its owner assertion or actual Host custody boundary, not fixture setup.
 These are synthetic local evidence, not live provider, remote filesystem or power-loss qualification.

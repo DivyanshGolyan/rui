@@ -874,7 +874,6 @@ pub fn applyConfiguration(
     if (!creating and !reads.found.get()) {
         return .{ .rejected = .unknown_session };
     }
-    if (creating) if (initial_skills) |captured| if (captured.* == .unavailable) return .{ .rejected = .skills_unavailable };
     if (reads.found.get()) try checkSaved(next);
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
     const default_provider = defaultProvider(a.store.served);
@@ -916,6 +915,10 @@ pub fn applyConfiguration(
         .rejected => |rejection| return .{ .rejected = rejection },
         .update => |actions| actions,
     };
+
+    // Preserve ordinary configuration refusals before considering a failed
+    // discovery capture, but reject it before any content or Session writes.
+    if (creating) if (initial_skills) |captured| if (captured.* == .unavailable) return .{ .rejected = .skills_unavailable };
 
     var command_instructions_id: ?u64 = null;
     switch (content_actions.instructions) {

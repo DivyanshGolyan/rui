@@ -219,6 +219,55 @@ def main():
             raise AssertionError("unexpectedly large skills Conversation")
 
         host = start()
+
+        def creation_refusal_case(label, rejected_workspace, code, repair):
+            sessions_before = invoke("session", "list", "--store", store, "--all")["sessions"]
+            request_count = len(endpoint.decoded())
+            refused = []
+            for operation, kind in (("configure", "configure"), ("start", "message")):
+                key = f"{label}-{operation}"
+                record = state / f"{key}.json"
+                result = subprocess.run([str(fixture.RUI), "session", operation, "--store", str(store),
+                    "--workspace", str(rejected_workspace), "--provider", "codex", "--model", "gpt-6-sol",
+                    "--record", str(record), "--key", key], input="refused initial Message" if operation == "start" else None,
+                    text=True, capture_output=True, timeout=15, env=environment)
+                assert result.returncode == 3, (label, operation, result.returncode, result.stdout, result.stderr)
+                reply = json.loads(result.stdout)
+                expected = {"status": "rejected", "replayed": False, "session": "", "code": code}
+                assert reply["answer"] == expected, (label, operation, reply)
+                refused.append((key, record, record.read_bytes(), kind, expected))
+            repair()
+            for key, record, captured, kind, expected in refused:
+                result = subprocess.run([str(fixture.RUI), "request", "recover", "--store", str(store),
+                    "--record", str(record), "--kind", kind], text=True, capture_output=True,
+                    timeout=15, env=environment)
+                assert result.returncode == 3, (label, kind, result.returncode, result.stdout, result.stderr)
+                assert json.loads(result.stdout)["answer"] == {**expected, "replayed": True}, result.stdout
+                observation = invoke("request", "inspect", "--store", store, "--key", key)["observation"]
+                assert observation["code"] == code and observation["target"] == "", observation
+                assert record.read_bytes() == captured
+            assert invoke("session", "list", "--store", store, "--all")["sessions"] == sessions_before
+            assert len(endpoint.decoded()) == request_count, "refused creation admitted model work"
+
+        # Ordinary Workspace validation remains authoritative even when the
+        # outer discovery capture also failed. Repair cannot alter keyed refusal.
+        missing_workspace = state / "missing-workspace"
+        creation_refusal_case("missing-workspace", missing_workspace, "invalid_workspace", missing_workspace.mkdir)
+        if os.geteuid() != 0:
+            inaccessible_workspace = state / "inaccessible-workspace"
+            inaccessible_root = inaccessible_workspace / ".agents" / "skills"
+            inaccessible_root.mkdir(parents=True)
+            inaccessible_root.chmod(0)
+            try:
+                # A valid Workspace with a genuinely inaccessible skills root
+                # must still fail closed, never become an empty catalog.
+                creation_refusal_case("inaccessible-root", inaccessible_workspace, "skills_unavailable",
+                                      lambda: inaccessible_root.chmod(0o700))
+            finally:
+                inaccessible_root.chmod(0o700)
+        else:
+            print("skills inaccessible-root permission fixture skipped for privileged root")
+
         created = invoke("session", "configure", "--store", store, "--workspace", workspace,
                          "--provider", "codex", "--model", "gpt-6-sol", "--instructions", "-",
                          "--record", state / "create.json", "--key", "create", text=PARENT_INSTRUCTIONS)
