@@ -61,7 +61,7 @@ If you lose the output of `session start`, recover its original handle to get th
 Do not start again with a new key.
 
 The conversation shows commentary and the final answer as separate assistant messages, in the provider's stream order around tool calls.
-`request read-result` returns only the final answer.
+For a completed Message, `request read-result` returns only the final answer; a skill refusal or catalog reload instead returns its saved diagnostic or acknowledgement.
 For responses whose messages have no phase, it returns the last assistant message.
 
 ### Addressing
@@ -171,3 +171,18 @@ Unarchive restores visibility without starting work.
 A new Message to an archived Session also restores it in the admission transaction.
 Messages during archive settlement reject as `session_archiving`.
 Exact Session reads remain available in every archive state.
+
+## Invoke and reload skills
+
+```sh
+rui session send --store "$STORE" --to "$SESSION" --skill NAME
+rui session configure --store "$STORE" --session "$SESSION" --reload-skills
+```
+
+Invocation uses the Session's advertised skill path and admits the complete current UTF-8 `SKILL.md` plus its absolute path as an ordinary Message, instead of reading stdin.
+Reload is an idle-safe mutation: it rescans repository and Host-home `.agents/skills`, appends only catalog changes and returns `answer.skills` as `reloaded` or `unchanged` without scheduling model work.
+Do not mix reload with configuration settings or a preset.
+Both operations use normal capture keys and `request recover`; replay preserves the original captured result even after files change or disappear.
+`request read-result` reads the saved reload acknowledgement or typed skill refusal diagnostic, and never reopens the skill file.
+Catalog metadata tracks name, description and winning path only; body-only edits are read by the next fresh invocation without a catalog change.
+Explicit `--tools` restrictions remain authoritative; skills grant no tools or permissions and run no scripts on load.

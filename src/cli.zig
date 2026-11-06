@@ -1972,7 +1972,9 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     var input = client.ConfigureInput{
         .store = "",
         .session = if (named) |reference| .{ .named = reference } else .create,
+        .reload_skills = parsed.has("reload-skills"),
     };
+    if (input.reload_skills and named == null) return usage();
     if (named != null and named.?.len == 0) return usage();
     if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
     if (parsed.get("model")) |model| {
@@ -2117,7 +2119,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     if (configuration == null and !protocol.validSessionId(destination)) {
         return error.InvalidSession;
     }
-    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = if (configuration) |value| value.input else null };
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .skill = parsed.get("skill"), .configuration = if (configuration) |value| value.input else null };
     // Peer context names a Session in its own Store, so it signs only sends
     // to that Store; an explicit --store naming another Store is a plain
     // caller's send there (#957). Incomplete or malformed context never falls
@@ -2482,6 +2484,15 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
                 if (err == error.CanonicalStoreFailure) return err;
                 stderr.diagnostic("rui: result: {s}\n", .{@tagName(caller_error.of(err))});
             };
+        },
+        .skill => {
+            var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            var captured = try client.captureMessage(init.io, .{ .store = destination, .session = reference, .text_path = "", .skill = argument }, .{ .generated = try requestDirectory(init, &directory_buffer) }).get();
+            var step: ?client.Step = null;
+            try sendCapturedMutation(requests_context, &captured, .{ .map = init.environ_map }, &step, .json);
+        },
+        .@"reload-skills" => {
+            _ = try liveConfigure(init, requests_context, live, &.{"--reload-skills"}, "Usage: /reload-skills\n");
         },
         .configure, .effort, .rename => {
             const typed_usage = liveUsage(command.name);
@@ -3372,7 +3383,9 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
     };
     if (code) |value| try writeMutationField(writer, "code: ", value);
     if (answer.result == .accepted) switch (answer.result.accepted) {
-        .configure => |value| try writer.print("revision: {d}; created: {}\n", .{ value.revision, value.created }),
+        .configure => |value| {
+            if (value.skills) |status| try writer.print("skills: {s}\n", .{@tagName(status)}) else try writer.print("revision: {d}; created: {}\n", .{ value.revision, value.created });
+        },
         .message => |value| try writer.print("queue admission: {d}\n", .{value.admission}),
         .session_stop => |value| {
             if (value.turn) |turn| try writer.print("selected Turn: {d}\n", .{turn}) else try writeMutationField(writer, "selected Turn: ", "none");
@@ -3444,7 +3457,10 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     if (reply.target == .permission_decision) try writer.print(",\"action\":\"{d}\",\"decision\":\"{s}\"", .{ reply.target.permission_decision.action, @tagName(reply.target.permission_decision.decision) });
     switch (answer.result) {
         .accepted => |accepted| switch (accepted) {
-            .configure => |value| try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ value.revision, value.created }),
+            .configure => |value| {
+                try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ value.revision, value.created });
+                if (value.skills) |status| try writer.print(",\"skills\":\"{s}\"", .{@tagName(status)});
+            },
             .message => |value| try writer.print(",\"admission\":\"{d}\"", .{value.admission}),
             .session_stop => |value| {
                 try writer.writeAll(",\"selection\":{\"turn\":");
@@ -3462,7 +3478,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     }
     try writer.writeByte('}');
     if (reply.target == .message and answer.result != .conflict) {
-        const input = reply.target.message;
+        const input = answer.input orelse protocol_reply.CommandObservation.ContentReference{ .bytes = reply.target.message.bytes, .digest = reply.target.message.digest };
         try writer.print(",\"input\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ input.bytes, std.fmt.bytesToHex(input.digest, .lower) });
         if (answer.result == .accepted) try writer.print(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{answer.result.accepted.message.admission});
     }
@@ -3529,6 +3545,19 @@ test "session start mutation receipt adds configuration without changing send" {
     reply.target.message.creates_session = false;
     try writeMutationJson(&writer, reply, null);
     try std.testing.expectEqualStrings(context ++ tail, writer.buffered());
+}
+
+test "skills native receipt uses Host captured input rather than the intent placeholder" {
+    const digest = protocol.contentDigest("complete skill body");
+    const wire = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"}},\"input\":{{\"type\":\"text\",\"bytes\":\"19\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{std.fmt.bytesToHex(digest, .lower)});
+    defer std.testing.allocator.free(wire);
+    const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "k7m2qx", .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } });
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeMutationJson(&writer, reply, null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"bytes\":\"19\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), &std.fmt.bytesToHex(digest, .lower)) != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"bytes\":\"0\"") == null);
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {

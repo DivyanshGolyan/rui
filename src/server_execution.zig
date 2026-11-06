@@ -1203,7 +1203,8 @@ fn advanceBash(host: *Host, slots: []ExecutionSlot, workspace: *Workspace) bool 
 
 /// Runs the next core tool call (D24) to its resolution: it reads the
 /// call's arguments, whose runtime checker may still refuse them, and one Store
-/// command does what they ask. Nothing is written before that command, so
+/// command imports the captured result. Filesystem effects finish outside the
+/// Store writer. Nothing is written before that command, so
 /// a call this stops short of is simply run again. The arguments are read
 /// whole onto the heap, so its frame stays small: every Store call may run
 /// other threads' queued writes on this stack.
@@ -1222,6 +1223,7 @@ noinline fn runNextCoreAction(host: *Host, mcp: *server_mcp.Calls) execution_tur
             .message_agent => runMessageAgent(host, input),
             .read_transcript => runReadTranscript(host, input),
             .start_agent => runStartAgent(host, input),
+            .skill => runSkill(host, input),
         },
     };
 }
@@ -1340,6 +1342,38 @@ noinline fn runReadTranscript(host: *Host, input: *const store_module.CoreAction
     return .admitted;
 }
 
+noinline fn runSkill(host: *Host, input: *const store_module.CoreActionInput) execution_turn.Admission {
+    var memory: std.heap.ArenaAllocator = .init(host.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    var request: protocol.SkillRequest = .{};
+    const check: tools.core_tools.StartAgentCheck = if (input.arguments.length > tools.core_tools.skill_max_argument_bytes)
+        .{ .rejected = "the arguments take more than 4096 bytes" }
+    else checked: {
+        const bytes = arena.alloc(u8, @intCast(input.arguments.length)) catch return .retry_later;
+        host.store.readCoreArguments(input, bytes) catch |err| {
+            fenceDispatch(host, "skill core input", err);
+            return .retry_later;
+        };
+        break :checked tools.core_tools.checkSkill(arena, bytes, &request) catch return .retry_later;
+    };
+    const captured: store_module.CapturedSkill = if (check == .rejected)
+        .{ .failed = .{ .code = .skills_unavailable, .bytes = check.rejected } }
+    else
+        @import("session_skills.zig").capture(arena, host.allocator, host.io, host.store, input.session.slice(), &request, host.bash_facts.home) catch |err| {
+            if (err != error.OutOfMemory) fenceDispatch(host, "skill capture", err);
+            return .retry_later;
+        };
+    _ = host.store.settleSkillTool(input.binding, arena, &captured, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+        error.StaleActionAttemptBinding => return .admitted,
+        else => {
+            fenceDispatch(host, "skill core settlement", err);
+            return .retry_later;
+        },
+    };
+    return .admitted;
+}
+
 /// Runs a `start_agent` call: its arguments are read whole and checked
 /// here, since a refusal is the call's own failed result (D140), and one
 /// Store command starts the agent. An attached or standalone agent starts
@@ -1391,7 +1425,9 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
         install = .{ .environments = environments, .offer = &offer };
         break :committed .{ .context = &install, .call = Install.call };
     } else null;
-    _ = host.store.startAgent(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
+    const parent_skills = host.store.readSkills(arena, input.session.slice()) catch return .retry_later;
+    const initial_skills = @import("session_skills.zig").captureInitial(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home) catch return .retry_later;
+    _ = host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, initial_skills, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         // A stop resolved the call first.
         error.StaleActionAttemptBinding => return .admitted,
         else => {
@@ -4056,13 +4092,23 @@ test "catalog answer slims saves and a 304 keeps its generation and facts" {
 }
 
 test "Host resolves MCP calls without Bash admission and continues the Turn" {
-    const records = comptime [_]tools.Record{ tools.record(.bash).*, .{
-        .name = "fetch_page",
-        .owner = .mcp,
-        .server = "docs",
-        .description = "Fetch a page.",
-        .input_schema = "{\"type\":\"object\"}",
-    }, tools.record(.find_tools).*, tools.record(.message_agent).*, tools.record(.read_transcript).*, tools.record(.start_agent).*, tools.record(.web_search).* };
+    // Keep the native catalog complete independently of this Session's
+    // deliberately restricted tools and the MCP behavior asserted below.
+    const records = comptime blk: {
+        var out = tools.built_in.records[0..tools.built_in.records.len].* ++ [_]tools.Record{.{
+            .name = "fetch_page",
+            .owner = .mcp,
+            .server = "docs",
+            .description = "Fetch a page.",
+            .input_schema = "{\"type\":\"object\"}",
+        }};
+        std.sort.heap(tools.Record, &out, {}, struct {
+            fn lessThan(_: void, a: tools.Record, b: tools.Record) bool {
+                return std.mem.lessThan(u8, a.name, b.name);
+            }
+        }.lessThan);
+        break :blk out;
+    };
     const digests = comptime blk: {
         @setEvalBranchQuota(1_000_000);
         var out: [records.len][32]u8 = undefined;

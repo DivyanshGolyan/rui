@@ -1061,3 +1061,44 @@ test "start_agent presets cannot supply provider or workspace even with override
         }
     }
 }
+
+pub const skill_description = "Invoke an advertised skill by name to read its complete raw SKILL.md and absolute path. Reload rescans this Session's repository and Host-home .agents/skills roots, appending only changed catalog entries. Skills are ordinary conversation content, grant no tools or permissions, and execute nothing on load.";
+pub const skill_schema = "{\"type\":\"object\",\"properties\":{\"operation\":{\"type\":\"string\",\"enum\":[\"invoke\",\"reload\"]},\"name\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":64}},\"required\":[\"operation\"],\"additionalProperties\":false}";
+pub const skill_max_argument_bytes = 4096;
+
+pub fn checkSkill(arena: std.mem.Allocator, bytes: []const u8, out: *protocol.SkillRequest) error{OutOfMemory}!StartAgentCheck {
+    if (bytes.len > skill_max_argument_bytes) return refused("the arguments take more than 4096 bytes");
+    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{ .duplicate_field_behavior = .@"error" }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return refused("the arguments are not one well-formed JSON object"),
+    };
+    if (root != .object) return refused("the arguments are not one JSON object");
+    if (unknownField(root.object, &.{ "operation", "name" })) |name| return refusedField(arena, name, "is not a skill field");
+    const operation = root.object.get("operation") orelse return refused("operation is required");
+    if (operation != .string) return refused("operation must be invoke or reload");
+    out.* = .{ .operation = std.meta.stringToEnum(@FieldType(protocol.SkillRequest, "operation"), operation.string) orelse return refused("operation must be invoke or reload") };
+    if (root.object.get("name")) |name| {
+        if (name != .string or name.string.len == 0) return refused("name must be a nonempty skill name");
+        out.name = .{};
+        out.name.?.set(name.string) catch return refused("name must be at most 64 UTF-8 bytes");
+    }
+    if ((out.operation == .invoke) != (out.name != null)) return refused("invoke requires name; reload accepts no name");
+    return .accepted;
+}
+
+test "skills model arguments separate invoke and reload without authority fields" {
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const allocator = memory.allocator();
+    var out: protocol.SkillRequest = .{};
+    try std.testing.expect(try checkSkill(allocator, "{\"operation\":\"invoke\",\"name\":\"demo\"}", &out) == .accepted);
+    try std.testing.expectEqual(@as(@FieldType(protocol.SkillRequest, "operation"), .invoke), out.operation);
+    try std.testing.expectEqualStrings("demo", out.name.?.slice());
+    try std.testing.expect(try checkSkill(allocator, "{\"operation\":\"reload\"}", &out) == .accepted);
+    try std.testing.expect(out.name == null);
+    for ([_][]const u8{
+        "{}",                                             "{\"operation\":\"invoke\"}",                      "{\"operation\":\"invoke\",\"name\":\"\"}",
+        "{\"operation\":\"reload\",\"name\":\"demo\"}",   "{\"operation\":\"reload\",\"tools\":[\"bash\"]}", "{\"operation\":\"reload\",\"operation\":\"reload\"}",
+        "{\"operation\":\"activate\",\"name\":\"demo\"}",
+    }) |invalid| try std.testing.expect(try checkSkill(allocator, invalid, &out) == .rejected);
+}

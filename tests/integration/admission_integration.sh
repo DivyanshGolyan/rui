@@ -10,7 +10,7 @@ fi
 rui=$1
 mode=${2:-full}
 case "$mode" in
-    full|artifact-smoke) ;;
+    full|artifact-smoke|fresh-defaults) ;;
     *) echo "unknown admission mode: $mode" >&2; exit 1 ;;
 esac
 root=$(pwd -P)
@@ -172,7 +172,27 @@ require_test() {
     fi
 }
 
+# No --tools selection: fresh Sessions load exactly the public defaults.
+# Keep these expected literals independent of the product-defaults owner.
+fresh_defaults_case() {
+    created=$($rui session configure --store "$store" --record "$records/rejected-create.json" --key rejected-create --workspace "$root" --provider codex --model gpt-6-sol)
+    contains "$created" '"status":"accepted"'
+    rejected_session=$(printf '%s' "$created" | session_id)
+    defaults=$($rui session inspect --store "$store" --session "$rejected_session")
+    contains "$defaults" '"tools":["bash","skill","web_search"]'
+    contains "$defaults" '"loaded_tools":["bash","skill","web_search"]'
+    contains "$defaults" '"permission_mode":"bypass"'
+    contains "$defaults" '"instructions":{"bytes":"0"'
+    contains "$defaults" '"output_schema":null'
+}
+
 start_host
+
+if [ "$mode" = fresh-defaults ]; then
+    fresh_defaults_case
+    echo 'admission fresh defaults: exact configured and loaded tool sets passed'
+    exit 0
+fi
 
 # SIGKILL skips capture.abort; revisiting the same record recovers its temporary.
 capture_session=$(python3 - "$rui" "$store" "$records" "$root" <<'PYCAPTURE'
@@ -456,14 +476,7 @@ before_incomplete=$(session_refs)
 incomplete_configuration=$(python3 -c 'import json, sys; print(json.dumps({"workspace": sys.argv[1], "provider": "codex", "model": ""}))' "$root")
 wire_configure incomplete-key "$records/incomplete.json" "$incomplete_configuration" after-commit >"$state/drop.out" 2>"$state/drop.err"
 require_test 'rejected creation creates no Session' "$(session_refs)" = "$before_incomplete"
-created=$($rui session configure --store "$store" --record "$records/rejected-create.json" --key rejected-create --workspace "$root" --provider codex --model gpt-6-sol)
-contains "$created" '"status":"accepted"'
-rejected_session=$(printf '%s' "$created" | session_id)
-defaults=$($rui session inspect --store "$store" --session "$rejected_session")
-contains "$defaults" '"tools":["bash","web_search"]'
-contains "$defaults" '"permission_mode":"bypass"'
-contains "$defaults" '"instructions":{"bytes":"0"'
-contains "$defaults" '"output_schema":null'
+fresh_defaults_case
 rejected=$(not_accepted "$rui" request recover --store "$store" --record "$records/incomplete.json" --kind configure)
 contains "$rejected" '"status":"rejected"'
 contains "$rejected" '"replayed":true'

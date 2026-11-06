@@ -1,6 +1,10 @@
 """The one fake `rui` both installer tests serve, and the saved work they install over."""
 from pathlib import Path
 import sqlite3
+import atexit
+import functools
+import subprocess
+import tempfile
 
 
 def script(version_line, wire, answer, pause=False):
@@ -63,3 +67,48 @@ def saved_work(home, schema, *, unwritten=False):
         return database
     database.close()
     return None
+
+
+@functools.lru_cache(maxsize=1)
+def native_publisher():
+    root = Path(__file__).resolve().parents[2]
+    scratch = tempfile.TemporaryDirectory(prefix="rui-native-publisher-")
+    atexit.register(scratch.cleanup)
+    directory = Path(scratch.name)
+    (directory / "src").symlink_to(root / "src", target_is_directory=True)
+    main = directory / "publisher.zig"
+    main.write_text("""const std = @import("std");
+const Installation = @import("src/Installation.zig");
+const path = @import("src/installation_path.zig");
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(allocator);
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path")) {
+        const home = init.environ_map.get("HOME") orelse return error.InvalidArguments;
+        var observed = try path.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+        defer observed.deinit(allocator);
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try path.write(&output.writer, &observed, home);
+        return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
+    }
+    if (args.len != 5 or !std.mem.eql(u8, args[1], "--publish-install")) return error.InvalidArguments;
+    const intent: Installation.Intent = if (std.mem.eql(u8, args[4], "intentional-source")) .intentional_source
+        else if (std.mem.eql(u8, args[4], "released-install")) .released_install
+        else if (std.mem.eql(u8, args[4], "released-upgrade")) .released_upgrade
+        else return error.InvalidArguments;
+    var outcome = try Installation.publishExisting(allocator, init.io, args[2], args[3], intent, null);
+    defer outcome.deinit(allocator);
+    const receipt = outcome.receipt();
+    const json = try std.json.Stringify.valueAlloc(allocator, .{
+        .outcome = @tagName(outcome), .operation_build = receipt.operation_build,
+        .selected_after = receipt.selected_after,
+    }, .{});
+    try std.Io.File.stdout().writeStreamingAll(init.io, json);
+}
+""")
+    binary = directory / "publisher"
+    subprocess.run(["zig", "build-exe", "-lc", "--dep", "test_poll", f"-Mroot={main}",
+                    f"-Mtest_poll={root / 'src/testing/poll.zig'}", f"-femit-bin={binary}"],
+                   check=True, capture_output=True, text=True, timeout=60)
+    return str(binary)

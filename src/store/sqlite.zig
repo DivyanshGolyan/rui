@@ -181,10 +181,10 @@ pub fn dbConfig(database: *c.sqlite3, operation: c_int, value: c_int) !void {
 /// and its second too when the update sets a column that Session reads
 /// (`schema.readByBoth`).
 pub const touch_oracle_tables = .{
-    "session",          "session_revision",   "message_admission", "sent_rejection",
-    "turn",             "session_stop",       "session_archive",   "model_operation",
-    "action_operation", "conversation_entry", "model_output_item", "model_tool_call",
-    "session_change",
+    "session",          "session_revision",      "message_admission", "sent_rejection",
+    "turn",             "session_stop",          "session_archive",   "model_operation",
+    "action_operation", "conversation_entry",    "model_output_item", "model_tool_call",
+    "session_change",   "session_skill_catalog",
 };
 
 /// Test builds: a temporary trigger on each table that carries a Session

@@ -117,10 +117,12 @@ const ConversationName = enum {
     login,
     model,
     recover,
+    @"reload-skills",
     rename,
     requests,
     result,
     setup,
+    skill,
     status,
     unarchive,
     upgrade,
@@ -142,10 +144,12 @@ pub const conversation = Commands(ConversationName, .{
     .login = .{ .description = null },
     .model = .{ .description = "this Session's model and sign-in" },
     .recover = .{ .argument = .{ .required = "KEY" }, .description = "the original request", .listed = false },
+    .@"reload-skills" = .{ .description = "rescan skills and append catalog changes without model work" },
     .rename = .{ .argument = .{ .required = "NAME" }, .description = "name this Session" },
     .requests = .{ .description = "recovery handles; pick one to recover it or read its answer", .listed = false },
     .result = .{ .argument = .{ .required = "KEY" }, .description = "a saved answer", .listed = false },
     .setup = .{ .argument = .{ .options = setup_options }, .description = "future defaults" },
+    .skill = .{ .argument = .{ .required = "NAME" }, .description = "invoke an advertised skill as ordinary input" },
     .status = .{ .description = "settings and work" },
     .unarchive = .{ .description = "restore this Session without restarting work" },
     .upgrade = .{ .description = "check stable Rui; install restarts this Store's Host" },
@@ -760,11 +764,14 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "rename ", "setup ", "status", "unarchive", "upgrade" } },
+        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "reload-skills", "rename ", "setup ", "skill ", "status", "unarchive", "upgrade" } },
         .{ .draft = "/c", .shown = &.{ "configure ", "copy " }, .first = "onfigure " },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
         .{ .draft = "/st", .shown = &.{"status"}, .first = "atus" },
-        .{ .draft = "/re", .shown = &.{"rename "} },
+        .{ .draft = "/re", .shown = &.{ "reload-skills", "rename " } },
+        .{ .draft = "/rel", .shown = &.{"reload-skills"}, .first = "oad-skills" },
+        .{ .draft = "/s", .shown = &.{ "setup ", "skill ", "status" }, .first = "etup " },
+        .{ .draft = "/sk", .shown = &.{"skill "}, .first = "ill " },
         // Recovery commands work, and /help names them, but the list leaves them out.
         .{ .draft = "/req", .shown = &.{} },
         .{ .draft = "/w", .shown = &.{} },
@@ -774,6 +781,8 @@ test "the list names the listed commands a command word starts, and Tab puts the
         .{ .draft = "/copy f", .shown = &.{"file"}, .first = "ile" },
         .{ .draft = "/copy file ", .shown = null },
         .{ .draft = "/rename ", .shown = null },
+        .{ .draft = "/skill ", .shown = null },
+        .{ .draft = "/reload-skills ", .shown = null },
         .{ .draft = "/status ", .shown = null },
         .{ .draft = "/nope ", .shown = null },
         .{ .draft = "/c\n", .shown = null },
@@ -792,6 +801,15 @@ test "the list names the listed commands a command word starts, and Tab puts the
         for (case.shown.?, list.shown()) |expected, entry| try std.testing.expectEqualStrings(expected, entry.word);
         if (case.first) |first| try std.testing.expectEqualStrings(first, list.completion(0));
     }
+}
+
+test "skills completion distinguishes immediate reload from invocation awaiting a name" {
+    const reload = conversation.suggest("/reload", .{}).?.shown()[0];
+    try std.testing.expectEqualStrings("reload-skills", reload.word);
+    try std.testing.expect(reload.runs);
+    const invoke = conversation.suggest("/skill", .{}).?.shown()[0];
+    try std.testing.expectEqualStrings("skill ", invoke.word);
+    try std.testing.expect(!invoke.runs);
 }
 
 test "/effort offers every grammar value for an unlisted model" {
@@ -907,12 +925,14 @@ test "a key's list is the draft's own, and counts as drawn when the latest frame
 test "the list order is the names' order and every listed usage fits before the descriptions" {
     inline for (.{ conversation, overview }) |screen| {
         const names = std.enums.values(screen.Name);
-        for (names[1..], 0..) |name, index| try std.testing.expect(std.mem.order(u8, @tagName(names[index]), @tagName(name)) == .lt);
+        for (names[1..], 0..) |name, index| try std.testing.expectEqual(.lt, std.mem.order(u8, @tagName(names[index]), @tagName(name)));
     }
     try std.testing.expectEqualStrings("/copy [code|file]", conversation.usage.get(.copy));
     try std.testing.expectEqualStrings("/rename NAME", conversation.usage.get(.rename));
     try std.testing.expectEqualStrings("/effort LEVEL", conversation.usage.get(.effort));
     try std.testing.expectEqualStrings("/configure [OPTIONS]", conversation.usage.get(.configure));
+    try std.testing.expectEqualStrings("/reload-skills", conversation.usage.get(.@"reload-skills"));
+    try std.testing.expectEqualStrings("/skill NAME", conversation.usage.get(.skill));
 }
 
 test "/copy takes each Copy's name but the answer's, which it copies alone" {

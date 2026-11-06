@@ -560,7 +560,7 @@ fn parse(text: []const u8) Slash {
         .help => .{ .inspection = .help },
         // The table's /copy words are `reads.Copy`'s own names.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
-        .@"inspect-action", .setup, .configure, .result, .rename, .effort => .{ .inspection = .command },
+        .@"inspect-action", .setup, .configure, .result, .rename, .effort, .skill, .@"reload-skills" => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
         .discard => .discard,
         .wait => .wait,

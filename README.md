@@ -103,6 +103,13 @@ Enter `/unarchive` to restore a Session without starting work.
 Sending a new Message to an archived Session also restores it.
 Archive keeps the conversation history and files.
 
+## Skills
+
+Rui discovers `SKILL.md` skills in your repository's `.agents/skills` and the Host user's `~/.agents/skills`; repository names win collisions.
+Use `/skill NAME` to read one into the conversation and `/reload-skills` to refresh the advertised catalog without starting a model turn.
+Skills are ordinary conversation content, grant no permissions and execute nothing on load.
+See [terminal commands](docs/using-rui.md#skills) or [scripted invocation](docs/scripting.md#invoke-and-reload-skills).
+
 ## Build from source
 
 See [Developing Rui](docs/development.md) to build and install from source, run tests, or try Rui without a provider account.
