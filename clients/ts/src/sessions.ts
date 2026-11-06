@@ -59,11 +59,25 @@ export interface SendOptions {
 	env?: Record<string, string>;
 }
 
+export type SessionArchiveState = CurrentReport["archive_state"];
+
+export interface ListSessionsOptions {
+	/** Defaults to active, including Sessions still settling an archive request. */
+	archive?: Schemas["ListSessionsRequest"]["archive"];
+}
+
+export interface SessionArchiveResult {
+	archived: boolean;
+	/** Accepted intent can remain pending until stopped work has really settled. */
+	completion: "pending" | "completed";
+}
+
 export interface SessionSummary {
 	id: string;
 	label: string | null;
 	/** The Session's work state, such as `idle`, `working` or `approval`. */
 	state: string;
+	archiveState: SessionArchiveState;
 	parent: string | null;
 }
 
@@ -71,6 +85,7 @@ type CurrentReport = Extract<Schemas["InspectSessionReply"], { profile: "current
 
 /** Current Host facts. Decimal counts, times and IDs remain lossless strings. */
 export interface SessionStatus {
+	archiveState: SessionArchiveState;
 	state: CurrentReport["work"]["state"]["kind"];
 	since: CurrentReport["work"]["state"]["since"];
 	turn: CurrentReport["work"]["turn"];
@@ -202,6 +217,7 @@ export class Session {
 		);
 		if (reply.session === null) throw new RuiRequestError("invocation_error", "session_not_found");
 		return {
+			archiveState: reply.archive_state,
 			state: reply.work.state.kind,
 			since: reply.work.state.since,
 			turn: reply.work.turn,
@@ -259,6 +275,36 @@ export class Session {
 			} satisfies Schemas["SessionStopRequest"]);
 		accepted(parse<Schemas["SessionStopReply"]>(await this.#link.exchange("/v1/control/session-stop", body)).answer);
 		this.#link.activity?.notify(this.id);
+	}
+
+	/** Stops work and archives after real settlement, using one durable intent. */
+	archive(options?: WriteOptions): Promise<SessionArchiveResult> {
+		return this.#setArchived(true, options);
+	}
+
+	/** Restores organization only. Previously stopped work is never resumed. */
+	unarchive(options?: WriteOptions): Promise<SessionArchiveResult> {
+		return this.#setArchived(false, options);
+	}
+
+	async #setArchived(archived: boolean, options?: WriteOptions): Promise<SessionArchiveResult> {
+		const idempotencyKey = key(options);
+		const reply = parse<Schemas["SessionArchiveReply"]>(await this.#link.exchange(
+			"/v1/control/session-archive",
+			(store) => JSON.stringify({
+				version: WIRE_VERSION,
+				kind: "session_archive",
+				store,
+				key: idempotencyKey,
+				session: this.id,
+				archived,
+			} satisfies Schemas["SessionArchiveRequest"]),
+		));
+		const answer = accepted(reply.answer);
+		const completion = reply.completion.status;
+		if (completion === "unavailable") throw new RuiRequestError("invocation_error", "invalid_response");
+		this.#link.activity?.notify(this.id);
+		return { archived: answer.archived, completion };
 	}
 
 	/**
@@ -332,8 +378,8 @@ export class Sessions {
 		return new Session(this.#link, accepted(reply.answer).session);
 	}
 
-	/** Every configured Session, newest first (D128). */
-	async list(): Promise<SessionSummary[]> {
+	/** Configured Sessions, newest first; archived Sessions are hidden by default. */
+	async list(options?: ListSessionsOptions): Promise<SessionSummary[]> {
 		const summaries: SessionSummary[] = [];
 		let after = "0";
 		let ceiling = "0";
@@ -348,13 +394,14 @@ export class Sessions {
 						kind: "list_sessions",
 						store,
 						workspace: null,
+						archive: options?.archive ?? "active",
 						after: wireAfter,
 						ceiling: wireCeiling,
 					} satisfies Schemas["ListSessionsRequest"]),
 				),
 			);
 			for (const row of page.sessions) {
-				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, parent: row.parent });
+				summaries.push({ id: row.reference, label: row.label, state: row.work.state.kind, archiveState: row.archive_state, parent: row.parent });
 			}
 			if (page.next === null || !("after" in page.next)) return summaries.reverse();
 			after = page.next.after;

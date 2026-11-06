@@ -106,6 +106,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/control/session-archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Archives or restores a Session. Archiving stops current and queued work. Retried by its key. */
+        post: operations["sessionArchive"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/control/model-interruption": {
         parameters: {
             query?: never;
@@ -1188,6 +1205,8 @@ export interface components {
             /** @constant */
             profile: "current";
             session: components["schemas"]["domainreportCurrentJsonSettings"];
+            /** @enum {string} */
+            archive_state: "active" | "archiving" | "archived";
             pending_messages: components["schemas"]["Decimal"];
             work: components["schemas"]["domainreportCurrentJsonWork"];
             peers: components["schemas"]["PeerFacts"];
@@ -1206,6 +1225,8 @@ export interface components {
             /** @constant */
             profile: "full";
             session: components["schemas"]["domainreportCurrentJsonSettings"];
+            /** @enum {string} */
+            archive_state: "active" | "archiving" | "archived";
             pending_messages: components["schemas"]["Decimal"];
             work: components["schemas"]["domainreportCurrentJsonWork"];
             peers: components["schemas"]["PeerFacts"];
@@ -1357,6 +1378,8 @@ export interface components {
             kind: "list_sessions";
             store: string;
             workspace: string | null;
+            /** @enum {string} */
+            archive: "active" | "archived" | "all";
             after: components["schemas"]["Decimal"];
             ceiling: components["schemas"]["Decimal"];
         } | {
@@ -1366,6 +1389,8 @@ export interface components {
             kind: "list_sessions";
             store: string;
             workspace: string | null;
+            /** @enum {string} */
+            archive: "active" | "archived" | "all";
             after: components["schemas"]["Decimal"];
             ceiling: components["schemas"]["Decimal"];
             since: string;
@@ -1376,6 +1401,8 @@ export interface components {
             kind: "list_sessions";
             store: string;
             workspace: string | null;
+            /** @enum {string} */
+            archive: "active" | "archived" | "all";
             after: components["schemas"]["Decimal"];
             ceiling: components["schemas"]["Decimal"];
             since: string;
@@ -1556,7 +1583,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
+                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted";
             };
             input: {
                 /** @constant */
@@ -2661,6 +2688,52 @@ export interface components {
                 /** @enum {string} */
                 status: "absent" | "accepted" | "rejected";
                 /** @constant */
+                kind: "session_archive";
+                target: string;
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "session_archive";
+                target: string;
+                code: string;
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "session_archive";
+                target: string;
+                archived: boolean;
+                completion: {
+                    /** @enum {string} */
+                    status: "pending" | "completed";
+                };
+            } | {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
+                kind: "session_archive";
+                target: string;
+                code: string;
+                archived: boolean;
+                completion: {
+                    /** @enum {string} */
+                    status: "pending" | "completed";
+                };
+            };
+        } | {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            type: "command_observation";
+            key: string;
+            /** @constant */
+            delta: "full";
+            since: string | null;
+            observation: {
+                /** @enum {string} */
+                status: "absent" | "accepted" | "rejected";
+                /** @constant */
                 kind: "model_interruption";
                 target: string;
             } | {
@@ -2873,7 +2946,72 @@ export interface components {
             store: string;
             key: string;
         };
+        SessionArchiveConflictReply: {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            type: "session_archive_reply";
+            answer: {
+                /** @constant */
+                status: "conflict";
+                /** @constant */
+                replayed: false;
+                session: string;
+                /** @constant */
+                code: "idempotency_key_conflict";
+            };
+            completion: {
+                /** @constant */
+                status: "unavailable";
+            };
+        };
+        SessionArchiveReply: {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            type: "session_archive_reply";
+            answer: {
+                /** @constant */
+                status: "accepted";
+                replayed: boolean;
+                session: string;
+                archived: boolean;
+            };
+            completion: {
+                /** @enum {string} */
+                status: "pending" | "completed";
+            };
+        } | {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            type: "session_archive_reply";
+            answer: {
+                /** @constant */
+                status: "rejected";
+                replayed: boolean;
+                session: string;
+                /** @enum {string} */
+                code: "invalid_session_reference" | "unknown_session" | "archive_pending";
+            };
+            completion: {
+                /** @constant */
+                status: "unavailable";
+            };
+        };
+        SessionArchiveRequest: {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            kind: "session_archive";
+            store: string;
+            key: string;
+            session: string;
+            archived: boolean;
+        };
         SessionRow: {
+            /** @enum {string} */
+            archive_state: "active" | "archiving" | "archived";
             reference: string;
             workspace: string;
             /** @enum {string} */
@@ -3547,6 +3685,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionStopConflictReply"] | components["schemas"]["ErrorReply"];
+                };
+            };
+            /** @description A refusal or failure. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorReply"];
+                };
+            };
+        };
+    };
+    sessionArchive: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The wire version this document describes. Any other version is refused. */
+                "X-Rui-Wire-Version": components["parameters"]["WireVersion"];
+                /** @description The Host instance (from host-info) the request is meant for; a different instance refuses it. */
+                "X-Rui-Host-Instance"?: components["parameters"]["HostInstance"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SessionArchiveRequest"];
+            };
+        };
+        responses: {
+            /** @description The reply. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionArchiveReply"];
+                };
+            };
+            /** @description The key was used before with different input (the conflict reply), or the request names another Store or Host instance (a refusal). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionArchiveConflictReply"] | components["schemas"]["ErrorReply"];
                 };
             };
             /** @description A refusal or failure. */

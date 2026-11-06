@@ -93,6 +93,7 @@ pub const Operations = struct {
     /// ends the overview after a canonical Store failure.
     start: *const fn (*Self, client.Requests, client.MessageInput, *Reply) anyerror!void,
     stop: *const fn (*Self, client.Requests, client.SessionStopInput, *Reply) anyerror!void,
+    archive: *const fn (*Self, client.Requests, client.SessionArchiveInput, *Reply) anyerror!void,
     /// The Host's `model_list` reply, owned by the allocator.
     models: *const fn (*Self, client.Requests, std.mem.Allocator) anyerror![]u8,
     /// Saves the person's default for new Sessions.
@@ -105,7 +106,7 @@ pub const Operations = struct {
     converse: *const fn (*Self, view.Reference) ?Left,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .start = startSession, .stop = stopSession, .models = listModels, .save_default = saveDefault, .command = runCommand, .converse = converse };
+pub const client_operations: Operations = .{ .host = hostFacts, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .save_default = saveDefault, .command = runCommand, .converse = converse };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -121,6 +122,7 @@ pub const Left = struct {
 pub const Reply = struct {
     outcome: enum { accepted, failed, unconfirmed } = .failed,
     session: view.Reference = undefined,
+    archive_pending: bool = false,
     /// The failure code, why an environment was refused, or the handle
     /// that recovers an unconfirmed request.
     text: protocol.Bounded(@max(protocol.max_code_bytes, client.Environment.too_large_bytes)) = .{},
@@ -172,6 +174,8 @@ pub const Reply = struct {
             const len = @typeInfo(view.Reference).array.len;
             if (session.len == len) result.session = session[0..len].*;
         }
+        if (answer.result == .accepted and answer.result.accepted == .session_archive)
+            result.archive_pending = answer.result.accepted.session_archive.completion == .pending;
         result.handle.set(handle) catch {};
         self.* = result;
     }
@@ -189,6 +193,14 @@ pub const Reply = struct {
             .failed => .{ .failed = self.text.slice() },
             .unconfirmed => .{ .unconfirmed = self.text.slice() },
         };
+    }
+
+    fn archive(self: *const Reply, request: view.ArchiveRequest) view.ArchiveResult {
+        return .{ .request = request, .outcome = switch (self.outcome) {
+            .accepted => .{ .requested = if (self.archive_pending) .pending else .completed },
+            .failed => .{ .failed = self.text.slice() },
+            .unconfirmed => .{ .unconfirmed = self.text.slice() },
+        } };
     }
 
     fn stop(self: *const Reply) view.StopOutcome {
@@ -210,6 +222,7 @@ const Job = union(enum) {
     /// read on the worker's thread.
     start: view.OwnedStart,
     stop: view.Reference,
+    archive: view.ArchiveRequest,
     models,
     save: view.Default,
     /// Owns its line, as a start owns its text.
@@ -293,6 +306,7 @@ job_count: usize = 0,
 /// The job the worker runs or last ran, and its output.
 job: Job = .list,
 traversal: protocol_reply.SessionTraversal = .init(null),
+traversal_archive: protocol.SessionArchiveFilter = .active,
 host: ?view.Host = null,
 page: protocol_reply.SessionListPage = undefined,
 lines: [view.max_first_line_reads]Line = @splat(.{}),
@@ -540,12 +554,14 @@ fn event(self: *Self, value: view.Event) !?Next {
     for (effects.slice()) |effect| switch (effect) {
         .list => |since| {
             self.traversal = .init(since);
+            self.traversal_archive = self.state.listing_archive.?;
             self.queue(.host);
             self.queue(.list);
         },
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
         .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
+        .archive => |request| self.queue(.{ .archive = request }),
         .list_models => self.queue(.models),
         .save_default => |binding| self.queue(.{ .save = binding }),
         .command => |command| self.queue(.{ .command = .{ .name = command.name, .session = command.session, .line = try self.init.gpa.dupe(u8, command.text) } }),
@@ -679,6 +695,10 @@ fn runJob(self: *Self, requests: client.Requests) !void {
             try self.ops.start(self, requests, input, &self.reply);
         },
         .stop => |*reference| try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.reply),
+        .archive => |*request| {
+            self.reply = .refused("archive_request_failed");
+            try self.ops.archive(self, requests, .{ .store = self.options.store, .session = &request.reference, .archived = request.archived }, &self.reply);
+        },
         .models => {
             const gpa = self.init.gpa;
             const body = try self.ops.models(self, requests, gpa);
@@ -740,6 +760,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             return self.event(.{ .start = self.reply.start() });
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
+        .archive => |request| return self.event(.{ .archive = self.reply.archive(request) }),
         .models => {
             outcome catch |err| return self.event(.{
                 .models = switch (err) {
@@ -1303,7 +1324,7 @@ fn listPage(self: *Self, requests: client.Requests, cursor: protocol_reply.Sessi
     const file = self.scratch.?;
     var sink: Sink = .{ .io = self.init.io, .file = file };
     var buffer: client.ReplyBuffer = .{};
-    const reply = try requests.listSessions(self.options.store, null, cursor, &sink, &buffer);
+    const reply = try requests.listSessionsFiltered(self.options.store, null, self.traversal_archive, cursor, &sink, &buffer);
     switch (try protocol_reply.SessionListReply.decode(self.init.io, file, null, cursor, reply)) {
         .page => |value| page.* = value,
         .failure => |failure| return failure,
@@ -1348,6 +1369,17 @@ fn stopSession(self: *Self, requests: client.Requests, input: client.SessionStop
     return reply.record(requests.sendCaptured(&captured, .{ .map = self.init.environ_map }, &buffer), captured.identity().key.slice());
 }
 
+fn archiveSession(self: *Self, requests: client.Requests, input: client.SessionArchiveInput, reply: *Reply) !void {
+    const io = self.init.io;
+    var captured = client.captureSessionArchive(io, input, .{ .generated = self.options.directory }) catch |err| {
+        reply.* = .refused(@errorName(err));
+        return;
+    };
+    defer captured.close(io);
+    var buffer: client.ReplyBuffer = .{};
+    return reply.record(requests.sendCaptured(&captured, .{ .map = self.init.environ_map }, &buffer), captured.identity().key.slice());
+}
+
 const test_now_s: u64 = 1_800_000_000;
 
 /// What the fake operations were asked, for the wiring tests.
@@ -1370,6 +1402,10 @@ const Seen = struct {
         reasoning_effort: ?protocol.Bounded(64) = null,
     } = .{},
     stops: usize = 0,
+    archives: usize = 0,
+    archive_session: view.Reference = @splat(0),
+    archive_requested: bool = true,
+    archive_filter: protocol.SessionArchiveFilter = .active,
     stopped: view.Reference = @splat(0),
     conversations: usize = 0,
     conversed: view.Reference = @splat(0),
@@ -1404,8 +1440,9 @@ const fake_operations: Operations = .{
         }
     }.stopped,
     .list = struct {
-        fn list(_: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+        fn list(self: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             Seen.now.lists += 1;
+            Seen.now.archive_filter = self.traversal_archive;
             Seen.now.since = cursor.since;
             page.* = .{ .count = Seen.now.listed, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
             for (page.rows[0..Seen.now.listed], listed_references[0..Seen.now.listed], 0..) |*row, reference, at| {
@@ -1455,6 +1492,14 @@ const fake_operations: Operations = .{
             reply.* = .{ .outcome = .accepted };
         }
     }.stop,
+    .archive = struct {
+        fn archive(_: *Self, _: client.Requests, input: client.SessionArchiveInput, reply: *Reply) !void {
+            Seen.now.archives += 1;
+            Seen.now.archive_session = input.session[0..6].*;
+            Seen.now.archive_requested = input.archived;
+            reply.* = .{ .outcome = .accepted, .archive_pending = input.archived };
+        }
+    }.archive,
     .models = struct {
         fn models(_: *Self, _: client.Requests, gpa: std.mem.Allocator) ![]u8 {
             Seen.now.model_lists += 1;
@@ -3503,4 +3548,64 @@ test "a command that fails while it runs is the failure reported, even when taki
     defer rig.overview.state.gpa = gpa;
     try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
     try std.testing.expect(failing.has_induced_failure);
+}
+
+test "overview archive effects preserve server filter, pending visibility, and restore intent" {
+    const Listing = struct {
+        var archive_state: protocol.SessionArchiveState = .active;
+        fn list(self: *Self, requests: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            _ = try fake_operations.list(self, requests, cursor, page);
+            for (page.rows[0..page.count]) |*row| {
+                row.archive_state = archive_state;
+                row.work.state = switch (archive_state) {
+                    .active => .{ .working = .{ .since = test_now_s } },
+                    .archiving => .{ .stopping = .{ .since = test_now_s } },
+                    .archived => .{ .stopped = .{ .since = test_now_s, .cause = .stop } },
+                };
+            }
+            return null;
+        }
+    };
+    var ops = fake_operations;
+    ops.list = Listing.list;
+    Listing.archive_state = .active;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.active, Seen.now.archive_filter);
+    try std.testing.expect(try rig.press("/archive\r") == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
+    try std.testing.expect(try rig.press("\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
+    try std.testing.expectEqualStrings("k7m2qx", &Seen.now.archive_session);
+    try std.testing.expect(Seen.now.archive_requested);
+    try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
+    try std.testing.expectEqual(view.ArchiveState.active, overview.state.rows.items[0].archive_state);
+    Listing.archive_state = .archiving;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(view.ArchiveState.archiving, overview.state.rows.items[0].archive_state);
+    Listing.archive_state = .archived;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 2 * view.list_interval_ms }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
+    try std.testing.expect(try rig.press("/sessions archived\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(protocol.SessionArchiveFilter.archived, Seen.now.archive_filter);
+    try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
+    try std.testing.expect(try rig.press("/unarchive\r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 2), Seen.now.archives);
+    try std.testing.expect(!Seen.now.archive_requested);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+    try std.testing.expectEqual(@as(usize, 1), overview.state.rows.items.len);
+    Listing.archive_state = .active;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 3 * view.list_interval_ms }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 0), overview.state.rows.items.len);
 }

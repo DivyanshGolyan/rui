@@ -533,7 +533,7 @@ fn parse(text: []const u8) Slash {
         .help => .{ .inspection = .help },
         // The table's /copy words are `reads.Copy`'s own names.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
-        .@"inspect-action", .setup, .configure, .result, .rename, .effort => .{ .inspection = .command },
+        .@"inspect-action", .setup, .configure, .result, .rename, .effort, .archive, .unarchive => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
         .discard => .discard,
         .wait => .wait,
@@ -621,6 +621,10 @@ test "frontend answers local and unknown commands in place and keeps Host comman
         .{ "/configure --permission-mode ask", "" },
         .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
         .{ "/inspect-action", "" },
+        .{ "/archive", "" },
+        .{ "/unarchive", "" },
+        .{ "/archive other", "! Usage: /archive" },
+        .{ "/unarchive other", "! Usage: /unarchive" },
         .{ "/status", "" },
         .{ "/copy", "" },
         .{ "/copy code", "" },
@@ -637,6 +641,51 @@ test "frontend answers local and unknown commands in place and keeps Host comman
             try std.testing.expect(self.notice == null);
             try std.testing.expectEqualStrings(case[0], self.input.takeCommand().?);
         }
+    }
+}
+
+test "archive commands use one existing hook for the exact open Session without changing its archive badge" {
+    const Hook = struct {
+        var calls: usize = 0;
+        var expected: []const u8 = undefined;
+
+        fn command(_: std.process.Init, _: client.Requests, store: []const u8, session: []const u8, text: []u8) anyerror!void {
+            calls += 1;
+            try std.testing.expectEqualStrings("archive-store", store);
+            try std.testing.expectEqualStrings("k7m2qx", session);
+            try std.testing.expectEqualStrings(expected, text);
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const page = try held.tmp.dir.createFile(std.testing.io, "command", .{ .read = true });
+    defer page.close(std.testing.io);
+    self.files = .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } };
+    self.store = "archive-store";
+    self.session = "k7m2qx";
+    self.command = Hook.command;
+    self.live.work.state = .{ .working = .{ .since = 1 } };
+    for ([_]struct { text: []const u8, state: protocol.SessionArchiveState }{
+        .{ .text = "/archive", .state = .active },
+        .{ .text = "/unarchive", .state = .archived },
+    }) |case| {
+        Hook.calls = 0;
+        Hook.expected = case.text;
+        self.line.archive_state = case.state;
+        self.slashCommand(case.text);
+        try std.testing.expect(parse(case.text).inspection == .command);
+        const text = self.input.takeCommand().?;
+        const job = self.freeze(.inspection);
+        @memcpy(job.command_text[0..text.len], text);
+        job.command_text_length = text.len;
+        var task: Task = .{ .io = std.testing.io };
+        try reads.runCommand(job, &task);
+        try std.testing.expectEqual(@as(usize, 1), Hook.calls);
+        try std.testing.expectEqual(case.state, self.line.archive_state);
+        try std.testing.expect(self.live.work.state == .working);
+        try std.testing.expect(self.submission.view() == null);
+        try std.testing.expectEqualStrings("k7m2qx", self.session);
     }
 }
 
@@ -944,11 +993,11 @@ fn drawFrame(self: *Self) !void {
     else if (self.tmux and !waiting and view.bytes.len != 0)
         try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
     var status_buffer: [Frame.status_capacity]u8 = undefined;
-    const status = statusLines(&status_buffer, context.buffered(), base_status);
+    const status = statusLines(&status_buffer, context.buffered(), base_status, self.line.archive_state);
     var queued_buffer: [Frame.status_capacity]u8 = undefined;
     const queued: ?Screen.Footer.Queued = if (self.queuedRow()) |row| .{
         .waiting = row.waiting,
-        .status = statusLines(&queued_buffer, context.buffered(), submission_status orelse if (self.admission.echo) |echo| (if (echo <= row.newest) "" else "Sent") else ""),
+        .status = statusLines(&queued_buffer, context.buffered(), submission_status orelse if (self.admission.echo) |echo| (if (echo <= row.newest) "" else "Sent") else "", self.line.archive_state),
     } else null;
     // The overview's stop prompt or notice, else the conversation's own.
     const said = self.lender.line(self.lender.context, self.live.work.state.asOf(now_ms));
@@ -1035,21 +1084,28 @@ comptime {
 
 /// The instructions always fit; a long context line is shortened, on a
 /// UTF-8 boundary, rather than pushing them out of the status region.
-fn statusLines(buffer: *[Frame.status_capacity]u8, context: []const u8, base: []const u8) []const u8 {
+fn statusLines(buffer: *[Frame.status_capacity]u8, context: []const u8, base: []const u8, archive_state: protocol.SessionArchiveState) []const u8 {
     std.debug.assert(base.len <= 256);
     var status = std.Io.Writer.fixed(buffer);
-    const room = buffer.len - base.len - "\n…".len;
+    const badge = status_page.archiveBadge(archive_state);
+    const room = buffer.len - base.len - (if (badge) |text| text.len else 0) - "\n… · ".len;
     var context_line = context;
     if (context_line.len > room) {
         var end = room;
         while (end > 0 and (context_line[end] & 0xc0) == 0x80) end -= 1;
         context_line = context_line[0..end];
     }
-    for ([_][]const u8{ context_line, base }, 0..) |line, index| {
-        if (line.len == 0) continue;
+    if (context_line.len != 0) {
+        status.writeAll(context_line) catch unreachable;
+        if (context_line.len < context.len) status.writeAll("…") catch unreachable;
+    }
+    if (badge != null or base.len != 0) {
         if (status.buffered().len != 0) status.writeAll("\n") catch unreachable;
-        status.writeAll(line) catch unreachable;
-        if (index == 0 and line.len < context.len) status.writeAll("…") catch unreachable;
+        if (badge) |text| {
+            status.writeAll(text) catch unreachable;
+            if (base.len != 0) status.writeAll(" · ") catch unreachable;
+        }
+        status.writeAll(base) catch unreachable;
     }
     return status.buffered();
 }
@@ -1059,11 +1115,30 @@ test "status lines keep the instructions beside an oversized context" {
     // A context whose cut falls inside a two-byte scalar.
     var context: [4000]u8 = undefined;
     for (0..context.len / 2) |index| context[index * 2 ..][0..2].* = "é".*;
-    const lines = statusLines(&buffer, &context, "Sent");
+    const lines = statusLines(&buffer, &context, "Sent", .active);
     try std.testing.expect(std.mem.endsWith(u8, lines, "…\nSent"));
     try std.testing.expect(std.unicode.utf8ValidateSlice(lines));
-    try std.testing.expectEqualStrings("Sent", statusLines(&buffer, "", "Sent"));
-    try std.testing.expectEqualStrings("? Delete /w\nSent", statusLines(&buffer, "? Delete /w", "Sent"));
+    try std.testing.expectEqualStrings("Sent", statusLines(&buffer, "", "Sent", .active));
+    try std.testing.expectEqualStrings("? Delete /w\nSent", statusLines(&buffer, "? Delete /w", "Sent", .active));
+}
+
+test "archive badges keep submission status and whole instructions beside oversized context" {
+    var buffer: [Frame.status_capacity]u8 = undefined;
+    var context: [4000]u8 = undefined;
+    for (0..context.len / 2) |index| context[index * 2 ..][0..2].* = "é".*;
+    for ([_]struct { state: protocol.SessionArchiveState, expected: []const u8 }{
+        .{ .state = .active, .expected = "Sent" },
+        .{ .state = .archiving, .expected = "Stopping and archiving · Sent" },
+        .{ .state = .archived, .expected = "Archived · /unarchive · Sent" },
+    }) |case| {
+        try std.testing.expectEqualStrings(case.expected, statusLines(&buffer, "", "Sent", case.state));
+        const text = statusLines(&buffer, &context, "Sent", case.state);
+        try std.testing.expect(std.mem.endsWith(u8, text, case.expected));
+        try std.testing.expect(std.mem.indexOf(u8, text, "…\n") != null);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+    }
+    try std.testing.expectEqualStrings("Stopping and archiving", statusLines(&buffer, "", "", .archiving));
+    try std.testing.expectEqualStrings("Archived · /unarchive", statusLines(&buffer, "", "", .archived));
 }
 
 /// Another client decided, or the Turn ended: the choice can no longer decide.
@@ -1947,6 +2022,39 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     // News goes out first in the next frame, once the read is applied.
     if (observed) |read| try self.lender.observed(self.lender.context, read.work, if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, read.opening);
     self.dirty = true;
+}
+
+test "archive badges follow only completed server snapshots and stay distinct from work" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.line = .{ .read = .{ .revision = 1, .end = 1 } };
+    self.live.work.state = .{ .working = .{ .since = 1 } };
+    self.reading.phase = .activity;
+    self.notice = "Command accepted";
+    var storage: [512]u8 = undefined;
+    for ([_]struct { archive: protocol.SessionArchiveState, work: protocol.WorkState, badge: ?[]const u8 }{
+        .{ .archive = .archiving, .work = .{ .stopping = .{ .since = 1 } }, .badge = "Stopping and archiving" },
+        .{ .archive = .archived, .work = .{ .stopped = .{ .since = 1, .cause = .stop } }, .badge = "Archived · /unarchive" },
+        .{ .archive = .active, .work = .{ .stopped = .{ .since = 1, .cause = .stop } }, .badge = null },
+    }) |case| {
+        const previous = self.line.archive_state;
+        self.job.result = .{ .line = .{ .read = .{ .revision = 1, .end = 2 }, .archive_state = case.archive }, .work = .{ .work = .{ .state = case.work } } };
+        try self.applyReader(.{ .cancelled = .{ .phase = .activity, .rendering = false } });
+        try std.testing.expectEqual(previous, self.line.archive_state);
+        try self.applyReader(.complete);
+        try std.testing.expectEqual(case.archive, self.line.archive_state);
+        try std.testing.expectEqualDeep(case.work, self.live.work.state);
+        try held.settle();
+        if (case.badge) |badge| {
+            try std.testing.expectEqualStrings(badge, rowWith(held.screen, badge, &storage).?);
+        } else {
+            try std.testing.expect(rowWith(held.screen, "Archived", &storage) == null);
+            try std.testing.expect(rowWith(held.screen, "Stopping and archiving", &storage) == null);
+        }
+        try std.testing.expectEqualStrings("Command accepted", rowWith(held.screen, "Command accepted", &storage).?);
+        try std.testing.expectEqualStrings("unused", self.session);
+    }
 }
 
 test "frontend commits spacing only for completed visible reads" {
@@ -3330,7 +3438,7 @@ test "permission resolved between the activity scan and Current keeps the fronte
     // Another client denies the selected Action (or its Turn stops/finishes)
     // before the next read: Current no longer has that unresolved row.
     const resolved =
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"context_estimate\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"context_estimate\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"archive_state\":\"active\",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try Host.respond(&listener, "/v1/inspect-session", resolved);
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, struct {
         fn completed(frontend: *Self) !bool {

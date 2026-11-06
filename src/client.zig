@@ -183,6 +183,11 @@ pub const Requests = struct {
 
     /// Same synchronous sink contract as inspectSession; no complete page copy.
     pub fn listSessions(self: Requests, store_path: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+        return self.listSessionsFiltered(store_path, workspace, .active, cursor, sink, reply_buffer);
+    }
+
+    /// Archive visibility is independent of Workspace scope and Session work.
+    pub fn listSessionsFiltered(self: Requests, store_path: []const u8, workspace: ?[]const u8, archive: protocol.SessionArchiveFilter, cursor: protocol_reply.SessionListCursor, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
         reply_buffer.len = 0;
         try self.check();
         if (workspace) |value| {
@@ -192,7 +197,7 @@ pub const Requests = struct {
         try cursor.validate();
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try appendListSessions(&body, paths.store.slice(), workspace, cursor);
+        try appendListSessions(&body, paths.store.slice(), workspace, archive, cursor);
         const fd = try openRead(self, &paths, "/v1/list-sessions", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
@@ -483,6 +488,12 @@ pub const SessionStopInput = struct {
     session: []const u8,
 };
 
+pub const SessionArchiveInput = struct {
+    store: []const u8,
+    session: []const u8,
+    archived: bool = true,
+};
+
 pub const ModelInterruptionInput = struct {
     store: []const u8,
     session: []const u8,
@@ -680,6 +691,21 @@ pub fn captureSessionStop(io: std.Io, input: SessionStopInput, target: CaptureTa
     return writeSessionStopCapture(io, &paths, input, location);
 }
 
+/// Captures archive or restore intent before any Host exchange. Restoration
+/// changes organization only; it never resumes previously stopped work.
+pub fn captureSessionArchive(io: std.Io, input: SessionArchiveInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try protocol_reply.validateIdentityInputs(location.key, input.session);
+    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var capture = try Capture.open(io, location.record, &output_buffer);
+    errdefer capture.abort();
+    try capture.writeRequest(protocol.session_archive_request, .{ paths.store.slice(), location.key, input.session, input.archived });
+    return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .session_archive);
+}
+
 pub fn captureModelInterruption(io: std.Io, input: ModelInterruptionInput, target: CaptureTarget) !CapturedRecord {
     const paths = try platform.resolveClientPaths(io, input.store);
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -859,8 +885,20 @@ pub fn listSessions(
 
 /// The request a list cursor names: a full traversal's keyset, a token's
 /// first page, or a changed continuation.
-fn appendListSessions(body: anytype, store: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor) !void {
-    const head = .{ store, workspace, cursor.after, cursor.ceiling };
+pub fn listSessionsFiltered(
+    io: std.Io,
+    store_path: []const u8,
+    workspace: ?[]const u8,
+    archive: protocol.SessionArchiveFilter,
+    cursor: protocol_reply.SessionListCursor,
+    destination: std.Io.File,
+    reply_buffer: *ReplyBuffer,
+) !protocol_reply.ReportReply {
+    return (Requests{ .io = io }).listSessionsFiltered(store_path, workspace, archive, cursor, destination, reply_buffer);
+}
+
+fn appendListSessions(body: anytype, store: []const u8, workspace: ?[]const u8, archive: protocol.SessionArchiveFilter, cursor: protocol_reply.SessionListCursor) !void {
+    const head = .{ store, workspace, archive, cursor.after, cursor.ceiling };
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     const since = cursor.since orelse return body.appendShape(protocol.list_sessions_request, head);
     if (cursor.changed) |*changed|
@@ -1109,6 +1147,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         session: ?protocol_reply.JsonString(protocol.max_session_bytes) = null,
         configuration: ?CapturedConfiguration = null,
         require_model: ?bool = null,
+        archived: bool = true,
         sender: ?protocol_reply.JsonAddress = null,
         sender_handle: ?protocol_reply.JsonString(32) = null,
         text: ?struct { state: protocol_reply.JsonString(8), value: CapturedText } = null,
@@ -1146,6 +1185,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest, .creates_session = fields.configuration != null } };
         },
         .session_stop => .session_stop,
+        .session_archive => .{ .session_archive = .{ .archived = fields.archived } },
         .model_interruption => .{ .model_interruption = .{
             .turn = protocol_reply.mutationId(fields.target.?.turn, true) catch return error.InvalidRequestRecord,
             .operation = protocol_reply.mutationId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
@@ -2440,6 +2480,7 @@ test "client capture rejects noncanonical Session references before publication"
                 .configure => captureConfigure(io, .{ .store = root, .session = .{ .named = session } }, target).get(),
                 .message => captureMessage(io, .{ .store = root, .session = session, .text_path = "", .text = "input\x00雪" }, target).get(),
                 .session_stop => captureSessionStop(io, .{ .store = root, .session = session }, target),
+                .session_archive => captureSessionArchive(io, .{ .store = root, .session = session }, target),
                 .model_interruption => captureModelInterruption(io, .{ .store = root, .session = session, .turn_id = 1, .operation_id = 1 }, target),
                 .permission_decision => capturePermissionDecision(io, .{ .store = root, .session = session, .action_id = 1 }, target),
             };
@@ -2478,6 +2519,7 @@ test "client recovery rejects noncanonical Session references without retransmis
                     .configure => ",\"configuration\":{}}",
                     .message => ",\"text\":{\"state\":\"value\",\"value\":\"input\\u0000雪\"}}",
                     .session_stop => "}",
+                    .session_archive => ",\"archived\":true}",
                     .model_interruption => ",\"turn\":\"1\",\"operation\":\"1\"}}",
                     .permission_decision => ",\"action\":\"1\",\"decision\":\"deny\"}",
                 });
@@ -3389,6 +3431,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
     const Direction = @FieldType(protocol.ActivityPage, "direction");
     const cases = .{
         .{ protocol.session_stop_request, .{ &store, &key, &session }, protocol.max_session_stop_request_bytes },
+        .{ protocol.session_archive_request, .{ &store, &key, &session, false }, protocol.max_session_archive_request_bytes },
         .{ protocol.model_interruption_request, .{ &store, &key, &session, id, id }, protocol.max_model_interruption_request_bytes },
         .{ protocol.permission_decision_request, .{ &store, &key, &session, id, protocol.PermissionDecision.allow_once }, protocol.max_permission_decision_request_bytes },
         .{ protocol.observe_command_request, .{ &store, &key, @as(?[]const u8, &observation_token) }, protocol.max_observe_command_request_bytes },
@@ -3397,7 +3440,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.read_result_request, .{ &store, &key }, protocol.max_read_result_request_bytes },
         .{ protocol.inspect_session_request.failed_response, .{ &store, &session, protocol.FailedResponsePart.metadata, id, id }, comptime protocol.shapeBytes(protocol.inspect_session_request.failed_response) },
         .{ protocol.inspect_session_request.current_since, .{ &store, &session, @as(?[]const u8, &observation_token) }, comptime protocol.shapeBytes(protocol.inspect_session_request.current_since) },
-        .{ protocol.list_sessions_changed_request, .{ &store, @as(?[]const u8, &workspace), id, id, &token, id, &reference }, protocol.max_list_sessions_request_bytes },
+        .{ protocol.list_sessions_changed_request, .{ &store, @as(?[]const u8, &workspace), protocol.SessionArchiveFilter.archived, id, id, &token, id, &reference }, protocol.max_list_sessions_request_bytes },
         .{ protocol.read_action_arguments_request, .{ &store, &session, id }, protocol.max_read_action_arguments_request_bytes },
         .{ protocol.read_action_call_id_request, .{ &store, &session, id }, protocol.max_read_action_call_id_request_bytes },
         .{ protocol.conversation_content_request, .{ &store, &session, id, id }, protocol.max_conversation_content_request_bytes },
@@ -3413,8 +3456,8 @@ test "every request renders its exact worst-case bound from the shape it writes"
         try body.appendShape(case[0], case[1]);
         try std.testing.expectEqual(@as(usize, case[2]), body.len);
         try std.testing.expect(try std.json.validate(std.testing.allocator, body.slice()));
-        // The first three are control requests, captured to a record file.
-        if (index >= 3) largest = @max(largest, body.len);
+        // The first four are control requests, captured to a record file.
+        if (index >= 4) largest = @max(largest, body.len);
     }
     try std.testing.expectEqual(protocol.max_client_request_bytes, largest);
     try std.testing.expectEqual(protocol.max_control_request_bytes, protocol.max_model_interruption_request_bytes);
@@ -3428,16 +3471,16 @@ test "Session list client renders each cursor's request exactly, within the boun
         .{ protocol_reply.SessionListCursor{ .since = token }, ",\"since\":\"abababababababababababababababab.42\"" },
         .{ protocol_reply.SessionListCursor{ .since = token, .changed = .{ .through = 48, .after_reference = "k7m2qx".* } }, ",\"since\":\"abababababababababababababababab.42\",\"through\":\"48\",\"after_reference\":\"k7m2qx\"" },
     };
-    inline for (cases) |case| {
+    inline for (comptime std.meta.tags(protocol.SessionArchiveFilter)) |archive| inline for (cases) |case| {
         var body: protocol.RequestBuffer = .{};
-        try appendListSessions(&body, "/store", null, case[0]);
+        try appendListSessions(&body, "/store", null, archive, case[0]);
         var expected: [512]u8 = undefined;
-        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"after\":\"{d}\",\"ceiling\":\"{d}\"{s}}}", .{ case[0].after, case[0].ceiling, case[1] }), body.slice());
-    }
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"archive\":\"{s}\",\"after\":\"{d}\",\"ceiling\":\"{d}\"{s}}}", .{ @tagName(archive), case[0].after, case[0].ceiling, case[1] }), body.slice());
+    };
     const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const escaped_workspace = @as([protocol.max_workspace_bytes]u8, @splat(1));
     var maximum: protocol.RequestBuffer = .{};
-    try appendListSessions(&maximum, &escaped_store, &escaped_workspace, .{ .since = .{ .instance = @splat(0xff), .generation = std.math.maxInt(u64) }, .changed = .{ .through = std.math.maxInt(u64), .after_reference = "zzzzzz".* } });
+    try appendListSessions(&maximum, &escaped_store, &escaped_workspace, .active, .{ .since = .{ .instance = @splat(0xff), .generation = std.math.maxInt(u64) }, .changed = .{ .through = std.math.maxInt(u64), .after_reference = "zzzzzz".* } });
     try std.testing.expect(maximum.len <= protocol.max_list_sessions_request_bytes);
     try std.testing.expect(std.mem.endsWith(u8, maximum.slice(), "\"since\":\"ffffffffffffffffffffffffffffffff.18446744073709551615\",\"through\":\"18446744073709551615\",\"after_reference\":\"zzzzzz\"}"));
 }
@@ -4269,5 +4312,69 @@ test "request wait maps actual protocol state and kind domains" {
     for (std.enums.values(protocol.CommandKind)) |kind| {
         const observation: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = kind, .state = .queued };
         try std.testing.expectEqual(@as(?WaitDisposition, if (kind == .message) null else .done), policy.disposition(observation));
+    }
+}
+
+test "archive captures preserve archive and restore intent through generated and explicit recovery" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_]bool{ true, false }) |archived| {
+        var captured = try captureSessionArchive(io, .{ .store = root, .session = "k7m2qx", .archived = archived }, .{ .generated = root });
+        const identity = captured.saved;
+        var original: [2048]u8 = undefined;
+        const count = try captured.file.readPositionalAll(io, &original, 0);
+        try std.testing.expectEqual(protocol.CommandKind.session_archive, identity.kind);
+        try std.testing.expectEqual(archived, captured.target.session_archive.archived);
+        captured.close(io);
+        var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = identity.key.slice() } });
+        try std.testing.expectEqual(archived, recovered.target.session_archive.archived);
+        var replayed: [2048]u8 = undefined;
+        const replayed_count = try recovered.file.readPositionalAll(io, &replayed, 0);
+        try std.testing.expectEqualSlices(u8, original[0..count], replayed[0..replayed_count]);
+        recovered.close(io);
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try requestPath(root, identity.key.slice(), &path_buffer);
+        var explicit = try openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_archive } });
+        try std.testing.expectEqual(archived, explicit.target.session_archive.archived);
+        explicit.close(io);
+        try std.testing.expectEqual(protocol.CommandKind.session_archive, (try inspectCaptured(io, root, identity.key.slice())).kind);
+        try std.testing.expectError(error.RequestBindingMismatch, openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } }));
+    }
+}
+
+test "archive recovery preserves the protocol default and refuses ambiguous or malformed intent" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const handle = "00000000-0000-4000-8000-000000000001";
+    const cases = .{
+        .{ "", @as(?bool, true) },
+        .{ ",\"archived\":false", @as(?bool, false) },
+        .{ ",\"archived\":null", @as(?bool, null) },
+        .{ ",\"archived\":\"true\"", @as(?bool, null) },
+        .{ ",\"archived\":true,\"archived\":false", @as(?bool, null) },
+    };
+    inline for (cases) |case| {
+        var body: protocol.RequestBuffer = .{};
+        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"session_archive\",\"store\":");
+        try body.appendJsonString(root);
+        try body.append(" ,\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\"");
+        try body.append(case[0]);
+        try body.append("}");
+        const file = try tmp.dir.createFile(io, handle ++ ".json", .{});
+        try file.writeStreamingAll(io, body.slice());
+        file.close(io);
+        if (case[1]) |expected| {
+            var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } });
+            defer recovered.close(io);
+            try std.testing.expectEqual(expected, recovered.target.session_archive.archived);
+        } else try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } }));
     }
 }

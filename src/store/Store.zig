@@ -62,6 +62,7 @@ const SessionReport = report_domain.SessionReport;
 const SessionReportCapture = report_domain.SessionReportCapture;
 const SessionReportOptions = report_domain.SessionReportOptions;
 const SessionStopReply = command_domain.SessionStopReply;
+const SessionArchiveReply = command_domain.SessionArchiveReply;
 const SupersedingControl = action_domain.SupersedingControl;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 const Queue = @import("queue.zig").Queue;
@@ -664,6 +665,19 @@ pub const Store = struct {
         var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
         defer access.deinit();
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopSession(&access, command, faults))) catch .infrastructure_failure;
+    }
+
+    pub fn archiveSession(self: *Store, command: *const protocol.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
+        EntryTrace.fromControl(faults.control_trace).mark(.requested);
+        return self.queue().write(archiveSessionHeld, .{ self, command, faults });
+    }
+
+    fn archiveSessionHeld(self: *Store, command: *const protocol.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
+        const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
+        defer entry.release();
+        var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.archiveSession(&access, command, faults))) catch .infrastructure_failure;
     }
 
     /// The stop an attached child owes (D38), as `nextCoreWork` names it.

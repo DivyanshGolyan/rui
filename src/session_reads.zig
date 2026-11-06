@@ -82,6 +82,7 @@ pub const Line = struct {
     effort: ?protocol.ReasoningEffort = null,
     left: ?u8 = null,
     asks: bool = false,
+    archive_state: protocol.SessionArchiveState = .active,
 
     fn stale(read: ?Moment, page: *const protocol.ActivityFacts) bool {
         const moment = read orelse return true;
@@ -103,6 +104,7 @@ pub const Line = struct {
             .effort = if (settings.reasoning_effort) |effort| effort.value else null,
             .left = if (trigger != null and estimate != null) session_line.left(trigger.?.value, estimate.?.value) else null,
             .asks = settings.permission_mode.value == .ask,
+            .archive_state = current.archive_state,
         };
     }
 
@@ -1659,7 +1661,7 @@ test "a Host command writes its page and inherits no saved terminal descriptor" 
     try std.testing.expectEqualStrings("page\n", bytes[0..try page.readPositionalAll(io, &bytes, 0)]);
 }
 
-test "the Session line takes its facts from Current and reads again after a change" {
+test "the Session line takes archive and other facts from Current and reads again after a change" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1678,24 +1680,27 @@ test "the Session line takes its facts from Current and reads again after a chan
         .{ .label = "null", .mode = "bypass", .effort = "null", .trigger = "null", .estimate = "null", .first = "null", .name = "k7m2qx", .left = null },
         .{ .label = "null", .mode = "bypass", .effort = "\"high\"", .trigger = "\"1000\"", .estimate = "\"1000\"", .first = "{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1\",\"sender\":null,\"content\":" ++ reference ++ "}", .name = "k7m2qx", .left = 0 },
     }) |case| {
-        var bytes: [4096]u8 = undefined;
-        const report = try std.fmt.bufPrint(&bytes, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt\\u0001x\",\"revision\":\"3\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"{s}\",\"instructions\":" ++ reference_format ++ ",\"output_schema\":null,\"reasoning_effort\":{s},\"reasoning_effort_override\":null,\"compaction_trigger\":{s},\"context_estimate\":{s},\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":{s},\"created_at\":\"1\"}},\"pending_messages\":\"0\",\"work\":{{\"state\":{{\"kind\":\"idle\",\"since\":\"1\"}},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null}},\"peers\":{{\"from_person_at\":null}},\"first_message\":{s},\"selected_message\":null,\"recent_messages\":[],\"actions\":{{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]}},\"rejected_calls\":{{\"count\":\"0\",\"items\":[]}},\"actionable_permissions\":[],\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}}}", .{ case.mode, case.effort, case.trigger, case.estimate, case.label, case.first });
-        try file.setLength(io, 0);
-        try file.writePositionalAll(io, report, 0);
-        const reply = protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } }) catch |err| {
-            std.debug.print("{s}\n", .{report});
-            return err;
-        };
-        Line.take(&line, &reply.current, moment);
-        try std.testing.expect(!Line.stale(line.?.read, &page));
-        const facts = line.?.facts(&unread, "k7m2qx").?;
-        try std.testing.expectEqualStrings(case.name, facts.name);
-        // The model's control byte shows as text, not as a terminal control.
-        try std.testing.expectEqualStrings("gpt\\x01x", facts.model);
-        try std.testing.expectEqual(case.left, facts.left);
-        try std.testing.expectEqual(std.mem.eql(u8, case.mode, "ask"), facts.asks);
-        try std.testing.expectEqual(!std.mem.eql(u8, case.effort, "null"), facts.effort != null);
-        try std.testing.expectEqual(!std.mem.eql(u8, case.first, "null"), line.?.first_position != null);
+        for ([_]protocol.SessionArchiveState{ .active, .archiving, .archived }) |archive| {
+            var bytes: [4096]u8 = undefined;
+            const report = try std.fmt.bufPrint(&bytes, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt\\u0001x\",\"revision\":\"3\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"{s}\",\"instructions\":" ++ reference_format ++ ",\"output_schema\":null,\"reasoning_effort\":{s},\"reasoning_effort_override\":null,\"compaction_trigger\":{s},\"context_estimate\":{s},\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":{s},\"created_at\":\"1\"}},\"archive_state\":\"{s}\",\"pending_messages\":\"0\",\"work\":{{\"state\":{{\"kind\":\"idle\",\"since\":\"1\"}},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null}},\"peers\":{{\"from_person_at\":null}},\"first_message\":{s},\"selected_message\":null,\"recent_messages\":[],\"actions\":{{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]}},\"rejected_calls\":{{\"count\":\"0\",\"items\":[]}},\"actionable_permissions\":[],\"execution\":{{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}}}", .{ case.mode, case.effort, case.trigger, case.estimate, case.label, @tagName(archive), case.first });
+            try file.setLength(io, 0);
+            try file.writePositionalAll(io, report, 0);
+            const reply = protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } }) catch |err| {
+                std.debug.print("{s}\n", .{report});
+                return err;
+            };
+            Line.take(&line, &reply.current, moment);
+            try std.testing.expectEqual(archive, line.?.archive_state);
+            try std.testing.expect(!Line.stale(line.?.read, &page));
+            const facts = line.?.facts(&unread, "k7m2qx").?;
+            try std.testing.expectEqualStrings(case.name, facts.name);
+            // The model's control byte shows as text, not as a terminal control.
+            try std.testing.expectEqualStrings("gpt\\x01x", facts.model);
+            try std.testing.expectEqual(case.left, facts.left);
+            try std.testing.expectEqual(std.mem.eql(u8, case.mode, "ask"), facts.asks);
+            try std.testing.expectEqual(!std.mem.eql(u8, case.effort, "null"), facts.effort != null);
+            try std.testing.expectEqual(!std.mem.eql(u8, case.first, "null"), line.?.first_position != null);
+        }
     }
     // The first line names an unlabelled Session once read; a blank one
     // leaves the reference.

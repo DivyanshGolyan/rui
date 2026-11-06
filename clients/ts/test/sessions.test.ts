@@ -87,7 +87,7 @@ test("status reflects an idle Session and paused queued work", { skip }, async (
 		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:status" });
 		const idle = await session.status();
 		assert.deepEqual(idle, {
-			state: "idle", since: idle.since, turn: null, operation: null, pendingMessages: "0",
+			archiveState: "active", state: "idle", since: idle.since, turn: null, operation: null, pendingMessages: "0",
 			parent: null, label: "first", model: spec.model, effort: "low", tools: ["bash"], permissionMode: "ask", latestOutcome: null,
 		});
 		assert.match(idle.since, /^[1-9][0-9]*$/);
@@ -184,6 +184,35 @@ test("inline text keeps its last character and kind filters may come in any orde
 			if (entry.kind === "admission") seen.push(entry.text);
 		}
 		assert.deepEqual(seen, texts);
+	} finally {
+		await rui.close();
+	}
+});
+
+test("archive lists, explicit restore, replay and new Message restoration preserve work", { skip }, async () => {
+	const rui = await connect();
+	try {
+		await rui.pause();
+		const session = await rui.sessions.create(spec, { idempotencyKey: "chat:archive" });
+		assert.deepEqual(await session.archive({ idempotencyKey: "archive:idle" }), { archived: true, completion: "completed" });
+		assert.equal((await session.status()).archiveState, "archived");
+		assert.deepEqual(await rui.sessions.list(), []);
+		assert.deepEqual((await rui.sessions.list({ archive: "archived" })).map((row) => [row.id, row.archiveState, row.state]), [[session.id, "archived", "idle"]]);
+		assert.equal((await rui.sessions.list({ archive: "all" })).length, 1);
+
+		assert.deepEqual(await session.unarchive({ idempotencyKey: "restore:idle" }), { archived: false, completion: "completed" });
+		assert.equal((await session.status()).state, "idle");
+		await session.archive({ idempotencyKey: "archive:idle" });
+		assert.equal((await session.status()).archiveState, "active", "replay must not reapply archive intent after restore");
+		assert.deepEqual(await rui.sessions.list({ archive: "archived" }), []);
+
+		await session.archive({ idempotencyKey: "archive:again" });
+		await session.send("fresh work restores", { idempotencyKey: "message:restore" });
+		const restored = await session.status();
+		assert.equal(restored.archiveState, "active");
+		assert.equal(restored.state, "pending");
+		assert.equal(restored.pendingMessages, "1");
+		assert.equal((await rui.sessions.list())[0]?.id, session.id);
 	} finally {
 		await rui.close();
 	}

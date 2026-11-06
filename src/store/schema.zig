@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 56;
+pub const schema_version: u32 = 57;
 /// `digest()` of each schema_version, oldest first. Each format PR appends
 /// its own version and forward step (D226); main's digests and steps are
 /// immutable even before release. tests/ci/test_store_schema_version.py
@@ -34,6 +34,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 54, .digest = 0xae916e0373329df9 },
     .{ .schema_version = 55, .digest = 0x4acf921dca365b6e },
     .{ .schema_version = 56, .digest = 0xbdf9ac7b6016b1da },
+    .{ .schema_version = 57, .digest = 0x75359f28a14f23a9 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -218,6 +219,41 @@ pub const migrations = [_]Migration{
         .mysql = &.{
             "ALTER TABLE action_operation ADD COLUMN action_operation_indeterminate_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN resolution_code='indeterminate' THEN session_ref END) STORED, ADD INDEX action_operation_indeterminate(action_operation_indeterminate_lead,parent_operation_id,call_ordinal)",
             "UPDATE store_meta SET meta_value='9' WHERE meta_key='wire_version' AND meta_value='8'",
+        },
+    },
+    // Schema 57: archive intent retains its original stop, and Commands
+    // retain their requested archive value for replay and observation.
+    .{
+        .from = 56,
+        .sqlite = &.{
+            "ALTER TABLE core_command RENAME TO core_command_before_57",
+            "CREATE TABLE core_command(\n command_key TEXT NOT NULL UNIQUE CHECK(length(CAST(command_key AS BLOB))<=128),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 6),\n target TEXT NOT NULL CHECK(length(CAST(target AS BLOB))<=128),\n input_digest BLOB NOT NULL CHECK(length(input_digest)=32),\n primary_content_id INTEGER REFERENCES content(content_id),\n secondary_content_id INTEGER REFERENCES content(content_id),\n accepted INTEGER NOT NULL CHECK(accepted IN (0,1)),\n code TEXT NOT NULL CHECK(length(CAST(code AS BLOB))<=96),\n revision INTEGER NOT NULL CHECK(revision>=0),\n created INTEGER NOT NULL CHECK(created IN (0,1)),\n command_seq INTEGER PRIMARY KEY NOT NULL CHECK(command_seq>0)\n) STRICT",
+            "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq FROM core_command_before_57",
+            "DROP TABLE core_command_before_57",
+            "CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)",
+            "ALTER TABLE session_stop RENAME TO session_stop_before_57",
+            "CREATE TABLE session_stop(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n selected_turn_id INTEGER REFERENCES turn(turn_id),\n position INTEGER CHECK(position>0),\n admission_cutoff INTEGER NOT NULL CHECK(admission_cutoff>=0),\n stopped_at INTEGER NOT NULL CHECK(stopped_at>0),\n parent_caused INTEGER NOT NULL DEFAULT 0 CHECK(parent_caused IN (0,1))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused) SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,CASE WHEN command_key>='rui.core/stop/' AND command_key<'rui.core/stop0' THEN 1 ELSE 0 END FROM session_stop_before_57",
+            "DROP TABLE session_stop_before_57",
+            "CREATE INDEX session_stop_exclusion ON session_stop(session_ref,admission_cutoff,position)",
+            "CREATE INDEX session_stop_unpositioned ON session_stop(session_ref) WHERE position IS NULL",
+            "CREATE INDEX session_stop_position ON session_stop(session_ref,position)",
+            "CREATE INDEX session_stop_turn ON session_stop(selected_turn_id)",
+            "CREATE TABLE session_archive(\n session_ref TEXT PRIMARY KEY NOT NULL REFERENCES session(session_ref),\n command_key TEXT REFERENCES session_stop(command_key)\n) STRICT, WITHOUT ROWID",
+            "CREATE TABLE session_archive_command(\n command_key TEXT PRIMARY KEY NOT NULL REFERENCES core_command(command_key),\n archived INTEGER NOT NULL CHECK(archived IN (0,1))\n) STRICT, WITHOUT ROWID",
+            "ALTER TABLE session_ending_owed RENAME TO session_ending_owed_before_57",
+            "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1),\n suppress_message INTEGER NOT NULL DEFAULT 0 CHECK(suppress_message IN (0,1))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO session_ending_owed(turn_id,delivered,suppress_message) SELECT turn_id,delivered,0 FROM session_ending_owed_before_57",
+            "DROP TABLE session_ending_owed_before_57",
+            "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
+        },
+        .mysql = &.{
+            "ALTER TABLE core_command DROP CHECK core_command_chk_2, ADD CHECK(kind BETWEEN 1 AND 6)",
+            "CREATE TABLE session_archive(\n session_ref VARCHAR(6) NOT NULL,\n command_key VARCHAR(128),\n PRIMARY KEY(session_ref),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(command_key) REFERENCES session_stop(command_key)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE session_archive_command(\n command_key VARCHAR(128) NOT NULL,\n archived TINYINT NOT NULL,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n CHECK(archived IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "ALTER TABLE session_stop ADD COLUMN parent_caused TINYINT NOT NULL DEFAULT 0, ADD CHECK(parent_caused IN (0,1))",
+            "UPDATE session_stop SET parent_caused=1 WHERE command_key>='rui.core/stop/' AND command_key<'rui.core/stop0'",
+            "ALTER TABLE session_ending_owed ADD COLUMN suppress_message TINYINT NOT NULL DEFAULT 0, ADD CHECK(suppress_message IN (0,1))",
         },
     },
 };
@@ -590,7 +626,7 @@ pub const tables = [_]Table{
         .name = "core_command",
         .columns = &.{
             .{ .name = "command_key", .type = .{ .text = .{ .max = 128 } } },
-            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 5" },
+            .{ .name = "kind", .type = .int, .check = "kind BETWEEN 1 AND 6" },
             .{ .name = "target", .type = .{ .text = .{ .max = 128 } } },
             .{ .name = "input_digest", .type = .{ .bytes = .{ .min = 32, .max = 32 } } },
             .{ .name = "primary_content_id", .type = .int, .nullable = true },
@@ -744,6 +780,8 @@ pub const tables = [_]Table{
             .{ .name = "position", .type = .int, .nullable = true, .check = "position>0" },
             .{ .name = "admission_cutoff", .type = .int, .check = "admission_cutoff>=0" },
             .{ .name = "stopped_at", .type = .int, .check = "stopped_at>0" },
+            // Causal provenance, independent of which Command recorded the stop.
+            .{ .name = "parent_caused", .type = .flag, .default = "0" },
         },
         .primary_key = &.{"command_key"},
         .foreign_keys = &.{
@@ -751,6 +789,33 @@ pub const tables = [_]Table{
             references("session_ref", "session", session_reference),
             references("selected_turn_id", "turn", &.{"turn_id"}),
         },
+        .without_rowid = true,
+    },
+    .{
+        // Current archive intent points to the durable stop first recorded
+        // for this archive, not a later idempotent archive command. A NULL
+        // command_key retains the row after restore without DELETE authority.
+        .name = "session_archive",
+        .columns = &.{
+            .{ .name = "session_ref", .type = .{ .text = null } },
+            .{ .name = "command_key", .type = .{ .text = null }, .nullable = true },
+        },
+        .primary_key = &.{"session_ref"},
+        .foreign_keys = &.{
+            references("session_ref", "session", session_reference),
+            references("command_key", "session_stop", command_reference),
+        },
+        .without_rowid = true,
+    },
+    .{
+        // The request's desired value never follows mutable archive intent.
+        .name = "session_archive_command",
+        .columns = &.{
+            .{ .name = "command_key", .type = .{ .text = null } },
+            .{ .name = "archived", .type = .flag },
+        },
+        .primary_key = &.{"command_key"},
+        .foreign_keys = &.{references("command_key", "core_command", command_reference)},
         .without_rowid = true,
     },
     .{
@@ -781,6 +846,8 @@ pub const tables = [_]Table{
         .columns = &.{
             .{ .name = "turn_id", .type = .int, .check = "turn_id>0" },
             .{ .name = "delivered", .type = .int, .check = "delivered BETWEEN 0 AND 1" },
+            // Archive-caused suppression outlives a later parent restore.
+            .{ .name = "suppress_message", .type = .flag, .default = "0" },
         },
         .primary_key = &.{"turn_id"},
         .foreign_keys = &.{
@@ -2195,4 +2262,145 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
         } else false;
         try std.testing.expect(found);
     }
+}
+
+test "schema 57 migration creates the canonical archive objects on SQLite and MySQL" {
+    const step = migrations[56 - migration_baseline];
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const expected = comptime objects(dialect);
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        var matched: usize = 0;
+        for (statements) |statement| {
+            if (!std.mem.startsWith(u8, statement, "CREATE ")) continue;
+            for (expected) |object| {
+                if (std.mem.eql(u8, object.sql, statement)) {
+                    matched += 1;
+                    break;
+                }
+            } else return error.NoncanonicalMigrationObject;
+        }
+        try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 11 else 2), matched);
+    }
+}
+
+test "schema 57 preserves Commands and stop references while adding nullable archive intent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [protocol.max_store_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/store.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations) |step| {
+        if (step.from >= 56) break;
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF;PRAGMA user_version=56");
+    try sqlite.exec(database, identity_sql);
+    {
+        const meta = try sqlite.prepare(database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','9'),('store_selector',?1),('format','56')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, root);
+        try sqlite.expectDone(meta);
+    }
+    // Exercise both optional content references and every saved field when
+    // the referenced Commands table is rebuilt, not just its row count.
+    try sqlite.exec(database, "UPDATE core_command SET primary_content_id=1,secondary_content_id=2,revision=17,code='retained' WHERE command_key='fixture-stop'");
+    // Historical child stops were identified by this reserved prefix. Keep
+    // both its exact bytewise boundaries and unrelated caller stops distinct.
+    const legacy_stops = [_]struct { key: []const u8, parent_caused: bool }{
+        .{ .key = "rui.core/stop/", .parent_caused = true },
+        .{ .key = "rui.core/stop/d8mv7p/rhvzwc/1", .parent_caused = true },
+        .{ .key = "rui.core/stop/0", .parent_caused = true },
+        .{ .key = "rui.core/stop", .parent_caused = false },
+        .{ .key = "rui.core/stop.", .parent_caused = false },
+        .{ .key = "rui.core/stop0", .parent_caused = false },
+        .{ .key = "rui.core/stop0/next", .parent_caused = false },
+        .{ .key = "rui.core/archive/d8mv7p", .parent_caused = false },
+    };
+    for (legacy_stops, 0..) |each, index| {
+        const command = try sqlite.prepare(database, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) SELECT ?1,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,?2 FROM core_command WHERE command_key='fixture-stop'");
+        defer _ = c.sqlite3_finalize(command);
+        try sqlite.bindText(command, 1, each.key);
+        try sqlite.bindU64(command, 2, 20 + index);
+        try sqlite.expectDone(command);
+        const ending_stop = try sqlite.prepare(database, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at) VALUES(?1,'d8mv7p',1,?2,?2,?2)");
+        defer _ = c.sqlite3_finalize(ending_stop);
+        try sqlite.bindText(ending_stop, 1, each.key);
+        try sqlite.bindU64(ending_stop, 2, 10 + index);
+        try sqlite.expectDone(ending_stop);
+    }
+    try sqlite.exec(database, "UPDATE session_stop SET position=NULL WHERE command_key='rui.core/stop0'");
+    try sqlite.exec(database, "CREATE TEMP TABLE original_stops AS SELECT * FROM session_stop");
+    try sqlite.exec(database, "CREATE TEMP TABLE original_commands AS SELECT * FROM core_command");
+    try sqlite.exec(database, "INSERT INTO session_ending_owed(turn_id,delivered) VALUES(1,0),(2,1)");
+    try sqlite.exec(database, "CREATE TEMP TABLE original_endings AS SELECT * FROM session_ending_owed");
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE core_command SET kind=6 WHERE command_key='fixture-stop'"));
+    try openExisting(std.testing.io, database, root);
+    try std.testing.expectEqual(@as(u32, 57), try sqlite.pragmaInt(database, "PRAGMA user_version"));
+    try std.testing.expect(try metaEquals(database, "format", "57"));
+    try std.testing.expect(try metaEquals(database, "wire_version", "9"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop EXCEPT SELECT * FROM original_stops)"));
+    for (legacy_stops) |each| {
+        const provenance = try sqlite.prepare(database, "SELECT parent_caused FROM session_stop WHERE command_key=?1");
+        defer _ = c.sqlite3_finalize(provenance);
+        try sqlite.bindText(provenance, 1, each.key);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(provenance));
+        try std.testing.expectEqual(@as(c_int, @intFromBool(each.parent_caused)), c.sqlite3_column_int(provenance, 0));
+    }
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT parent_caused FROM session_stop WHERE command_key='fixture-stop'"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_endings EXCEPT SELECT turn_id,delivered FROM session_ending_owed)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT turn_id,delivered FROM session_ending_owed EXCEPT SELECT * FROM original_endings)"));
+    try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_ending_owed WHERE suppress_message=0"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='session_ending_open' AND sql='CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)'"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive_command"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='core_command_target_order' AND sql='CREATE INDEX core_command_target_order ON core_command(target,kind,command_seq)'"));
+    try sqlite.exec(database, "INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) VALUES('archive-request',6,'rhvzwc',zeroblob(32),NULL,NULL,1,'',0,0,10),('restore-request',6,'rhvzwc',zeroblob(32),NULL,NULL,1,'',0,0,11)");
+    for ([_][:0]const u8{
+        "UPDATE session_stop SET parent_caused=-1 WHERE command_key='fixture-stop'",
+        "UPDATE session_stop SET parent_caused=2 WHERE command_key='fixture-stop'",
+        "UPDATE session_stop SET parent_caused=NULL WHERE command_key='fixture-stop'",
+        "UPDATE session_ending_owed SET suppress_message=-1 WHERE turn_id=1",
+        "UPDATE session_ending_owed SET suppress_message=2 WHERE turn_id=1",
+        "UPDATE session_ending_owed SET suppress_message=NULL WHERE turn_id=1",
+        "UPDATE core_command SET kind=0 WHERE command_key='archive-request'",
+        "UPDATE core_command SET kind=7 WHERE command_key='archive-request'",
+        "UPDATE core_command SET command_key='fixture-stop' WHERE command_key='archive-request'",
+        "INSERT INTO session_archive(session_ref,command_key) VALUES('k7m2qx','fixture-stop')",
+        // A Command without a durable stop cannot become archive intent.
+        "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc','archive-request')",
+        "INSERT INTO session_archive_command(command_key,archived) VALUES('missing-request',1)",
+    }) |statement| try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, statement));
+    // Legacy stop insert callers that omit provenance retain the false default.
+    try sqlite.exec(database, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at) VALUES('archive-request','rhvzwc',NULL,NULL,0,1)");
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT parent_caused FROM session_stop WHERE command_key='archive-request'"));
+    try sqlite.exec(database, "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc','fixture-stop')");
+    try sqlite.exec(database, "INSERT INTO session_archive_command(command_key,archived) VALUES('archive-request',1),('restore-request',0)");
+    for ([_][:0]const u8{
+        "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc',NULL)",
+        "UPDATE session_archive_command SET archived=-1 WHERE command_key='archive-request'",
+        "UPDATE session_archive_command SET archived=2 WHERE command_key='archive-request'",
+        "UPDATE session_archive_command SET archived=NULL WHERE command_key='archive-request'",
+        "INSERT INTO session_archive_command(command_key,archived) VALUES('archive-request',0)",
+    }) |statement| try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, statement));
+    // Causal ending suppression remains durable after restoring the parent.
+    try sqlite.exec(database, "UPDATE session_ending_owed SET suppress_message=1 WHERE turn_id=1");
+    // Restore changes only current intent; each request keeps its own bool.
+    try sqlite.exec(database, "UPDATE session_archive SET command_key=NULL WHERE session_ref='rhvzwc'");
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive WHERE session_ref='rhvzwc' AND command_key IS NULL"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='archive-request'"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='restore-request'"));
+    try openExisting(std.testing.io, database, root);
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_ending_owed WHERE turn_id=1"));
 }

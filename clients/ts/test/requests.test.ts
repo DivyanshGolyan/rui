@@ -44,7 +44,7 @@ type CurrentReport = Extract<components["schemas"]["InspectSessionReply"], { pro
 
 function report(work: CurrentReport["work"], parent: string | null = null): CurrentReport {
 	return {
-		version: WIRE_VERSION, type: "session_report", delta: "full", since: null, profile: "current",
+		version: WIRE_VERSION, type: "session_report", delta: "full", since: null, profile: "current", archive_state: "active",
 		session: {
 			reference: "abc123", parent, workspace: "/work", provider: "openai", model: "model-a", revision: "1",
 			tools: ["bash"], loaded_tools: ["bash"], permission_mode: "ask", label: "Review", created_at: "1",
@@ -67,18 +67,18 @@ const idleWork: CurrentReport["work"] = {
 
 test("status requests the Current profile and maps reported facts and parent losslessly", async () => {
 	const latestOutcome = { code: "failed_saved", content: { bytes: "7", sha256: "a".repeat(64) } };
-	for (const parent of [null, "p4rent"]) {
+	for (const archiveState of ["active", "archiving", "archived"] as const) for (const parent of [null, "p4rent"]) {
 		const link: Link = {
 			async exchange(path, build) {
 				assert.equal(path, "/v1/inspect-session");
 				assert.deepEqual(JSON.parse(build('store"\n')), {
 					version: WIRE_VERSION, kind: "inspect_session", store: 'store"\n', session: 'session"\n',
 				});
-				return Buffer.from(JSON.stringify(report({ ...idleWork, latest_outcome: latestOutcome }, parent)));
+				return Buffer.from(JSON.stringify({ ...report({ ...idleWork, latest_outcome: latestOutcome }, parent), archive_state: archiveState }));
 			},
 		};
 		assert.deepEqual(await new Session(link, 'session"\n').status(), {
-			state: "idle", since: "9007199254740993", turn: null, operation: null, pendingMessages: "9007199254740993",
+			archiveState, state: "idle", since: "9007199254740993", turn: null, operation: null, pendingMessages: "9007199254740993",
 			parent, label: "Review", model: "model-a", effort: "high", tools: ["bash"], permissionMode: "ask", latestOutcome,
 		});
 	}
