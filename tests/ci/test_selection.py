@@ -335,7 +335,17 @@ class SelectionTest(unittest.TestCase):
         for result in ('failure', 'cancelled', 'skipped'):
             cases.append((*green, 'failure', 'success', 'true', result))
         cases.append((*green, 'failure', 'success', 'false', 'success'))
-        for targets, plan, policy, build, native, private, expected, typecheck, split, unit in cases:
+        cases = [(*case, 'false', 'skipped') for case in cases]
+        for targets in ('[]', '["check"]'):
+            build = native = typecheck = 'skipped' if targets == '[]' else 'success'
+            for codegen, result, expected in (('true', 'success', 'success'),
+                                             ('true', 'failure', 'failure'),
+                                             ('true', 'cancelled', 'failure'),
+                                             ('true', 'skipped', 'failure'),
+                                             ('false', 'success', 'failure')):
+                cases.append((targets, 'success', 'success', build, native, False, expected,
+                              typecheck, 'false', 'skipped', codegen, result))
+        for targets, plan, policy, build, native, private, expected, typecheck, split, unit, codegen, codegen_result in cases:
             with self.subTest(targets=targets, plan=plan, policy=policy, build=build, native=native, private=private,
                               typecheck=typecheck, split=split, unit=unit):
                 needs = SimpleNamespace(plan=SimpleNamespace(result=plan, outputs=SimpleNamespace(targets=targets)))
@@ -352,7 +362,8 @@ class SelectionTest(unittest.TestCase):
                                             env={**os.environ, 'TARGETS': targets, 'PLAN_RESULT': plan,
                                                  'POLICY_RESULT': policy, 'BUILD_RESULT': build,
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
-                                                 'SPLIT': split, 'UNIT_RESULT': unit})
+                                                 'SPLIT': split, 'UNIT_RESULT': unit,
+                                                 'CODEGEN': codegen, 'CODEGEN_RESULT': codegen_result})
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
 
@@ -438,6 +449,15 @@ class SelectionTest(unittest.TestCase):
                                     env=dict(os.environ, PLAN_RESULT=plan, BUILD_RESULT='success',
                                              NATIVE_RESULT='success', SPLIT='true', UNIT_RESULT='success'))
             self.assertNotEqual(result.returncode, 0)
+
+    def test_codegen_is_required_but_not_a_dependency_of_suite_startup(self):
+        text = Path('.github/workflows/check.yml').read_text()
+        codegen = re.search(r'(?ms)^  linux_codegen:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
+        suites = re.search(r'(?ms)^  linux_suites:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
+        self.assertIn('needs: plan', codegen)
+        self.assertIn('zig build stack-frames -Dcpu=baseline --summary all', codegen)
+        self.assertNotIn('-Dpr-ci', codegen)
+        self.assertNotIn('linux_codegen', suites)
 
     def test_shared_state_and_unknown_code_fail_closed(self):
         for path in ("src/future_owner.zig", "tests/integration/future_case.py"):
