@@ -1647,7 +1647,13 @@ const FailureRead = struct {
 
     fn keep(read: *FailureRead, row: *const send_failure.Row) error{CorruptStore}!void {
         if (!row.consistent) return error.CorruptStore;
-        read.failed.* = .{ .key = row.command_key, .target = .{ .session = row.target }, .code = row.code };
+        // A saved attempted target is command identity, not necessarily a peer:
+        // both refused creation and malformed addressed sends reach this read.
+        read.failed.* = .{
+            .key = row.command_key,
+            .target = if (protocol.validSessionId(row.target.slice())) .{ .session = row.target } else null,
+            .code = row.code,
+        };
         read.at = row.rejected_at.get();
     }
 };
@@ -1797,8 +1803,8 @@ const ItemRead = struct {
             },
             9 => {
                 const failure = &read.state.failure;
-                if (read.round == 1) failure.read.queue(a, session) else {
-                    failure.label = .{ .peer = &item.value.send_failed.target };
+                if (read.round == 1) failure.read.queue(a, session) else if (item.value.send_failed.target) |*peer| {
+                    failure.label = .{ .peer = peer };
                     failure.label.queue(a);
                 }
             },
@@ -1892,7 +1898,7 @@ const ItemRead = struct {
                     item.at = failure.read.at;
                     return;
                 }
-                try failure.label.found();
+                if (item.value.send_failed.target != null) try failure.label.found();
             },
             6 => {
                 const outcome = &read.state.outcome;

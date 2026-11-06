@@ -198,7 +198,10 @@ fn outline(store: *storage.Store, arena: std.mem.Allocator, session: []const u8,
         // A Label is display text, never model input: only the sender's ID.
         .received => |message| if (message.sender) |sender| try out.print(" {s}", .{sender.session.slice()}),
         .sent => |sent| try out.print(" {s}", .{sent.target.session.slice()}),
-        .send_failed => |sent| try out.print(" {s}", .{sent.target.session.slice()}),
+        .send_failed => |sent| if (sent.target) |target|
+            try out.print(" {s}", .{target.session.slice()})
+        else
+            try out.writeAll(" (no valid target reference)"),
         .call, .tool_result => {
             const request = try contentRequest(arena, session, item);
             const tool = try store.activityTool(request);

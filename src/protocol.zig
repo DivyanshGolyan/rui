@@ -8,7 +8,7 @@ const named_scratch = @import("named_scratch.zig");
 const store_id = @import("store_id.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
-pub const wire_version = "9";
+pub const wire_version = "10";
 
 /// Host-owned lifecycle state of a Message request.
 pub const MessageRequestState = enum { queued, processing, waiting_for_permission, completed, failed, cancelled, rejected };
@@ -883,7 +883,13 @@ pub const ActivityItem = struct {
     pub const Stop = struct { key: Bounded(max_key_bytes), turn: ?u64, cutoff: u64, completion: SessionStopCompletion };
     /// A Message this Session sent: admitted to `target`, or rejected there.
     pub const Sent = struct { admission: u64, target: NamedPeer, content: Content, admitted_at: u64 };
-    pub const SendFailed = struct { key: Bounded(max_key_bytes), target: NamedPeer, code: Bounded(max_code_bytes) };
+    pub const SendFailed = struct {
+        key: Bounded(max_key_bytes),
+        /// No canonical attempted reference, not evidence of creation intent.
+        /// A canonical but unknown Session still has a target.
+        target: ?NamedPeer,
+        code: Bounded(max_code_bytes),
+    };
     /// A call that waits on a person's decision because the Session asked
     /// for approval when it was made: `action` is the id a
     /// `permission_decision` names. The row follows its call at ordinal 1.
@@ -922,7 +928,7 @@ pub const ActivityItem = struct {
         /// Holes: admission, admitted at, target, content.
         pub const sent = .{ "{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\",\"target\":", Hole{ .json = NamedPeer }, ",\"content\":", Hole{ .json = Content }, "}" };
         /// Holes: key, target, code.
-        pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .json = NamedPeer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
+        pub const send_failed = .{ "{\"key\":", Hole{ .string = max_key_bytes }, ",\"target\":", Hole{ .optional_json = NamedPeer }, ",\"code\":", Hole{ .string = max_code_bytes }, "}" };
         /// Holes: action, operation, call ordinal.
         pub const approval_requested = .{ "{\"session\":", Hole{ .string = session_id_bytes }, ",\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call_ordinal\":\"", Hole.decimal, "\"}" };
         /// Holes: revision, field.
