@@ -158,7 +158,16 @@ Keep unrelated cleanup separate; exclude personal style, speculative extensibili
 Use [canonical gates](VERIFICATION.md#canonical-gates) for required commands, focused checks, cache conditions and assembled-versus-independently-merged cadence; confirm commands in `build.zig`.
 Before every push, including review-fix rounds and after merging main, run only these checks:
 
-- `python3 tests/ci/prepush.py`, which runs `git diff --check` against the merge base, `zig fmt --check`, `python3 -B -m unittest discover -s tests/ci`, `ruff check --select F821 tests`, the `select_tests.py --phase development` targets and, when Zig changed, `zig build typecheck-macos`
+- `python3 tests/ci/prepush.py`, which selects local feedback from the committed diff against the merge base.
+  Use `--plan` to inspect its commands without executing them.
+  It checks whitespace, sentence layout for changed shared documents, formatting for changed Zig files, undefined names in changed Python files, and caller-error coverage for changed CLI owners.
+  Source changes run their applicable import, provider, wire, fixture, platform and Store policy tests.
+  CI Python owners run their corresponding test file when one exists; shared or unmapped policy inputs run the policy suite.
+  Client changes run the existing TypeScript check instead of an unrelated Zig build.
+  Other development build targets come from `select_tests.py`.
+  Zig and manifest changes select the macOS type check only when those inputs have build targets of their own.
+  Deleted files still select owner checks, and mixed changes union checks without repeating them.
+  Commands read working-tree contents; unstaged and untracked-only changes do not select checks.
 - the touched owners' focused tests (`-Dtest-filter`)
 - a mutation that reverts each fix and shows its new test fails
 
