@@ -7949,7 +7949,7 @@ test "upgrade holds admit no archive surface before prompt draft or ledger mutat
                     state.archive = .all;
                     _ = try step(&state, .{ .tick = test_now_s * 1000 });
                     _ = try respond(&state, .full, testToken(1), &.{row});
-                    try std.testing.expectEqualDeep(@as(?Reference, ref), state.selected);
+                    try std.testing.expectEqual(@as(?Reference, ref), state.selected);
                     state.upgrade_blocked = blocked;
                     state.upgrade_pending = !blocked;
                     state.last_archived = "bbbbbb".*;
@@ -7967,10 +7967,10 @@ test "upgrade holds admit no archive surface before prompt draft or ledger mutat
                     // append to or otherwise replace the shell-owned draft.
                     if (case.event == .composed) drawWithRoom(&state, case.event.composed.draft);
                     try expectEffects(&.{}, try step(&state, case.event));
-                    try std.testing.expectEqualDeep(prompt, state.prompt);
+                    try std.testing.expectEqual(prompt, state.prompt);
                     try std.testing.expectEqual(@as(usize, 2), state.request_count);
-                    try std.testing.expectEqualDeep(unknown, state.requests[0]);
-                    try std.testing.expectEqualDeep(pending, state.requests[1]);
+                    try std.testing.expectEqual(unknown, state.requests[0]);
+                    try std.testing.expectEqual(pending, state.requests[1]);
                     try std.testing.expectEqualStrings("bbbbbb", &state.last_archived.?);
                     try std.testing.expectEqualStrings(&ref, &state.selected.?);
                     try std.testing.expectEqual(archive, state.find(ref).?.archive_state);
@@ -8002,7 +8002,7 @@ test "upgrade holds share stop admission for both screens and preserve captured 
                 const prompt = state.prompt;
                 state.panel = .help;
                 try expectEffects(&.{}, try step(&state, event));
-                try std.testing.expectEqualDeep(prompt, state.prompt);
+                try std.testing.expectEqual(prompt, state.prompt);
                 try std.testing.expectEqual(@as(usize, 0), state.request_count);
                 try std.testing.expect(state.panel != null and state.panel.? == .help);
                 try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
@@ -8013,7 +8013,7 @@ test "upgrade holds share stop admission for both screens and preserve captured 
                     try expectEffects(&.{.{ .stop = ref }}, try step(&state, event));
                 } else {
                     try expectEffects(&.{}, try step(&state, event));
-                    try std.testing.expectEqualDeep(@as(?Prompt, .{ .stop = ref }), state.prompt);
+                    try std.testing.expectEqual(@as(?Prompt, .{ .stop = ref }), state.prompt);
                 }
             }
         }
@@ -8031,7 +8031,7 @@ test "upgrade holds retain archive confirmation until admitted and allow local d
         state.upgrade_blocked = blocked;
         state.upgrade_pending = !blocked;
         try expectEffects(&.{}, try submit(&state, draft));
-        try std.testing.expectEqualDeep(prompt, state.prompt);
+        try std.testing.expectEqual(prompt, state.prompt);
         // Escape cancels locally without clearing the draft; edits stay local.
         try expectEffects(&.{}, try press(&state, draft, .clear));
         try std.testing.expect(state.prompt == null);
@@ -8076,7 +8076,7 @@ test "upgrade holds settle accepted archive restore and stop completions without
                     try std.testing.expectEqual(expected, state.requests[0].status);
                     if (outcome == .unconfirmed) try std.testing.expectEqualStrings("saved-handle", state.requests[0].text.slice());
                 }
-                if (outcome == .requested and archived) try std.testing.expectEqualDeep(@as(?Reference, ref), state.last_archived);
+                if (outcome == .requested and archived) try std.testing.expectEqual(@as(?Reference, ref), state.last_archived);
             }
         }
         for ([_]StopOutcome{ .stopped, .{ .failed = "stop_failed" }, .{ .unconfirmed = "saved-handle" } }) |outcome| {

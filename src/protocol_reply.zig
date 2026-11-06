@@ -541,11 +541,13 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
 }
 
 test "upgrade Host information profiles retain the entire strict shape" {
-    const old = "{\"version\":\"9\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}";
+    const legacy_wire = comptime HostInfoProfile.released_9.wire();
+    const legacy_field = "\"version\":\"" ++ legacy_wire ++ "\"";
+    const old = "{" ++ legacy_field ++ ",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}";
     try std.testing.expectEqualStrings(protocol.wire_version, HostInfoProfile.current.wire());
     try std.testing.expectEqualStrings("9", HostInfoProfile.released_9.wire());
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(old, "/one"));
-    const current = try std.mem.replaceOwned(u8, std.testing.allocator, old, "\"version\":\"9\"", "\"version\":\"" ++ protocol.wire_version ++ "\"");
+    const current = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, "\"version\":\"" ++ protocol.wire_version ++ "\"");
     defer std.testing.allocator.free(current);
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(current, "/one", .released_9));
     inline for (std.meta.tags(HostInfoProfile)) |profile| {
@@ -584,7 +586,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
     for ([_][]const u8{ "8", "11", "09", "unknown", "" }) |wire| {
         const version = try std.fmt.allocPrint(std.testing.allocator, "\"version\":\"{s}\"", .{wire});
         defer std.testing.allocator.free(version);
-        const bad = try std.mem.replaceOwned(u8, std.testing.allocator, old, "\"version\":\"9\"", version);
+        const bad = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, version);
         defer std.testing.allocator.free(bad);
         inline for (std.meta.tags(HostInfoProfile)) |profile|
             try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(bad, "/one", profile));

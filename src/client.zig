@@ -2451,7 +2451,9 @@ test "upgrade Host observation encoder sends exactly the selected read-only prof
 }
 
 test "upgrade Host observation headers preserve strict framing and profile identity" {
-    const old = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 0\r\nX-Rui-Wire-Version: 9\r\n\r\n";
+    const legacy_wire = comptime protocol_reply.HostInfoProfile.released_9.wire();
+    const legacy_field = "X-Rui-Wire-Version: " ++ legacy_wire;
+    const old = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 0\r\n" ++ legacy_field ++ "\r\n\r\n";
     _ = try parseResponseHeadForProfile(old, .released_9);
     try std.testing.expectError(error.WrongWireVersion, parseResponseHead(old));
     try std.testing.expectError(error.WrongWireVersion, parseResponseHeadForProfile(empty_test_response, .released_9));
@@ -2467,7 +2469,7 @@ test "upgrade Host observation headers preserve strict framing and profile ident
             .{ .from = "Content-Type: application/json", .to = "Content-Type: application/json\r\nContent-Encoding: gzip" },
             .{ .from = "Content-Type: application/json", .to = "Content-Type: application/json\r\nBad Name: x" },
             .{ .from = "Content-Type: application/json", .to = "Content-Type: application/json\r\nX-Extension: \x01" },
-            .{ .from = "X-Rui-Wire-Version:", .to = "X-Rui-Wire-Version: 9\r\nX-Rui-Wire-Version:" },
+            .{ .from = "X-Rui-Wire-Version:", .to = legacy_field ++ "\r\nX-Rui-Wire-Version:" },
         }) |case| {
             const bad = try std.mem.replaceOwned(u8, std.testing.allocator, good, case.from, case.to);
             defer std.testing.allocator.free(bad);
@@ -2476,13 +2478,13 @@ test "upgrade Host observation headers preserve strict framing and profile ident
         for ([_][]const u8{ "8", "11", "09", "unknown", "" }) |wire| {
             const field = try std.fmt.allocPrint(std.testing.allocator, "X-Rui-Wire-Version: {s}", .{wire});
             defer std.testing.allocator.free(field);
-            const bad = try std.mem.replaceOwned(u8, std.testing.allocator, good, if (profile == .released_9) "X-Rui-Wire-Version: 9" else "X-Rui-Wire-Version: " ++ protocol.wire_version, field);
+            const bad = try std.mem.replaceOwned(u8, std.testing.allocator, good, if (profile == .released_9) legacy_field else "X-Rui-Wire-Version: " ++ protocol.wire_version, field);
             defer std.testing.allocator.free(bad);
             try std.testing.expectError(error.WrongWireVersion, parseResponseHeadForProfile(bad, profile));
         }
     }
     // A malformed historical header must not become authority for a fallback.
-    try std.testing.expectError(error.InvalidResponse, parseResponseHead("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 9\r\n\r\n"));
+    try std.testing.expectError(error.InvalidResponse, parseResponseHead("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" ++ legacy_field ++ "\r\n\r\n"));
     try std.testing.expectError(error.InvalidResponse, parseResponseHead("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 0\r\n\r\n"));
 }
 
