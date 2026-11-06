@@ -554,16 +554,9 @@ fn writeHeld(out: *std.Io.Writer, text: []const u8) error{WriteFailed}!void {
     var end = @min(text.len, bound);
     if (end < text.len) while (end > 0 and text[end] & 0xc0 == 0x80) : (end -= 1) {};
     var safe: TerminalText = .{ .mode = .line };
-    // TerminalText's internal fixed hexadecimal buffers always fit their
-    // two/four digit escapes; only the supplied writer can fail here.
-    safe.feed(out, text[0..end]) catch |err| switch (err) {
-        error.WriteFailed => return error.WriteFailed,
-        error.NoSpaceLeft => unreachable,
-    };
-    safe.finish(out) catch |err| switch (err) {
-        error.WriteFailed => return error.WriteFailed,
-        error.NoSpaceLeft => unreachable,
-    };
+    // Escape spellings are immutable; only the supplied writer can fail.
+    try safe.feed(out, text[0..end]);
+    try safe.finish(out);
     if (end != text.len) try out.writeAll("...");
 }
 
