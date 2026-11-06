@@ -87,6 +87,7 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 ### Landing cadence
 
 [AGENTS.md](AGENTS.md#landing) owns the landing rule and per-commit proof.
+[strict_paths.py](tests/ci/strict_paths.py) owns the strict paths, whose failures are diagnosed rather than retried.
 Each small, coherent change lands on main by merging its PR.
 Lane completion and review signoff are not prerequisites.
 Focused checks on changed layers are development feedback.
@@ -130,7 +131,10 @@ Ordinary diagnostic Selected dispatches do not hide a stable qualification.
 Each main qualification explicitly dispatches a completion callback.
 Its bounded CLI wait runs outside the ref-writer lock and supplies no acceptance evidence.
 Failed or timed-out waits skip that callback's writer; incomplete workflows remain ineligible, and the next normal promotion pass rechecks completed evidence.
-[Landing](AGENTS.md#landing) documents lost-completion and diagnosed Auto-land-job recovery.
+To recover a lost completion without rerunning tests, run `gh workflow run auto-land.yml --ref main -f completed_run=<main-qualification-run-ID>`.
+After a runner failure, rerun the diagnosed Auto-land job, not the native qualification workflows.
+After a diagnosed interruption that left current main's qualification absent, the agent that diagnosed it runs `GITHUB_REPOSITORY=DivyanshGolyan/rui python3 -B tests/ci/auto_land.py --qualify-main`, never while an Auto-land promotion job is running.
+It fills only absent runs, keeps existing attempts, and does nothing when main already equals stable.
 No timer or automatic native-test retry is part of this recovery.
 Control-plane calls whose repetition creates no test evidence make up to three attempts: Auto-land's qualification and release dispatches, the completion wake and the release artifact download annotate each retry as a warning, and toolchain and dependency downloads use curl's own retry.
 Before resubmitting a qualification dispatch, Auto-land checks whether the failed submission created the run; a repeated wake or release dispatch is harmless because the writer and release are serialized and release skips a released SHA.
@@ -208,7 +212,7 @@ Build-cache keys separate native tools, Apple SDK, architecture, dependency pins
 PR caches never feed a privileged workflow.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
-On Linux, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
+On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
 [build_artifact.py](tests/ci/build_artifact.py) transfers the executables and pinned package sources through immutable same-run artifacts that expire after one day.
 Workers accept either one whole part or exactly the unit and rest parts, with disjoint executable inventories that together match the extracted tree, and verify each exact artifact ID, archive digest, run and attempt, source and tree, platform selection, OS, architecture, compiler digest and executable hashes before use; runner image versions are logged, not compared.
 Extraction rejects traversal, special files, hardlinks and symlinks.

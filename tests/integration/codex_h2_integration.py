@@ -198,7 +198,7 @@ def run(*, observed=False, intake=100):
             incoming_error.add_note("Codex H2 cleanup failed: " + ", ".join(type(error).__name__ for error in errors))
 
 
-def openai_base_url_run():
+def openai_base_url_run(*, catalog_available=False):
     """RUI_OPENAI_BASE_URL sends the OpenAI key to the Responses endpoint
     under that base, over TLS, and nowhere else. The model list holds a
     stream of its own: with one execution place and a peer allowing one
@@ -220,6 +220,8 @@ def openai_base_url_run():
     endpoint = h2_fixture.Endpoint(tls, 1, sse=True, eager_sse=True)
     endpoint.models_release = threading.Event()
     endpoint.max_streams = 1
+    if catalog_available:
+        endpoint.catalog = b'{"openai":{"models":{"catalog-only":{"limit":{"context":123}}}}}'
     endpoint.models = json.dumps({"object": "list", "data": [
         {"id": "gpt-6-sol", "object": "model", "created": 1, "owned_by": "openai"},
         {"id": "custom-model", "object": "model", "created": 2, "owned_by": "you"},
@@ -230,8 +232,10 @@ def openai_base_url_run():
     host = None
     complete = False
     try:
+        catalog_url = f"https://localhost:{endpoint.server_address[1]}/api.json" if catalog_available else "https://127.0.0.1:1/api.json"
         # A served provider uses system trust, which this certificate joins.
-        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai", "--active-capacity", "1"], env={
+        host, ready = start_ready_process([fixture.RUI, "host", "serve", "--store", store, "--provider", "openai", "--active-capacity", "1",
+            "--test-models-dev-url", catalog_url], env={
             **os.environ, "RUI_OPENAI_KEY_FILE": str(key_file), "SSL_CERT_FILE": str(root / "cert.pem"),
             "RUI_OPENAI_BASE_URL": f"https://localhost:{endpoint.server_address[1]}/custom/v1/",
         })
@@ -248,25 +252,46 @@ def openai_base_url_run():
         observation, answer, _ = fixture.wait_for_result_release(store, "custom-base", session, time.monotonic() + 20)
         assert observation["result"]["status"] == "completed", observation
         assert answer == b"answer-custom-base", answer
-        # The Host fetched the key's model list once at start and keeps it.
+        # Listing requests while the initial GET is held do not start another.
         assert model_list()[0]["source"] == "pending", model_list()
+        # Record the simultaneous held population before releasing either
+        # discovery response. Later refreshes may retire/reopen connections.
+        assert len(endpoint.connections) == (3 if catalog_available else 2), endpoint.connections
         endpoint.models_release.set()
         listed = fixture.wait_for(
             lambda: (value if (value := model_list())[0]["source"] != "pending" else None),
             "the OpenAI model list", timeout=20)
         assert listed == [{"provider": "openai", "source": "live", "models": [
             {"id": "gpt-6-sol", "known": True}, {"id": "custom-model", "known": False}]}], listed
-        # The key goes only to the list and the Responses endpoint beside it.
-        assert [(headers[b":method"], headers[b":path"]) for headers in endpoint.request_headers] == [
-            (b"GET", b"/custom/v1/models"), (b"POST", b"/custom/v1/responses")], endpoint.request_headers
-        for headers in endpoint.request_headers:
+        def provider_headers():
+            return [headers for headers in endpoint.request_headers if headers[b":path"] != b"/api.json"]
+        fixture.wait_for(
+            lambda: len(provider_headers()) >= 3,
+            "a model-list request refreshes the provider list again", timeout=20)
+        # The key goes only to the list and Responses endpoint beside it.
+        paths = [(headers[b":method"], headers[b":path"]) for headers in provider_headers()]
+        assert paths[:2] == [(b"GET", b"/custom/v1/models"), (b"POST", b"/custom/v1/responses")], paths
+        assert all(path == (b"GET", b"/custom/v1/models") for path in paths[2:]), paths
+        for headers in provider_headers():
             assert headers[b":authority"].startswith(b"localhost:"), headers
             assert headers[b"authorization"] == ("Bearer " + codex.OPENAI_KEY).encode(), headers
             assert b"chatgpt-account-id" not in headers, headers
-        assert b"content-length" not in endpoint.request_headers[0], endpoint.request_headers[0]
-        # One stream per connection: the held list and the message each
-        # needed their own.
-        assert len(endpoint.connections) == 2, endpoint.connections
+        assert b"content-length" not in provider_headers()[0], provider_headers()[0]
+        if catalog_available:
+            # The raw catalog is saved, then used conditionally by the next
+            # refresh. The test only observes the network owner boundary.
+            def revalidated():
+                model_list()
+                return next((headers for headers in endpoint.request_headers
+                             if headers[b":path"] == b"/api.json" and b"if-none-match" in headers), None)
+            conditional = fixture.wait_for(revalidated, "the saved catalog ETag on the next GET", timeout=20)
+            assert conditional[b"if-none-match"] == b'"catalog-v1"', conditional
+            for headers in endpoint.request_headers:
+                if headers[b":path"] == b"/api.json":
+                    assert b"authorization" not in headers and b"chatgpt-account-id" not in headers, headers
+                    assert headers[b"accept-encoding"] == b"identity", headers
+        print("openai base URL passed: a message completes beside held discovery GETs; repeated model-list requests refresh again; "
+              + ("models.dev saves its ETag and revalidates without credentials" if catalog_available else "unreachable models.dev does not block Host readiness or the model list"))
         # A new Host whose list response is invalid publishes the catalog fallback.
         fixture.stop_host(host)
         host = None
@@ -281,7 +306,6 @@ def openai_base_url_run():
         assert fallback[0]["source"] == "catalog_fallback", fallback
         assert fallback[0]["models"] and all(model["known"] for model in fallback[0]["models"]), fallback
         print("openai catalog fallback passed: failed live list exposes catalog_fallback with known catalog models")
-        print("openai base URL passed: the key goes over TLS to /custom/v1/models and /custom/v1/responses under RUI_OPENAI_BASE_URL, a message completes beside a held model list at one execution place, and the live list comes back")
         complete = True
     finally:
         def retire():
@@ -300,10 +324,130 @@ def openai_base_url_run():
                 retain_failure_state("OpenAI base URL failure state", root)
 
 
+def catalog_unusable_proxy_run():
+    """Catalog-only Client initialization is optional; provider setup is not."""
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-catalog-proxy.")).resolve()
+    home = root / "home"
+    home.mkdir()
+    env = {**os.environ, "HOME": str(home), "HTTPS_PROXY": "socks5://127.0.0.1:1080"}
+    complete = False
+    try:
+        for capacity in (0, 1):
+            store = root / f"store-{capacity}"
+            log = root / f"host-{capacity}.stderr"
+            host = None
+            try:
+                host, ready = start_ready_process([
+                    "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-proxy", log,
+                    *fixture.host_arguments(store, None, active_capacity=capacity),
+                    "--test-models-dev-url", "https://127.0.0.1:1/api.json",
+                ], env=env, required_fields={"execution": "unavailable", "active_capacity": str(capacity)})
+                diagnostic = b"rui: models.dev catalog unavailable (HttpsProxySchemeUnsupported); the saved catalog stands\n"
+                fixture.wait_for(lambda: log.read_bytes() == diagnostic, "the catalog Client setup diagnostic")
+                for _ in range(3):
+                    listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")
+                    assert listed["providers"] == [], listed
+                    info = h2_fixture.closed_host_request(ready["socket"], store, "host_info")
+                    assert info["active_capacity"] == str(capacity), info
+                assert host.poll() is None, host.returncode
+                assert log.read_bytes() == diagnostic, log.read_bytes()
+            finally:
+                if host is not None:
+                    fixture.stop_host(host)
+        # Even an HTTP provider shares Engine.init's proxy validation. Do not
+        # swallow its failure or retry without the inherited network policy.
+        required = subprocess.run([
+            *fixture.host_arguments(root / "required-provider", "http://127.0.0.1:1/responses"),
+            "--test-models-dev-url", "https://127.0.0.1:1/api.json",
+        ], env=env, capture_output=True, text=True, timeout=10)
+        assert required.returncode != 0, required
+        assert "transport reactor initialization failure: HttpsProxySchemeUnsupported" in required.stderr, required
+        assert "models.dev catalog unavailable" not in required.stderr, required
+        print("catalog proxy failure passed: provider-free Hosts stay responsive at capacity 0 and 1; provider setup still fences")
+        complete = True
+    finally:
+        if complete:
+            shutil.rmtree(root)
+        else:
+            retain_failure_state("catalog proxy failure state", root)
+
+
+def catalog_unusable_trust_run():
+    """Optional HTTPS discovery cannot fence a cleartext provider's Reactor."""
+    root = pathlib.Path(tempfile.mkdtemp(prefix="rui-catalog-trust.")).resolve()
+    payload, _, _ = fixture.sse_answer("http-response", "reasoning", "message", "HTTP still works")
+    endpoint = fixture.SuccessEndpoint([payload])
+    thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+    thread.start()
+    store = root / "store"
+    log = root / "host.stderr"
+    host = None
+    complete = False
+    try:
+        # The shared boundary disables discovery for every descendant, not
+        # just start_ready_process callers. Bad HTTPS trust must be irrelevant
+        # to an ordinary HTTP fixture unless the catalog case opts in below.
+        host, ready = start_ready_process([
+            "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-offline", log,
+            *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
+        ], env={**os.environ, "SSL_CERT_FILE": str(root / "missing-ca.pem")})
+        for _ in range(3):
+            listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
+            assert listed and listed[0]["provider"] == "codex", listed
+        fixture.stop_host(host)
+        host = None
+        assert log.read_bytes() == b"", log.read_bytes()
+        # Retain all stderr, including a diagnostic emitted before readiness.
+        host, ready = start_ready_process([
+            "sh", "-c", 'log=$1; shift; exec "$@" 2>"$log"', "rui-catalog-trust", log,
+            *fixture.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
+            "--test-models-dev-url", "https://127.0.0.1:1/api.json",
+        ], env={**os.environ, "SSL_CERT_FILE": str(root / "missing-ca.pem")},
+            required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
+        diagnostic = b"rui: models.dev catalog unavailable (InvalidSslCertFile); the saved catalog stands\n"
+        fixture.wait_for(lambda: log.read_bytes() == diagnostic,
+                         "the catalog endpoint setup diagnostic", timeout=10)
+        for _ in range(3):
+            listed = h2_fixture.closed_host_request(ready["socket"], store, "model_list")["providers"]
+            assert listed and listed[0]["provider"] == "codex", listed
+        configured = fixture.command(
+            "session", "configure", "--store", store, "--record", root / "config.json", "--key", "config",
+            "--workspace", fixture.ROOT, "--provider", "codex", "--model", "gpt-6-sol", "--tools", "none",
+        )
+        assert configured["answer"]["status"] == "accepted", configured
+        session = configured["answer"]["session"]
+        fixture.message(root, store, "http", session, "HTTP still works")
+        observation, answer, _ = fixture.wait_for_result_release(store, "http", session, time.monotonic() + 20)
+        assert observation["result"]["status"] == "completed", observation
+        assert answer == b"HTTP still works", answer
+        assert len(endpoint.requests) == 1, endpoint.requests
+        assert host.poll() is None, host.returncode
+        assert log.read_bytes() == diagnostic, log.read_bytes()
+        print("catalog trust failure passed: Host serves model lists and an HTTP model request; one diagnostic, no fence")
+        complete = True
+    finally:
+        def retire():
+            thread.join(timeout=5)
+            assert not thread.is_alive(), "HTTP provider thread did not retire"
+        cleaned = False
+        try:
+            dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
+                        endpoint.shutdown, endpoint.server_close, retire)
+            cleaned = True
+        finally:
+            if complete and cleaned:
+                shutil.rmtree(root)
+            else:
+                retain_failure_state("catalog trust failure state", root)
+
+
 if __name__ == "__main__":
     host_process.enter()
+    catalog_unusable_proxy_run()
     if os_semantics.SSL_CERT_FILE_TRUST:
+        catalog_unusable_trust_run()
         openai_base_url_run()
+        openai_base_url_run(catalog_available=True)
     else:
         print("openai base URL TLS case not run: Darwin system trust ignores SSL_CERT_FILE; unit tests cover the URL rules")
     run()

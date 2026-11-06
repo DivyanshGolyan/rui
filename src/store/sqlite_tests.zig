@@ -10749,7 +10749,7 @@ test "K4 malformed delivered approval forwards fence page cursor and direct hydr
     }
 }
 
-test "schema 53 migrates recovery index and wire 8 together to schema 54 wire 9" {
+test "schema 55 migrates recovery index and wire 8 together to schema 56 wire 9" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -10763,11 +10763,12 @@ test "schema 53 migrates recovery index and wire 8 together to schema 54 wire 9"
         try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
         try sqlite.exec(raw, store_testing.baseline_rows);
         for (store_schema.migrations) |step| {
-            if (step.from >= 53) break;
+            if (step.from >= 55) break;
             for (step.sqlite) |statement| try sqlite.exec(raw, statement);
         }
-        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=53", .{store_schema.application_id}));
-        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('store_selector',?1),('format','53')");
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM sqlite_schema WHERE name='action_operation_indeterminate'", .{}));
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=55", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('store_selector',?1),('format','55')");
         defer _ = c.sqlite3_finalize(meta);
         try sqlite.bindText(meta, 1, root);
         try sqlite.expectDone(meta);
@@ -10775,8 +10776,9 @@ test "schema 53 migrates recovery index and wire 8 together to schema 54 wire 9"
     var storage: Store = undefined;
     try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u32, 54), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
-    try std.testing.expectEqual(@as(u64, 9), try store_testing.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='wire_version'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value='56'", .{}));
+    try std.testing.expectEqual(@as(u32, 56), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='9'", .{}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='action_operation_indeterminate'", .{}));
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
 }
@@ -10808,4 +10810,127 @@ test "Message recovery observation seeks stay bounded as the Turn accumulates re
         }
     }
     try std.testing.expectEqual(costs[0], costs[1]);
+}
+
+test "a failed model fact batch rolls back overwritten rows and source together" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/facts.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    {
+        defer storage.close() catch unreachable;
+        try storage.saveModelFacts(&.{.{ .id = "kept", .context_window = 100, .efforts = .{}, .openai_listed = true }}, "\"old\"");
+        // The first row is overwritten and stepped before the second row's
+        // constraint fails. Neither that overwrite nor publication may stick.
+        try std.testing.expectError(error.StatementFailed, storage.saveModelFacts(&.{
+            .{ .id = "kept", .context_window = 200, .efforts = .{}, .openai_listed = false },
+            .{ .id = "", .context_window = null, .efforts = .{}, .openai_listed = false },
+        }, "\"new\""));
+        try std.testing.expect(storage.isFenced());
+    }
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(?u32, 100), (try storage.modelFact("kept")).?.context_window);
+    const source = (try storage.readModelCatalogSource()).?;
+    try std.testing.expectEqual(@as(u64, 1), source.generation);
+    try std.testing.expectEqualStrings("\"old\"", source.etag.?.slice());
+}
+
+test "schema 54 gains empty model catalog tables at 55 without changing its rows" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        for (store_schema.migrations) |step| {
+            if (step.from >= 54) break;
+            for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+        }
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM sqlite_schema WHERE name IN ('model_fact','model_catalog_source')", .{}));
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=54", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','54')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, protocol.wire_version);
+        try sqlite.bindText(meta, 2, root);
+        try sqlite.expectDone(meta);
+    }
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(u64, schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+    try std.testing.expect((try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{})) > 0);
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_fact", .{}));
+    try std.testing.expect(try storage.readModelCatalogSource() == null);
+}
+
+test "model catalog save releases its pager working set before leaving the queue" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    _ = sqlite.c.sqlite3_db_release_memory(storage.sqliteDatabase());
+    const baseline_cache = storage.sqliteDiagnostic().cache_used_bytes.?;
+    const catalog = @import("../model_catalog.zig");
+    var ids: [1024][64]u8 = undefined;
+    var facts: [ids.len]catalog.Entry = undefined;
+    for (&facts, &ids, 0..) |*fact, *id, index| {
+        @memset(id, 'a');
+        _ = try std.fmt.bufPrint(id, "catalog-{d:0>4}", .{index});
+        fact.* = .{ .id = id, .context_window = 123, .efforts = .{}, .openai_listed = true };
+    }
+    try storage.saveModelFacts(&facts, "\"one\"");
+    // Only the preexisting pinned fixture pages and accounting remain.
+    try std.testing.expectEqual(baseline_cache, storage.sqliteDiagnostic().cache_used_bytes.?);
+    try std.testing.expectEqual(@as(?u32, 123), (try storage.modelFact(facts[999].id)).?.context_window);
+    try storage.saveModelFacts(&facts, "\"two\"");
+    try std.testing.expectEqual(baseline_cache, storage.sqliteDiagnostic().cache_used_bytes.?);
+    try std.testing.expectEqual(@as(u64, 2), (try storage.readModelCatalogSource()).?.generation);
+}
+
+test "prepared cache eviction keeps colliding probe chains reachable" {
+    var database: ?*c.sqlite3 = null;
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(":memory:", &database));
+    defer _ = c.sqlite3_close(database.?);
+    var cache: sqlite.StatementCache = .{};
+    defer cache.deinit();
+    const keys = comptime keys: {
+        @setEvalBranchQuota(100_000);
+        var result: [65][:0]const u8 = undefined;
+        for (&result, 0..) |*key, index| key.* = std.fmt.comptimePrint("SELECT {d}", .{index});
+        break :keys result;
+    };
+    var buckets: [64]?[:0]const u8 = @splat(null);
+    for (keys) |key| {
+        const bucket = std.hash.int(@intFromPtr(key.ptr)) & 63;
+        if (buckets[bucket]) |first| {
+            for ([_][:0]const u8{ first, key }) |sql| {
+                var statement: ?*c.sqlite3_stmt = null;
+                try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_prepare_v3(database.?, sql, -1, 0, &statement, null));
+                try cache.insert(sql, statement.?);
+            }
+            const survivor = cache.find(key).?;
+            cache.remove(first);
+            try std.testing.expect(cache.find(first) == null);
+            try std.testing.expectEqual(survivor, cache.find(key).?);
+            cache.remove(first); // An already-evicted form is a no-op.
+            try std.testing.expectEqual(@as(usize, 1), cache.count);
+            cache.remove(key);
+            try std.testing.expectEqual(@as(usize, 0), cache.count);
+            return;
+        }
+        buckets[bucket] = key;
+    }
+    unreachable; // 65 static keys in 64 initial buckets must collide.
 }

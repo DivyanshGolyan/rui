@@ -19,12 +19,12 @@ NATIVE = (
 # Selected Linux suites run at most this many shards, all concurrently.
 LINUX_SHARDS = 10
 # Targets whose graph compiles the unit test binary (src/tests.zig). It takes
-# minutes on one core, so a second Linux producer builds it beside the rest.
+# minutes on one core, so a second producer builds it beside the rest.
 # build.zig refuses a split producer whose selection does not reach it.
 UNIT_TARGETS = frozenset(("test", "check", "check-full"))
 
 
-def split_linux(targets):
+def split_build(targets):
     # A selection of the unit tests alone leaves the rest producer nothing to compile.
     return bool(UNIT_TARGETS & set(targets)) and set(targets) != {"test"}
 

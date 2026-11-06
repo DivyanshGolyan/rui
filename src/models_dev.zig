@@ -38,7 +38,7 @@ pub fn parse(scratch: std.mem.Allocator, body: []const u8) Error![]catalog.Entry
                 }
                 const previous = models.getPtr(id);
                 if (previous) |kept| {
-                    if (!openai or kept.openai) {
+                    if (!openai or kept.openai_listed) {
                         try parser.skip();
                         continue;
                     }
@@ -46,13 +46,13 @@ pub fn parse(scratch: std.mem.Allocator, body: []const u8) Error![]catalog.Entry
                 var entry = try parser.model();
                 if (previous) |kept| {
                     entry.id = kept.id;
-                    entry.openai = true;
+                    entry.openai_listed = true;
                     kept.* = entry;
                 } else {
                     const owned = try scratch.dupe(u8, id);
                     errdefer scratch.free(owned);
                     entry.id = owned;
-                    entry.openai = openai;
+                    entry.openai_listed = openai;
                     try models.put(owned, entry);
                 }
             }
@@ -63,7 +63,9 @@ pub fn parse(scratch: std.mem.Allocator, body: []const u8) Error![]catalog.Entry
     const entries = try scratch.alloc(catalog.Entry, models.count());
     var values = models.valueIterator();
     for (entries) |*entry| entry.* = values.next().?.*;
-    std.mem.sort(catalog.Entry, entries, {}, lessThan);
+    // IDs are unique: stability adds nothing. Block sort keeps a 16 KiB
+    // temporary on the execution stack; pdqsort uses bounded small frames.
+    std.mem.sortUnstable(catalog.Entry, entries, {}, lessThan);
     return entries;
 }
 
@@ -122,7 +124,7 @@ const Parser = struct {
 
     fn model(self: *Parser) Error!catalog.Entry {
         try self.expect(.object_begin);
-        var entry: catalog.Entry = .{ .id = "", .context_window = null, .efforts = .{}, .openai = false };
+        var entry: catalog.Entry = .{ .id = "", .context_window = null, .efforts = .{}, .openai_listed = false };
         while (try self.key()) |member| {
             defer self.release(member);
             if (std.mem.eql(u8, text(member), "limit")) {
@@ -236,10 +238,10 @@ test "models dev openai wins otherwise first provider wins and output is sorted"
     try std.testing.expectEqual(@as(usize, 2), entries.len);
     try std.testing.expectEqualStrings("a", entries[0].id);
     try std.testing.expectEqual(@as(?u32, 2), entries[0].context_window);
-    try std.testing.expect(!entries[0].openai);
+    try std.testing.expect(!entries[0].openai_listed);
     try std.testing.expectEqualStrings("z", entries[1].id);
     try std.testing.expectEqual(@as(?u32, 3), entries[1].context_window);
-    try std.testing.expect(entries[1].openai);
+    try std.testing.expect(entries[1].openai_listed);
 }
 
 test "models dev unions listed efforts drops unknowns and ignores other options" {
@@ -303,7 +305,7 @@ test "models dev owns escaped ids and releases temporary tokens and failed parse
     try std.testing.expectEqualStrings("a/b", entries[0].id);
     try std.testing.expectEqual(@as(?u32, 42), entries[0].context_window);
     try std.testing.expectEqual(catalog.Efforts.init(.{ .high = true }), entries[0].efforts);
-    try std.testing.expect(entries[0].openai);
+    try std.testing.expect(entries[0].openai_listed);
     try std.testing.expectError(error.InvalidCatalog, parse(allocator,
         \\{"openai":{"models":{"a\/b":{},"a/b":{"unread":[1,]}}}}
     ));

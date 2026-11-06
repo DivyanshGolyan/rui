@@ -251,6 +251,11 @@ pub fn build(b: *std.Build) void {
     });
     configurePosix(b, read_client);
     session_list_client.root_module.addImport("rui_client", read_client);
+    const session_list_integration = b.addSystemCommand(&.{"python3"});
+    session_list_integration.addFileArg(b.path("tests/integration/session_list_integration.py"));
+    session_list_integration.addFileArg(ci.path(release_safe));
+    session_list_integration.addFileArg(ci.path(session_list_client));
+    b.step("session-list-integration", "Run native Session listing and idle Host resource checks").dependOn(&session_list_integration.step);
     const activity_client = b.addExecutable(.{
         .name = "rui-activity-client-test",
         .use_llvm = test_actor_llvm,

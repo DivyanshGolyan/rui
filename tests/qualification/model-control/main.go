@@ -608,7 +608,7 @@ func activeCancellation(binary, root, url string, endpoint *streamEndpoint) (res
 		if err != nil {
 			return nil, err
 		}
-		processing, ok := observation["processing"].(map[string]any)
+		processing, ok := observation["binding"].(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("processing identity unavailable: %v", observation)
 		}
@@ -1261,7 +1261,7 @@ func realSettlement(binary, root string) (result map[string]any, resultError err
 		if err != nil {
 			return false, err
 		}
-		value, ok := observation["processing"].(map[string]any)
+		value, ok := observation["binding"].(map[string]any)
 		if ok {
 			processing = value
 		}

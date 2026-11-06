@@ -2432,6 +2432,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/historical.zig"),
         @embedFile("domain/history_floor.zig"),
         @embedFile("domain/model_admission.zig"),
+        @embedFile("domain/model_facts.zig"),
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
@@ -8647,6 +8648,10 @@ test "a fixture's SQL is portable Rui SQL and names no SQLite mechanism" {
 /// gives it (less the `Held` of a body an entry point queues).
 const EntryPoint = enum {
     saveCatalog,
+    saveModelFacts,
+    readModelCatalogSource,
+    modelFact,
+    readOpenAiModelIds,
     readCatalogSet,
     readCatalogRecords,
     readCatalogText,
@@ -8777,7 +8782,11 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readDeclaredTool = 1,
     .readProviderTool = 1,
     .checkAttempt = 1,
-    // A Host's catalog is saved once; each later open finds it.
+    .saveModelFacts = 2,
+    .readModelCatalogSource = 1,
+    .modelFact = 1,
+    .readOpenAiModelIds = 1,
+    // A Host's tool catalog is saved once; each later open finds it.
     .saveCatalog = 1,
     .readCatalogSet = 1,
     .readCatalogRecords = 1,
@@ -8824,6 +8833,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/historical.zig"),
         @embedFile("domain/history_floor.zig"),
         @embedFile("domain/model_admission.zig"),
+        @embedFile("domain/model_facts.zig"),
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
@@ -8988,6 +8998,22 @@ test "each Store entry point takes its round budget on its common path" {
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
             var meter: RoundMeter = .{ .storage = &storage };
+            meter.start();
+            try storage.saveModelFacts(&.{.{ .id = "catalog-budget", .context_window = null, .efforts = .{}, .openai_listed = true }}, null);
+            meter.stop(.saveModelFacts);
+            meter.start();
+            _ = try storage.readModelCatalogSource();
+            meter.stop(.readModelCatalogSource);
+            meter.start();
+            _ = try storage.modelFact("catalog-budget");
+            meter.stop(.modelFact);
+            meter.start();
+            const model_ids = try storage.readOpenAiModelIds(std.testing.allocator);
+            defer {
+                for (model_ids) |id| std.testing.allocator.free(id);
+                std.testing.allocator.free(model_ids);
+            }
+            meter.stop(.readOpenAiModelIds);
             meter.start();
             try storage.saveCatalog(&tool_catalog.built_in);
             meter.stop(.saveCatalog);
@@ -11326,6 +11352,139 @@ test "observation since leaves absent and non Session targets untokened and repo
             try std.testing.expect(storage.configure(&failed, .{ .before_commit = true }) == .infrastructure_failure);
             try std.testing.expectError(error.StoreFenced, storage.observeCommand("observe-before-fence", token, &observed));
             try std.testing.expectError(error.StoreFenced, storage.observeCommand("observe-before-fence", null, &observed));
+        }
+    }.run);
+}
+
+test "model fact refresh reads existence once before batched writes" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const count = 4100;
+            const allocator = std.testing.allocator;
+            const ids = try allocator.alloc([32]u8, count);
+            defer allocator.free(ids);
+            const entries = try allocator.alloc(@import("../model_catalog.zig").Entry, count);
+            defer allocator.free(entries);
+            // First inserts, then a mix of old/new IDs, then only updates.
+            // Input order is deliberately not sorted: existence is by ID.
+            for (0..3) |refresh| {
+                const offset: usize = if (refresh == 0) 0 else count / 2;
+                for (entries, ids, 0..) |*entry, *id, index| entry.* = .{
+                    .id = try std.fmt.bufPrint(id, "catalog-{d}", .{count - index + offset}),
+                    .context_window = @intCast(100 + refresh),
+                    .efforts = .{},
+                    .openai_listed = true,
+                };
+                const rounds = TwinRounds.start(&storage);
+                const before = RoundMeter.QueryShape.snapshot(&storage);
+                try storage.saveModelFacts(entries, "\"batch\"");
+                const shape = RoundMeter.QueryShape.snapshot(&storage).since(before);
+                std.debug.print("model facts: {d} entries, {d} Access rounds\n", .{ count, rounds.taken() });
+                try std.testing.expectEqual(@as(u16, 2), rounds.taken());
+                if (case.engine == .mysql) {
+                    // Both reads share one pass. Access queues eight writes
+                    // per pass, source last; COMMIT is the sole control send.
+                    const write_passes = (count + 1 + 7) / 8;
+                    try std.testing.expectEqual(@as(u64, 1 + write_passes), shape.access_passes);
+                    try std.testing.expectEqual(@as(u64, 1), shape.controls);
+                    try std.testing.expectEqual(@as(u64, 2 + write_passes), shape.queries);
+                    try std.testing.expectEqual(shape.expected(), shape.queries);
+                }
+                try std.testing.expectEqual(@as(u64, refresh + 1), (try storage.readModelCatalogSource()).?.generation);
+                try std.testing.expectEqual(@as(?u32, @intCast(100 + refresh)), (try storage.modelFact(entries[0].id)).?.context_window);
+                try std.testing.expectEqual(@as(u64, count), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_fact fact JOIN model_catalog_source source ON source.generation=fact.generation WHERE source.slot=1", .{}));
+            }
+        }
+    }.run);
+}
+
+test "saved model facts replace generations and hide removed ids" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const allocator = std.testing.allocator;
+            var arena: std.heap.ArenaAllocator = .init(allocator);
+            defer arena.deinit();
+            const first = try @import("../models_dev.zig").parse(arena.allocator(),
+                \\{"openai":{"models":{"a":{"limit":{"context":100},"reasoning_options":[{"type":"effort","values":["low","high"]}]},"b":{}}},"other":{"models":{"c":{}}}}
+            );
+            try std.testing.expect(try storage.readModelCatalogSource() == null);
+            try storage.saveModelFacts(first, "\"one\"");
+            const source = (try storage.readModelCatalogSource()).?;
+            try std.testing.expectEqual(@as(u64, 1), source.generation);
+            try std.testing.expectEqualStrings("\"one\"", source.etag.?.slice());
+            try std.testing.expect(source.fetched_at > 0);
+            const a = (try storage.modelFact("a")).?;
+            try std.testing.expectEqual(@as(?u32, 100), a.context_window);
+            try std.testing.expectEqual(@as(u8, @intCast(first[0].efforts.bits.mask)), a.efforts);
+            try std.testing.expect(a.openai_listed);
+            const ids = try storage.readOpenAiModelIds(allocator);
+            defer {
+                for (ids) |id| allocator.free(id);
+                allocator.free(ids);
+            }
+            try std.testing.expectEqual(@as(usize, 2), ids.len);
+            try std.testing.expectEqualStrings("a", ids[0]);
+            try std.testing.expectEqualStrings("b", ids[1]);
+            const second = try @import("../models_dev.zig").parse(arena.allocator(),
+                \\{"openai":{"models":{"b":{"limit":{"context":200}}}}}
+            );
+            try storage.saveModelFacts(second, null);
+            try std.testing.expectEqual(@as(u64, 2), (try storage.readModelCatalogSource()).?.generation);
+            try std.testing.expect(try storage.modelFact("a") == null);
+            try std.testing.expect(try storage.modelFact("c") == null);
+            try std.testing.expectEqual(@as(?u32, 200), (try storage.modelFact("b")).?.context_window);
+            try std.testing.expect((try storage.readModelCatalogSource()).?.etag == null);
+            const current_ids = try storage.readOpenAiModelIds(allocator);
+            defer {
+                for (current_ids) |id| allocator.free(id);
+                allocator.free(current_ids);
+            }
+            try std.testing.expectEqual(@as(usize, 1), current_ids.len);
+            try std.testing.expectEqualStrings("b", current_ids[0]);
+            // Hidden IDs still occupy their keys. A later refresh must update
+            // those older-generation rows, not mistake them for new IDs.
+            try storage.saveModelFacts(first, "\"three\"");
+            try std.testing.expectEqual(@as(u64, 3), (try storage.readModelCatalogSource()).?.generation);
+            try std.testing.expectEqual(@as(?u32, 100), (try storage.modelFact("a")).?.context_window);
+            try std.testing.expect((try storage.modelFact("c")) != null);
+            try storage.saveModelFacts(&.{}, null);
+            try std.testing.expectEqual(@as(u64, 4), (try storage.readModelCatalogSource()).?.generation);
+            for ([_][]const u8{ "a", "b", "c" }) |id| try std.testing.expect(try storage.modelFact(id) == null);
+        }
+    }.run);
+}
+
+test "model fact effort masks are format-defined on every engine" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            // These fixed bits, not a loop index or inferred enum value, are
+            // part of the Store format. Reordering tags must fail this test.
+            const cases = .{ .{ .none, 1 }, .{ .low, 2 }, .{ .medium, 4 }, .{ .high, 8 }, .{ .xhigh, 16 }, .{ .max, 32 } };
+            inline for (cases) |effort| {
+                try storage.saveModelFacts(&.{.{ .id = "effort", .context_window = null, .efforts = .initOne(effort[0]), .openai_listed = false }}, null);
+                try std.testing.expectEqual(@as(u8, effort[1]), (try storage.modelFact("effort")).?.efforts);
+            }
+            const insert = "INSERT INTO model_fact(model_id,context_window,efforts,openai_listed,generation) VALUES(?1,NULL,?2,0,1)";
+            const constraint_error = if (case.engine == .mysql) error.MysqlFixtureFailed else error.StatementFailed;
+            try std.testing.expectError(constraint_error, store_testing.exec(&storage, insert, .{ "below", @as(i64, -1) }));
+            try std.testing.expectError(constraint_error, store_testing.exec(&storage, insert, .{ "above", @as(i64, 64) }));
+            try store_testing.exec(&storage, insert, .{ "empty", @as(i64, 0) });
+            try store_testing.exec(&storage, insert, .{ "full", @as(i64, 63) });
         }
     }.run);
 }

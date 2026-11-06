@@ -1,8 +1,7 @@
-"""Numbers that move only past a release: the wire version and the Store schema.
+"""Release bookkeeping shared by the wire and Store format checks.
 
-A number needs a new value only once its current value has shipped. Until a
-release, every PR shares main's unreleased number, so concurrent PRs never
-race to the next one.
+The wire version moves only past a release. Store versions instead append
+one format per PR (D226), enforced by test_store_schema_version.py.
 """
 import re
 import subprocess

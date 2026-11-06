@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).parent))
 from platform_boundary import mac_path, python_sites, sites, violations, zig_sites  # noqa: E402
 from select_tests import select  # noqa: E402
+from qualification import split_build  # noqa: E402
 
 
 AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (Path(__file__).parents[2] / "build.zig").read_text()))
@@ -89,11 +90,44 @@ class PlatformBoundaryTest(unittest.TestCase):
                     outputs = dict(line.split("=", 1) for line in (root / "output").read_text().splitlines())
                     native = json.loads(outputs["native_targets"])
                     self.assertEqual(outputs["native"], str(mac).lower())
+                    self.assertEqual(outputs["macos_split"], str(split_build(native)).lower())
+                    self.assertEqual(outputs["linux_split"], str(split_build(selection["targets"])).lower())
                     if mac:
                         self.assertEqual(native, selection["native_targets"] or ["check"])
                         self.assertTrue(json.loads(outputs["macos_matrix"])["include"])
                     else:
                         self.assertEqual(native, [])
+
+    def test_executed_plan_splits_the_final_native_selection(self):
+        workflow = (Path(__file__).parents[2] / ".github/workflows/check.yml").read_text()
+        script = textwrap.dedent(re.search(r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", workflow)[1])
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "tests").symlink_to((Path(__file__).parents[1]).resolve(), target_is_directory=True)
+            for stable, native, mac_required, split in (
+                    (True, [], False, True),  # Stable adds check even for documentation.
+                    (False, [], True, True),  # A Mac PR falls back to check.
+                    (False, ["test"], True, False),
+                    (False, ["check-full"], True, True),
+                    (False, ["test-logic"], True, False),
+                    (False, ["check"], False, False)):
+                with self.subTest(stable=stable, native=native, mac_required=mac_required):
+                    selection = select(["README.md"], "review", AVAILABLE)
+                    selection.update(native_targets=native, mac_required=mac_required)
+                    (root / "selection.json").write_text(json.dumps(selection))
+                    (root / "output").write_text("")
+                    subprocess.run([sys.executable, "-B", "-c", script], cwd=root, check=True,
+                                   env=dict(os.environ, STABLE=str(stable).lower(),
+                                            EVENT_NAME="workflow_dispatch" if stable else "pull_request",
+                                            GITHUB_REF_NAME="main", GITHUB_OUTPUT=str(root / "output"),
+                                            GITHUB_STEP_SUMMARY=str(root / "summary")))
+                    outputs = dict(line.split("=", 1) for line in (root / "output").read_text().splitlines())
+                    self.assertEqual(outputs["macos_split"], str(split).lower())
+                    self.assertEqual(outputs["linux_split"], "false")
+                    if stable:
+                        self.assertEqual(json.loads(outputs["native_targets"]),
+                                         ["admission-debug-integration", "check"])
+                        self.assertEqual(outputs["retry"], "false")
 
 
 if __name__ == "__main__":

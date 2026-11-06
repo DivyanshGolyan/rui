@@ -41,8 +41,8 @@ def semantics(platform_name):
     # descriptors) on Darwin. These mirror descriptor_capacity.zig
     # independently.
     TRANSPORT_WAKE_DESCRIPTORS = 2 if DARWIN else 1
-    # Lease(2), SQLite(4), listener(1) and the transport waker.
-    HOST_FIXED_DESCRIPTORS = 2 + 4 + 1 + TRANSPORT_WAKE_DESCRIPTORS
+    # Lease(2), SQLite(4), listener(1), transport waker and catalog socket(1).
+    HOST_FIXED_DESCRIPTORS = 2 + 4 + 1 + TRANSPORT_WAKE_DESCRIPTORS + 1
     # Credential parent and lock (2), the refresh Client's waker, one
     # connection socket and two trust-loading handles.
     AUTHENTICATION_DESCRIPTORS = 2 + TRANSPORT_WAKE_DESCRIPTORS + 1 + 2

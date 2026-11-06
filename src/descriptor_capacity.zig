@@ -38,6 +38,10 @@ pub const Transport = enum {
     requests,
     /// Model requests and the OpenAI key's model list.
     requests_and_model_list,
+    /// The catalog, with or without model requests, even at zero capacity.
+    catalog,
+    /// The catalog and provider list, with or without model requests.
+    listings,
 };
 
 pub fn calculate(
@@ -67,9 +71,15 @@ pub fn calculate(
         else => return error.UnsupportedDescriptorPlatform,
     };
     fixed_host = try add(fixed_host, transport_wake);
-    // The model list's stream sits beside every model slot's, so its one
-    // socket does too. A Host with no slot fetches nothing.
-    const model_list: usize = @intFromBool(transport == .requests_and_model_list and active_capacity != 0);
+    // Discovery sockets sit beyond model slots, including a catalog-only
+    // Host with zero Active Capacity. Legacy request-only populations stay
+    // expressible for callers that run no discovery.
+    const model_list: usize = switch (transport) {
+        .none, .requests => 0,
+        .requests_and_model_list => @intFromBool(active_capacity != 0),
+        .catalog => 1,
+        .listings => 2,
+    };
     fixed_host = try add(fixed_host, model_list);
 
     // While sealing the second configure content value, an ordinary
@@ -250,4 +260,17 @@ test "intake fits the available limit without sacrificing its minimum" {
     try std.testing.expectEqual(@as(usize, 45), try fitIntake(475, 256));
     try std.testing.expectEqual(@as(usize, 10), try fitIntake(475, 115));
     try std.testing.expectError(error.DescriptorCapacityInsufficient, fitIntake(475, 114));
+}
+
+test "catalog discovery reserves its sockets beyond model capacity including zero" {
+    for ([_]usize{ 0, 1, 100 }) |capacity| {
+        for ([_]std.Target.Os.Tag{ .linux, .macos }) |os_tag| {
+            const requests = try calculate(3, capacity, 10, 2, .requests, false, os_tag);
+            const catalog = try calculate(3, capacity, 10, 2, .catalog, false, os_tag);
+            const listings = try calculate(3, capacity, 10, 2, .listings, false, os_tag);
+            try std.testing.expectEqual(requests.fixed_host + 1, catalog.fixed_host);
+            try std.testing.expectEqual(requests.fixed_host + 2, listings.fixed_host);
+            try std.testing.expectEqual(requests.execution, listings.execution);
+        }
+    }
 }

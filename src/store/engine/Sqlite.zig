@@ -178,6 +178,13 @@ pub fn releaseEntry(self: *Sqlite) void {
     if (@import("builtin").is_test) self.statements.assertIdle();
 }
 
+/// Called under Store queue ownership after a bulk transaction and its
+/// statements have ended. SQLite retains any page it cannot safely release.
+pub fn releaseUnusedMemory(self: *Sqlite, comptime statements: anytype) void {
+    inline for (statements) |S| self.statements.remove(S.sql);
+    _ = c.sqlite3_db_release_memory(self.database);
+}
+
 pub fn diagnostic(self: *Sqlite) store_core.SqliteDiagnostic {
     var result: store_core.SqliteDiagnostic = .{};
     var current: c.sqlite3_int64 = 0;

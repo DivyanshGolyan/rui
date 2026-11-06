@@ -642,7 +642,7 @@ contains "$known_message" '"admission":"1"'
 contains "$known_message" '"status":"queued"'
 known_observation=$($rui request inspect --store "$store" --key msg-known)
 contains "$known_observation" '"kind":"message"'
-contains "$known_observation" '"status":"queued"'
+contains "$known_observation" '"state":"queued"'
 contains "$known_observation" '"type":"text"'
 known_session=$($rui session inspect --store "$store" --session "$main_session")
 contains "$known_session" '"pending_messages":"1"'
@@ -707,7 +707,7 @@ while :; do
     fi
     sleep 0.01
 done
-contains "$during_observation" '"status":"queued"'
+contains "$during_observation" '"state":"queued"'
 
 # Ingress scratch/file acquisition, write and seal failures happen before
 # admission. Their caller captures remain retryable and acquire one admission
@@ -911,7 +911,7 @@ expected, encoded = sys.argv[1:]
 observation = json.loads(encoded)
 if observation["key"] != expected:
     raise SystemExit("escaped key was normalized or truncated")
-if observation["observation"]["queue"]["status"] != "queued":
+if observation["observation"]["state"] != "queued":
     raise SystemExit("escaped key did not recover queued admission")
 PY
 
