@@ -26,6 +26,8 @@ RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integr
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
 RULES = (
+    (("build.zig", "build.zig.zon", "src/vaxis-parser.patch", "src/prepare_vaxis.sh", "tests/vaxis/*"),
+     ("test-vaxis",), ("test-vaxis",), "Patched dependency roots, not external-import discovery"),
     (("src/logic_tests.zig", "src/request_wait.zig", "src/core_boundary.zig", "src/word_search.zig", "src/execution_turn.zig", "src/request_encoding.zig",
       "src/AnswerRenderer.zig", "src/store/engine/mysql_refusal.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
@@ -382,7 +384,9 @@ def select(paths, phase, available):
     if phase == "development":
         # Development does not replace final boundary/native acceptance, but
         # keeps each matched live rule's own targets (`LIVE_RULES`).
-        targets = {"test-logic"} | live_targets if targets else set()
+        # The dependency regression roots are not discovered by test-logic.
+        dependency_targets = targets & {"test-vaxis"}
+        targets = {"test-logic"} | live_targets | dependency_targets if targets else set()
         native_targets = set()
     for reason, served_by in live_reasons:
         if not targets & served_by:

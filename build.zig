@@ -144,6 +144,29 @@ pub fn build(b: *std.Build) void {
     );
     logic_test_step.dependOn(&run_logic_tests.step);
 
+    // Imports do not discover dependency tests. Use the very same patched
+    // modules configureVaxis gives Rui, as explicit test roots instead.
+    const vaxis_owner = b.createModule(.{ .target = target, .optimize = .ReleaseSafe });
+    configureVaxis(b, vaxis_owner);
+    const vaxis_test_step = b.step("test-vaxis", "Run patched parser, Unicode, width, Window and render regressions");
+    for ([_][]const u8{ "vaxis", "terminal_width", "terminal_unicode" }) |name| {
+        const dependency_tests = b.addTest(.{
+            .name = b.fmt("test-{s}", .{name}),
+            .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
+            .root_module = vaxis_owner.import_table.get(name).?,
+            // Discover exports with main's exact refAllDecls test, not the
+            // broad substring (which also selects vxfw's filesystem scanner
+            // requiring a dependency cwd). No network, TTY or widget tests.
+            .filters = if (std.mem.eql(u8, name, "vaxis"))
+                &.{ "main.test.refAllDecls", "parse:", "InternalScreen:", "render:", "resize:", "resize preserves", "print:", "Window " }
+            else
+                &.{},
+        });
+        const run_dependency_tests = ci.run(dependency_tests);
+        run_dependency_tests.has_side_effects = true;
+        vaxis_test_step.dependOn(&run_dependency_tests.step);
+    }
+
     const openapi_emitter = b.addExecutable(.{
         .name = "openapi",
         .root_module = b.createModule(.{
