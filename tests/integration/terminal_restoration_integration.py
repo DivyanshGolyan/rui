@@ -225,22 +225,35 @@ static int command_return_signal(int fd, const void *bytes, size_t count) {
     return 0;
 }
 
+/* One bounded accepted-byte observer, independent of attempted write sizes. */
+struct consent_frame { size_t choice, end; int saw_choice; };
+static int consent_frame_accepted(struct consent_frame *frame, const void *bytes, size_t count) {
+    const char *choice = "Allow";
+    const char *end = "\033[?2026l\033]8;;\033\\\033[m";
+    for (size_t i = 0; i < count; ++i) {
+        char byte = ((const char *)bytes)[i];
+        if (!frame->saw_choice) {
+            frame->choice = byte == choice[frame->choice] ? frame->choice + 1 : (byte == choice[0] ? 1 : 0);
+            if (!choice[frame->choice]) frame->saw_choice = 1;
+        } else {
+            if (!end[frame->end]) frame->end = 0;
+            frame->end = byte == end[frame->end] ? frame->end + 1 : (byte == end[0] ? 1 : 0);
+        }
+    }
+    return frame->saw_choice && !end[frame->end];
+}
+
 static void consent_hold(int fd, const void *bytes, size_t count, int last) {
     const int screen = screen_fd(fd);
     const char *fault = getenv("RUI_TERMINAL_FAULT");
-    static int choice = 0, choice_held = 0;
+    static int choice_held = 0;
+    static struct consent_frame frame;
     if (screen != 1 || !fault || strncmp(fault, "consent-", 8)) return;
-    /* The renderer writes only changed cells; "Allow" starts the choice's
-       highlighted option ("Allow once"). Hold after the frame that draws
-       it completes. */
-    static size_t matched = 0;  /* Writes may split the word. */
-    for (size_t i = 0; !choice && i < count; ++i) {
-        char byte = ((const char *)bytes)[i];
-        matched = byte == "Allow"[matched] ? matched + 1 : (byte == 'A' ? 1 : 0);
-        if (matched == 5) choice = 1;
-    }
-    if (last && choice && !choice_held && count >= 8 &&
-        !memcmp((const char *)bytes + count - 8, "\033[?2026l", 8)) {
+    /* Pixel visibility ends at sync-reset, but full delivery includes the
+       OSC8-close and SGR postlude. Hold before the final native write returns:
+       no delivered receipt exists yet, even though every byte was accepted. */
+    int complete = consent_frame_accepted(&frame, bytes, count);
+    if (last && complete && !choice_held) {
         choice_held = 1;
         record("choice-output-complete\n");
         while (access(getenv("RUI_TERMINAL_CHOICE_RELEASE"), F_OK)) usleep(1000);
@@ -278,11 +291,14 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
         }
     }
     ssize_t written = real_writev(fd, iov, count);
-    size_t total = 0;
-    for (int i = 0; i < count; ++i) total += iov[i].iov_len;
-    if (written >= 0 && (size_t)written == total) {
+    if (written > 0) {
         int saved = errno;
-        for (int i = 0; i < count; ++i) consent_hold(fd, iov[i].iov_base, iov[i].iov_len, i == count - 1);
+        size_t left = (size_t)written;
+        for (int i = 0; i < count && left; ++i) {
+            size_t accepted = left < iov[i].iov_len ? left : iov[i].iov_len;
+            left -= accepted;
+            consent_hold(fd, iov[i].iov_base, accepted, left == 0);
+        }
         errno = saved;
     }
     return written;
@@ -397,6 +413,8 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     const char *marker = "VISIBLE-CANCEL-PREFIX";
     /* Hold only after the frame carrying the marker closes: a terminal
        shows a synchronized frame only once its end arrives. */
+    /* This is pixel visibility, deliberately earlier than full-frame consent
+       delivery: do not substitute the neutral postlude used by consent_hold. */
     const char *frame_end = "\033[?2026l";
     static size_t matched = 0, ended = 0;
     static int visible = 0, shown = 0, stream_held = 0;
@@ -442,7 +460,7 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
             }
         }
     }
-    if (result == (ssize_t)count) consent_hold(fd, bytes, count, 1);
+    if (result > 0) consent_hold(fd, bytes, (size_t)result, 1);
     static int blocked = 0, progressed = 0;
     if (screen == 1 && pressure_stopped && result < 0 && saved_errno == EAGAIN && !blocked) {
         blocked = 1;
@@ -903,6 +921,54 @@ int main(int argc, char **argv) {
     return 0;
 }
 """
+
+
+def check_consent_frame_boundary(state):
+    """Compile the actual tiny observer; feed independently specified boundaries."""
+    observer = PROBE[PROBE.index("struct consent_frame {"):PROBE.index("static void consent_hold(")]
+    driver = r"""
+#include <assert.h>
+#include <stddef.h>
+#include <string.h>
+OBSERVER
+int main(void) {
+    const char frame[] = "cells Allow once\033[?2026l\033]8;;\033\\\033[m";
+    const size_t n = sizeof(frame) - 1;
+    /* Every split across syscalls/iovecs, including one accepted byte at a time. */
+    for (size_t split = 0; split < n; ++split) {
+        struct consent_frame state = {0};
+        assert(!consent_frame_accepted(&state, frame, split));
+        assert(consent_frame_accepted(&state, frame + split, n - split));
+    }
+    struct consent_frame partial = {0};
+    for (size_t at = 0; at < n - 1; ++at)
+        assert(!consent_frame_accepted(&partial, frame + at, 1));
+    /* Attempted final byte is NOT accepted: completion must stay false. */
+    assert(!consent_frame_accepted(&partial, frame + n - 1, 0));
+    assert(consent_frame_accepted(&partial, frame + n - 1, 1));
+    const char inner[] = "Allow once\033]8;;\033\\\033[m";
+    struct consent_frame not_end = {0};
+    assert(!consent_frame_accepted(&not_end, inner, sizeof(inner) - 1));
+    const char end[] = "\033[?2026l\033]8;;\033\\\033[m";
+    assert(consent_frame_accepted(&not_end, end, sizeof(end) - 1));
+    struct consent_frame no_choice = {0};
+    assert(!consent_frame_accepted(&no_choice, end, sizeof(end) - 1));
+    /* Each missing postlude byte is independently insufficient. */
+    for (size_t drop = n - (sizeof(end) - 1); drop < n; ++drop) {
+        char missing[sizeof(frame)];
+        memcpy(missing, frame, drop);
+        memcpy(missing + drop, frame + drop + 1, n - drop - 1);
+        struct consent_frame state = {0};
+        assert(!consent_frame_accepted(&state, missing, n - 1));
+    }
+    return 0;
+}
+""".replace("OBSERVER", observer)
+    source, executable = state / "frame-boundary.c", state / "frame-boundary"
+    source.write_text(driver)
+    subprocess.run(["cc", str(source), "-o", str(executable)], check=True)
+    subprocess.run([str(executable)], check=True)
+    print("frame-boundary: accepted split/partial postlude oracle passed", flush=True)
 
 
 def check_forwarding(state, library):
@@ -3187,6 +3253,10 @@ def main(selected=None):
         source, library = state / "probe.c", state / "probe.so"
         source.write_text(PROBE)
         subprocess.run(os_semantics.shared_library_command(source, library), check=True)
+        check_consent_frame_boundary(state)
+        if selected == "frame-boundary":
+            completed = True
+            return
         check_forwarding(state, library)
         if selected == "forwarding":
             completed = True

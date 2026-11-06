@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 const vaxis = @import("vaxis");
 const Self = @This();
 
-pub const max_cells = 49_152;
+pub const max_cells = @import("RenderGeometry.zig").max_cells;
 pub const memory_limit = 32 * 1024 * 1024;
 const frame_link_bytes = 128 * 1024;
 const grid_link_bytes = 512 * 1024;
@@ -117,8 +117,11 @@ fn applyPolicy(self: *Self) void {
 }
 
 pub fn validateGeometry(size: vaxis.Winsize) !void {
-    if (size.cols < 8 or size.rows < 2) return error.TerminalTooSmall;
-    if (@as(u32, size.cols) * size.rows > max_cells) return error.TerminalTooLarge;
+    try @import("RenderGeometry.zig").validate(size.cols, size.rows);
+}
+
+pub fn idle(self: *const Self) bool {
+    return self.phase == .idle;
 }
 
 /// Start one nonpumping paint. Failed begin poisons even before a caller can

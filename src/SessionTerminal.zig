@@ -10,6 +10,7 @@ const attention = @import("attention.zig");
 const preferences = @import("preferences.zig");
 const termios = @import("posix");
 const Self = @This();
+const vaxis = @import("vaxis");
 
 original: Editor.Attributes,
 flags: [2]c_int,
@@ -64,6 +65,8 @@ clipboard_sequence: enum { closed, sending, abandoned } = .closed,
 /// While a write waits for credit the pump may run; a write it asks for
 /// waits until this one ends.
 writing: bool = false,
+/// Last width fact received while a frozen write prevents backend mutation.
+pending_width: ?vaxis.gwidth.Method = null,
 pump: ?struct { context: *anyopaque, step: *const fn (*anyopaque) anyerror!void } = null,
 
 const Batch = struct { number: u64, clears: bool };
@@ -137,23 +140,7 @@ pub fn finish(self: *Self) !void {
     if (!self.active) return self.result;
     self.active = false;
     self.release_deadline_ms = monotonicMs() + release_wait_ms;
-    const ops: NativeOutput = .{ .fd = self.output };
-    const abandoned = self.clipboard_sequence == .closed or writeWithin(ops, "\x18", self.release_deadline_ms);
-    // A terminal that keeps records past exit would show Sessions no Rui
-    // watches; one it fails to take stays until the terminal drops it.
-    if (self.statuses_shown) _ = writeWithin(ops, attention.clear_statuses, self.release_deadline_ms);
-    // The UI owns emitted style, even if a renderer's next window was cancelled.
-    // Attempt controls independently within one shared wait.
-    const synchronized = writeWithin(ops, "\x1b[?2026l", self.release_deadline_ms);
-    const reset = writeWithin(ops, "\x1b[0m", self.release_deadline_ms);
-    // Each owned mode is reset even when an earlier reset fails.
-    const paste_disabled = writeWithin(ops, "\x1b[?2004l", self.release_deadline_ms);
-    const focus_disabled = writeWithin(ops, "\x1b[?1004l", self.release_deadline_ms);
-    const scroll_reset = self.alternate_scroll != .on or writeWithin(ops, "\x1b[?1007l", self.release_deadline_ms);
-    var screen_ok = true;
-    for ([_][]const u8{ "\x1b[?25h", "\x1b[?1049l" }) |sequence| {
-        if (!writeWithin(ops, sequence, self.release_deadline_ms)) screen_ok = false;
-    }
+    const output_ok = self.restoreOutput(NativeOutput{ .fd = self.output }, self.release_deadline_ms);
     // Input discard is independent of output credit. TCSAFLUSH can drain the
     // same terminal's output and keep it raw while an output peer is absent.
     const flushed = termios.tcflush(0, termios.TCIFLUSH) == 0;
@@ -164,8 +151,65 @@ pub fn finish(self: *Self) !void {
     }
     // The duplicate shares stdout's description: flags already apply to fd 1.
     if (self.output != 1 and std.c.close(self.output) != 0) flags_ok = false;
-    self.result = if (restored) |_| if (flags_ok and abandoned and reset and paste_disabled and focus_disabled and scroll_reset and flushed and screen_ok and synchronized) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
+    self.result = if (restored) |_| if (flags_ok and output_ok and flushed) {} else error.TerminalCleanupFailed else |_| error.TerminalRestoreFailed;
     return self.result;
+}
+
+/// Every independent reset gets an attempt, including after the shared deadline
+/// or an earlier failure. Kept beside finish so tests exercise the real order.
+fn restoreOutput(self: *const Self, ops: anytype, deadline_ms: i64) bool {
+    const abandoned = writeWithin(ops, "\x18", deadline_ms);
+    // A terminal that keeps records past exit would show Sessions no Rui
+    // watches; one it fails to take stays until the terminal drops it.
+    if (self.statuses_shown) _ = writeWithin(ops, attention.clear_statuses, deadline_ms);
+    // The UI owns emitted style, even if a renderer's next window was cancelled.
+    // Attempt controls independently within one shared wait.
+    const links_closed = writeWithin(ops, vaxis.ctlseqs.osc8_clear, deadline_ms);
+    const synchronized = writeWithin(ops, "\x1b[?2026l", deadline_ms);
+    const reset = writeWithin(ops, "\x1b[0m", deadline_ms);
+    // Each owned mode is reset even when an earlier reset fails.
+    const paste_disabled = writeWithin(ops, "\x1b[?2004l", deadline_ms);
+    const focus_disabled = writeWithin(ops, "\x1b[?1004l", deadline_ms);
+    const scroll_reset = self.alternate_scroll != .on or writeWithin(ops, "\x1b[?1007l", deadline_ms);
+    var screen_ok = true;
+    for ([_][]const u8{ "\x1b[?25h", "\x1b[?1049l" }) |sequence| {
+        if (!writeWithin(ops, sequence, deadline_ms)) screen_ok = false;
+    }
+    return abandoned and links_closed and synchronized and reset and paste_disabled and focus_disabled and scroll_reset and screen_ok;
+}
+
+test "restoration attempts every independent control after any refusal or expired credit" {
+    // Independent literal oracle, not the production writer's sequence table.
+    const expected = [_][]const u8{ "\x18", "\x1b]8;;\x1b\\", "\x1b[?2026l", "\x1b[0m", "\x1b[?2004l", "\x1b[?1004l", "\x1b[?1007l", "\x1b[?25h", "\x1b[?1049l" };
+    const Output = struct {
+        refused: ?usize,
+        blocked: bool = false,
+        writes: usize = 0,
+        waits: usize = 0,
+        fn write(self: *@This(), bytes: []const u8) error{ WouldBlock, Failed }!usize {
+            const index = self.writes;
+            self.writes += 1;
+            std.testing.expect(index < expected.len) catch return error.Failed;
+            std.testing.expectEqualStrings(expected[index], bytes) catch return error.Failed;
+            if (self.blocked) return error.WouldBlock;
+            if (self.refused == index) return error.Failed;
+            return bytes.len;
+        }
+        fn waitWritable(self: *@This(), _: i32) void {
+            self.waits += 1;
+        }
+    };
+    const terminal: Self = .{ .original = undefined, .flags = undefined, .screen = undefined, .alternate_scroll = .on };
+    for (0..expected.len + 1) |refused| {
+        var output: Output = .{ .refused = if (refused < expected.len) refused else null };
+        try std.testing.expectEqual(refused == expected.len, terminal.restoreOutput(&output, monotonicMs() - 1));
+        try std.testing.expectEqual(expected.len, output.writes);
+        try std.testing.expectEqual(@as(usize, 0), output.waits);
+    }
+    var blocked: Output = .{ .refused = null, .blocked = true };
+    try std.testing.expect(!terminal.restoreOutput(&blocked, monotonicMs() - 1));
+    try std.testing.expectEqual(expected.len, blocked.writes);
+    try std.testing.expectEqual(@as(usize, 0), blocked.waits);
 }
 
 /// Optional exit notice holds a restored caller on stdout backpressure only
@@ -413,7 +457,10 @@ pub fn next(self: *Self, io: std.Io, wait: i32) !?Read {
 pub fn write(self: *Self, bytes: []const u8) !void {
     std.debug.assert(!self.writing);
     self.writing = true;
-    defer self.writing = false;
+    defer {
+        self.writing = false;
+        self.applyReports();
+    }
     if (self.clipboard_sequence == .abandoned) {
         try self.writeAll("\x18");
         self.clipboard_sequence = .closed;
@@ -433,6 +480,10 @@ fn writeAll(self: *Self, bytes: []const u8) !void {
             .INTR => continue,
             .AGAIN => {
                 if (self.pump) |pump| try pump.step(pump.context) else return error.TerminalCleanupFailed;
+                // Input pumps are nonblocking. A bounded output-credit poll
+                // prevents a full terminal plus busy input from spinning.
+                var fds = [_]std.posix.pollfd{.{ .fd = self.output, .events = std.posix.POLL.OUT, .revents = 0 }};
+                _ = try std.posix.poll(&fds, 16);
                 continue;
             },
             else => return error.TerminalCleanupFailed,
@@ -440,6 +491,21 @@ fn writeAll(self: *Self, bytes: []const u8) !void {
         if (n == 0) return error.TerminalCleanupFailed;
         offset += @intCast(n);
     }
+}
+
+/// A report revokes current domain authority immediately. Reflow/capability
+/// mutation waits until frozen bytes are finished and the backend is idle.
+pub fn widthReported(self: *Self, method: vaxis.gwidth.Method) void {
+    self.pending_width = method;
+    self.screen.invalidateLayout();
+    self.applyReports();
+}
+
+pub fn applyReports(self: *Self) void {
+    const method = self.pending_width orelse return;
+    if (self.writing or !self.screen.backend.idle()) return;
+    self.pending_width = null;
+    self.screen.setWidth(method);
 }
 
 pub fn geometry(self: *const Self) std.posix.winsize {
@@ -573,7 +639,7 @@ test "a clipboard copy interrupted while the terminal is full ends with CAN befo
             // Leaving at once: restoration ends the sequence first.
             terminal.finish() catch {};
             try drain(pipe[0], &buffer, &shown);
-            try std.testing.expect(std.mem.startsWith(u8, shown.items, "\x18\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h"));
+            try std.testing.expect(std.mem.startsWith(u8, shown.items, "\x18" ++ vaxis.ctlseqs.osc8_clear ++ "\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h"));
         } else {
             // Staying, as when Esc returns to the overview: its next frame
             // ends it first, then the scroll mode reported during the copy.
@@ -747,12 +813,109 @@ pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, footer: Screen.Foot
     };
     var buffer: [4096]u8 = undefined;
     var output: Output = .{ .terminal = self, .writer = .{ .vtable = &.{ .drain = Output.drain }, .buffer = &buffer } };
-    self.writeWaiting(&output.writer) catch |err| return output.failure orelse err;
+    self.applyReports();
     const size = self.geometry();
-    const delivered = self.screen.render(&output.writer, size, bytes, cursor, footer, live) catch |err| return output.failure orelse err;
+    const reflow = self.screen.prepareFrame(size) catch |err| {
+        self.screen.backend.poison();
+        return err;
+    };
+    defer {
+        self.screen.backend.end();
+        self.applyReports();
+    }
+    // Runs before end: failed delivery cannot apply deferred capabilities.
+    errdefer self.screen.backend.poison();
+    // Only this memory writer's error is allocation failure. No input may
+    // pump until painting and encoding have consumed every borrowed slice.
+    self.writeWaiting(self.screen.backend.prefixWriter()) catch return error.OutOfMemory;
+    const delivered = self.screen.renderPrepared(&output.writer, size, reflow, bytes, cursor, footer, live) catch |err| return output.failure orelse err;
     self.wrote();
     self.size = size;
     return delivered;
+}
+
+test "redraw acknowledges prefix-only and zero-output frames at the unchanged delivery boundary" {
+    var env = try std.testing.environ.createMap(std.testing.allocator);
+    defer env.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try Screen.Test.init(screen, std.testing.io, &env, false);
+    defer Screen.Test.deinit(screen);
+    var pipe: [2]c_int = undefined;
+    if (std.c.pipe(&pipe) != 0) return error.TestUnexpectedResult;
+    defer for (pipe) |fd| {
+        _ = std.c.close(fd);
+    };
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    for (pipe) |fd| try std.testing.expect(std.c.fcntl(fd, std.c.F.SETFL, nonblock) == 0);
+    var terminal: Self = .{ .original = undefined, .flags = undefined, .screen = screen, .output = pipe[1] };
+    _ = screen.presented(try terminal.redraw("", 0, .{}, &.{}));
+    var bytes: [65536]u8 = undefined;
+    while (std.c.read(pipe[0], &bytes, bytes.len) > 0) {}
+    const empty = try terminal.redraw("", 0, .{}, &.{});
+    try std.testing.expect(screen.backend.idle() and !screen.ticket.?.delivered);
+    try std.testing.expect(std.c.read(pipe[0], &bytes, bytes.len) < 0);
+    _ = screen.presented(empty);
+    try std.testing.expect(screen.ticket.?.delivered);
+    terminal.program_status = .supported;
+    const batch = terminal.beginStatuses();
+    try std.testing.expect(terminal.reportStatus("k7m2qx", "Frozen", .done));
+    const prefix = try terminal.redraw("", 0, .{}, &.{});
+    try std.testing.expect(terminal.statusesTaken(batch));
+    const count = std.c.read(pipe[0], &bytes, bytes.len);
+    try std.testing.expect(count > 0);
+    try std.testing.expectEqualStrings("\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=RnJvemVu\x1b\\\x1b]8;;\x1b\\\x1b[m", bytes[0..@intCast(count)]);
+    try std.testing.expect(!screen.ticket.?.delivered);
+    _ = screen.presented(prefix);
+    try std.testing.expect(screen.ticket.?.delivered);
+}
+
+test "a real partial output failure returns no receipt or waiting acknowledgment and poisons release" {
+    var env = try std.testing.environ.createMap(std.testing.allocator);
+    defer env.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try Screen.Test.init(screen, std.testing.io, &env, true);
+    defer Screen.Test.deinit(screen);
+    // Alternating styles produce more than one atomic pipe write of bytes.
+    for (0..1800) |_| try screen.append("\x1b[91mX\x1b[0mY");
+    var pipe: [2]c_int = undefined;
+    if (std.c.pipe(&pipe) != 0) return error.TestUnexpectedResult;
+    defer for (pipe) |fd| {
+        _ = std.c.close(fd);
+    };
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    for (pipe) |fd| try std.testing.expect(std.c.fcntl(fd, std.c.F.SETFL, nonblock) == 0);
+    const block: [4096]u8 = @splat('x');
+    while (std.c.write(pipe[1], &block, block.len) > 0) {}
+    while (std.c.write(pipe[1], &block, 1) > 0) {}
+    var room: [4096]u8 = undefined;
+    try std.testing.expect(std.c.read(pipe[0], &room, room.len) == room.len);
+    const Pump = struct {
+        called: bool = false,
+        fn step(raw: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.called = true;
+            return error.InteractiveInterrupted;
+        }
+    };
+    var interrupted: Pump = .{};
+    var terminal: Self = .{ .original = undefined, .flags = undefined, .screen = screen, .output = pipe[1], .pump = .{ .context = &interrupted, .step = Pump.step } };
+    terminal.program_status = .supported;
+    const batch = terminal.beginStatuses();
+    try std.testing.expect(terminal.reportStatus("k7m2qx", "Frozen", .done));
+    try std.testing.expectError(error.InteractiveInterrupted, terminal.redraw("", 0, .{}, &.{}));
+    try std.testing.expect(interrupted.called and !terminal.statusesTaken(batch));
+    try std.testing.expect(!screen.ticket.?.delivered);
+    var accepted: [128 * 1024]u8 = undefined;
+    const count = std.c.read(pipe[0], &accepted, accepted.len);
+    try std.testing.expect(count > 0);
+    // This is an actually accepted frame prefix, not attempted output or an
+    // interrupted first write. The full postlude was never delivered.
+    const prefix = std.mem.indexOf(u8, accepted[0..@intCast(count)], "\x1b]7501;state=done:id=rui/k7m2qx:") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(prefix < @as(usize, @intCast(count)));
+    try std.testing.expect(!std.mem.endsWith(u8, accepted[0..@intCast(count)], "\x1b[?2026l\x1b]8;;\x1b\\\x1b[m"));
+    try std.testing.expectError(error.RenderBackendPoisoned, screen.backend.begin(.{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 }));
 }
 
 test "a notification waits for the next frame, only while focus is away and the person has not turned them off" {
@@ -816,9 +979,9 @@ test "leaving clears the program status records Rui set, and only then" {
         var shown: [1024]u8 = undefined;
         const left = shown[0..@intCast(@max(std.c.read(pipe[0], &shown, shown.len), 0))];
         if (reported)
-            try std.testing.expect(std.mem.startsWith(u8, left, "\x1b]7501;state=clear:id=rui\x1b\\\x1b[?2026l"))
+            try std.testing.expect(std.mem.startsWith(u8, left, "\x18\x1b]7501;state=clear:id=rui\x1b\\" ++ vaxis.ctlseqs.osc8_clear ++ "\x1b[?2026l"))
         else
-            try std.testing.expect(std.mem.startsWith(u8, left, "\x1b[?2026l"));
+            try std.testing.expect(std.mem.startsWith(u8, left, "\x18" ++ vaxis.ctlseqs.osc8_clear ++ "\x1b[?2026l"));
     }
 }
 
@@ -866,7 +1029,7 @@ test "a clear a cut frame may not have written goes with the next frame, else wi
         }
         terminal.finish() catch {};
         const left = shown[0..@intCast(@max(std.c.read(pipe[0], &shown, shown.len), 0))];
-        try std.testing.expectEqual(!resumed, std.mem.startsWith(u8, left, "\x1b]7501;state=clear:id=rui\x1b\\"));
+        try std.testing.expectEqual(!resumed, std.mem.startsWith(u8, left, "\x18\x1b]7501;state=clear:id=rui\x1b\\"));
         try std.testing.expect(std.mem.indexOf(u8, left, "\x1b[?2026l") != null);
     }
 }

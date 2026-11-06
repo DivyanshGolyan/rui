@@ -84,7 +84,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             self.screen = try std.testing.allocator.create(Screen);
             var environ = try std.testing.environ.createMap(std.testing.allocator);
             defer environ.deinit();
-            try self.screen.init(std.testing.io, &environ, false);
+            try Screen.Test.init(self.screen, std.testing.io, &environ, false);
             self.terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = self.screen, .output = self.output.handle, .active = false };
             self.interrupted = .{};
             self.front = try std.testing.allocator.create(Frontend);
@@ -113,7 +113,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             _ = self.front.submission.join();
             self.front.submission.close();
             self.front.reader.join() catch unreachable;
-            self.screen.deinit();
+            Screen.Test.deinit(self.screen);
             std.testing.allocator.destroy(self.screen);
             std.testing.allocator.destroy(self.front);
             std.debug.assert(std.c.dup2(self.saved_stdin, 0) >= 0);
@@ -157,9 +157,9 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             try std.testing.expectEqualStrings(draft.slice(), actual.bytes);
             try std.testing.expectEqual(draft.cursor, actual.cursor);
             if (self.front.dirty or self.screen.stale()) try ops.draw(self.front);
-            const window = self.screen.vx.window();
+            const window = Screen.Test.window(self.screen);
             if (choosing) |row| {
-                try std.testing.expect(!self.screen.vx.screen.cursor_vis);
+                try std.testing.expect(!self.screen.backend.storage.?.vx.screen.cursor_vis);
                 var storage: [256]u8 = undefined;
                 const shown = for (0..window.height) |index| {
                     if (std.mem.eql(u8, rowText(window, @intCast(index), &storage), row)) break true;
@@ -168,8 +168,8 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
                 try std.testing.expect(shown);
                 return;
             }
-            try std.testing.expect(self.screen.vx.screen.cursor_vis);
-            const row = self.screen.vx.screen.cursor.row;
+            try std.testing.expect(self.screen.backend.storage.?.vx.screen.cursor_vis);
+            const row = self.screen.backend.storage.?.vx.screen.cursor.row;
             try std.testing.expectEqualStrings("›", window.readCell(0, row).?.char.grapheme);
             var expected_column: u16 = 2;
             var column: u16 = 2;
@@ -181,7 +181,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
                 index += length;
                 column += 1;
             }
-            try std.testing.expectEqual(expected_column, self.screen.vx.screen.cursor.col);
+            try std.testing.expectEqual(expected_column, self.screen.backend.storage.?.vx.screen.cursor.col);
         }
     };
 }
@@ -733,12 +733,12 @@ fn publication(comptime Frontend: type, comptime ops: anytype) !void {
         var empty: [0]u8 = .{};
         if (mode == 0) {
             var output = std.Io.Writer.fixed(&empty);
-            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
+            try std.testing.expectError(error.WriteFailed, fixture.Screen.Test.render(screen, &output, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
         } else {
             // Every frame byte is accepted before flush fails. Publishing
             // between writeAll and flush must fail this independent control.
             var output: FlushFailure = .{ .writer = .{ .buffer = &empty, .vtable = &.{ .drain = FlushFailure.drain, .flush = FlushFailure.flush } } };
-            try std.testing.expectError(error.WriteFailed, fixture.screen.render(&output.writer, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
+            try std.testing.expectError(error.WriteFailed, fixture.Screen.Test.render(screen, &output.writer, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
             try std.testing.expect(output.accepted > 0 and output.flushed);
         }
         try std.testing.expectEqual(before, fixture.screen.action_seen);

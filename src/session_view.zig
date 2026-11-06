@@ -1793,8 +1793,8 @@ test "MCP approval renders object arguments and adopts the same Allow once and D
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Screen);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Screen.Test.init(screen, std.testing.io, &environ, false);
+    defer Screen.Test.deinit(screen);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
@@ -1852,8 +1852,8 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Screen);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Screen.Test.init(screen, std.testing.io, &environ, false);
+    defer Screen.Test.deinit(screen);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });

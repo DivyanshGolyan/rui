@@ -6,6 +6,7 @@ const core_boundary = @import("core_boundary.zig");
 /// each one listed here and runs its tests, and selector tests require each
 /// to select test-logic.
 const cores = .{
+    .{ "RenderGeometry.zig", @import("RenderGeometry.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
     .{ "word_search.zig", @import("word_search.zig") },
     .{ "attempt.zig", @import("attempt.zig") },

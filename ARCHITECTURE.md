@@ -2642,7 +2642,13 @@ One scalar row census per Pane is cached by text generation and the complete lay
 The conversation reserves a stable one-column library scrollbar rail from its first frame, showing position within the loaded retained canvas, never a percentage of all saved history.
 A transcript alone may keep bounded trailing blank canvas to pin short text through prepend or geometry changes; Down never grows it, Up shrinks it, and added text absorbs it.
 `TerminalFrame` budgets regions without moving the scroll owner and observes only real text rows after final layout; blank canvas cannot credit an Action.
-`SessionScreen` owns libvaxis cells and bounded allocations, and `SessionTerminal` alone owns terminal modes and output.
+One invocation-owned `RenderBackend` owns libvaxis grids, page-charged allocations, URI retention and frozen encoded bytes; detail Sessions borrow it rather than reinitialize it.
+`SessionScreen` owns only its conversation projection, reflow coordinates and exact per-frame consent tickets/Delivered receipts; `SessionTerminal` alone owns terminal modes, output deadlines, waiting-report acknowledgment and the persistent byte decoder.
+Preparation captures the old source anchor before backend resize; waiting prefixes are staged before paint borrows cells, and generated helper labels live in charged frame scratch through encode.
+Encoding finishes before output can pump, then the screen issues its ticket and returns Delivered only after every byte and final flush succeed, including a zero-byte unchanged frame.
+Every nonempty encoded frame, including prefix-only output, closes OSC8 and resets SGR; a truly unchanged empty frame emits nothing.
+A begin, paint, encode or output failure poisons the backend for the invocation; releasing its storage never authorizes a retry of an uncertain diff.
+The overview still owns its legacy Span projection/diff separately; a healthy overview/detail handoff invalidates both projections without replacing the backend or decoder.
 libvaxis's own TTY owner is not used: restoration must attempt every step without waiting on a drain, wait at most one bounded second for output credit, and restore descriptor flags exactly.
 Resize keeps the first browsed line in view and preserves draft bytes and logical cursor; an Action restarts from its top.
 Text uses existing width behavior unless a terminal reports Unicode mode 2027 already enabled.
@@ -2651,9 +2657,15 @@ The renderer neither enables that mode nor requires Kitty graphics, mouse report
 The interface supports at most 49,152 terminal cells, including 24 × 2048 and 192 × 256.
 It checks geometry before allocating grids.
 Larger startup or resize geometry reports `TerminalTooLarge`, restores terminal configuration and gives shrink guidance.
-Cells, retained grapheme allocations and frame bytes share 32 MiB, raised from the extraction's initial 16-MiB limit to accommodate dense Unicode and per-cell SGR at that geometry.
+Backend cells, retained graphemes and URIs, generated frame scratch, waiting prefix and encoded frame bytes share one page-charged 32 MiB, raised from the extraction's initial 16-MiB limit to accommodate dense Unicode and per-cell SGR at that geometry.
 Resize retires old grids before allocating replacements; the native allocation high-water includes transient frame and resize allocations and platform page rounding.
 Content that exceeds the budget fails explicitly without changing saved work.
+Link parameters are unsupported at the shared encode boundary; per-frame URI retention is capped at 128 KiB and retained URI storage recycles before exceeding 512 KiB.
+The domain chooses appearance roles and day/night palettes; the backend enforces explicit width and none/indexed/direct colour policy without inventing colour conversions.
+NO_COLOR rejects chromatic cells but preserves domain-selected noncolour attributes, including Markdown italic and underline.
+During a blocked write, the first overview open or settled detail Escape return is held in its existing semantic target until the entire frozen frame is delivered.
+Later complete interactive events are discarded, except typed urgent exit; reports still update facts, partial CSI/SS3/paste stays in the same decoder, and width changes invalidate consent immediately but mutate backend policy only when idle.
+No replay queue is kept. Bounded input/output/signal polling permits urgent cancellation under zero credit; restoration independently attempts CAN, OSC8 close, sync/SGR resets and every owned mode within its existing shared deadline.
 Standalone zero-width output clusters, clusters wider than eight cells and clusters longer than 64 bytes become visible Unicode escapes in the display copy; a run of one repeated scalar is escaped once with its count.
 Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
 Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.

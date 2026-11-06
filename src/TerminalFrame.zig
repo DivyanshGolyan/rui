@@ -11,12 +11,9 @@ pub const Call = Viewport.Sized(512, false);
 pub const status_capacity = 2048;
 // Includes the historical 24 × 2048 resize witness; the shell accounts dense
 // Unicode cells, retained graphemes and frame bytes together under 32 MiB.
-pub const max_cells = 24 * 2048;
+pub const max_cells = @import("RenderGeometry.zig").max_cells;
 
-pub fn validateGeometry(width: u16, height: u16) !void {
-    if (height < 2 or width < 8) return error.TerminalTooSmall;
-    if (@as(u32, width) * height > max_cells) return error.TerminalTooLarge;
-}
+pub const validateGeometry = @import("RenderGeometry.zig").validate;
 
 /// The input row of a waiting Action: Allow once, then Deny. Each option is
 /// a two-cell marker, its label and a space; the labels shorten to fit.

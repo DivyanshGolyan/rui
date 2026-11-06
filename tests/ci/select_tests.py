@@ -14,7 +14,7 @@ from strict_paths import strict
 # Renderer, terminal and frontend owners select the roots that run their unit
 # tests and PTY callers, not the Store-native check, unless a strict path changes.
 FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig",
-            "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig",
+            "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/RenderBackend.zig", "src/RenderGeometry.zig", "src/testing/render.zig",
             "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
             "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig", "src/overview_view.zig",
             "src/Overview.zig", "src/keymap.zig", "src/status_page.zig", "src/command_value.zig", "src/home_path.zig")
@@ -49,7 +49,7 @@ RULES = (
     (("src/model_list.zig",), ("test-logic", "test", "codex-h2-integration"),
      ("test-logic", "test", "codex-h2-integration"), "Provider model lists; the Host's fetch and the wire reply follow"),
     (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig",
-      "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/session_view.zig", "src/session_history.zig",
+      "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/RenderBackend.zig", "src/RenderGeometry.zig", "src/testing/render.zig", "src/session_view.zig", "src/session_history.zig",
       "src/session_reads.zig", "src/ClientTask.zig", "src/Overview.zig", "src/keymap.zig", "src/slash_commands.zig",
       "src/status_page.zig", "src/command_value.zig", "src/home_path.zig"),
      ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
