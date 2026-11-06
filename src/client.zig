@@ -2428,9 +2428,44 @@ test "client activity peer boundary rejects noncanonical IDs and owns canonical 
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
-            try std.testing.expectEqualStrings(session, page.facts.items[0].value.send_failed.target.session.slice());
+            try std.testing.expectEqualStrings(session, page.facts.items[0].value.send_failed.target.?.session.slice());
             try std.testing.expectEqualStrings("key\x00雪", page.facts.items[0].value.send_failed.key.slice());
         } else try std.testing.expectError(error.InvalidResponse, protocol_reply.ActivityPage.parse(body.slice(), .{}));
+    }
+}
+
+test "client failed-send target is required and nullable without relaxing peers" {
+    const cases = [_]struct { field: []const u8, failure: ?anyerror }{
+        .{ .field = "\"target\":null,", .failure = null },
+        .{ .field = "\"target\":{\"session\":\"absent\",\"label\":\"Review\"},", .failure = null },
+        .{ .field = "", .failure = error.InvalidActivityPage },
+        .{ .field = "\"target\":\"\",", .failure = error.InvalidActivityPage },
+        .{ .field = "\"target\":false,", .failure = error.InvalidActivityPage },
+        .{ .field = "\"target\":{},", .failure = error.InvalidActivityPage },
+        .{ .field = "\"target\":{\"session\":null},", .failure = error.InvalidActivityPage },
+        .{ .field = "\"target\":{\"session\":\"\",\"label\":null},", .failure = error.InvalidResponse },
+        .{ .field = "\"target\":{\"session\":\"absent\",\"label\":\"bad\\nlabel\"},", .failure = error.InvalidResponse },
+    };
+    for (cases, 0..) |case, index| {
+        var body: protocol.RequestBuffer = .{};
+        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused\",");
+        try body.append(case.field);
+        try body.append("\"code\":\"unsupported_reasoning_effort\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, protocol_reply.ActivityPage.parse(body.slice(), .{}));
+            continue;
+        }
+        const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
+        @memset(body.bytes[0..body.len], 'x');
+        const failed = page.facts.items[0].value.send_failed;
+        try std.testing.expectEqualStrings("refused", failed.key.slice());
+        try std.testing.expectEqualStrings("unsupported_reasoning_effort", failed.code.slice());
+        if (index == 0) {
+            try std.testing.expect(failed.target == null);
+        } else {
+            try std.testing.expectEqualStrings("absent", failed.target.?.session.slice());
+            try std.testing.expectEqualStrings("Review", failed.target.?.label.slice());
+        }
     }
 }
 

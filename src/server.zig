@@ -3580,6 +3580,26 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_activity_page_response_bytes, page_writer.end);
 }
 
+test "failed send without a canonical target writes explicit null within activity bounds" {
+    var key: protocol.Bounded(protocol.max_key_bytes) = .{};
+    try key.set("refused-creation");
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+    try code.set("unsupported_reasoning_effort");
+    const item: protocol.ActivityItem = .{
+        .position = 7,
+        .ordinal = 0,
+        .at = 1,
+        .value = .{ .send_failed = .{ .key = key, .target = null, .code = code } },
+    };
+    var buffer: [protocol.ActivityItem.max_json_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try item.writeJson(&writer);
+    try std.testing.expectEqualStrings(
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused-creation\",\"target\":null,\"code\":\"unsupported_reasoning_effort\"}}}",
+        writer.buffered(),
+    );
+}
+
 test "retired reserved exchanges cannot block their successors while workers are occupied" {
     for (std.enums.values(Route)) |route| {
         if (!route.isControl() and route != .host_info) continue;

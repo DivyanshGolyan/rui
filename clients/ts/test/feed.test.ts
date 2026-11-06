@@ -4,7 +4,7 @@ import { setImmediate as turn } from "node:timers/promises";
 import { test } from "node:test";
 
 import { RuiUnavailableError } from "../src/errors.ts";
-import { listActivity, type FeedEntry } from "../src/feed.ts";
+import { decodeCursor, listActivity, type FeedEntry } from "../src/feed.ts";
 import { SessionNotifications } from "../src/notifications.ts";
 import { Session, type Link } from "../src/sessions.ts";
 import { WIRE_VERSION } from "../src/transport.ts";
@@ -60,9 +60,23 @@ function narrowed(entry: FeedEntry): void {
 			void completion;
 			break;
 		}
-		case "sent": case "send_failed": {
+		case "sent": {
 			const target: Schemas["NamedPeer"] = entry.target;
 			void target;
+			break;
+		}
+		case "send_failed": {
+			const target: Schemas["NamedPeer"] | null = entry.target;
+			// @ts-expect-error A refused Message need not name a canonical peer.
+			const nonnull: Schemas["NamedPeer"] = entry.target;
+			const { target: omitted, ...withoutTarget } = entry;
+			// @ts-expect-error The target field is required even when its value is null.
+			const missing: typeof entry = withoutTarget;
+			if (entry.target !== null) {
+				const session: string = entry.target.session;
+				void session;
+			}
+			void [target, nonnull, omitted, missing];
 			break;
 		}
 		case "approval_requested": {
@@ -118,6 +132,45 @@ test("feed camelCases only row keys, preserving nested wire values and content r
 	assert.equal(entries[2].sessionId, "ch1ld1");
 	assert.equal("session" in entries[2], false);
 	assert.equal("call_ordinal" in entries[2], false);
+});
+
+test("failed sends retain null targets, identity and cursor continuation without content reads", async () => {
+	const requests: Schemas["ActivityPageRequest"][] = [];
+	const rows: Schemas["ActivityItem"][] = [
+		{ position: "7", ordinal: "0", at: "1", value: { send_failed: { key: "refused-creation", target: null, code: "unsupported_reasoning_effort" } } },
+		{ position: "8", ordinal: "0", at: "2", value: { send_failed: { key: "unknown-address", target: { session: "absent", label: null }, code: "unknown_session" } } },
+	];
+	const link: Link = {
+		exchange: async (path, build) => {
+			assert.equal(path, "/v1/activity-page", "failed sends must not fetch activity content");
+			requests.push(JSON.parse(build("/store")) as Schemas["ActivityPageRequest"]);
+			assert.ok(requests.length <= rows.length, "pagination must finish after both refusals");
+			return Buffer.from(JSON.stringify({
+				delta: "full", since: null, items: [rows[requests.length - 1]],
+				more: requests.length === 1, end: "9",
+			}));
+		},
+	};
+	const entries = [];
+	for await (const entry of listActivity(link, "k7m2qx", { kinds: ["send_failed"] })) entries.push(entry);
+	assert.equal(entries.length, 2);
+	assert.ok(entries[0]?.kind === "send_failed");
+	assert.equal(entries[0].target, null);
+	assert.equal(entries[0].key, "refused-creation");
+	assert.equal(entries[0].code, "unsupported_reasoning_effort");
+	assert.deepEqual(decodeCursor(entries[0].cursor), { position: "7", ordinal: "0" });
+	assert.equal("text" in entries[0], false);
+	assert.equal("contentBytes" in entries[0], false);
+	assert.ok(entries[1]?.kind === "send_failed");
+	assert.deepEqual(entries[1].target, { session: "absent", label: null });
+	assert.equal(entries[1].key, "unknown-address");
+	assert.equal(entries[1].code, "unknown_session");
+	assert.deepEqual(decodeCursor(entries[1].cursor), { position: "8", ordinal: "0" });
+	assert.equal(requests.length, 2);
+	assert.deepEqual(requests.map(({ end, position, ordinal, kinds }) => ({ end, position, ordinal, kinds })), [
+		{ end: null, position: "0", ordinal: null, kinds: ["send_failed"] },
+		{ end: "9", position: "7", ordinal: "0", kinds: ["send_failed"] },
+	]);
 });
 
 function gate(): { promise: Promise<void>; resolve: () => void } {
