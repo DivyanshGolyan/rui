@@ -73,6 +73,7 @@ test "CLI exits derive from certainty before remedy" {
     try std.testing.expectEqual(Status.environment, knownError(error.HostStopped));
     try std.testing.expectEqual(Status.environment, knownError(error.ApiKeyMissing));
     try std.testing.expectEqual(Status.environment, knownError(error.StoreAlreadyOwned));
+    try std.testing.expectEqual(Status.environment, knownError(error.StoreIdentityMismatch));
     try std.testing.expectEqual(Status.later, knownError(error.ResultNotReady));
     // A missing input/capture file is not evidence of a stopped Host.
     try std.testing.expectEqual(Status.unclassified, knownError(error.FileNotFound));

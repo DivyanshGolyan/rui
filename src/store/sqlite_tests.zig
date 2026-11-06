@@ -4308,6 +4308,91 @@ fn storeId(path: []const u8) ![2 * store_schema.store_id_bytes]u8 {
     return id[0 .. 2 * store_schema.store_id_bytes].*;
 }
 
+test "SQLite selector mismatch retains caller-owned evidence after failed open" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    const saved_selector = "/" ++ @as([protocol.max_store_bytes - 1]u8, @splat('s'));
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, saved_selector);
+    try storage.close();
+    var refused: Store = undefined;
+    try std.testing.expectError(error.StoreIdentityMismatch, refused.open(std.testing.io, database, root));
+    var evidence: store_schema.IdentityMismatch = .{};
+    try std.testing.expectError(error.StoreIdentityMismatch, refused.openWithOptions(std.testing.io, database, root, .{ .identity_mismatch = &evidence }));
+    try std.testing.expectEqualStrings(saved_selector, evidence.saved_selector.slice());
+    try refused.open(std.testing.io, database, saved_selector);
+    try refused.close();
+    try std.testing.expectEqualStrings(saved_selector, evidence.saved_selector.slice());
+}
+
+test "SQLite selector mismatch retains migration evidence and rolls back metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, root);
+    try storage.close();
+    const original_id = try storeId(database);
+    {
+        const raw = try openRaw(database);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, "UPDATE store_meta SET meta_value='56' WHERE meta_key='format';PRAGMA user_version=56");
+        var evidence: store_schema.IdentityMismatch = .{};
+        try std.testing.expectError(error.StoreIdentityMismatch, store_schema.migrate(std.testing.io, raw, "/different/canonical/store", 56, &.{}, &evidence));
+        try std.testing.expectEqualStrings(root, evidence.saved_selector.slice());
+        try std.testing.expectEqual(@as(u32, 56), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u32, 56), try sqlite.pragmaInt(raw, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
+        const selector = try sqlite.prepare(raw, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
+        defer _ = c.sqlite3_finalize(selector);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(selector));
+        var saved: protocol.Bounded(protocol.max_store_bytes) = .{};
+        try sqlite.readText(selector, 0, &saved);
+        try std.testing.expectEqualStrings(root, saved.slice());
+    }
+    try std.testing.expectEqualStrings(&original_id, &try storeId(database));
+}
+
+test "SQLite invalid identity metadata is not a selector mismatch" {
+    const cases = .{
+        .{ "PRAGMA application_id=0", error.WrongStoreIdentity },
+        .{ "DELETE FROM store_meta WHERE meta_key='store_selector'", error.WrongStoreIdentity },
+        .{ "DELETE FROM store_meta WHERE meta_key='store_id'", error.WrongStoreIdentity },
+        .{ "UPDATE store_meta SET meta_value='not-an-id' WHERE meta_key='store_id'", error.WrongStoreIdentity },
+        .{ "UPDATE store_meta SET meta_value=CAST(x'ff' AS TEXT) WHERE meta_key='store_selector'", error.InvalidUtf8 },
+        .{ "UPDATE store_meta SET meta_value=printf('%0493d',0) WHERE meta_key='store_selector'", error.ValueTooLong },
+    };
+    inline for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+        var storage: Store = undefined;
+        try storage.open(std.testing.io, database, root);
+        try storage.close();
+        {
+            const raw = try openRaw(database);
+            defer _ = c.sqlite3_close(raw);
+            try sqlite.exec(raw, case[0]);
+        }
+        for ([_][]const u8{ root, "/different/canonical/store" }) |selector| {
+            var evidence: store_schema.IdentityMismatch = .{};
+            try evidence.saved_selector.set("unchanged");
+            var refused: Store = undefined;
+            try std.testing.expectError(case[1], refused.openWithOptions(std.testing.io, database, selector, .{ .identity_mismatch = &evidence }));
+            try std.testing.expectEqualStrings("unchanged", evidence.saved_selector.slice());
+        }
+    }
+}
+
 test "a new Store draws its own Store id, keeps it, and is refused without it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -8648,7 +8733,7 @@ test "a migration whose step fails leaves its backup and the original Store read
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
-        try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}));
+        try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}, null));
     }
     for ([_][]const u8{ "store.sqlite3.kept", "store.backup.saved", "store.backup-old" }) |kept| {
         var kept_buffer: [8]u8 = undefined;
@@ -8671,7 +8756,7 @@ test "a migration whose step fails leaves its backup and the original Store read
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
-        try std.testing.expectError(error.MigrationBackupFailed, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session_revision"}, .mysql = &.{} }}));
+        try std.testing.expectError(error.MigrationBackupFailed, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session_revision"}, .mysql = &.{} }}, null));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session_revision"));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "PRAGMA foreign_keys"));
     }
@@ -8696,7 +8781,7 @@ test "a Store at the maximum path backs itself up before a migration" {
     const raw = try openRaw(database);
     defer _ = c.sqlite3_close(raw);
     try sqlite.exec(raw, "UPDATE store_meta SET meta_value='7' WHERE meta_key='format';PRAGMA user_version=7");
-    try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(io, raw, paths.store.slice(), 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}));
+    try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(io, raw, paths.store.slice(), 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}, null));
     var backup_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const backup = try std.fmt.bufPrint(&backup_buffer, "{s}/rui.backup", .{paths.store.slice()});
     try std.testing.expect((try std.Io.Dir.cwd().statFile(io, backup, .{})).size > 0);
@@ -8743,7 +8828,7 @@ test "a migration that rebuilds a referenced table from the schema's text keeps 
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
-        try store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = rebuild, .mysql = &.{} }});
+        try store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = rebuild, .mysql = &.{} }}, null);
     }
     var storage: Store = undefined;
     try storage.open(std.testing.io, store.path, store.root);
@@ -8770,7 +8855,7 @@ test "a migration that leaves other text than bootstrap's, or a broken reference
     const raw = try openRaw(store.path);
     defer _ = c.sqlite3_close(raw);
     for (cases) |case| {
-        try std.testing.expectError(case.refusal, store_schema.migrate(std.testing.io, raw, store.root, case.from, &.{.{ .from = case.from, .sqlite = case.statements, .mysql = &.{} }}));
+        try std.testing.expectError(case.refusal, store_schema.migrate(std.testing.io, raw, store.root, case.from, &.{.{ .from = case.from, .sqlite = case.statements, .mysql = &.{} }}, null));
         try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session"));

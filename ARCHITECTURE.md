@@ -1394,6 +1394,7 @@ Stores older than the migration baseline are rejected, not replayed through an o
 Recovery is an explicit choice: use a compatible build at the original Store path, or back up the stopped Store and select a separate fresh Store.
 Rui never automatically recreates an incompatible Store.
 Store identity binds the canonical original path; moving or copying its directory does not relocate that identity.
+A SQLite selector mismatch refuses startup with `store_identity_mismatch` (exit 6), naming the saved original and actual canonical folders without changing the identity.
 Restoring a backup requires exclusive access to the original path and preservation of any replacement Store before restoration.
 The [recovery instructions](docs/store-reset.md) leave the original Store untouched.
 

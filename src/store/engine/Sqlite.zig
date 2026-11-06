@@ -113,7 +113,7 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
     try sqlite.exec(database.?, "PRAGMA locking_mode=EXCLUSIVE");
     if (existing) {
         if (options.found_schema_version) |found| found.* = try sqlite.pragmaInt(database.?, "PRAGMA user_version");
-        try store_schema.openExisting(io, database.?, selector);
+        try store_schema.openExisting(io, database.?, selector, options.identity_mismatch);
     }
     try sqlite.exec(database.?, "PRAGMA busy_timeout=0");
     try sqlite.exec(database.?, "PRAGMA foreign_keys=ON");
