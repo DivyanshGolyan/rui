@@ -1411,3 +1411,7 @@ test "a bare address longer than a link may carry stays plain text" {
     const closers = "https://a" ++ @as([2000]u8, @splat(')'));
     try expectRendered(closers ++ " ", comptime linked("https://a", "https://a") ++ @as([2000]u8, @splat(')')) ++ " ");
 }
+
+test "a bare local path excludes the sentence semicolon from its OSC 8 link" {
+    try expectRendered("The report is at /tmp/report.md;", "The report is at " ++ comptime linked("file:///tmp/report.md", "/tmp/report.md") ++ ";");
+}
