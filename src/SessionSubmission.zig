@@ -106,7 +106,7 @@ pub fn begin(self: *Self, intent: Intent) !void {
     self.publication = .not_sent;
     const target: client.CaptureTarget = .{ .generated = self.directory };
     self.target = .{ .reserved = try target.resolve(self.io, &self.path, &self.key) };
-    try self.task.start(self.io, self, submit);
+    try self.startWorker(submit);
     self.state = .submitting;
 }
 
@@ -154,7 +154,28 @@ pub fn unconfirmedMessage(self: *const Self) ?*const [36]u8 {
 }
 
 fn launchRetry(self: *Self) !void {
-    try self.task.start(self.io, self, resend);
+    try self.startWorker(resend);
+}
+
+// ClientTask's pthread entry is shared with frontend readers. Let the native
+// fixture identify this spawn's purpose, without guessing from thread order or
+// opaque std.Thread arguments. The optional preload hook only scopes identity;
+// pthread_create still owns the injected failure and its normal error mapping.
+fn startWorker(self: *Self, run: Task.Run) !void {
+    const image = if (std.c.getenv("RUI_TEST_SUBMISSION_START") != null)
+        std.c.dlopen(null, .{ .LAZY = true })
+    else
+        null;
+    defer if (image) |handle| {
+        _ = std.c.dlclose(handle);
+    };
+    const mark: ?*const fn (c_int) callconv(.c) void = if (image) |handle|
+        @ptrCast(@alignCast(std.c.dlsym(handle, "rui_test_submission_start")))
+    else
+        null;
+    if (mark) |notify| notify(1);
+    defer if (mark) |notify| notify(0);
+    try self.task.start(self.io, self, run);
 }
 
 test "submission bounded gestures consume only the original and do not requeue failed launch" {
