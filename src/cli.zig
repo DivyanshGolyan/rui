@@ -280,6 +280,10 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .action_deny => try decideAction(init, parsed, .deny),
         .action_read_call_id => try readActionContent(init, parsed, .call_id),
         .action_read_arguments => try readActionContent(init, parsed, .arguments),
+        .store_schema => {
+            if (!std.mem.eql(u8, parsed.get("engine").?, "mysql")) return error.InvalidArguments;
+            try std.Io.File.stdout().writeStreamingAll(init.io, @import("store.zig").mysql_schema);
+        },
         .host_start, .host_pause, .host_status => try host(init, command, parsed),
         .host_serve => unreachable,
         // Inspection has its own read-only operation; configure's grammar
@@ -648,11 +652,17 @@ fn writeHostStatus(io: std.Io, status: protocol_reply.HostStatus) !void {
             try writer.print(",\"instance\":\"{s}\",\"active_capacity\":\"{d}\",\"intake_capacity\":\"{d}\",\"descriptor_limit\":", .{ &instance, ready.active_capacity, ready.intake_capacity });
             if (ready.descriptor_limit) |limit| try writer.print("\"{d}\"", .{limit}) else try writer.writeAll("null");
             try writer.print(",\"started_at\":\"{d}\",\"custody_occupied\":\"{d}\",\"paused\":{}", .{ ready.started_at, ready.custody_occupied, ready.paused });
+            if (ready.innodb_doublewrite) |value| {
+                try writer.writeAll(",\"innodb_doublewrite\":");
+                try std.json.Stringify.value(value.slice(), .{}, writer);
+            }
             try writer.writeAll(",\"capabilities\":");
             try std.json.Stringify.value(ready.capabilities, .{}, writer);
             var location: [protocol.max_store_bytes + "/diagnostics".len]u8 = undefined;
             try writer.writeAll(",\"diagnostics\":");
-            try std.json.Stringify.value(try std.fmt.bufPrint(&location, "{s}/diagnostics", .{ready.store.slice()}), .{}, writer);
+            // A ready opaque identity already resolved through this runtime hint.
+            const directory = if (platform.isOpaqueStoreId(ready.store.slice())) platform.mysqlRuntimeDirectory(ready.store.slice()).? else ready.store.slice();
+            try std.json.Stringify.value(try std.fmt.bufPrint(&location, "{s}/diagnostics", .{directory}), .{}, writer);
         },
         else => {},
     }
@@ -732,6 +742,9 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
         .access_failure => return error.StoreAccessFailed,
         .unavailable, .owned_unavailable => {},
     }
+    // An opaque MySQL id has no login and can only attach. Never turn it
+    // into a new SQLite directory when the launched Host is unavailable.
+    if (platform.mysqlRuntimeDirectory(selected) != null) return error.MysqlHostUnavailable;
     // Only the serving Host obtains the exclusive lease; this creates the
     // candidate Store path without claiming an owner or touching SQLite.
     var dir = try std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) });
@@ -1601,6 +1614,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var launch_socket: [platform.max_launch_socket_path_bytes]u8 = undefined;
     const store_path = if (launched) |frame| switch (frame.store) {
         .sqlite_dir => |*directory| directory.slice(),
+        .mysql_url => frame.runtime_dir.slice(),
     } else parsed.get("store");
     const provider_endpoint = parsed.get("provider-endpoint");
     const provider_ca_file = parsed.get("provider-ca-file");
@@ -1741,10 +1755,16 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         bash_path,
         bash_timeout_ms,
         init.environ_map.get("HOME"),
-        if (launched) |frame| .{ .runtime_dir = frame.runtime_dir.slice(), .socket_path = frame.socketPath(&launch_socket), .stdin = 0, .paused = frame.paused, .mcp_servers = frame.mcpServerSlice(), .presets = frame.presets } else null,
+        if (launched) |frame| .{ .runtime_dir = frame.runtime_dir.slice(), .socket_path = frame.socketPath(&launch_socket), .stdin = 0, .paused = frame.paused, .mcp_servers = frame.mcpServerSlice(), .presets = frame.presets, .mysql_url = switch (frame.store) {
+            .mysql_url => |url| url,
+            .sqlite_dir => null,
+        } } else null,
     ) catch |err| {
         // A launched Host stops when its stdin closes; that is its clean end.
         if (launched != null and err == error.EffectAwareShutdown) return;
+        if (launched) |frame| if (frame.store == .mysql_url) {
+            if (launch_frame.mysqlRefusal(err)) |refusal| launch_frame.writeRefusal(io, refusal);
+        };
         if (launched != null and err == error.StoreAlreadyOwned)
             launch_frame.writeRefusal(io, .{ .code = .store_locked, .message = "another Host owns this Store" });
         if (launched != null and err == error.RuntimeDirectoryInUse)
@@ -3760,7 +3780,7 @@ const usage_text =
     \\    without asking by default. Enter Message text in the terminal editor.
     \\    Type /help in the conversation.
     \\  rui RESOURCE --help
-    \\    Resources: session, request, action, host, defaults, auth.
+    \\    Resources: session, request, action, host, defaults, auth, store.
     \\  rui RESOURCE COMMAND --help
     \\    Installed operation help owns exact options. Help needs no Host or credentials.
     \\  rui --version
@@ -4099,6 +4119,17 @@ test "Host transport classification requires Store lock evidence" {
     var writer = std.Io.Writer.fixed(&bytes);
     try caller_error.writeLine(&writer, code, .{ .resource = "session", .operation = "inspect", .store = "/private/store", .not_sent = false });
     try std.testing.expectEqualStrings("rui session inspect: The Host for this Store is shutting down and no longer accepts requests. Store: \"/private/store\". Next: Wait for it to exit, then start it again with rui host start --store PATH and retry. [host_stopping]\n", writer.buffered());
+}
+
+test "MySQL Host unavailability uses launch-frame repair without lock claims" {
+    const code = caller_error.of(error.MysqlHostUnavailable);
+    try std.testing.expectEqual(caller_error.Code.mysql_host_unavailable, code);
+    try std.testing.expectEqual(caller_error.Act.operate, caller_error.facts(code).act);
+    try std.testing.expectEqual(caller_exit.Status.environment, caller_exit.knownError(error.MysqlHostUnavailable));
+    var bytes: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try caller_error.writeLine(&writer, code, .{ .resource = "host", .operation = "start", .store = "0123456789abcdef0123456789abcdef", .not_sent = false });
+    try std.testing.expectEqualStrings("rui host start: The launched MySQL Host for this Store is unavailable. Store: \"0123456789abcdef0123456789abcdef\". Next: Check this Store's launch-frame Host and RUI_RUNTIME_DIR, then retry unchanged. [mysql_host_unavailable]\n", writer.buffered());
 }
 
 test "CLI boundary keeps Store and transport failures distinct" {

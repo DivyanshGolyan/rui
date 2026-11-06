@@ -540,6 +540,7 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         error.FileNotFound => .unavailable,
         else => .access_failure,
     };
+    if (paths.database.len == 0) return readHostInfo(io, &paths, deadline);
     return switch (lockState(io, &paths)) {
         .free => .unavailable,
         .held => readHostInfo(io, &paths, deadline),
@@ -552,6 +553,9 @@ pub const HostLockState = enum { free, held, failure };
 /// Probe without contacting the Host; a failed probe proves neither absence
 /// nor ownership and must not be treated as a held lock by diagnostic callers.
 pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
+    // MySQL owns its Store through GET_LOCK, not the runtime's socket lease.
+    // No filesystem result, including a missing runtime, proves its ownership.
+    if (platform.mysqlRuntimeDirectory(store_path) != null) return .failure;
     const paths = platform.resolveClientPaths(io, store_path) catch |err| return if (err == error.FileNotFound) .free else .failure;
     return lockState(io, &paths);
 }
@@ -579,6 +583,68 @@ fn lockState(io: std.Io, paths: *const platform.Paths) HostLockState {
         .AGAIN => .held,
         else => .failure,
     };
+}
+
+test "MySQL Host status bypasses filesystem locks and lock ownership stays unknown" {
+    const RuntimeHint = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    };
+    const io = std.testing.io;
+    const previous = if (std.c.getenv("RUI_RUNTIME_DIR")) |value|
+        try std.testing.allocator.dupeSentinel(u8, std.mem.span(value), 0)
+    else
+        null;
+    defer if (previous) |value| std.testing.allocator.free(value);
+    defer {
+        // Only remove a variable this test added; inherited entries must not
+        // shift the environment view Zig kept at process startup.
+        const result = if (previous) |value|
+            RuntimeHint.setenv("RUI_RUNTIME_DIR", value, 1)
+        else
+            RuntimeHint.unsetenv("RUI_RUNTIME_DIR");
+        if (result != 0) @panic("runtime hint restoration failed");
+    }
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    var runtime_buffer: [@import("socket_fixture.zig").max_path_bytes:0]u8 = undefined;
+    const runtime = try std.fmt.bufPrintSentinel(&runtime_buffer, "{s}/runtime", .{tmp.root[0..tmp.root_len]}, 0);
+    var socket_buffer: [platform.max_launch_socket_path_bytes]u8 = undefined;
+    const socket = try std.fmt.bufPrint(&socket_buffer, "{s}/rui.sock", .{runtime});
+    var lease: platform.StoreLease = undefined;
+    try lease.acquireMysql(io, runtime, socket);
+    var leased = true;
+    defer if (leased) lease.release();
+    try std.testing.expectEqual(@as(c_int, 0), RuntimeHint.setenv("RUI_RUNTIME_DIR", runtime, 1));
+    const store_id = "0123456789abcdef0123456789abcdef";
+    // The runtime's rui.lock reserves an endpoint, not MySQL's GET_LOCK.
+    try std.testing.expectEqual(HostLockState.failure, hostLockState(io, store_id));
+    try std.testing.expectEqual(std.meta.Tag(protocol_reply.HostStatus).owned_unavailable, std.meta.activeTag(hostStatusUntil(io, store_id, null)));
+    lease.release();
+    leased = false;
+    try tmp.dir.deleteTree(io, "runtime");
+    // A missing runtime directory also proves nothing about Store ownership.
+    try std.testing.expectEqual(HostLockState.failure, hostLockState(io, store_id));
+}
+
+test "SQLite Host lock evidence preserves free held and failed probes" {
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    try std.testing.expectEqual(HostLockState.free, hostLockState(io, root));
+    try std.testing.expect(hostStatusUntil(io, root, null) == .unavailable);
+    var lease = try platform.StoreLease.acquire(io, root);
+    var leased = true;
+    defer if (leased) lease.release();
+    try std.testing.expectEqual(HostLockState.held, hostLockState(io, root));
+    lease.release();
+    leased = false;
+    try std.testing.expectEqual(HostLockState.free, hostLockState(io, root));
+    try tmp.dir.deleteFile(io, "host.lock");
+    try tmp.dir.createDir(io, "host.lock", .fromMode(0o700));
+    try std.testing.expectEqual(HostLockState.failure, hostLockState(io, root));
+    try std.testing.expect(hostStatusUntil(io, root, null) == .access_failure);
 }
 
 fn readHostInfo(io: std.Io, paths: *const platform.Paths, deadline: ?i128) protocol_reply.HostStatus {
@@ -2450,6 +2516,23 @@ test "retry and generated recovery select captured mutations by kind" {
     try std.testing.expectError(error.FileNotFound, testResend(io, .{ .explicit = .{ .store = root, .record = stop_record, .kind = .session_stop } }));
     try std.testing.expectError(error.RequestBindingMismatch, testResend(io, .{ .explicit = .{ .store = root, .record = message_record, .kind = .permission_decision } }));
     try std.testing.expectError(error.FileNotFound, testResend(io, .{ .explicit = .{ .store = root, .record = message_record, .kind = .message } }));
+}
+
+test "peer Store address CLI validation accepts opaque ids and preserves SQLite paths" {
+    // session send calls this before capture or transport, including sends
+    // with an explicit destination in another Store.
+    const id = "0123456789abcdef0123456789abcdef";
+    for ([_][]const u8{ id, "/", "/store", "/store with spaces/é" }) |store|
+        try validatePeer(store, "k7m2qx", "handle");
+    for ([_][]const u8{
+        "",                "relative",                         "0123456789abcdef0123456789abcde",
+        id ++ "0",         "0123456789ABCDEF0123456789abcdef", "g123456789abcdef0123456789abcdef",
+        "/store/",         "/store//child",                    "/store/./child",
+        "/store/../child", "/store\n",                         "/store\x7f",
+    }) |store| try std.testing.expectError(error.InvalidRuiAddress, validatePeer(store, "k7m2qx", "handle"));
+    try std.testing.expectError(error.InvalidUtf8, validatePeer("/store\xff", "k7m2qx", "handle"));
+    try std.testing.expectError(error.InvalidRuiAddress, validatePeer(id, "INVALID", "handle"));
+    try std.testing.expectError(error.InvalidSenderHandle, validatePeer(id, "k7m2qx", &@as([protocol.max_sender_handle_bytes + 1]u8, @splat('x'))));
 }
 
 test "a peer capture preserves the full sender including self and leaves foreign Store admission to the Host" {

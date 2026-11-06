@@ -39,7 +39,9 @@ fn map() std.posix.MMapError!Stack {
     return std.posix.mmap(null, size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
 }
 
-fn install(stack: Stack) void {
+// Keep setup scratch out of resident thread frames and visible to the
+// production Host stack gate even when LLVM inlines every spawn wrapper.
+noinline fn install(stack: Stack) void {
     if (stack.len == 0) return;
     // A sized stack outside any signal handler.
     std.posix.sigaltstack(&.{ .sp = stack.ptr, .flags = 0, .size = @intCast(stack.len) }, null) catch |err|

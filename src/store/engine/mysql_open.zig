@@ -17,6 +17,7 @@ pub const State = struct {
     epoch: u64,
     commit_seq: u64,
     doublewrite: protocol.Bounded(32),
+    store_id: [2 * schema.store_id_bytes]u8,
 };
 const FactsRow = struct {
     version: protocol.Bounded(128),
@@ -68,6 +69,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     try conn.query("SELECT meta_key,meta_value FROM store_meta;" ++ comptime schema.catalogSql("DATABASE()"));
     const Meta = struct { key: protocol.Bounded(32), value: protocol.Bounded(protocol.max_store_bytes) };
     var meta_columns = try columns(Meta, conn);
+    var store_id: [2 * schema.store_id_bytes]u8 = undefined;
     var seen: packed struct { format: bool = false, wire_version: bool = false, selector: bool = false, store_id: bool = false } = .{};
     while (try nextRow(conn)) {
         var meta: Meta = undefined;
@@ -87,6 +89,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
             seen.selector = true;
         } else if (std.mem.eql(u8, key, "store_id")) {
             if (!schema.isStoreId(value)) return error.WrongStoreIdentity;
+            store_id = value[0..store_id.len].*;
             seen.store_id = true;
         } else return error.WrongStoreSchema;
     }
@@ -116,6 +119,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
             id[2 * i] = digits[byte >> 4];
             id[2 * i + 1] = digits[byte & 15];
         }
+        store_id = id;
         try insertMeta(batch, "store_id", &id);
     }
     try batch.writeAll("INSERT INTO store_owner(owner_key,epoch,commit_seq) SELECT 1,0,0 WHERE NOT EXISTS(SELECT 1 FROM store_owner WHERE owner_key=1);UPDATE store_owner SET epoch=epoch+1 WHERE owner_key=1;UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL;SELECT epoch,commit_seq FROM store_owner WHERE owner_key=1;COMMIT");
@@ -134,7 +138,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     // A missing acknowledgement is never reported as a successful open.
     expectOk(conn) catch return error.CommitOutcomeUnknown;
     if (!conn.isReady()) return error.ProtocolViolation;
-    return .{ .epoch = owner.epoch, .commit_seq = owner.commit_seq, .doublewrite = facts.doublewrite };
+    return .{ .epoch = owner.epoch, .commit_seq = owner.commit_seq, .doublewrite = facts.doublewrite, .store_id = store_id };
 }
 
 fn text(w: *std.Io.Writer, value: []const u8) !void {

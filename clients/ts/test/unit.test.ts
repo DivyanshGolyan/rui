@@ -158,8 +158,10 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 function launchTypeChecks() {
 	// @ts-expect-error The Host requires every non-defaulted launch field.
 	encodeFrame({ v: 1, store: "/s" });
-	// @ts-expect-error store_fenced is not a launch refusal in the Host enum.
 	new RuiStartError("store_fenced", "refused");
+	new RuiStartError("mysql_version_unsupported", "refused");
+	// @ts-expect-error Unknown codes are not launch refusals in the Host enum.
+	new RuiStartError("not_a_start_error", "refused");
 }
 
 test("activity search follows an empty budget page's next and preserves snippets", async () => {

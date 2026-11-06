@@ -616,8 +616,10 @@ pub fn checkSessionReportsForTesting(context: anytype) !void {
         }
     };
     inline for (comptime std.enums.values(store_testing.Engine)) |engine| {
-        var case: store_testing.Case = .{ .engine = engine };
-        try Fixture.run(&case, context);
+        if (engine != .mysql or try @import("mysql_testing.zig").available()) {
+            var case: store_testing.Case = .{ .engine = engine };
+            try Fixture.run(&case, context);
+        }
     }
 }
 
@@ -8105,6 +8107,58 @@ test "Full history takes a round per chunk" {
                 .sqlite, .mysql => 2,
             };
             try std.testing.expectEqual(content_rounds, storage.testing_content_work.content_rounds - content_before);
+        }
+    }.run);
+}
+
+test "Full revision queries bound the rows MySQL must drain after a streaming stop" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSessionAsk(&storage, "revision-drain");
+            for (2..9) |revision| {
+                var key: [32]u8 = undefined;
+                var change: protocol.ConfigureCommand = .{};
+                try change.key.set(try std.fmt.bufPrint(&key, "revision-drain-{d}", .{revision}));
+                try change.session.set(session.slice());
+                change.configuration.instructions = try testingBytesContent(&tmp, key[0..change.key.len], key[0..change.key.len]);
+                try std.testing.expect(storage.configure(&change, .{}) == .accepted);
+            }
+            const Rows = struct {
+                count: usize = 0,
+                valid: bool = true,
+                after: report_domain.full_revisions.Args,
+                decoded: report_domain.full_revisions.Row = undefined,
+
+                pub fn visit(rows: *@This(), row: *const report_domain.full_revisions.Row) bool {
+                    const next = report_domain.full_revisions.next(rows.after, row) orelse {
+                        rows.valid = false;
+                        return false;
+                    };
+                    rows.after = next;
+                    rows.count += 1;
+                    return true;
+                }
+            };
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var a: reads_domain.ReadAccess = .open(&entry);
+            defer a.deinit();
+            // Consume the SQL result, not just RevisionChunk's prefix: this
+            // includes every row the MySQL server must compute and send even
+            // when the renderer stops at the first owned nonempty content.
+            // Test both the initial query and a seek after a streaming stop.
+            for ([_]u64{ 0, 2 }) |after| {
+                var rows: Rows = .{ .after = .{ .session = session.slice(), .revision = after } };
+                a.readEach(report_domain.full_revisions, rows.after, 256 + 1, &rows);
+                try a.run();
+                try std.testing.expect(rows.valid);
+                try std.testing.expectEqual(@as(usize, 3), rows.count);
+            }
         }
     }.run);
 }

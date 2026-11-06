@@ -47,6 +47,9 @@ pub const Options = struct {
     address: Address,
     user: []const u8,
     password: []const u8,
+    /// Launch-owned credentials, erased immediately after login (or failure).
+    /// Other callers retain ownership and leave this null.
+    password_to_wipe: ?[]u8 = null,
     database: []const u8,
     deadline_ms: u32 = round_deadline_ms,
 };
@@ -105,6 +108,9 @@ pub const Connection = struct {
     /// error (`mysql.Event.format`) to `refusal` and returns
     /// `error.LoginRefused`. On any error the connection is closed.
     pub fn open(self: *Connection, options: Options, refusal: *std.Io.Writer) OpenError!void {
+        defer if (options.password_to_wipe) |bytes| std.crypto.secureZero(u8, bytes);
+        // Full authentication can send the clear password over TLS/a socket.
+        defer std.crypto.secureZero(u8, &self.handshake);
         self.fd = -1;
         self.deadline_ms = options.deadline_ms;
         self.lost = false;
@@ -862,4 +868,20 @@ test "the end of the stream mid-result loses the connection for every later call
     };
     try peer.join();
     try driven;
+}
+
+test "launch password is erased even when MySQL login options are refused" {
+    const connection = try std.testing.allocator.create(Connection);
+    defer std.testing.allocator.destroy(connection);
+    var password = "launch-only-password".*;
+    var refusal: std.Io.Writer.Discarding = .init(&.{});
+    try std.testing.expectError(error.InvalidOptions, connection.open(.{
+        .address = .{ .unix_socket = "/not-contacted" },
+        .user = "",
+        .password = &password,
+        .password_to_wipe = &password,
+        .database = "db",
+    }, &refusal.writer));
+    for (password) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    for (connection.handshake) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
