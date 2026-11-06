@@ -74,13 +74,18 @@ test("follow wakes for two local sends and makes no requests between them while 
 		const events = new EventEmitter();
 		let pages = 0;
 		let idlePages = 0;
+		let idle = false;
 		const exchange = rui.exchange.bind(rui);
 		rui.exchange = async (...args) => {
 			const reply = await exchange(...args);
 			if (args[0] === "/v1/activity-page") {
 				pages++;
 				const page = JSON.parse(reply.toString("utf8"));
-				if (page.items.length === 0 && page.queued.count === "0" && ["idle", "finished", "failed", "stopped"].includes(page.work.state.kind)) {
+				if (page.delta === "full") {
+					idle = page.queued.count === "0" && ["idle", "finished", "failed", "stopped"].includes(page.work.state.kind);
+				}
+				// An unchanged exhausted page has no rows and retains the last full work state.
+				if (idle && (page.delta === "not_modified" || page.items.length === 0)) {
 					idlePages++;
 					// Let the iterator consume the reply before the observation reaches the test.
 					setImmediate(() => events.emit("idle"));

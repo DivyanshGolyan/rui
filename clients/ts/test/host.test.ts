@@ -84,7 +84,7 @@ test("closing Rui rejects a parked follower and releases its watch without abort
 	});
 	// Only the idle page is synthetic; close still exercises the real Rui lifecycle.
 	t.mock.method(rui, "exchange", async () => Buffer.from(JSON.stringify({
-		items: [], more: false, end: "0", queued: { count: "0" }, work: { state: { kind: "idle" } },
+		delta: "full", since: null, items: [], more: false, end: "0", queued: { count: "0" }, work: { state: { kind: "idle" } },
 	})));
 	const feed = rui.getSession("s").listActivity({ follow: true, signal: controller.signal });
 	let failure: unknown;

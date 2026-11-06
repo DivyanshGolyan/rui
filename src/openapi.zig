@@ -183,6 +183,7 @@ pub const routes = [_]Route{
         .summary = "A Session's report, or one failed provider response.",
         .variants = &.{
             variant(protocol.inspect_session_request.current, .{}),
+            variant(protocol.inspect_session_request.current_since, .{}),
             variant(protocol.inspect_session_request.full, .{}),
             variant(protocol.inspect_session_request.failed_response, .{}),
         },
@@ -232,8 +233,8 @@ pub const routes = [_]Route{
         .path = "/v1/activity-page",
         .kind = .activity_page,
         .summary = "One page of a Session's activity feed, with its work and queue at the page's boundary.",
-        .variants = &.{variant(protocol.activity_page_request, .{})},
-        .reply = jsonReply(.{protocol.ActivityFacts.head ++ .{ListOf(protocol.ActivityItem)} ++ protocol.ActivityFacts.tail}),
+        .variants = &.{ variant(protocol.activity_page_request, .{}), variant(protocol.activity_page_since_request, .{}) },
+        .reply = jsonReply(.{ protocol.ActivityFacts.head ++ .{ListOf(protocol.ActivityItem)} ++ protocol.ActivityFacts.tail, protocol.ActivityFacts.unchanged }),
     },
     .{
         .path = "/v1/activity-content",
@@ -1388,6 +1389,27 @@ test "Command observation schema requires full metadata or a token-only repeat" 
         .{ prefix ++ ",\"observation\":{\"status\":\"absent\"}}", false },
         .{ prefix ++ ",\"delta\":\"not_modified\",\"since\":null}", false },
         .{ prefix ++ ",\"delta\":\"not_modified\",\"since\":\"token\",\"observation\":{\"status\":\"absent\"}}", false },
+    };
+    inline for (cases) |case| {
+        const value = try std.json.parseFromSliceLeaky(Value, allocator, case[0], .{});
+        try std.testing.expectEqual(case[1], conforms(schemas, schema, value));
+    }
+}
+
+test "Activity schema distinguishes full pages and token-only repeats" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var document: Document = .init(allocator);
+    const built = try document.build();
+    const schemas = built.object.get("components").?.object.get("schemas").?.object;
+    const schema = schemas.get("ActivityPageReply").?;
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\"";
+    const cases = .{
+        .{ prefix ++ ",\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42.k7m2qx\"}", true },
+        .{ prefix ++ ",\"delta\":\"not_modified\",\"since\":null}", false },
+        .{ prefix ++ ",\"delta\":\"not_modified\"}", false },
+        .{ prefix ++ ",\"delta\":\"full\",\"since\":null}", false },
     };
     inline for (cases) |case| {
         const value = try std.json.parseFromSliceLeaky(Value, allocator, case[0], .{});

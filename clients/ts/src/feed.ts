@@ -123,7 +123,7 @@ function entryOf(row: Row): { entry: FeedEntry; reference: Schemas["ActivityItem
 	return { entry, reference: reference && wanted ? reference : undefined };
 }
 
-function activityBody(store: string, session: string, request: { end: string | null; position: string; ordinal: string | null; kinds: readonly FeedKind[] }): string {
+function activityBody(store: string, session: string, request: { end: string | null; position: string; ordinal: string | null; kinds: readonly FeedKind[]; since: string | null }): string {
 	return JSON.stringify({
 		version: WIRE_VERSION,
 		kind: "activity_page",
@@ -135,6 +135,7 @@ function activityBody(store: string, session: string, request: { end: string | n
 		direction: "forward",
 		kinds: [...request.kinds],
 		limit: String(PAGE_ROWS),
+		...(request.since === null ? {} : { since: request.since }),
 	} satisfies Schemas["ActivityPageRequest"]);
 }
 
@@ -188,6 +189,8 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 	}
 	let pinnedEnd: string | null = null;
 	let wait = FIRST_POLL_MS;
+	let since: string | null = null;
+	let idle = false;
 	const { signal } = options;
 	const watcher = options.follow ? link.activity?.watch(session) : undefined;
 	try {
@@ -195,39 +198,49 @@ export async function* listActivity(link: Link, session: string, options: ListAc
 			// Capture before I/O so a write racing an idle reply cannot be lost.
 			const revision = watcher?.revision ?? 0;
 			const page = JSON.parse(
-				(await link.exchange("/v1/activity-page", (store) => activityBody(store, session, { end: pinnedEnd, position, ordinal, kinds }))).toString("utf8"),
+				(await link.exchange("/v1/activity-page", (store) => activityBody(store, session, { end: pinnedEnd, position, ordinal, kinds, since }))).toString("utf8"),
 			) as Schemas["ActivityPageReply"];
-			for (const row of page.items) {
-				// Cancellation is honoured before each entry, and again after any read that took time.
-				if (signal?.aborted) return;
-				const { entry, reference } = entryOf(row);
-				if (reference && "content" in entry) {
-					if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
-						entry.truncated = true;
-					} else {
-						const prefix = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, row), undefined, { prefix: INLINE_TEXT_BYTES });
-						entry.text = prefix.toString("utf8");
+			let receivedItems = false;
+			if (page.delta === "not_modified") {
+				since = page.since;
+			} else {
+				for (const row of page.items) {
+					// Cancellation is honoured before each entry, and again after any read that took time.
+					if (signal?.aborted) return;
+					const { entry, reference } = entryOf(row);
+					if (reference && "content" in entry) {
+						if (Number(reference.bytes) > INLINE_TEXT_BYTES) {
+							entry.truncated = true;
+						} else {
+							const prefix = await link.exchange("/v1/activity-content", (store) => contentBody(store, session, row), undefined, { prefix: INLINE_TEXT_BYTES });
+							entry.text = prefix.toString("utf8");
+						}
 					}
+					if (signal?.aborted) return;
+					yield entry;
+					position = row.position;
+					ordinal = row.ordinal;
 				}
-				if (signal?.aborted) return;
-				yield entry;
-				position = row.position;
-				ordinal = row.ordinal;
+				if (page.more) {
+					// A bounded read keeps the end the first page named; a following one asks again.
+					pinnedEnd = options.follow ? null : page.end;
+					// A Session token cannot stand in for rows not yet consumed.
+					since = null;
+					wait = FIRST_POLL_MS;
+					continue;
+				}
+				if (!options.follow) return;
+				pinnedEnd = null;
+				// Exhausted: everything the filter matches up to the end has been read, so the next poll starts at the end
+				// rather than rescanning the rows between the last match and it.
+				position = page.end;
+				ordinal = null;
+				since = page.since;
+				idle = page.queued.count === "0" && dormant(page.work.state.kind);
+				receivedItems = page.items.length > 0;
 			}
-			if (page.more) {
-				// A bounded read keeps the end the first page named; a following one asks again.
-				pinnedEnd = options.follow ? null : page.end;
-				wait = FIRST_POLL_MS;
-				continue;
-			}
-			if (!options.follow) return;
-			pinnedEnd = null;
-			// Exhausted: everything the filter matches up to the end has been read, so the next poll starts at the end
-			// rather than rescanning the rows between the last match and it.
-			position = page.end;
-			ordinal = null;
-			if (page.items.length > 0) wait = FIRST_POLL_MS;
-			else if (page.queued.count === "0" && dormant(page.work.state.kind)) {
+			if (receivedItems) wait = FIRST_POLL_MS;
+			else if (idle) {
 				await (watcher ? watcher.wait(revision, signal) : untilAbort(signal));
 				wait = FIRST_POLL_MS;
 			} else {

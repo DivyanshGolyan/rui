@@ -102,7 +102,7 @@ test("feed camelCases only row keys, preserving nested wire values and content r
 		{ position: "2", ordinal: "0", at: "1", value: { hosted_call: { presentation } } },
 		{ position: "3", ordinal: "0", at: "1", value: { approval_requested: { session: "ch1ld1", action: "8", operation: "9", call_ordinal: "10" } } },
 	];
-	const link: Link = { exchange: async (path) => path === "/v1/activity-content" ? Buffer.from("ok") : Buffer.from(JSON.stringify({ items: rows, more: false, end: "3" })) };
+	const link: Link = { exchange: async (path) => path === "/v1/activity-content" ? Buffer.from("ok") : Buffer.from(JSON.stringify({ delta: "full", since: null, items: rows, more: false, end: "3" })) };
 	const entries = [];
 	for await (const entry of listActivity(link, "s")) entries.push(entry);
 	assert.ok(entries[0]?.kind === "tool_result");
@@ -143,7 +143,7 @@ function fakeSession(state: Schemas["WorkStateJson"]["kind"] = "idle", queued = 
 			pages++;
 			const items = deliver ? [{ position: String(pages), ordinal: "0", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }] : [];
 			deliver = false;
-			return Buffer.from(JSON.stringify({ items, more: false, end: String(pages), queued: { count: queued }, work: { state: { kind: state } } }));
+			return Buffer.from(JSON.stringify({ delta: "full", since: null, items, more: false, end: String(pages), queued: { count: queued }, work: { state: { kind: state } } }));
 		},
 	};
 	return { link, pages: () => pages };
@@ -334,3 +334,76 @@ test("releasing a failed watch again does not unregister a new follower after re
 		fresh.close();
 	}
 });
+
+test("follow retains its exhausted cursor and backoff across not_modified, and clears excluded tokens", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const requests: Schemas["ActivityPageRequest"][] = [];
+	const replies = [
+		{ delta: "full", since: "token-a", items: [], more: false, end: "9", queued: { count: "0" }, work: { state: { kind: "working" } } },
+		{ version: "9", type: "activity_page", delta: "not_modified", since: "token-b" },
+		{ delta: "full", since: null, items: [], more: false, end: "12", queued: { count: "0" }, work: { state: { kind: "working" } } },
+		{ delta: "full", since: "token-c", items: [{ position: "13", ordinal: "2", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }], more: false, end: "14", queued: { count: "0" }, work: { state: { kind: "working" } } },
+	];
+	const link: Link = { exchange: async (_path, body) => {
+		requests.push(JSON.parse(body("store")) as Schemas["ActivityPageRequest"]);
+		assert.ok(replies.length > 0, "unexpected extra poll");
+		return Buffer.from(JSON.stringify(replies.shift()));
+	} };
+	const controller = new AbortController();
+	const feed = listActivity(link, "s", { follow: true, signal: controller.signal });
+	const pending = feed.next();
+	try {
+		await turn();
+		assert.equal(requests.length, 1);
+		for (const [index, delay] of [250, 500, 1_000].entries()) {
+			t.mock.timers.tick(delay - 1);
+			await turn();
+			assert.equal(requests.length, index + 1);
+			t.mock.timers.tick(1);
+			await turn();
+			assert.equal(requests.length, index + 2);
+		}
+		const result = await pending;
+		assert.equal(result.value?.position, "13");
+		assert.equal(result.value?.ordinal, "2");
+		assert.deepEqual(requests.map((request) => ({ position: request.position, ordinal: request.ordinal, end: request.end, since: "since" in request ? request.since : undefined })), [
+			{ position: "0", ordinal: null, end: null, since: undefined },
+			{ position: "9", ordinal: null, end: null, since: "token-a" },
+			{ position: "9", ordinal: null, end: null, since: "token-b" },
+			{ position: "12", ordinal: null, end: null, since: undefined },
+		]);
+	} finally {
+		controller.abort();
+		await pending;
+		await feed.return(undefined);
+	}
+});
+
+for (const follow of [false, true]) {
+	test(`${follow ? "following" : "bounded"} pagination never reuses a token while pages remain unread`, async () => {
+		const requests: Schemas["ActivityPageRequest"][] = [];
+		const controller = new AbortController();
+		const link: Link = { exchange: async (_path, body) => {
+			requests.push(JSON.parse(body("store")) as Schemas["ActivityPageRequest"]);
+			const first = requests.length === 1;
+			const position = first ? "2" : "3";
+			return Buffer.from(JSON.stringify({ delta: "full", since: "token", more: first, end: "9",
+				items: [{ position, ordinal: "1", at: "1", value: { stop: { key: "k", turn: null, cutoff: "1", completion: "completed" } } }],
+				queued: { count: "0" }, work: { state: { kind: "working" } },
+			}));
+		} };
+		const feed = listActivity(link, "s", { follow, signal: controller.signal });
+		try {
+			assert.equal((await feed.next()).value?.position, "2");
+			assert.equal((await feed.next()).value?.position, "3");
+			assert.equal(requests.length, 2);
+			assert.deepEqual(requests.map((request) => ({ position: request.position, ordinal: request.ordinal, end: request.end, since: "since" in request ? request.since : undefined })), [
+				{ position: "0", ordinal: null, end: null, since: undefined },
+				{ position: "2", ordinal: "1", end: follow ? null : "9", since: undefined },
+			]);
+		} finally {
+			controller.abort();
+			await feed.return(undefined);
+		}
+	});
+}

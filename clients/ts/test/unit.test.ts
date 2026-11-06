@@ -76,7 +76,7 @@ test("environment entries the Host would refuse are left out, never split", () =
 
 function pageOf(rows: number): Buffer {
 	const items = Array.from({ length: rows }, (_, index) => ({ position: String(index + 1), ordinal: "0", at: "t", value: { stop: {} } }));
-	return Buffer.from(JSON.stringify({ items, more: false, end: String(rows) }));
+	return Buffer.from(JSON.stringify({ delta: "full", since: null, items, more: false, end: String(rows) }));
 }
 
 test("an aborted feed stops between the entries of one page", async () => {
@@ -105,7 +105,7 @@ test("the feed asks for every kind by default and keeps approval requests when a
 	const link: Link = {
 		exchange: async (_path, body) => {
 			bodies.push(body("store"));
-			return Buffer.from(JSON.stringify({ items: [row], more: false, end: "1" }));
+			return Buffer.from(JSON.stringify({ delta: "full", since: null, items: [row], more: false, end: "1" }));
 		},
 	};
 	assert.equal((await listActivity(link, "s").next()).value?.kind, "approval_requested");
@@ -156,7 +156,7 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 		exchange: async (_path, build) => {
 			bodies.push(build("/s"));
 			if (bodies.length === 2) controller.abort();
-			return Buffer.from(JSON.stringify({ items: [], more: false, end: "9", queued: { count: "0" }, work: { state: { kind: "working" } } }));
+			return Buffer.from(JSON.stringify({ delta: "full", since: null, items: [], more: false, end: "9", queued: { count: "0" }, work: { state: { kind: "working" } } }));
 		},
 	};
 	for await (const entry of listActivity(link, "s", { follow: true, kinds: ["received"], signal: controller.signal })) assert.fail(String(entry));
@@ -234,7 +234,7 @@ test("approval and ending feed entries expose the child sessionId", async () => 
 		{ approval_requested: { session: "ch1ld1", action: "7", operation: "2", call_ordinal: "0" } },
 		{ turn_ended: { session: "ch1ld1", turn: "3", operation: "2", ending: "stopped", code: "cancelled", content: null } },
 	]) {
-		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ items: [{ position: "1", ordinal: "0", at: "1", value }], more: false, end: "1" })) };
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ delta: "full", since: null, items: [{ position: "1", ordinal: "0", at: "1", value }], more: false, end: "1" })) };
 		const entry = (await listActivity(link, "p4rent").next()).value;
 		assert.ok(entry && (entry.kind === "approval_requested" || entry.kind === "turn_ended"));
 		const sessionId: string = entry.sessionId;

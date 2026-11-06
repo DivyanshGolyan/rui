@@ -548,6 +548,21 @@ pub fn testingSessionReportWithProfile(
     limit: u64,
     profile: protocol.ReportProfile,
 ) ![]u8 {
+    return testingSessionReportWithExecution(storage, tmp, session_ref, limit, profile, .{
+        .dispatch_fenced = false,
+        .custody_occupied = 0,
+        .scratch_used_bytes = 0,
+    });
+}
+
+fn testingSessionReportWithExecution(
+    storage: *Store,
+    tmp: *std.testing.TmpDir,
+    session_ref: []const u8,
+    limit: u64,
+    profile: protocol.ReportProfile,
+    execution: report_domain.SessionReportExecution,
+) ![]u8 {
     var root: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(std.testing.io, &root);
     var used = std.atomic.Value(u64).init(0);
@@ -556,7 +571,7 @@ pub fn testingSessionReportWithProfile(
         .scratch_budget = .{ .used = &used, .limit = limit },
         .request_number = 1,
         .profile = profile,
-        .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 },
+        .execution = execution,
     });
     const bytes = try std.testing.allocator.alloc(u8, @intCast(report.length));
     errdefer std.testing.allocator.free(bytes);
@@ -1547,7 +1562,12 @@ test "Current excludes history while Full exposes exact closed Session inventory
             const current = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .current);
             defer std.testing.allocator.free(current);
             try std.testing.expect(std.mem.indexOf(u8, current, "\"profile\":\"current\"") != null);
-            try std.testing.expect(std.mem.indexOf(u8, current, "\"full\"") == null);
+            var parsed_current = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, current, .{});
+            defer parsed_current.deinit();
+            // The delta value is also named "full"; history is the object key.
+            try std.testing.expect(parsed_current.value.object.get("full") == null);
+            try std.testing.expectEqualStrings("full", parsed_current.value.object.get("delta").?.string);
+            try std.testing.expect(parsed_current.value.object.get("since").? == .null);
 
             const text = try std.testing.allocator.alloc(u8, 64 * 1024);
             defer std.testing.allocator.free(text);
@@ -2024,6 +2044,10 @@ pub fn expectOneWork(storage: *Store, tmp: *std.testing.TmpDir, session: []const
     var request: protocol.ActivityPage = .{};
     try request.session.set(session);
     const page = try store_core.activityPageForTesting(storage, request);
+    // Both an upcoming retry and its elapsed/pending projection are unsafe
+    // for commit-only tokens, including when the wall clock moves backward.
+    if (page.work.work.state == .retrying or page.work.work.state == .pending)
+        try std.testing.expect(page.token == null);
     var paged: [protocol.WorkStateJson.max_json_bytes]u8 = undefined;
     var paged_writer: std.Io.Writer = .fixed(&paged);
     try (protocol.WorkStateJson{ .state = page.work.work.state }).writeJson(&paged_writer);
@@ -11485,6 +11509,128 @@ test "model fact effort masks are format-defined on every engine" {
             try std.testing.expectError(constraint_error, store_testing.exec(&storage, insert, .{ "above", @as(i64, 64) }));
             try store_testing.exec(&storage, insert, .{ "empty", @as(i64, 0) });
             try store_testing.exec(&storage, insert, .{ "full", @as(i64, 63) });
+        }
+    }.run);
+}
+
+test "activity since sibling commit preserves end and own commit returns new items" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("activity-token-parent", "", workspace, "model-a");
+            const parent = storage.configure(&create, .{}).accepted.session;
+            var request: protocol.ActivityPage = .{};
+            try request.session.set(parent.slice());
+            var page: protocol.ActivityFacts = undefined;
+            try storage.activityPage(&request, &page);
+            try std.testing.expect(!page.not_modified);
+            const token = page.token.?;
+            const end = page.end;
+            request.position = end;
+            request.since = token;
+            try storage.activityPage(&request, &page);
+            try std.testing.expect(page.not_modified);
+            try std.testing.expectEqualDeep(token, page.token.?);
+            // The unchanged answer deliberately leaves the caller's page intact.
+            try std.testing.expectEqual(end, page.end);
+            // Bounded and backward traversals must not reuse a follow hint.
+            request.end = end;
+            try storage.activityPage(&request, &page);
+            try std.testing.expect(!page.not_modified);
+            try std.testing.expect(page.token == null);
+            request.end = null;
+            request.direction = .backward;
+            try storage.activityPage(&request, &page);
+            try std.testing.expect(!page.not_modified);
+            try std.testing.expect(page.token == null);
+            request.direction = .forward;
+            var sibling = try completeConfiguration("activity-token-sibling", "", workspace, "model-a");
+            const sibling_session = storage.configure(&sibling, .{}).accepted.session;
+            try storage.activityPage(&request, &page);
+            try std.testing.expect(page.not_modified);
+            try std.testing.expectEqualDeep(token.at(storage.commit_generation.load(.acquire)), page.token.?);
+            try std.testing.expectEqual(end, page.end);
+            var update = try completeConfiguration("activity-token-update", parent.slice(), workspace, "model-a");
+            update.configuration.label.state = .value;
+            try update.configuration.label.value.set("Own change");
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try storage.activityPage(&request, &page);
+            try std.testing.expect(!page.not_modified);
+            try std.testing.expect(page.count > 0);
+            try std.testing.expectEqualDeep(token.at(storage.commit_generation.load(.acquire)), page.token.?);
+            // A second changed field gives this fixture two actual public rows.
+            var second_update = try completeConfiguration("activity-token-second-update", parent.slice(), workspace, "model-a");
+            second_update.configuration.label.state = .value;
+            try second_update.configuration.label.value.set("Second own change");
+            try std.testing.expect(storage.configure(&second_update, .{}) == .accepted);
+            // A page with unread lookahead cannot issue a follow token.
+            request.position = 0;
+            request.limit = 1;
+            request.since = null;
+            try storage.activityPage(&request, &page);
+            try std.testing.expect(page.more);
+            try std.testing.expect(page.token == null);
+            request.position = end;
+            request.limit = protocol.ActivityPage.items;
+            request.since = token;
+            try submitTestMessage(&storage, &tmp, "activity-token-message", "activity-token-message", parent.slice(), "new item");
+            try storage.activityPage(&request, &page);
+            try std.testing.expect(!page.not_modified);
+            try std.testing.expect(page.end > end);
+            try std.testing.expect(page.count > 0);
+            // A queued message is pending: it cannot grant a token because
+            // pending also represents a retry whose deadline has elapsed.
+            try std.testing.expect(page.token == null);
+            var found = false;
+            for (page.items[0..page.count]) |*item| {
+                found = found or item.value == .admission;
+            }
+            try std.testing.expect(found);
+            // A token for the sibling must never suppress this Session's read.
+            request.since.?.session = sibling_session.slice()[0..protocol.session_id_bytes].*;
+            try storage.activityPage(&request, &page);
+            try std.testing.expect(!page.not_modified);
+        }
+    }.run);
+}
+
+test "Current remains full when execution changes without a Session commit" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("current-uncacheable", "", workspace, "model-a");
+            const session = storage.configure(&create, .{}).accepted.session;
+            const generation = storage.commit_generation.load(.acquire);
+            for ([_]usize{ 0, 1 }) |occupied| {
+                const bytes = try testingSessionReportWithExecution(&storage, &tmp, session.slice(), 1024 * 1024, .current, .{
+                    .dispatch_fenced = occupied != 0,
+                    .custody_occupied = occupied,
+                    .scratch_used_bytes = occupied * 4096,
+                });
+                defer std.testing.allocator.free(bytes);
+                const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+                defer parsed.deinit();
+                const object = parsed.value.object;
+                try std.testing.expectEqualStrings("full", object.get("delta").?.string);
+                try std.testing.expect(object.get("since").? == .null);
+                const execution = object.get("execution").?.object;
+                try std.testing.expectEqual(occupied != 0, execution.get("dispatch_fenced").?.bool);
+                try std.testing.expectEqualStrings(if (occupied == 0) "0" else "1", execution.get("custody_occupied").?.string);
+                try std.testing.expectEqualStrings(if (occupied == 0) "0" else "4096", execution.get("scratch_used_bytes").?.string);
+                try std.testing.expectEqual(generation, storage.commit_generation.load(.acquire));
+            }
         }
     }.run);
 }

@@ -44,7 +44,7 @@ type CurrentReport = Extract<components["schemas"]["InspectSessionReply"], { pro
 
 function report(work: CurrentReport["work"], parent: string | null = null): CurrentReport {
 	return {
-		version: WIRE_VERSION, type: "session_report", profile: "current",
+		version: WIRE_VERSION, type: "session_report", delta: "full", since: null, profile: "current",
 		session: {
 			reference: "abc123", parent, workspace: "/work", provider: "openai", model: "model-a", revision: "1",
 			tools: ["bash"], loaded_tools: ["bash"], permission_mode: "ask", label: "Review", created_at: "1",

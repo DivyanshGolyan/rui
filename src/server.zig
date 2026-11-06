@@ -1750,7 +1750,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
                 },
             };
-            try fd.json(200, protocol.max_activity_page_response_bytes, renderActivityPage, .{page});
+            try fd.json(200, activityPageBytes(page), renderActivityPage, .{page});
         },
         .activity_search => |*command| {
             const page = try createUnfilled(host.allocator, protocol.ActivitySearchFacts);
@@ -1795,6 +1795,10 @@ fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!voi
 fn createUnfilled(allocator: std.mem.Allocator, comptime T: type) error{OutOfMemory}!*T {
     const bytes = allocator.rawAlloc(@sizeOf(T), .of(T), @returnAddress()) orelse return error.OutOfMemory;
     return @ptrCast(@alignCast(bytes));
+}
+
+fn activityPageBytes(page: *const protocol.ActivityFacts) usize {
+    return if (page.not_modified) protocol.shapeBytes(protocol.ActivityFacts.unchanged) else protocol.max_activity_page_response_bytes;
 }
 
 fn renderActivityPage(out: protocol.JsonOut, page: *const protocol.ActivityFacts) error{BufferTooLarge}!void {
@@ -3019,6 +3023,44 @@ test "message observation renders Host state binding live work and persistent re
     try Expect.rendered(&observation, accepted ++ "cancelled\"" ++ input ++ queue ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}");
 }
 
+test "activity page both unchanged tiers render byte exactly with independent reservations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    storage.instance = @splat(0xab);
+    var configure = try store_module.testingCompleteConfiguration("page-tier-create", "", root, "model-a");
+    const session = storage.configure(&configure, .{}).accepted.session;
+    var request: protocol.ActivityPage = .{};
+    try request.session.set(session.slice());
+    const page = try std.testing.allocator.create(protocol.ActivityFacts);
+    defer std.testing.allocator.destroy(page);
+    try storage.activityPage(&request, page);
+    try std.testing.expect(!page.not_modified);
+    try std.testing.expectEqual(protocol.max_activity_page_response_bytes, activityPageBytes(page));
+    request.position = page.end;
+    request.since = page.token.?;
+    for (0..2) |tier| {
+        if (tier == 1) {
+            try configure.key.set("page-tier-sibling");
+            try std.testing.expect(storage.configure(&configure, .{}) == .accepted);
+        }
+        try storage.activityPage(&request, page);
+        try std.testing.expect(page.not_modified);
+        var bytes: [512]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        try renderActivityPage(.{ .writer = &writer }, page);
+        var expected: [256]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.{d}.{s}\"}}", .{ storage.commitGeneration(), session.slice() }), writer.buffered());
+        try std.testing.expectEqual(protocol.shapeBytes(protocol.ActivityFacts.unchanged), activityPageBytes(page));
+        try std.testing.expect(activityPageBytes(page) < protocol.max_activity_page_response_bytes);
+    }
+}
+
 test "command observation full and both unchanged tiers render byte exactly with independent reservations" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3479,7 +3521,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     facts.work.workspace.len = protocol.max_workspace_bytes;
     var page_buffer: [protocol.max_activity_page_response_bytes]u8 = undefined;
     var page_writer = std.Io.Writer.fixed(&page_buffer);
-    try facts.writeJson(&page_writer);
+    try facts.writeFullJson(&page_writer, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)));
     try std.testing.expectEqual(protocol.max_activity_page_response_bytes, page_writer.end);
 }
 
