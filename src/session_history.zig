@@ -17,7 +17,7 @@ pub const Prepared = struct {
     /// The transcript matches live presentation; details keep exact tool output.
     pub const Mode = enum { transcript, details };
 
-    pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, mode: Mode, colour: bool) !void {
+    pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, mode: Mode, colour: bool, home: []const u8) !void {
         var window: [protocol.content_window_bytes]u8 = undefined;
         var compact = false;
         for (0..self.page.count) |reverse| {
@@ -87,7 +87,7 @@ pub const Prepared = struct {
                 .assistant => {
                     try sink.feed("\n");
                     var answer: View.Answer(@TypeOf(sink)) = undefined;
-                    answer.init(sink);
+                    answer.init(sink, home);
                     try staged.read(&answer);
                     try answer.finish();
                 },
@@ -205,7 +205,7 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
     prepared.page.items[1] = .{ .position = 3, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = 8193, .digest = @splat(0) } };
     prepared.page.items[2] = .{ .position = 2, .ordinal = 0, .kind = .user, .content = .{ .bytes = 9000, .digest = @splat(0) }, .admitted_at = 1_800_000_000 };
     var sink: Sink = .{};
-    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)\x1b[2J\né\u{202e}", "09azvw", &sink, .details, false);
+    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)\x1b[2J\né\u{202e}", "09azvw", &sink, .details, false, "");
     try std.testing.expectEqualSlices(u64, &.{2}, sink.positions[0..sink.notes]);
     // Independent UTF-8 byte-to-hex oracle for Store controls and directional text.
     const identity = " --store-hex 2f746d702f6127242866616c7365291b5b324a0ac3a9e280ae --session 09azvw";
@@ -250,7 +250,7 @@ test "history body limit preserves contextual tool outcomes" {
             if (size == 8192) try scratch.writePositionalAll(io, body, 0);
             prepared.offsets[0] = if (size == 8192) 0 else std.math.maxInt(u64);
             var sink: Sink = .{};
-            try prepared.render(io, scratch, "store", "09azvw", &sink, .details, false);
+            try prepared.render(io, scratch, "store", "09azvw", &sink, .details, false, "");
             const output = sink.bytes[0..sink.length];
             try std.testing.expect(std.mem.startsWith(u8, output, case.heading));
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output, case.heading));
@@ -286,7 +286,7 @@ test "reopened transcript keeps useful stdout when stderr is blank" {
     prepared.page.items[0] = .{ .position = 7, .ordinal = 2, .kind = .tool_result, .content = .{ .bytes = result.len, .digest = @splat(0) }, .presentation = .{ .description = description, .code = .failed, .publication_position = 7 } };
     prepared.offsets[0] = 0;
     var sink: Sink = .{};
-    try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false);
+    try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "");
     try std.testing.expectEqualStrings("\n! Run check — Failed (exit 7)\n  useful diagnostic B\n", sink.bytes[0..sink.length]);
 }
 
@@ -467,4 +467,28 @@ test "history preparation binds wire and staged bytes before exposure" {
             }), err);
         }
     }
+}
+
+test "history assistant local paths use the borrowed HOME and leave punctuation outside the link" {
+    const Sink = struct {
+        bytes: [1024]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(io, "history", .{ .read = true });
+    defer scratch.close(io);
+    const text = "The report is at ~/report.md;";
+    try scratch.writePositionalAll(io, text, 0);
+    var prepared: Prepared = .{ .page = .{ .end = 1, .count = 1, .more = false } };
+    prepared.page.items[0] = .{ .position = 1, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = text.len, .digest = protocol.contentDigest(text) } };
+    prepared.offsets[0] = 0;
+    var sink: Sink = .{};
+    try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "/home/a b");
+    try std.testing.expectEqualStrings("\nThe report is at \x1b]8;;file:///home/a%20b/report.md\x1b\\\x1b[4m~/report.md\x1b[0m\x1b]8;;\x1b\\;\n", sink.bytes[0..sink.length]);
 }

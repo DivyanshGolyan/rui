@@ -1043,10 +1043,10 @@ pub fn Answer(comptime Sink: type) type {
         writer: std.Io.Writer,
         renderer: Renderer,
         failure: ?anyerror = null,
-        pub fn init(self: *@This(), sink: Sink) void {
+        pub fn init(self: *@This(), sink: Sink, home: []const u8) void {
             self.* = .{ .sink = sink, .writer = undefined, .renderer = undefined };
             self.writer = .{ .vtable = &.{ .drain = drain }, .buffer = &self.storage };
-            self.renderer = .{ .out = &self.writer };
+            self.renderer = .{ .out = &self.writer, .home = home };
         }
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
             if (self.failure) |err| return err;
@@ -1579,7 +1579,7 @@ test "a waiting Message shows at its Admission only when nothing holds it and no
 /// sink learns each one as it shows (`drew`).
 /// `provider` is the Session's, for the words of a failed Turn; null until
 /// its settings are read.
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, provider: ?protocol.Provider, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking) !queued_line.Drawn {
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, provider: ?protocol.Provider, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking, home: []const u8) !queued_line.Drawn {
     const historical = page.facts.direction == .backward;
     var from = taking.from;
     var drawn = taking.drawn;
@@ -1618,7 +1618,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 compact_tools.* = false;
                 try sink.feed("\n");
                 var answer: Answer(@TypeOf(sink)) = undefined;
-                answer.init(sink);
+                answer.init(sink, home);
                 try content(requests, store, session, item, assistant.content, &answer);
                 try answer.finish();
                 try sink.feed("\n");

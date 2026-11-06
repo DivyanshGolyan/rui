@@ -3684,7 +3684,7 @@ fn showResult(init: std.process.Init, requester: client.Requests, saved: *const 
     var read_buffer: client.ReplyBuffer = .{};
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
-    var renderer: AnswerRenderer = .{ .out = &output.interface };
+    var renderer: AnswerRenderer = .{ .out = &output.interface, .home = init.environ_map.get("HOME") orelse "" };
     const answer = blk: {
         // Abandon retained text and pending writer bytes on failure. A renderer
         // transition may be buffered, so tracked style cannot prove terminal state.
