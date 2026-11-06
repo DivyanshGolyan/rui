@@ -5,9 +5,12 @@ once, with its reason, instead of in a `sys.platform` branch at the call site.
 tests/ci/platform_boundary.py lets no other fixture read the platform, and a
 PR that changes this file runs Mac Selected.
 """
+import ctypes
 import os
 import pathlib
 import platform
+import socket
+import struct
 import subprocess
 import sys
 import termios
@@ -126,3 +129,40 @@ def processes_executing(executable):
     # warnings off (-w), only a failure writes to stderr.
     assert mapped.returncode == 0 or (mapped.returncode == 1 and not mapped.stderr), mapped
     return {int(field[1:]) for field in mapped.stdout.splitlines() if field.startswith("p")}
+
+
+def native_release_target():
+    """The native release asset spelling, or None for unsupported machines."""
+    return {("Darwin", "arm64"): "darwin-arm64",
+            ("Linux", "x86_64"): "linux-x86_64"}.get((_module.SYSTEM, platform.machine()))
+
+
+def socket_peer_pid(connection):
+    """Kernel-owned PID of this connected local stream's server process."""
+    if _module.DARWIN:
+        return connection.getsockopt(0, 2)  # SOL_LOCAL, LOCAL_PEERPID
+    credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+    pid, uid, _ = struct.unpack("3i", credentials)
+    assert uid == os.geteuid(), "Unix peer belongs to a different user"
+    return pid
+
+
+def process_executable(pid):
+    """Executed image of one live process, independent of its argv spelling."""
+    if _module.PROC_FS:
+        return pathlib.Path(f"/proc/{pid}/exe").resolve(strict=True)
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    buffer = ctypes.create_string_buffer(4096)
+    count = library.proc_pidpath(pid, buffer, len(buffer))
+    assert count > 0, "native process path unavailable"
+    return pathlib.Path(os.fsdecode(buffer.value))
+
+
+def process_environment(pid, *, env):
+    """Private fixture launch evidence. Callers must never log these bytes."""
+    if _module.PROC_FS:
+        return pathlib.Path(f"/proc/{pid}/environ").read_bytes().decode()
+    # BSD ps owns Darwin's process argument/environment observation. Only
+    # fixture processes with wholly synthetic private values call this helper.
+    return subprocess.check_output(["ps", "eww", "-p", str(pid), "-o", "command="],
+                                   env=env, text=True, timeout=5)

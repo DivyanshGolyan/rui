@@ -66,6 +66,39 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_upgrade_owners_select_standalone_fixture_in_both_phases(self):
+        paths = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
+                 "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
+                 "src/host_identity.c", "src/UpgradePanel.zig", "src/host_launch.c",
+                 "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/slash_commands.zig",
+                 "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
+                 "tests/integration/upgrade_integration.py", "tests/ci/test_upgrade_fixture.py", "release/publish.sh", "release/install.sh",
+                 "install.sh", "build.zig")
+        for path in paths:
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    result = select([path], phase, AVAILABLE)
+                    self.assertIn("upgrade-integration", result["targets"])
+                    if phase == "review":
+                        self.assertIn("upgrade-integration", result["native_targets"])
+
+    def test_installer_owners_select_standalone_fixture_in_both_phases(self):
+        paths = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
+                 "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py", "tests/ci/release.py",
+                 "tests/ci/release_numbers.py", "tests/ci/qualification.py", "src/Installation.zig", "src/installation_path.zig",
+                 "src/release_candidate.zig", "src/cli.zig", "src/cli_args.zig", "src/store/schema.zig",
+                 "src/fetch_dependencies.sh", "release/publish.sh", "release/install.sh",
+                 "install.sh", "build.zig", "build.zig.zon")
+        for path in paths:
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    result = select([path], phase, AVAILABLE)
+                    self.assertIn("installer-integration", result["targets"])
+                    if phase == "review":
+                        self.assertIn("installer-integration", result["native_targets"])
+                    else:
+                        self.assertEqual(result["native_targets"], [])
+
     def test_request_wait_selects_its_native_oracle_and_portable_core(self):
         for path in ("src/client.zig", "src/cli_args.zig", "src/server.zig",
                      "src/TestObservation.zig", "tests/integration/request_wait_integration.py",
@@ -223,11 +256,11 @@ class SelectionTest(unittest.TestCase):
         pty = ["canonical-failure-integration", "terminal-restoration-integration"]
         for path, expected in (
                 # src/tests.zig, not the logic root, runs these owners' unit tests.
-                ("src/SessionFrontend.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
+                ("src/SessionFrontend.zig", ["admission-debug-integration", *pty, "test", "test-logic", "upgrade-integration"]),
                 ("src/SessionTerminal.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
                 ("src/ClientTask.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
                 ("src/ConversationViewport.zig", [*pty, "test-logic"]),
-                ("src/TerminalEditor.zig", ["admission-debug-integration", *pty, "test-logic"]),
+                ("src/TerminalEditor.zig", ["admission-debug-integration", *pty, "test-logic", "upgrade-integration"]),
                 ("src/TerminalText.zig", ["admission-debug-integration", *pty, "test-logic"]),
                 ("src/session_sequence_model_test.zig", ["test-logic"])):
             with self.subTest(path=path):
@@ -699,8 +732,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_installer_report_runs_the_fixture_that_pins_its_json_reader(self):
         result = select(["release/publish.sh"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["host-status-integration"])
-        self.assertEqual(result["native_targets"], ["host-status-integration"])
+        self.assertEqual(result["targets"], ["host-status-integration", "installer-integration", "upgrade-integration"])
+        self.assertEqual(result["native_targets"], ["host-status-integration", "installer-integration", "upgrade-integration"])
         self.assertTrue(result["mac_required"])
 
     def test_existing_fixture_target_and_new_fixture_fallback(self):
@@ -754,15 +787,105 @@ class SelectionTest(unittest.TestCase):
             self.assertTrue(setup_requirements([target])["node"], target)
 
     def test_setup_installs_fixture_packages_for_any_target(self):
-        self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False})
-        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True})
-        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "node": False, "python": True})
-        self.assertEqual(setup_requirements(["ts-client"]), {"go": False, "node": True, "python": True})
+        self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False, "tmux": False})
+        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True, "tmux": False})
+        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "node": False, "python": True, "tmux": False})
+        self.assertEqual(setup_requirements(["ts-client"]), {"go": False, "node": True, "python": True, "tmux": False})
         imported = set()
         for fixture in (Path(__file__).parents[1] / "integration").glob("*.py"):
             imported |= set(re.findall(r"(?m)^\s*(?:import|from) (h2|pyte|wcwidth)\b", fixture.read_text()))
         pinned = {line.split("==")[0] for line in (Path(__file__).parents[1] / "integration/requirements.txt").read_text().split()}
         self.assertLessEqual(imported, pinned)
+
+    def test_tmux_requirement_only_follows_upgrade_target(self):
+        for targets in ([], ["check"], ["check-full"], ["installer-integration"], ["test-logic", "check-full"]):
+            with self.subTest(targets=targets):
+                self.assertFalse(setup_requirements(targets)["tmux"])
+        for targets in (["upgrade-integration"], ["check", "upgrade-integration"]):
+            with self.subTest(targets=targets):
+                self.assertTrue(setup_requirements(targets)["tmux"])
+
+    def test_setup_uses_actual_shard_targets_without_losing_resource_go(self):
+        for platform in ("linux", "macos"):
+            for row in qualification("all", platform)["include"]:
+                with self.subTest(platform=platform, row=row["name"]):
+                    required = setup_requirements(row["targets"])
+                    if row["resource"]:
+                        self.assertTrue(required["go"])
+                        self.assertFalse(required["tmux"])
+                    elif "measurement-check" not in row["targets"]:
+                        self.assertFalse(required["go"])
+        for path, jobs in ((".github/workflows/check.yml", ("linux_suites", "macos_suites")),
+                           (".github/workflows/qualify-macos.yml", ("qualify",))):
+            workflow = Path(path).read_text()
+            for job in jobs:
+                with self.subTest(path=path, job=job):
+                    body = re.split(r"(?m)^  [a-z_]+:\s*$", workflow.split(f"  {job}:\n", 1)[1], 1)[0]
+                    setup = body.split("- uses: ./.github/actions/setup", 1)[1].split("      - name:", 1)[0]
+                    self.assertIn("targets: ${{ toJSON(matrix.targets) }}", setup)
+                    self.assertIn("compiled: 'true'", setup)
+        for path, jobs in ((".github/workflows/check.yml", ("linux_build", "macos_build")),
+                           (".github/workflows/qualify-macos.yml", ("compile",))):
+            workflow = Path(path).read_text()
+            for job in jobs:
+                with self.subTest(path=path, job=job):
+                    body = re.split(r"(?m)^  [a-z_]+:\s*$", workflow.split(f"  {job}:\n", 1)[1], 1)[0]
+                    setup = body.split("- uses: ./.github/actions/setup", 1)[1].split("      - name:", 1)[0]
+                    self.assertIn("check-part: compiled", setup)
+                    self.assertIn("targets: ${{ needs.plan.outputs.", setup)
+
+    def test_tmux_setup_checks_and_installs_real_command(self):
+        setup = Path(".github/actions/setup/action.yml").read_text()
+        step = setup.split("    - name: Install tmux for upgrade integration\n", 1)[1].split("    - uses:", 1)[0]
+        self.assertIn("steps.requirements.outputs.tmux == 'true' && inputs.check-part != 'compiled'", step)
+        script = dedent(step.split("      run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            log = root / "log"
+            def tool(name, body):
+                path = tools / name
+                path.write_text("#!/bin/sh\n" + body)
+                path.chmod(0o755)
+            tool("uname", 'echo "$TEST_OS"\n')
+            installer = ("""printf '%s %s\n' "${0##*/}" "$*" >> "$LOG"
+if [ "$MODE" = fail ]; then exit 42; fi
+if [ "$MODE" != missing ]; then
+  case "$*" in *install*) printf '#!/bin/sh\nexit 0\n' > "$TOOLS/tmux"; /bin/chmod +x "$TOOLS/tmux" ;; esac
+fi
+""")
+            tool("brew", installer)
+            tool("sudo", installer)
+            def run(os_name, mode="ok", present=False):
+                tmux = tools / "tmux"
+                tmux.unlink(missing_ok=True)
+                log.unlink(missing_ok=True)
+                if present:
+                    tool("tmux", "exit 0\n")
+                env = {"PATH": str(tools), "TEST_OS": os_name, "MODE": mode,
+                       "LOG": str(log), "TOOLS": str(tools)}
+                result = subprocess.run(["/bin/bash", "-c", script], env=env, capture_output=True, text=True)
+                return result, log.read_text().splitlines() if log.exists() else []
+            for os_name in ("Darwin", "Linux"):
+                with self.subTest(os=os_name, present=True):
+                    result, calls = run(os_name, present=True)
+                    self.assertEqual((result.returncode, calls), (0, []))
+            for os_name, expected in (("Darwin", ["brew install tmux"]),
+                                      ("Linux", ["sudo apt-get update -q", "sudo apt-get install -yq tmux"])):
+                with self.subTest(os=os_name):
+                    result, calls = run(os_name)
+                    self.assertEqual((result.returncode, calls), (0, expected))
+                    self.assertTrue(result.stdout.strip().endswith("/tmux"))
+            result, calls = run("FreeBSD")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(calls, [])
+            for os_name in ("Darwin", "Linux"):
+                for mode in ("fail", "missing"):
+                    with self.subTest(os=os_name, mode=mode):
+                        result, calls = run(os_name, mode=mode)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertTrue(calls)
 
     def test_shards_keep_every_selected_target_and_both_full_parts(self):
         targets = ["check-full", "codex-credential-integration", "test-full", "measurement-check"]
@@ -790,6 +913,13 @@ class SelectionTest(unittest.TestCase):
         self.assertCountEqual(selected, [*NATIVE, "check-full"])
         self.assertEqual(sum("-Dcheck-part=execution" in batch for batch in batches), 1)
         self.assertEqual(sum("-Dcheck-part=callers" in batch for batch in batches), 1)
+
+    def test_daily_native_and_all_include_standalone_installer(self):
+        for platform in ("linux", "macos"):
+            for suite in ("native", "all"):
+                with self.subTest(platform=platform, suite=suite):
+                    rows = qualification(suite, platform)["include"]
+                    self.assertEqual(sum("installer-integration" in row["targets"] for row in rows), 1)
 
     def test_qualification_uses_existing_platform_targets_and_isolates_resources(self):
         for platform in ("linux", "macos"):

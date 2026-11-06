@@ -33,6 +33,19 @@ runs:
             for name, required in setup_requirements(json.loads(os.environ['TARGETS'])).items():
                 print(f'{name}={str(required).lower()}', file=output)
         PY
+    - name: Install tmux for upgrade integration
+      if: ${{ steps.requirements.outputs.tmux == 'true' && inputs.check-part != 'compiled' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v tmux >/dev/null 2>&1; then
+          case "$(uname -s)" in
+            Darwin) brew install tmux ;;
+            Linux) sudo apt-get update -q; sudo apt-get install -yq tmux ;;
+            *) echo "tmux installation is unsupported on $(uname -s)" >&2; exit 1 ;;
+          esac
+        fi
+        command -v tmux
     - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       if: ${{ steps.requirements.outputs.go == 'true' }}
       with:

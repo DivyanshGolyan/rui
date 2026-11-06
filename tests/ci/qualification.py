@@ -14,7 +14,7 @@ NATIVE = (
     "check-full", "test-logic", "admission-debug-integration", "dispatch-debug-integration",
     "transport-h2-integration", "codex-h2-integration", "codex-credential-integration",
     "current-facts-integration", "server-delivery-integration", "test-full",
-    "measurement-check",
+    "measurement-check", "installer-integration",
 )
 # Selected Linux suites run at most this many shards, all concurrently.
 LINUX_SHARDS = 10

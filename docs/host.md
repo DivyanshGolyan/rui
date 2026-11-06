@@ -22,11 +22,26 @@ If startup times out, run `host status` and read the diagnostic log.
 A timeout does not prove that the Host stopped.
 Rui installs no OS service and never restarts a crashed Host.
 
+## Upgrade and activation
+
+`rui upgrade --check` is read-only and does not start a Host.
+`rui upgrade` updates an eligible released managed installation to the latest published stable release and restarts the selected Store's Host only if it was already running and can be safely activated.
+A selected source or unknown managed build is refused before installation; the standalone release installer can deliberately convert it to a release.
+An unmanaged or packaged destination belongs to its application or package manager.
+This restart affects all Sessions in that Store and may interrupt their work.
+With an eligible installation and no running Host, it only installs.
+Installation and activation are reported separately; an unsupported Host launch may be left running after a release was installed.
+Automatic activation supports released managed `host serve` launches whose public settings can be preserved.
+Source, application-owned `--launch-frame`, hidden-option and relative configuration-path launches are not paused.
+Private launch environment is observed only in memory and wiped after the operation.
+Upgrade waits for the observed Host's lease to retire and checks the pinned target's readiness before reporting activation.
+Manual source and release installers do not restart a Host.
+
 ### Capacity and file limits
 
 A new Host can run 100 executions at once.
 `rui host start --active-capacity 8` starts a new Host with a different capacity.
-A running Host keeps the capacity it started with, even after you upgrade Rui.
+A running Host keeps its configured capacity through an Upgrade restart.
 If you pass a different `--active-capacity` while a Host is running, `host start` connects to that Host unchanged and says so on stderr.
 To change the capacity, pause the Host and start it again.
 

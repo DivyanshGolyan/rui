@@ -10,6 +10,14 @@ Output follows three rules:
 - `.context.session` is the Session ID and `.context.key` is the request handle in mutation receipts.
 - Recovery notices and diagnostics go to stderr.
 
+## Upgrade the standalone client
+
+`rui upgrade --check` inspects the latest published stable release without installing or starting a Host.
+`rui upgrade` installs it and conditionally restarts an already-running supported Host for the selected Store, interrupting work across that Store's Sessions.
+If no Host is running it only installs; installation and activation have separate outcomes, and unsupported or application-owned launches are not blindly stopped.
+The installer's defaults-selected Store probe is not necessarily the explicitly selected active Store.
+Manual source and release installers remain install-only.
+
 ## Start a Session
 
 One-shot commands never start a Host or sign in.

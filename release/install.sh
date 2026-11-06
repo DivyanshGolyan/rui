@@ -73,7 +73,11 @@ if [ "$actual" != "$expected" ]; then
     printf 'Downloaded archive digest %s does not match %s. No installation changed.\n' "$actual" "$expected" >&2
     exit 1
 fi
-tar -xzf "$release/$archive" -C "$release" --strip-components=1
+archive_root=${archive%.tar.gz}
+mkdir "$release/bin"
+tar -xzOf "$release/$archive" "$archive_root/bin/rui" >"$release/bin/rui"
+chmod 700 "$release/bin/rui"
+tar -xzOf "$release/$archive" "$archive_root/THIRD_PARTY_NOTICES.md" >"$release/THIRD_PARTY_NOTICES.md"
 rm "$release/$archive"
 printf 'Checking the downloaded command ...\n'
 reported=$("$release/bin/rui" --version)
@@ -87,4 +91,4 @@ test -f "$release/THIRD_PARTY_NOTICES.md"
 # Keep each complete build: running processes may still use its files.
 published=1
 format=${version#0.}
-rui_publish "$prefix" "$release" "${format%%.*}"
+rui_publish "$prefix" "$release" "${format%%.*}" released-install

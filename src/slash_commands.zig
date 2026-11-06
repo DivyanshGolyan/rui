@@ -123,6 +123,7 @@ const ConversationName = enum {
     setup,
     status,
     unarchive,
+    upgrade,
     wait,
 };
 
@@ -147,6 +148,7 @@ pub const conversation = Commands(ConversationName, .{
     .setup = .{ .argument = .{ .options = setup_options }, .description = "future defaults" },
     .status = .{ .description = "settings and work" },
     .unarchive = .{ .description = "restore this Session without restarting work" },
+    .upgrade = .{ .description = "check stable Rui; install restarts this Store's Host" },
     .wait = .{ .description = null },
 });
 
@@ -162,7 +164,7 @@ const session_views = &[_]Choice{
     .{ .word = "all", .description = "unarchived and archived Sessions" },
 };
 
-pub const overview = Commands(enum { archive, configure, exit, help, model, rename, sessions, setup, unarchive, undo }, .{
+pub const overview = Commands(enum { archive, configure, exit, help, model, rename, sessions, setup, unarchive, undo, upgrade }, .{
     .archive = .{ .description = "archive the selected Session; stop active work first" },
     .configure = .{ .argument = .{ .options = start_options }, .description = "hold settings for the next Session" },
     .exit = .{ .description = "leave; Host work continues" },
@@ -173,6 +175,7 @@ pub const overview = Commands(enum { archive, configure, exit, help, model, rena
     .setup = conversation.table.get(.setup),
     .unarchive = .{ .description = "restore the selected Session without restarting work" },
     .undo = .{ .description = "restore the last Session archived here" },
+    .upgrade = conversation.table.get(.upgrade),
 });
 
 /// What both screens say for a line that names no command: the name typed,
@@ -757,7 +760,7 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "rename ", "setup ", "status", "unarchive" } },
+        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "rename ", "setup ", "status", "unarchive", "upgrade" } },
         .{ .draft = "/c", .shown = &.{ "configure ", "copy " }, .first = "onfigure " },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
         .{ .draft = "/st", .shown = &.{"status"}, .first = "atus" },
@@ -921,8 +924,8 @@ test "/copy takes each Copy's name but the answer's, which it copies alone" {
 }
 
 test "both screens' shared commands take the same arguments and say the same things" {
-    inline for (.{ "help", "rename", "setup" }) |name| try std.testing.expectEqualStrings(conversation.usage.get(@field(conversation.Name, name)), overview.usage.get(@field(overview.Name, name)));
-    for ([_][]const u8{ "/rename", "/rename lane four", "/setup", "/setup --model gpt-5.5", "/help", "/help me" }) |text| {
+    inline for (.{ "help", "rename", "setup", "upgrade" }) |name| try std.testing.expectEqualStrings(conversation.usage.get(@field(conversation.Name, name)), overview.usage.get(@field(overview.Name, name)));
+    for ([_][]const u8{ "/rename", "/rename lane four", "/setup", "/setup --model gpt-5.5", "/help", "/help me", "/upgrade", "/upgrade now" }) |text| {
         errdefer std.debug.print("line={s}\n", .{text});
         try std.testing.expectEqualStrings(@tagName(conversation.parse(text)), @tagName(overview.parse(text)));
     }
@@ -953,6 +956,22 @@ test "a command's short output is the same notice on both screens, and longer ou
     try std.testing.expectEqual(@as(usize, short_result_bytes), resultNotice(&buffer, long[0..short_result_bytes]).?.len);
 }
 
+test "upgrade is a local no-argument command on both screens" {
+    inline for (.{ conversation, overview }) |screen| {
+        const command = screen.parse("/upgrade").command;
+        try std.testing.expectEqualStrings("upgrade", @tagName(command.name));
+        try std.testing.expectEqualStrings("", command.argument);
+        try std.testing.expectEqualStrings("/upgrade", screen.usage.get(command.name));
+        for ([_][]const u8{ "/upgrade now", "/upgrade --check", "/upgrade --store other" }) |text| {
+            try std.testing.expectEqualStrings("upgrade", @tagName(screen.parse(text).misused));
+        }
+        const list = screen.suggest("/up", .{}).?;
+        try std.testing.expectEqual(@as(usize, 1), list.count);
+        try std.testing.expectEqualStrings("upgrade", list.shown()[0].word);
+        try std.testing.expect(list.enter(0).runs);
+    }
+}
+
 test "archive commands and server archive view choices parse on their owning screens" {
     for ([_][]const u8{ "/archive", "/unarchive" }) |line| {
         try std.testing.expect(conversation.parse(line) == .command);
@@ -973,4 +992,23 @@ test "archive commands and server archive view choices parse on their owning scr
     try std.testing.expect(overview.parse("/sessions active") == .misused);
     try std.testing.expect(overview.parse("/undo") == .command);
     try std.testing.expect(conversation.parse("/sessions archived") == .unknown);
+}
+
+test "archive and upgrade retain separate local command identities after merge" {
+    inline for (.{ conversation, overview }) |screen| {
+        inline for (.{ "archive", "unarchive", "upgrade", "exit" }) |name| {
+            const parsed = screen.parse("/" ++ name);
+            try std.testing.expect(parsed == .command);
+            try std.testing.expectEqualStrings(name, @tagName(parsed.command.name));
+            try std.testing.expectEqualStrings("", parsed.command.argument);
+            try std.testing.expect(screen.parse("/" ++ name ++ " other") == .misused);
+            const list = screen.suggest("/" ++ name, .{}).?;
+            try std.testing.expectEqual(@as(usize, 1), list.count);
+            try std.testing.expectEqualStrings(name, list.shown()[0].word);
+            try std.testing.expect(list.enter(0).runs);
+        }
+    }
+    const restored = overview.parse("/undo").command;
+    try std.testing.expectEqual(.undo, restored.name);
+    try std.testing.expect(conversation.parse("/undo") == .unknown);
 }

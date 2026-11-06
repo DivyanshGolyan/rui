@@ -401,7 +401,27 @@ test "a model list reply reads as what the Host writes" {
         try std.testing.expectError(error.InvalidModelList, modelListProviders(body));
 }
 
+/// Read-only Host information profiles; neither profile grants ordinary requests.
+pub const HostInfoProfile = enum {
+    current,
+    released_9,
+
+    pub fn wire(self: HostInfoProfile) []const u8 {
+        return switch (self) {
+            .current => protocol.wire_version,
+            .released_9 => "9",
+        };
+    }
+};
+
+pub const HostInfoFacts = @FieldType(HostStatus, "ready");
+
 pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
+    return .{ .ready = try parseHostInfoForProfile(body, store, .current) };
+}
+
+/// Validates the complete known shape, not a compatible ordinary-client reply.
+pub fn parseHostInfoForProfile(body: []const u8, store: []const u8, profile: HostInfoProfile) !HostInfoFacts {
     if (body.len > protocol.max_host_info_response_bytes) return error.InvalidHostInfo;
     var parse_storage: [protocol.max_host_info_response_bytes * 2]u8 = undefined;
     var arena = std.heap.FixedBufferAllocator.init(&parse_storage);
@@ -409,7 +429,7 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
         .ignore_unknown_fields = false,
         .allocate = .alloc_if_needed,
     });
-    if (!std.mem.eql(u8, info.version, protocol.wire_version) or
+    if (!std.mem.eql(u8, info.version, profile.wire()) or
         !std.mem.eql(u8, info.type, "host_info") or
         !std.mem.eql(u8, info.store, store))
         return error.InvalidHostInfo;
@@ -436,7 +456,7 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
         doublewrite = .{};
         try doublewrite.?.set(value);
     }
-    return .{ .ready = .{
+    return .{
         .store = identity,
         .instance = instance,
         .active_capacity = capacity,
@@ -447,7 +467,7 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
         .paused = info.paused,
         .innodb_doublewrite = doublewrite,
         .capabilities = info.capabilities,
-    } };
+    };
 }
 
 test "Host information is bounded and rejects ambiguous identities and capacity" {
@@ -517,6 +537,59 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
         const duplicated = try std.mem.replaceOwned(u8, std.testing.allocator, golden, case.needle, case.replacement);
         defer std.testing.allocator.free(duplicated);
         try std.testing.expectError(error.DuplicateField, parseHostInfo(duplicated, "/one"));
+    }
+}
+
+test "upgrade Host information profiles retain the entire strict shape" {
+    const legacy_wire = comptime HostInfoProfile.released_9.wire();
+    const legacy_field = "\"version\":\"" ++ legacy_wire ++ "\"";
+    const old = "{" ++ legacy_field ++ ",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}";
+    try std.testing.expectEqualStrings(protocol.wire_version, HostInfoProfile.current.wire());
+    try std.testing.expectEqualStrings("9", HostInfoProfile.released_9.wire());
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(old, "/one"));
+    const current = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, "\"version\":\"" ++ protocol.wire_version ++ "\"");
+    defer std.testing.allocator.free(current);
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(current, "/one", .released_9));
+    inline for (std.meta.tags(HostInfoProfile)) |profile| {
+        const body = if (profile == .released_9) old else current;
+        const facts = try parseHostInfoForProfile(body, "/one", profile);
+        try std.testing.expect(facts.store.eql("/one"));
+        try std.testing.expectEqual(@as(usize, 17), facts.active_capacity);
+        try std.testing.expectEqual(@as(usize, 10), facts.intake_capacity);
+        try std.testing.expectEqual(@as(?usize, 256), facts.descriptor_limit);
+        try std.testing.expectEqual(@as(usize, 3), facts.custody_occupied);
+        try std.testing.expectEqual(@as(u64, 1792918800), facts.started_at);
+        try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 }, &facts.instance);
+        try std.testing.expect(facts.paused and facts.capabilities.bash);
+        try std.testing.expectEqual(protocol.Route.endpoint, facts.capabilities.providers.codex);
+        try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.openai);
+        try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(body, "/other", profile));
+        for ([_]struct { from: []const u8, to: []const u8, failure: anyerror }{
+            .{ .from = "\"type\":\"host_info\"", .to = "\"type\":\"host_status\"", .failure = error.InvalidHostInfo },
+            .{ .from = "\"store\":\"/one\"", .to = "\"store\":\"/one\",\"store\":\"/one\"", .failure = error.DuplicateField },
+            .{ .from = "\"paused\":true", .to = "\"paused\":true,\"paused\":false", .failure = error.DuplicateField },
+            .{ .from = "\"paused\":true,", .to = "", .failure = error.MissingField },
+            .{ .from = "\"paused\":true", .to = "\"paused\":true,\"unknown\":false", .failure = error.UnknownField },
+            .{ .from = "000102030405060708090a0b0c0d0e0f", .to = "000102030405060708090a0b0c0d0e0F", .failure = error.InvalidHostInfo },
+            .{ .from = "\"active_capacity\":\"17\"", .to = "\"active_capacity\":\"017\"", .failure = error.InvalidHostInfo },
+            .{ .from = "\"intake_capacity\":\"10\"", .to = "\"intake_capacity\":\"9\"", .failure = error.InvalidHostInfo },
+            .{ .from = "\"descriptor_limit\":\"256\"", .to = "\"descriptor_limit\":\"+256\"", .failure = error.InvalidHostInfo },
+            .{ .from = "\"started_at\":\"1792918800\"", .to = "\"started_at\":\"0\"", .failure = error.InvalidHostInfo },
+            .{ .from = "\"custody_occupied\":\"3\"", .to = "\"custody_occupied\":\"18\"", .failure = error.InvalidHostInfo },
+            .{ .from = "\"codex\":\"endpoint\"", .to = "\"codex\":\"unknown\"", .failure = error.InvalidEnumTag },
+        }) |case| {
+            const bad = try std.mem.replaceOwned(u8, std.testing.allocator, body, case.from, case.to);
+            defer std.testing.allocator.free(bad);
+            try std.testing.expectError(case.failure, parseHostInfoForProfile(bad, "/one", profile));
+        }
+    }
+    for ([_][]const u8{ "8", "11", "09", "unknown", "" }) |wire| {
+        const version = try std.fmt.allocPrint(std.testing.allocator, "\"version\":\"{s}\"", .{wire});
+        defer std.testing.allocator.free(version);
+        const bad = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, version);
+        defer std.testing.allocator.free(bad);
+        inline for (std.meta.tags(HostInfoProfile)) |profile|
+            try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(bad, "/one", profile));
     }
 }
 

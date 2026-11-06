@@ -565,6 +565,23 @@ pub fn build(b: *std.Build) void {
     const host_launch_step = b.step("host-launch-integration", "Run detached Host launch, alias convergence and startup-failure cases");
     host_launch_step.dependOn(&host_launch_integration.step);
 
+    const installer_integration = b.addSystemCommand(&.{"python3"});
+    installer_integration.addFileArg(b.path("tests/integration/installer_integration.py"));
+    installer_integration.addFileArg(ci.path(release_safe));
+    b.step("installer-integration", "Run source and release installer cases through the production publication owner").dependOn(&installer_integration.step);
+
+    const upgrade_release = addRuiWithIdentity(b, target, .ReleaseSafe, "rui-upgrade-release-fixture", pinned_transport, .{
+        .version = b.fmt("0.{d}.10000", .{@import("src/store/schema.zig").schema_version}),
+        .revision = buildRevision(b),
+    });
+    const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
+    upgrade_fixture_step.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);
+    const upgrade_integration = b.addSystemCommand(&.{"python3"});
+    upgrade_integration.addFileArg(b.path("tests/integration/upgrade_integration.py"));
+    upgrade_integration.addFileArg(ci.path(upgrade_release));
+    const upgrade_step = b.step("upgrade-integration", "Run isolated release publication and exact Host upgrade lifecycle cases");
+    upgrade_step.dependOn(&upgrade_integration.step);
+
     const launch_frame_integration = b.addSystemCommand(&.{"python3"});
     launch_frame_integration.addFileArg(b.path("tests/integration/launch_frame_integration.py"));
     launch_frame_integration.addFileArg(ci.path(release_safe));
@@ -1074,6 +1091,19 @@ fn addRui(
     name: []const u8,
     pinned_transport: ?PinnedTransport,
 ) *std.Build.Step.Compile {
+    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, .{ .version = buildVersion(b), .revision = buildRevision(b) });
+}
+
+const BuildIdentity = struct { version: []const u8, revision: []const u8 };
+
+fn addRuiWithIdentity(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    name: []const u8,
+    pinned_transport: ?PinnedTransport,
+    identity: BuildIdentity,
+) *std.Build.Step.Compile {
     const executable = b.addExecutable(.{
         .name = name,
         .root_module = b.createModule(.{
@@ -1087,7 +1117,7 @@ fn addRui(
     configureBashPlatform(b, executable);
     configureHostLaunch(b, executable);
     configureTerminalEditor(b, executable);
-    configureTransport(b, executable, target, pinned_transport);
+    configureTransportWithIdentity(b, executable, target, pinned_transport, identity);
     return executable;
 }
 
@@ -1145,10 +1175,20 @@ fn configureTransport(
     /// Null type-checks without the built transport: headers only, no link.
     maybe_pinned: ?PinnedTransport,
 ) void {
+    configureTransportWithIdentity(b, compile, target, maybe_pinned, .{ .version = buildVersion(b), .revision = buildRevision(b) });
+}
+
+fn configureTransportWithIdentity(
+    b: *std.Build,
+    compile: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    maybe_pinned: ?PinnedTransport,
+    identity: BuildIdentity,
+) void {
     const options = b.addOptions();
     options.addOption(bool, "enabled", transportEnabled(target));
-    options.addOption([]const u8, "revision", buildRevision(b));
-    options.addOption([]const u8, "version", buildVersion(b));
+    options.addOption([]const u8, "revision", identity.revision);
+    options.addOption([]const u8, "version", identity.version);
     compile.root_module.addOptions("transport_options", options);
     const test_poll = addTestPoll(b);
     compile.root_module.addImport("test_poll", test_poll);
@@ -1286,6 +1326,10 @@ fn configureBashPlatform(b: *std.Build, compile: *std.Build.Step.Compile) void {
 fn configureHostLaunch(b: *std.Build, compile: *std.Build.Step.Compile) void {
     compile.root_module.addCSourceFile(.{
         .file = b.path("src/host_launch.c"),
+        .flags = &.{"-std=c11"},
+    });
+    compile.root_module.addCSourceFile(.{
+        .file = b.path("src/host_identity.c"),
         .flags = &.{"-std=c11"},
     });
 }

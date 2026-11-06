@@ -132,7 +132,8 @@ def assert_launch_adapter(root, env):
     source, actor = root / "launch-probe.c", root / "launch-probe"
     source.write_text(LAUNCH_PROBE)
     adapter = pathlib.Path(__file__).resolve().parents[2] / "src/host_launch.c"
-    subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(source), str(adapter),
+    identity = adapter.with_name("host_identity.c")
+    subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(source), str(adapter), str(identity),
                     "-pthread", "-o", str(actor)], check=True)
     output = root / "launch-probe-output"
     probe_env = {**env, "RUI_LAUNCH_PROBE_OUTPUT": str(output),

@@ -16,12 +16,18 @@ Enter these at the `›` prompt.
 | `/requests` | Lists saved requests for recovery. |
 | `/configure` | Changes settings for the current Session only. |
 | `/setup` | Changes defaults for future Sessions, not the current one. |
+| `/upgrade` | Opens the local Upgrade panel in the overview or conversation; choose Install or Cancel. |
 | `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
 Tool outcomes in normal conversation show only their description and outcome, with a numeric failed exit when available.
 `/details` escapes the retained tool bytes safely and marks shortened results with `Earlier output omitted`.
 Its raw export command reads the full unchanged saved result.
+
+Upgrade installs the latest published stable release and restarts the selected Store's Host only if it is already running and its launch is supported.
+Restart affects all Sessions in that Store and may interrupt work; no running Host means install only.
+The panel retains your draft, selected Session and unresolved capture handles without replaying uncertain effects.
+It reports installation separately from activation, including when an application-owned or unsupported Host cannot be restarted safely.
 
 ## Approve Bash commands
 

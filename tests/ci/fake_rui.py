@@ -22,13 +22,22 @@ state() {{
     esac
 }}
 case "$*" in
+    --publish-install*) exec "$RUI_TEST_PUBLISH_HELPER" "$@" ;;
+    --installation-path)
+        [ -z "${{TEST_PATH_FAULT-}}" ] || exit 1
+        exec "$RUI_TEST_PUBLISH_HELPER" "$@" ;;
+    --installation-facts)
+        [ -z "${{TEST_UNKNOWN_FACTS-}}" ] || exit 1
+        if [ -n "${{TEST_FACTS-}}" ]; then printf '%s\\n' "$TEST_FACTS"; exit 0; fi
+        printf '{{"schema_version":{wire},"minimum_schema_version":%s}}\\n' "${{TEST_MINIMUM_SCHEMA-{wire}}}" ;;
     --version) echo '{version_line}' ;;
     "defaults inspect")
         [ -z "${{TEST_REPORT_FAULT-}}" ] || exit 1
         host=$(state)
         if [ -z "${{TEST_HOST-}}" ] && [ ! -d "$store" ]; then host=store_unavailable; fi
         printf '{{"version":"1","type":"defaults","changed":false,"store":"%s","store_source":"home","store_available":false,"provider":null,"model":null,"local_credentials":{{"codex":"missing","openai":"missing"}},"next_session":{{"status":"choose_provider"}},"host":{{"status":"%s"}}}}\\n' "$store" "$host" ;;
-    "host status")
+    "host status"|"host status --store "*)
+        if [ -n "${{TEST_STATUS_LOG-}}" ]; then printf '%s\\n' "$*" >>"$TEST_STATUS_LOG"; fi
         [ -z "${{TEST_REPORT_FAULT-}}" ] || exit 1
         printf '{{"version":"1","type":"host_status","status":"%s"}}\\n' "$(state)"
         [ "$(state)" != incompatible ] ;;
