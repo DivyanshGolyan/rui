@@ -1605,7 +1605,7 @@ fn hostProvidersLine(routes: protocol.Routes, buffer: []u8) []const u8 {
 fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
     // A launched Host reads its Store, key and runtime directory from stdin,
-    // and holds the frame for its life: the provider borrows the key.
+    // and holds the frame for its life: the provider borrows the key and CA path.
     const launched: ?*launch_frame.Frame = if (parsed.has("launch-frame")) try readLaunchFrame(init) else null;
     defer if (launched) |frame| {
         frame.deinit();
@@ -1738,6 +1738,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
             if (err == error.InvalidBaseUrl) launch_frame.writeRefusal(io, .{ .code = .launch_frame_invalid, .message = "provider.baseUrl must be an https URL with a host and no query" });
             return err;
         };
+        served.ca_file = if (frame.ca_file.len == 0) null else frame.ca_file.slice();
         served.table.set(.openai, .{ .endpoint = endpoint, .credential = .{ .key_file = .{ .key = frame.key.slice() } } });
     }
     if (openai_fixture) |endpoint| {

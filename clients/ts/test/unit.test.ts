@@ -24,6 +24,16 @@ test("a launch frame is a big-endian length and the JSON", () => {
 	assert.equal(frame.subarray(4).toString("utf8"), json);
 });
 
+test("launch frame carries optional provider CA trust without leaking extra settings", () => {
+	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" } };
+	assert.deepEqual(launchFor(options, "/r").frame.provider, { kind: "openai_key", ...options.provider });
+	const provider = { ...options.provider, caFile: "/fixture/ca.pem", extra: true };
+	const frame = launchFor({ ...options, provider }, "/r").frame;
+	assert.deepEqual(frame.provider, { kind: "openai_key", ...options.provider, caFile: "/fixture/ca.pem" });
+	const decoded = JSON.parse(encodeFrame(frame).subarray(4).toString("utf8"));
+	assert.equal(decoded.provider.caFile, "/fixture/ca.pem");
+});
+
 test("launch frame carries the MCP servers, an empty list when none are given", () => {
 	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" } };
 	const tools = [
@@ -158,6 +168,8 @@ test("a followed feed resumes from the end of an exhausted page", async () => {
 function launchTypeChecks() {
 	// @ts-expect-error The Host requires every non-defaulted launch field.
 	encodeFrame({ v: 1, store: "/s" });
+	// @ts-expect-error Provider CA trust is a PEM filename, never a verification toggle.
+	launchFor({ database: "/s", provider: { baseUrl: "https://example.com", key: "key", caFile: false } }, "/r");
 	new RuiStartError("store_fenced", "refused");
 	new RuiStartError("mysql_version_unsupported", "refused");
 	// @ts-expect-error Unknown codes are not launch refusals in the Host enum.

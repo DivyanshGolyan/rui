@@ -187,6 +187,19 @@ test("a refused frame is a RuiStartError", { skip }, async () => {
 	});
 });
 
+test("invalid provider CA paths are refused with the launch frame", { skip }, async () => {
+	for (const caFile of ["", "/tmp/ca.pem\0ignored"]) {
+		await assert.rejects(Rui.connect(options(newStore(), {
+			provider: { baseUrl: "https://example.com/v1", key, caFile },
+		})), (error: unknown) => {
+			assert.ok(error instanceof RuiStartError);
+			assert.equal(error.code, "launch_frame_invalid");
+			assert.match(error.message, /provider\.caFile/);
+			return true;
+		});
+	}
+});
+
 test("an invalid MCP server is a RuiStartError", { skip }, async () => {
 	const token = "mcp-secret-test";
 	const tools = [{ name: "drift", url: "https://example.com/mcp", bearerToken: token, callTimeoutMs: 1000 }];

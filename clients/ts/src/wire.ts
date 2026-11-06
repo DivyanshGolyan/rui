@@ -1257,6 +1257,7 @@ export interface components {
                 kind: "openai_key";
                 baseUrl: string;
                 key: string;
+                caFile?: string | null;
             };
             runtimeDir: string;
             activeCapacity?: number | null;

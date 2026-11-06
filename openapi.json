@@ -4818,6 +4818,16 @@
               },
               "key": {
                 "type": "string"
+              },
+              "caFile": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
