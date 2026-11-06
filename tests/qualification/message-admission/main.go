@@ -168,7 +168,7 @@ func payloadCase(binary, workspace, parent string, size int) (row map[string]any
 	if err != nil {
 		return nil, err
 	}
-	if field(observation, "observation", "queue", "status") != "queued" {
+	if field(observation, "observation", "state") != "queued" {
 		return nil, fmt.Errorf("payload observation differed: %v", observation)
 	}
 	var inspection map[string]any
@@ -247,7 +247,7 @@ func historyProfile(binary, workspace, parent string) (rows []map[string]any, re
 				if err != nil {
 					return nil, err
 				}
-				if field(observation, "observation", "queue", "status") != "queued" {
+				if field(observation, "observation", "state") != "queued" {
 					return nil, fmt.Errorf("history queue changed: %v", observation)
 				}
 				row[name] = elapsed
