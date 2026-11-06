@@ -173,7 +173,7 @@ else:
         (build_artifact.roots()['binaries'] / 'test-logic_tests').write_text('#!/bin/sh\n')
         (build_artifact.roots()['binaries'] / 'test-logic_tests').chmod(0o755)
         for artifact, part, binaries in (('201', 'unit', unit_root), ('202', 'rest', None)):
-            build_artifact.package(['test'], self.root / part, binaries, part)
+            build_artifact.package(self.inputs['targets'], self.root / part, binaries, part)
             self.receipt = json.loads((self.root / part / 'compiled.json').read_text())
             self.archive = (self.root / part / 'compiled.tar.gz').read_bytes()
             self.refresh_download()
@@ -187,6 +187,44 @@ else:
         self.assertFalse((self.root / 'compiled').exists())
         self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
         self.assertTrue((build_artifact.roots()['binaries'] / 'test-logic_tests').exists())
+
+    def test_macos_split_uses_the_same_restore_cli_and_executes_the_producer(self):
+        self.inputs.update(system='Darwin', machine='arm64', targets=['check', 'admission-debug-integration'])
+        self.split_downloads()
+        with patch.object(sys, 'argv', ['build_artifact.py', 'restore', json.dumps(self.inputs['targets']),
+                                       '--artifact-id', '202', '--artifact-id', '201']):
+            build_artifact.main()
+        self.assertEqual(self.gates(), ['producer'])
+        self.assertFalse((self.root / 'compiled').exists())
+        self.assertTrue((build_artifact.roots()['binaries'] / 'test-logic_tests').exists())
+        self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
+        self.assertIn('Using verified producer artifact 202, 201', (self.root / 'summary').read_text())
+
+    def test_macos_rejected_unit_artifact_discards_both_parts_before_rebuilding(self):
+        self.inputs.update(system='Darwin', machine='arm64', targets=['check'])
+        self.split_downloads()
+        rest = self.downloads['202']
+        with zipfile.ZipFile(io.BytesIO(self.downloads['201'][0])) as unit:
+            self.receipt = json.loads(unit.read('compiled.json'))
+            self.archive = unit.read('compiled.tar.gz')
+        for foreign in ('system', 'machine', 'targets'):
+            with self.subTest(foreign=foreign):
+                # A different platform or selection in either part invalidates the handoff.
+                self.receipt['inputs'][foreign] = 'foreign'
+                self.refresh_download()
+                self.downloads = {'202': rest, '201': (self.download, self.metadata)}
+                build_artifact.restore(['202', '201'], ['check'])
+                self.assertIn('-Dci-targets=check -Dci-part=all', (self.root / 'compiled').read_text())
+                self.assertEqual(self.gates(), ['consumer'])
+                self.assertFalse((build_artifact.roots()['binaries'] / 'test-logic_tests').exists())
+                self.receipt['inputs'][foreign] = self.inputs[foreign]
+
+    def test_unsplit_restore_cli_ignores_the_skipped_unit_artifact_id(self):
+        with patch.object(sys, 'argv', ['build_artifact.py', 'restore', '["test"]',
+                                       '--artifact-id', '101', '--artifact-id', '']):
+            build_artifact.main()
+        self.assertEqual(self.gates(), ['producer'])
+        self.assertFalse((self.root / 'compiled').exists())
 
     def test_a_missing_repeated_or_overlapping_part_rebuilds_locally(self):
         self.split_downloads()
