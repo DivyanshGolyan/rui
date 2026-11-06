@@ -355,3 +355,23 @@ test "overview benchmark: merging a 10,000-row listing and computing its layout"
     try std.testing.expect(merge_allocations <= total);
     try std.testing.expect(layout_allocations <= total);
 }
+
+test "markdown opacity bounded head cost without a renderer caller" {
+    const prefix = @import("markdown_prefix.zig");
+    const raw = try std.testing.allocator.alloc(u8, prefix.head_limit);
+    defer std.testing.allocator.free(raw);
+    @memset(raw, '`');
+    const Context = prefix.Context;
+    const start = nanosecondsNow();
+    for (0..10_000) |_| std.mem.doNotOptimizeAway(Context.step(.plain, "ordinary", .pending));
+    const ordinary = nanosecondsNow();
+    for (0..10_000) |_| std.mem.doNotOptimizeAway(Context.step(.plain, raw, .limit_cut));
+    const complete = nanosecondsNow();
+    for (0..1000) |_| {
+        for (1..prefix.head_limit + 1) |at| {
+            std.mem.doNotOptimizeAway(Context.step(.plain, raw[0..at], .pending));
+        }
+    }
+    const fragmented = nanosecondsNow();
+    std.debug.print("opacity pure cost: ordinary={d}ns/10000 complete128={d}ns/10000 bytewise128={d}ns/1000 (8256 supplied head bytes/candidate, not render CPU)\n", .{ ordinary - start, complete - ordinary, fragmented - complete });
+}

@@ -98,6 +98,40 @@ pub fn recognize(raw: []const u8, ended: bool) Recognition {
 /// The existing assistant renderer's fence subset, not CommonMark. Callers own
 /// line bounds, real endings, active/literal fence state and retained storage.
 pub const Fence = struct {
+    pub const Marker = enum { backtick, tilde };
+    pub const Run = struct {
+        marker: Marker,
+        count: u8,
+        end: u8,
+        /// A terminator or actual ending was observed before the head cap.
+        complete: bool,
+    };
+    pub const Lead = union(enum) { need_more, none, run: Run };
+
+    /// Opacity-only raw facts. Partial runs expose their observed count so a
+    /// closer can be disproved early, without guessing an opener's full run.
+    /// `limit_cut` may refer to a containing head before its quote was peeled.
+    /// Strict legacy helpers below deliberately keep their original subset.
+    pub fn lead(raw: []const u8, supplied_ending: HeadEnding) Lead {
+        std.debug.assert(raw.len <= head_limit);
+        const ending = if (raw.len == head_limit) .limit_cut else supplied_ending;
+        const start = indentation(raw);
+        if (start == raw.len) return if (ending.ended()) .none else .need_more;
+        const marker: Marker = switch (raw[start]) {
+            '`' => .backtick,
+            '~' => .tilde,
+            else => return .none,
+        };
+        var end = start;
+        while (end < raw.len and raw[end] == raw[start]) : (end += 1) {}
+        return .{ .run = .{
+            .marker = marker,
+            .count = @intCast(end - start),
+            .end = @intCast(end),
+            .complete = end < raw.len or ending.ended(),
+        } };
+    }
+
     pub fn candidate(raw: []const u8) bool {
         return std.mem.startsWith(u8, raw[indentation(raw)..], "```");
     }
@@ -146,6 +180,119 @@ pub const Fence = struct {
             return self.possible and self.ticks == 3;
         }
     };
+};
+
+/// A source head, never a retained suffix. Reaching 128 bytes takes precedence
+/// over a caller already knowing the following LF/EOF: every consumer applies
+/// the same bounded policy without borrowing unavailable future bytes.
+pub const head_limit = 128;
+pub const HeadEnding = enum {
+    pending,
+    line_feed,
+    canonical_eof,
+    limit_cut,
+
+    fn ended(self: HeadEnding) bool {
+        return self == .line_feed or self == .canonical_eof;
+    }
+};
+
+/// PURE UNUSED opacity eligibility. It grants no delimiter-stripping, styling,
+/// copy, retained-provenance or terminal authority. Future output integration
+/// must reconcile this with legacy display custody in ONE pre-inline owner;
+/// enabling it beside an independently deciding renderer is not sufficient.
+///
+/// A draft traversal starts plain and discards this value at canonical end.
+/// A future streaming caller reprobes its existing raw head until resolved,
+/// commits next ONCE per hard line, then uses that projection to real LF/EOF.
+/// need_more never commits. No source/chunk/retention edge resets context.
+pub const Context = union(enum) {
+    plain,
+    fence: struct {
+        outer: ?Quote,
+        marker: Fence.Marker,
+        /// Null means an opener run reached the head cap without a terminator:
+        /// retain opacity through canonical EOF, never guess a shorter closer.
+        run: ?u8,
+    },
+
+    pub const Mode = enum { prose, @"opaque" };
+    pub const Projection = struct { quote: ?Quote, body_at: u8, mode: Mode };
+    pub const Decision = struct { next: Context, projection: Projection };
+    pub const Probe = union(enum) { need_more, resolved: Decision };
+
+    pub fn step(self: Context, raw: []const u8, supplied_ending: HeadEnding) Probe {
+        std.debug.assert(raw.len <= head_limit);
+        std.debug.assert(std.mem.indexOfScalar(u8, raw, '\n') == null);
+        std.debug.assert(supplied_ending != .limit_cut or raw.len == head_limit);
+        const ending = if (raw.len == head_limit) .limit_cut else supplied_ending;
+        var quote: ?Quote = null;
+        var at: u8 = 0;
+        switch (self) {
+            .plain => switch (recognize(raw, ending.ended())) {
+                .need_more => return .need_more,
+                .literal => {},
+                .quote => |value| {
+                    quote = value;
+                    at = value.bytes;
+                },
+            },
+            .fence => |active| {
+                if (active.run) |run| std.debug.assert(run >= 3 and run < head_limit);
+                if (active.outer) |outer| switch (outer.outer(raw, ending.ended())) {
+                    .need_more => return .need_more,
+                    // A missing container is not proof the code ended. Never
+                    // greedily reinterpret this line as a new/deeper quote.
+                    .literal => return resolved(self, null, 0, .@"opaque"),
+                    .body => |bytes| {
+                        at = bytes;
+                        quote = .{ .bytes = bytes, .depth = outer.depth, .indent = outer.indent };
+                    },
+                };
+                const expected = active.run orelse return resolved(self, quote, at, .@"opaque");
+                const body = raw[at..];
+                const facts = switch (Fence.lead(body, ending)) {
+                    .need_more => return .need_more,
+                    .none => return resolved(self, quote, at, .@"opaque"),
+                    .run => |value| value,
+                };
+                // Partial facts can disprove a close without waiting for EOL.
+                if (facts.marker != active.marker or facts.count > expected or
+                    (facts.complete and facts.count < expected)) return resolved(self, quote, at, .@"opaque");
+                if (!facts.complete) return if (ending == .limit_cut) resolved(self, quote, at, .@"opaque") else .need_more;
+                var tail = body[facts.end..];
+                // CTX-V1-CRLF: only proved LF authorizes this syntax-only strip.
+                // Legacy Fence.closing and LastCode deliberately remain strict.
+                if (ending == .line_feed and tail.len > 0 and tail[tail.len - 1] == '\r') tail = tail[0 .. tail.len - 1];
+                for (tail, 0..) |byte, index| {
+                    if (byte == ' ' or byte == '\t') continue;
+                    if (byte == '\r' and index + 1 == tail.len and ending == .pending) return .need_more;
+                    return resolved(self, quote, at, .@"opaque");
+                }
+                if (ending == .pending) return .need_more;
+                if (ending == .limit_cut) return resolved(self, quote, at, .@"opaque");
+                return resolved(.plain, quote, at, .@"opaque");
+            },
+        }
+        const facts = switch (Fence.lead(raw[at..], ending)) {
+            .need_more => return .need_more,
+            .none => return resolved(.plain, quote, at, .prose),
+            .run => |value| value,
+        };
+        if (facts.complete and facts.count < 3) return resolved(.plain, quote, at, .prose);
+        if (!facts.complete and ending != .limit_cut) return .need_more;
+        // Run identity is irrevocable once its terminator is observed. Info
+        // syntax affects legacy presentation, not opacity, so open early.
+        return resolved(.{ .fence = .{
+            .outer = quote,
+            .marker = facts.marker,
+            .run = if (facts.complete) facts.count else null,
+        } }, quote, at, .@"opaque");
+    }
+
+    fn resolved(next: Context, quote: ?Quote, at: u8, mode: Mode) Probe {
+        return .{ .resolved = .{ .next = next, .projection = .{ .quote = quote, .body_at = at, .mode = mode } } };
+    }
 };
 
 test "markdown prefix bounded grammar and exact source ranges" {
@@ -336,4 +483,171 @@ test "markdown fence opener retains every byte classification of the old info fo
             try std.testing.expectEqual(indent <= 3 and old_info, Fence.opening(raw[0 .. indent + 4]));
         }
     }
+}
+
+fn opacityResolved(context: Context, raw: []const u8, ending: HeadEnding) !Context.Decision {
+    const result = context.step(raw, ending);
+    try std.testing.expectEqual(.resolved, std.meta.activeTag(result));
+    return result.resolved;
+}
+
+fn opacityFragments(context: Context, raw: []const u8, ending: HeadEnding, first: usize) !Context.Decision {
+    const limit = @min(raw.len, head_limit);
+    var at = @min(first, limit);
+    while (true) : (at += 1) {
+        const status: HeadEnding = if (at == head_limit) .limit_cut else if (at == raw.len) ending else .pending;
+        switch (context.step(raw[0..at], status)) {
+            .resolved => |decision| return decision,
+            .need_more => try std.testing.expect(at < limit),
+        }
+    }
+}
+
+test "markdown opacity resolves ordinary and known opener prefixes early without stripping authority" {
+    for ([_][]const u8{ "a", "~x", "`x", "\\```", "    > literal", ">text" }) |raw| {
+        const result = try opacityResolved(.plain, raw, .pending);
+        try std.testing.expectEqual(Context.Mode.prose, result.projection.mode);
+        try std.testing.expectEqual(@as(?Quote, null), result.projection.quote);
+        try std.testing.expectEqual(.plain, std.meta.activeTag(result.next));
+    }
+    for ([_][]const u8{ "", "   ", ">", "> ", "`", "``", "```", "~~~" }) |raw| {
+        try std.testing.expectEqual(.need_more, std.meta.activeTag(Context.step(.plain, raw, .pending)));
+    }
+    const quoted = try opacityResolved(.plain, "> > prose", .pending);
+    try std.testing.expectEqual(@as(u4, 2), quoted.projection.quote.?.depth);
+    try std.testing.expectEqual(@as(u8, 4), quoted.projection.body_at);
+    for ([_][]const u8{ "```x", "```` ", "~~~bad info", "```\r" }, [_]u8{ 3, 4, 3, 3 }) |raw, run| {
+        const result = try opacityResolved(.plain, raw, .pending);
+        try std.testing.expectEqual(Context.Mode.@"opaque", result.projection.mode);
+        try std.testing.expectEqual(@as(?u8, run), result.next.fence.run);
+    }
+    try std.testing.expectEqual(Fence.Marker.tilde, (try opacityResolved(.plain, "~~~ ", .pending)).next.fence.marker);
+    // These existing display policies have not been widened by opacity facts.
+    try std.testing.expect(!Fence.opening("~~~"));
+    try std.testing.expect(!Fence.opening("````"));
+    try std.testing.expect(!Fence.opening("```bad info"));
+    try std.testing.expect(!Fence.opening("```\r"));
+}
+
+test "markdown opacity records exact run identity and never promotes top level code quotes" {
+    var state = (try opacityResolved(.plain, "````lang", .line_feed)).next;
+    for ([_][]const u8{ "> still code", "```", "~~~", "`````", "````bad" }) |raw| {
+        const result = try opacityResolved(state, raw, .line_feed);
+        try std.testing.expectEqual(Context.Mode.@"opaque", result.projection.mode);
+        try std.testing.expect(result.projection.quote == null);
+        try std.testing.expectEqual(state, result.next);
+    }
+    try std.testing.expectEqual(.need_more, std.meta.activeTag(state.step("```", .pending)));
+    state = (try opacityResolved(state, "````", .line_feed)).next;
+    try std.testing.expectEqual(.plain, std.meta.activeTag(state));
+    try std.testing.expectEqual(Context.Mode.prose, (try opacityResolved(state, "> real quote", .line_feed)).projection.mode);
+}
+
+test "markdown opacity quoted fences consume only exact recorded outer depth" {
+    var state = (try opacityResolved(.plain, " > ```lang", .line_feed)).next;
+    const body = try opacityResolved(state, " > >>>>>>>>> code", .line_feed);
+    try std.testing.expectEqual(Context.Mode.@"opaque", body.projection.mode);
+    try std.testing.expectEqual(Quote{ .bytes = 3, .depth = 1, .indent = 1 }, body.projection.quote.?);
+    try std.testing.expectEqualStrings(">>>>>>>>> code", " > >>>>>>>>> code"[body.projection.body_at..]);
+    const tight = try opacityResolved(state, " >> code", .line_feed);
+    try std.testing.expectEqual(Quote{ .bytes = 2, .depth = 1, .indent = 1 }, tight.projection.quote.?);
+    const blank = try opacityResolved(state, " >", .line_feed);
+    try std.testing.expectEqual(@as(u8, 2), blank.projection.body_at);
+    for ([_][]const u8{ "> code", "  > code", "plain", " >text" }) |raw| {
+        const mismatch = try opacityResolved(state, raw, .line_feed);
+        try std.testing.expect(mismatch.projection.quote == null);
+        try std.testing.expectEqual(state, mismatch.next);
+    }
+    state = (try opacityResolved(state, " > ```", .line_feed)).next;
+    try std.testing.expectEqual(.plain, std.meta.activeTag(state));
+    const nested = (try opacityResolved(.plain, "> > ~~~", .line_feed)).next;
+    const missing = try opacityResolved(nested, "> code", .line_feed);
+    try std.testing.expect(missing.projection.quote == null);
+    try std.testing.expectEqual(nested, missing.next);
+    const code = try opacityResolved(nested, "> >>> code", .line_feed);
+    try std.testing.expectEqual(Quote{ .bytes = 3, .depth = 2, .indent = 0 }, code.projection.quote.?);
+    try std.testing.expectEqualStrings(">> code", "> >>> code"[code.projection.body_at..]);
+}
+
+test "markdown opacity CTX V1 CRLF close is distinct from strict display grammar" {
+    const state = (try opacityResolved(.plain, "```bad info\r", .line_feed)).next;
+    for ([_][]const u8{ "```", "   ```", "``` \t", "```\r", "``` \t\r" }) |raw| {
+        const close = try opacityResolved(state, raw, .line_feed);
+        try std.testing.expectEqual(.plain, std.meta.activeTag(close.next));
+        try std.testing.expectEqual(Context.Mode.@"opaque", close.projection.mode);
+    }
+    try std.testing.expectEqual(.plain, std.meta.activeTag((try opacityResolved(state, "``` \t", .canonical_eof)).next));
+    for ([_][]const u8{ "```\r", "``` \t" }) |raw| {
+        try std.testing.expectEqual(.need_more, std.meta.activeTag(state.step(raw, .pending)));
+    }
+    for ([_][]const u8{ "```\r", "```\r\r", "```\r ", "``` ", "```\x00" }) |raw| {
+        try std.testing.expectEqual(state, (try opacityResolved(state, raw, .canonical_eof)).next);
+    }
+    for ([_][]const u8{ "```\r\r", "```\rX", "``` \tX", "``` " }) |raw| {
+        try std.testing.expectEqual(state, (try opacityResolved(state, raw, .pending)).next);
+    }
+    try std.testing.expectEqual(state, (try opacityResolved(state, "```\r\r", .line_feed)).next);
+    try std.testing.expect(!Fence.closing("```\r"));
+    try std.testing.expect(!Fence.closing("``` \t"));
+    const tilde = (try opacityResolved(.plain, "~~~~bad", .line_feed)).next;
+    try std.testing.expectEqual(.plain, std.meta.activeTag((try opacityResolved(tilde, "~~~~\t\r", .line_feed)).next));
+}
+
+test "markdown opacity deterministic head cap keeps unknown runs opaque through actual EOF" {
+    var raw: [head_limit]u8 = @splat('`');
+    try std.testing.expectEqual(.need_more, std.meta.activeTag(Context.step(.plain, raw[0 .. head_limit - 1], .pending)));
+    const known = try opacityResolved(.plain, raw[0 .. head_limit - 1], .line_feed);
+    try std.testing.expectEqual(@as(?u8, 127), known.next.fence.run);
+    for ([_]HeadEnding{ .pending, .line_feed, .canonical_eof, .limit_cut }) |ending| {
+        const unknown = try opacityResolved(.plain, &raw, ending);
+        try std.testing.expect(unknown.next.fence.run == null);
+        try std.testing.expectEqual(unknown.next, (try opacityResolved(unknown.next, "```", .line_feed)).next);
+        try std.testing.expectEqual(unknown.next, (try opacityResolved(unknown.next, "> code", .canonical_eof)).next);
+    }
+    raw[head_limit - 1] = 'x';
+    try std.testing.expectEqual(@as(?u8, 127), (try opacityResolved(.plain, &raw, .limit_cut)).next.fence.run);
+    @memcpy(raw[0..2], "> ");
+    @memset(raw[2..], '`');
+    const quoted = try opacityResolved(.plain, &raw, .line_feed);
+    try std.testing.expectEqual(@as(u4, 1), quoted.next.fence.outer.?.depth);
+    try std.testing.expect(quoted.next.fence.run == null);
+    const state = (try opacityResolved(.plain, "```", .line_feed)).next;
+    @memcpy(raw[0..3], "```");
+    @memset(raw[3..], ' ');
+    try std.testing.expectEqual(state, (try opacityResolved(state, &raw, .line_feed)).next);
+    try std.testing.expectEqual(.plain, std.meta.activeTag((try opacityResolved(state, "```", .line_feed)).next));
+}
+
+test "markdown opacity every prefix split commits the same one hard line decision" {
+    const plain: Context = .plain;
+    const fence = (try opacityResolved(plain, "````x", .line_feed)).next;
+    const quoted = (try opacityResolved(plain, "> > ~~~x", .line_feed)).next;
+    const unknown: Context = .{ .fence = .{ .outer = null, .marker = .backtick, .run = null } };
+    const contexts = [_]Context{ plain, fence, quoted, unknown };
+    const heads = [_][]const u8{ "ordinary", "> a", "> > a", ">", "> ", "```", "````", "````x", "~~~~\r", "```` \t\r", "> > >>> code", "> > ~~~\t\r", "changed outer", "" };
+    for (contexts) |state| for (heads) |raw| for ([_]HeadEnding{ .line_feed, .canonical_eof }) |ending| {
+        const whole = try opacityResolved(state, raw, ending);
+        for (0..raw.len + 1) |first| {
+            try std.testing.expectEqual(whole, try opacityFragments(state, raw, ending, first));
+        }
+    };
+    const cap: [head_limit]u8 = @splat('~');
+    const whole = try opacityResolved(plain, &cap, .line_feed);
+    for (0..head_limit + 1) |first| {
+        try std.testing.expectEqual(whole, try opacityFragments(plain, &cap, .line_feed, first));
+    }
+}
+
+test "markdown opacity source remains raw and state has no per line buffer" {
+    const raw = "> ```bad\x1b[31m\xff\x07";
+    const opened = try opacityResolved(.plain, raw, .line_feed);
+    try std.testing.expectEqualStrings("```bad\x1b[31m\xff\x07", raw[opened.projection.body_at..]);
+    const code = "> > \x1b]8;;https://example.test\x07";
+    const projected = try opacityResolved(opened.next, code, .line_feed);
+    try std.testing.expectEqual(Quote{ .bytes = 2, .depth = 1, .indent = 0 }, projected.projection.quote.?);
+    try std.testing.expectEqualStrings("> \x1b]8;;https://example.test\x07", code[projected.projection.body_at..]);
+    try std.testing.expect(@sizeOf(Context) <= 16);
+    try std.testing.expect(@sizeOf(Context.Decision) <= 32);
+    try std.testing.expect(@sizeOf(Context.Probe) <= 40);
+    std.debug.print("opacity value sizes Context={d} Decision={d} Probe={d} bytes (unused; no renderer authority)\n", .{ @sizeOf(Context), @sizeOf(Context.Decision), @sizeOf(Context.Probe) });
 }
