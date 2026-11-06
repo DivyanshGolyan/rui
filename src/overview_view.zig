@@ -349,8 +349,6 @@ pub const Event = union(enum) {
     open: Reference,
     /// The Host's facts, read as a listing starts; null when it gave none.
     host: ?Host,
-    /// The person pressed a key, at this Unix millisecond.
-    looked: u64,
     conversed: Conversed,
     /// A model-list read ended.
     models: ModelsRead,
@@ -855,12 +853,6 @@ pub const State = struct {
     left: bool = false,
     /// The serving Host's facts, from the latest host-info read.
     host: ?Host = null,
-    /// The person's last keypress, else the first tick, in Unix milliseconds.
-    looked_ms: ?u64 = null,
-    /// Host restarts seen since `looked_ms`: changes of `started_at`.
-    restarts: u32 = 0,
-    /// The last Host start host-info gave, kept while the Host gives none.
-    started_at: ?u64 = null,
 
     /// The person's default for new Sessions. A pick replaces it at once,
     /// and a save follows it to the preferences file. `nextBinding` says
@@ -1288,21 +1280,6 @@ pub const Summary = struct {
     latest: u64 = 0,
     /// Every Session you messaged has finished.
     answered: bool = true,
-    /// Rows that finished or failed since the person looked.
-    finished_since: usize = 0,
-    failed_since: usize = 0,
-
-    /// Counts `row` if it finished or failed at or after `looked_s`. A
-    /// state's time is in whole seconds: one in the second of the keypress
-    /// counts, so nothing after it is missed.
-    fn count(self: *Summary, row: *const Row, looked_s: u64) void {
-        if (row.state.since() < looked_s) return;
-        switch (row.state) {
-            .finished => self.finished_since += 1,
-            .failed => self.failed_since += 1,
-            else => {},
-        }
-    }
 };
 
 const Run = struct { start: usize = 0, len: usize = 0 };
@@ -1500,19 +1477,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             state.selected = ref;
             effects.add(.{ .open = ref });
         },
-        .host => |facts| {
-            state.host = facts;
-            if (facts) |host| {
-                if (state.started_at) |seen| state.restarts += @intFromBool(host.started_at != seen);
-                state.started_at = host.started_at;
-            }
-        },
-        .looked => |at_ms| {
-            state.looked_ms = at_ms;
-            state.restarts = 0;
-            // A later look can only lower the counts, so none stay none.
-            if (state.summary.finished_since + state.summary.failed_since != 0) countSinceLooked(state);
-        },
+        .host => |facts| state.host = facts,
         .models => |read| readModels(state, read),
         .ran => |ran| try ranCommand(state, ran),
         .saved => |answer| {
@@ -1645,7 +1610,6 @@ pub fn writeDeparture(state: *const State, saved_effort: ?ReasoningEffort, write
 
 fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
     state.now_ms = now_ms;
-    if (state.looked_ms == null) state.looked_ms = now_ms;
     var changed = false;
     for (state.rows.items) |*row| {
         const next = row.state.asOf(now_ms);
@@ -1838,7 +1802,6 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     state.sort_keys.items.len = rows.len;
     state.summary = .{};
     const latest = std.math.maxInt(u34);
-    const looked_s = if (state.looked_ms) |at| at / 1000 else null;
     for (state.sort_keys.items, rows, 0..) |*key, *row, at| {
         const rule = rules.get(row.state);
         state.summary.failed += @intFromBool(row.state == .failed);
@@ -1846,7 +1809,6 @@ fn arrange(state: *State) error{OutOfMemory}!void {
         state.summary.approvals += @intFromBool(row.state == .approval);
         state.summary.latest = @max(state.summary.latest, row.state.since());
         if (row.group() == .yours and row.state != .finished) state.summary.answered = false;
-        if (looked_s) |since| state.summary.count(row, since);
         const age: u128 = latest - @min(row.state.since(), latest);
         key.* = .{ .key = @as(u128, @backingInt(row.group())) << 82 | age << 48 | referenceKey(row.reference), .index = @intCast(at) };
     }
@@ -1866,13 +1828,6 @@ fn arrange(state: *State) error{OutOfMemory}!void {
     if (state.selectedRow()) |row| {
         if (!visible(state, position(state, row.reference).?)) state.unfolded.insert(row.group());
     } else if (state.selected == null and rows.len != 0) state.selected = rows[state.order.items[0]].reference;
-}
-
-fn countSinceLooked(state: *State) void {
-    state.summary.finished_since = 0;
-    state.summary.failed_since = 0;
-    const looked_ms = state.looked_ms orelse return;
-    for (state.rows.items) |*row| state.summary.count(row, looked_ms / 1000);
 }
 
 fn folded(state: *const State, group: Group) bool {
@@ -2760,11 +2715,9 @@ fn hintRows(state: *const State) u16 {
     return @intCast(@min(1 + std.mem.count(u8, notice.text(), "\n"), slash_commands.short_result_lines));
 }
 
-/// The top's rows: the title, the alarm bands or else the headline, the
-/// Host's health, and what changed since the person looked.
 fn topRows(state: *const State) usize {
     const bands = @as(usize, @intFromBool(state.unreachable_since_ms != null)) + @intFromBool(band(state.rows.items, state.now_ms, state.login_at) != null);
-    return 1 + @max(bands, 1) + 1 + @intFromBool(sinceLooked(state) != null);
+    return 1 + @max(bands, 1) + 1;
 }
 
 /// Draws the overview at `state.size`. `frame` picks the spinner's glyph.
@@ -2778,10 +2731,7 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, fra
     @memset(lines, &.{});
     screen.lines = lines;
     if (height == 0 or width == 0) return screen;
-    // The top: title, the alarm bands or else the headline, the Host's
-    // health, what changed since the person looked, a gap.
-    // At most: title, two bands, health, since.
-    var top: [5][]const Span = undefined;
+    var top: [4][]const Span = undefined;
     var count: usize = 0;
     top[count] = try header(&painter, state);
     count += 1;
@@ -2803,10 +2753,6 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, fra
     // the list does not move when it comes.
     top[count] = try healthLine(&painter, state);
     count += 1;
-    if (sinceLooked(state)) |news| {
-        top[count] = try sinceLine(&painter, news);
-        count += 1;
-    }
     std.debug.assert(count == topRows(state));
     // The bottom: the rule, the composer's rows and the hints, in the same
     // rows a conversation gives its input.
@@ -3166,32 +3112,6 @@ fn healthLine(painter: *Painter, state: *const State) error{OutOfMemory}![]const
         const text = try std.fmt.allocPrint(painter.arena, "slots {d}/{d}", .{ host.slots_in_use, host.slots });
         _ = try painter.put(column, text, painter.width -| column -| 1, .{ .colour = if (host.slots_in_use >= host.slots) .ink else .normal });
     }
-    return painter.finish();
-}
-
-/// What changed since the person last looked, kept until their next key.
-pub const News = struct { seconds: u64, finished: usize, failed: usize, restarts: u32 };
-
-/// News once a Session failed or the Host restarted since the person's last
-/// keypress, else null: finishes alone are no news.
-pub fn sinceLooked(state: *const State) ?News {
-    const looked_ms = state.looked_ms orelse return null;
-    const news: News = .{ .seconds = (state.now_ms -| looked_ms) / 1000, .finished = state.summary.finished_since, .failed = state.summary.failed_since, .restarts = state.restarts };
-    return if (news.failed != 0 or news.restarts != 0) news else null;
-}
-
-fn sinceLine(painter: *Painter, news: News) error{OutOfMemory}![]const Span {
-    painter.begin(false);
-    var span: [16]u8 = undefined;
-    var finished: [32]u8 = undefined;
-    var failed: [32]u8 = undefined;
-    const restarted = switch (news.restarts) {
-        0 => "",
-        1 => ", Host restarted",
-        else => try std.fmt.allocPrint(painter.arena, ", Host restarted {d} times", .{news.restarts}),
-    };
-    const text = try std.fmt.allocPrint(painter.arena, "Since you looked {s} ago: {s} finished, {s} failed{s}.", .{ spanText(&span, news.seconds), grouped(&finished, news.finished), grouped(&failed, news.failed), restarted });
-    _ = try painter.put(1, text, painter.width -| 2, .{ .colour = .ink });
     return painter.finish();
 }
 
@@ -5068,8 +4988,6 @@ test "Host facts give the health line, and a row from before a restart still say
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 20, .slots = 2, .slots_in_use = 2 } });
     try expectScreenLine(&state, 2, " Host up 20s   slots 2/2");
     try expectStyle(&state, 2, 15, .{ .colour = .ink });
-    // The restart is the Host's fact, said on the since line; the rows
-    // keep their own words.
     const after = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings(before[std.mem.indexOf(u8, before, " Active").?..], after[std.mem.indexOf(u8, after, " Active").?..]);
@@ -6602,42 +6520,97 @@ test "the headline says whether anything works, and counts failures" {
     }
 }
 
-test "since you looked: a failure or a Host restart shows until the next keypress" {
-    var state = try opened(&mixed);
+test "overview top stays compact through completion failure Host changes and input" {
+    const Check = struct {
+        fn screen(state: *State, headline_text: []const u8, health: []const u8, group: []const u8) !void {
+            const text = try screenText(state, 80, 24, .{});
+            defer std.testing.allocator.free(text);
+            var lines = std.mem.splitScalar(u8, text, '\n');
+            for ([_][]const u8{ " रुई rui  ~/code/rui", headline_text, health, "", group }) |expected| {
+                try std.testing.expectEqualStrings(expected, lines.next().?);
+            }
+            try std.testing.expect(std.mem.indexOf(u8, text, "Since you looked") == null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "Host restarted") == null);
+        }
+    };
+    var state = try opened(&.{
+        session("a1b2c3", .{ .working = ago(40) }, .{ .label = "Finish later" }),
+        session("b2c3d4", .{ .working = ago(20) }, .{ .label = "Fail later" }),
+    });
     defer state.deinit();
-    const host: Host = .{ .started_at = test_now_s - 600, .slots = 100, .slots_in_use = 3 };
+    try Check.screen(&state, " Running. 2 Sessions. Nothing needs you.", "", " Active · 2");
+    const host: Host = .{ .started_at = test_now_s - 600, .slots = 4, .slots_in_use = 2 };
     _ = try step(&state, .{ .host = host });
-    try std.testing.expectEqual(@as(?u64, test_now_s * 1000), state.looked_ms);
-    try std.testing.expectEqual(@as(?News, null), sinceLooked(&state));
-    // Finishes alone are no news.
+    try Check.screen(&state, " Running. 2 Sessions. Nothing needs you.", " Host up 10m   slots 2/4", " Active · 2");
+
     _ = try step(&state, .{ .tick = (test_now_s + 60) * 1000 });
-    _ = try respond(&state, .changed, testToken(2), &.{session("b2c3d4", .{ .finished = .{ .since = test_now_s + 60 } }, .{ .label = "Profile the curl send queue" })});
-    try std.testing.expectEqual(@as(?News, null), sinceLooked(&state));
-    try expectScreenLine(&state, 3, "");
-    // A failure is news, with the finishes beside it.
-    _ = try step(&state, .{ .tick = (test_now_s + 12 * 60) * 1000 });
-    _ = try respond(&state, .changed, testToken(3), &.{session("a1b2c3", .{ .failed = .{ .since = test_now_s + 12 * 60, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Find why store tests fail" })});
-    try std.testing.expectEqual(@as(?News, .{ .seconds = 12 * 60, .finished = 1, .failed = 1, .restarts = 0 }), sinceLooked(&state));
-    try expectScreenLine(&state, 3, " Since you looked 12m ago: 1 finished, 1 failed.");
-    try expectStyle(&state, 3, 1, .{ .colour = .ink });
-    // A keypress clears it. A failure in the keypress's own second stays
-    // until the next one, since states keep whole seconds.
-    _ = try step(&state, .{ .looked = (test_now_s + 12 * 60) * 1000 + 500 });
-    try std.testing.expect(sinceLooked(&state) != null);
-    _ = try step(&state, .{ .looked = (test_now_s + 12 * 60 + 1) * 1000 });
-    _ = try press(&state, .{}, .next);
-    try std.testing.expectEqual(@as(?News, null), sinceLooked(&state));
-    // A changed Host start is a restart, seen across the Host's silence.
+    _ = try respond(&state, .changed, testToken(2), &.{session("a1b2c3", .{ .finished = .{ .since = test_now_s + 60 } }, .{ .label = "Finish later" })});
+    try Check.screen(&state, " Running. 2 Sessions. Nothing needs you.", " Host up 11m   slots 2/4", " Active · 1");
+
+    _ = try step(&state, .{ .tick = (test_now_s + 120) * 1000 });
+    _ = try respond(&state, .changed, testToken(3), &.{session("b2c3d4", .{ .failed = .{ .since = test_now_s + 120, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Fail later" })});
+    try Check.screen(&state, " Quiet for 0s. 1 failed.", " Host up 12m   slots 2/4", " Finished · 1");
+    try expectScreenLine(&state, 7, " Stopped or failed · 1");
+    try expectScreenLine(&state, 8, "  × Fail later                                                               0s");
+
     _ = try step(&state, .{ .host = null });
-    _ = try step(&state, .{ .host = .{ .started_at = test_now_s + 13 * 60, .slots = 100, .slots_in_use = 0 } });
-    try std.testing.expectEqual(@as(u32, 1), state.restarts);
-    _ = try step(&state, .{ .tick = (test_now_s + 14 * 60) * 1000 });
-    try expectScreenLine(&state, 3, " Since you looked 1m ago: 0 finished, 0 failed, Host restarted.");
-    _ = try step(&state, .{ .host = .{ .started_at = test_now_s + 14 * 60, .slots = 100, .slots_in_use = 0 } });
-    try expectScreenLine(&state, 3, " Since you looked 1m ago: 0 finished, 0 failed, Host restarted 2 times.");
-    _ = try step(&state, .{ .looked = (test_now_s + 14 * 60) * 1000 });
-    try std.testing.expectEqual(@as(u32, 0), state.restarts);
-    try std.testing.expectEqual(@as(?News, null), sinceLooked(&state));
+    try Check.screen(&state, " Quiet for 0s. 1 failed.", "", " Finished · 1");
+    _ = try step(&state, .{ .host = host });
+    try Check.screen(&state, " Quiet for 0s. 1 failed.", " Host up 12m   slots 2/4", " Finished · 1");
+    for ([_]u64{ test_now_s + 60, test_now_s + 120, test_now_s + 120 }) |started_at| {
+        _ = try step(&state, .{ .host = .{ .started_at = started_at, .slots = 8, .slots_in_use = 0 } });
+        try Check.screen(&state, " Quiet for 0s. 1 failed.", if (started_at == test_now_s + 60) " Host up 1m   slots 0/8" else " Host up 0s   slots 0/8", " Finished · 1");
+    }
+    _ = try step(&state, .{ .tick = (test_now_s + 121) * 1000 });
+    try Check.screen(&state, " Quiet for 1s. 1 failed.", " Host up 1s   slots 0/8", " Finished · 1");
+    _ = try press(&state, .{}, .next);
+    try Check.screen(&state, " Quiet for 1s. 1 failed.", " Host up 1s   slots 0/8", " Finished · 1");
+    _ = try typeText(&state, "a task");
+    try Check.screen(&state, " Quiet for 1s. 1 failed.", " Host up 1s   slots 0/8", " Finished · 1");
+}
+
+test "overview compact top leaves a failed row visible in a narrow viewport" {
+    var state = try opened(&.{session("a1b2c3", .{ .working = ago(40) }, .{ .label = "Fail later" })});
+    defer state.deinit();
+    _ = try step(&state, .{ .tick = (test_now_s + 60) * 1000 });
+    _ = try respond(&state, .changed, testToken(2), &.{session("a1b2c3", .{ .failed = .{ .since = test_now_s + 60, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Fail later" })});
+    const text = try screenText(&state, 40, 9, .{});
+    defer std.testing.allocator.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    for ([_][]const u8{
+        " रुई rui  ~/code/rui",
+        " Quiet for 0s. 1 failed.",
+        "",
+        "",
+        " Stopped or failed · 1",
+        "  × Fail later",
+    }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Since you looked") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Host restarted") == null);
+}
+
+test "overview compact top preserves both alarm bands before health and the list" {
+    var state = try opened(&.{session("a1b2c3", .{ .working = ago(40) }, .{ .label = "Fail later" })});
+    defer state.deinit();
+    _ = try step(&state, .{ .tick = (test_now_s + 60) * 1000 });
+    _ = try respond(&state, .changed, testToken(2), &.{session("a1b2c3", .{ .failed = .{ .since = test_now_s + 60, .code = bounded(session_work.max_code_bytes, "provider_sign_in_refresh_token_expired"), .resets_at = null } }, .{ .label = "Fail later" })});
+    _ = try step(&state, .{ .tick = (test_now_s + 61) * 1000 });
+    _ = try step(&state, .{ .list = .failed });
+    _ = try step(&state, .{ .tick = (test_now_s + 121) * 1000 });
+    const text = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    for ([_][]const u8{
+        " रुई rui  ~/code/rui",
+        " Host stopped 1m ago. Run rui host start.",
+        " Sign-in expired. Run rui auth login codex.",
+        " Host not responding. Last update 1m ago.",
+        "",
+        " Stopped or failed · 1",
+        "  × Fail later                                                               1m",
+    }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Since you looked") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Host restarted") == null);
 }
 
 test "the Host-stopped band comes first, over the provider bands and the faded rows" {
