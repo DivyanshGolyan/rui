@@ -6650,6 +6650,12 @@
                 "maxLength": 128,
                 "x-rui-max-bytes": 128
               },
+              "delta": {
+                "const": "full"
+              },
+              "since": {
+                "type": "null"
+              },
               "observation": {
                 "type": "object",
                 "properties": {
@@ -6667,6 +6673,8 @@
               "version",
               "type",
               "key",
+              "delta",
+              "since",
               "observation"
             ],
             "additionalProperties": false
@@ -6684,6 +6692,21 @@
                 "type": "string",
                 "maxLength": 128,
                 "x-rui-max-bytes": 128
+              },
+              "delta": {
+                "const": "full"
+              },
+              "since": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 60,
+                    "x-rui-max-bytes": 60
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "observation": {
                 "anyOf": [
@@ -6830,6 +6853,8 @@
               "version",
               "type",
               "key",
+              "delta",
+              "since",
               "observation"
             ],
             "additionalProperties": false
@@ -6847,6 +6872,21 @@
                 "type": "string",
                 "maxLength": 128,
                 "x-rui-max-bytes": 128
+              },
+              "delta": {
+                "const": "full"
+              },
+              "since": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 60,
+                    "x-rui-max-bytes": 60
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "observation": {
                 "anyOf": [
@@ -10091,6 +10131,8 @@
               "version",
               "type",
               "key",
+              "delta",
+              "since",
               "observation"
             ],
             "additionalProperties": false
@@ -10108,6 +10150,21 @@
                 "type": "string",
                 "maxLength": 128,
                 "x-rui-max-bytes": 128
+              },
+              "delta": {
+                "const": "full"
+              },
+              "since": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 60,
+                    "x-rui-max-bytes": 60
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "observation": {
                 "anyOf": [
@@ -10320,6 +10377,8 @@
               "version",
               "type",
               "key",
+              "delta",
+              "since",
               "observation"
             ],
             "additionalProperties": false
@@ -10337,6 +10396,21 @@
                 "type": "string",
                 "maxLength": 128,
                 "x-rui-max-bytes": 128
+              },
+              "delta": {
+                "const": "full"
+              },
+              "since": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 60,
+                    "x-rui-max-bytes": 60
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "observation": {
                 "anyOf": [
@@ -10513,6 +10587,8 @@
               "version",
               "type",
               "key",
+              "delta",
+              "since",
               "observation"
             ],
             "additionalProperties": false
@@ -10530,6 +10606,21 @@
                 "type": "string",
                 "maxLength": 128,
                 "x-rui-max-bytes": 128
+              },
+              "delta": {
+                "const": "full"
+              },
+              "since": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 60,
+                    "x-rui-max-bytes": 60
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "observation": {
                 "anyOf": [
@@ -10702,39 +10793,118 @@
               "version",
               "type",
               "key",
+              "delta",
+              "since",
               "observation"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "9"
+              },
+              "type": {
+                "const": "command_observation"
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "delta": {
+                "const": "not_modified"
+              },
+              "since": {
+                "type": "string",
+                "maxLength": 60,
+                "x-rui-max-bytes": 60
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "key",
+              "delta",
+              "since"
             ],
             "additionalProperties": false
           }
         ]
       },
       "ObserveCommandRequest": {
-        "type": "object",
-        "properties": {
-          "version": {
-            "const": "9"
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "9"
+              },
+              "kind": {
+                "const": "observe_command"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key"
+            ],
+            "additionalProperties": false
           },
-          "kind": {
-            "const": "observe_command"
-          },
-          "store": {
-            "type": "string",
-            "maxLength": 492,
-            "x-rui-max-bytes": 492
-          },
-          "key": {
-            "type": "string",
-            "maxLength": 128,
-            "x-rui-max-bytes": 128
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "9"
+              },
+              "kind": {
+                "const": "observe_command"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "since": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 60,
+                    "x-rui-max-bytes": 60
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "since"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "version",
-          "kind",
-          "store",
-          "key"
-        ],
-        "additionalProperties": false
+        ]
       },
       "PageWork": {
         "type": "object",

@@ -1,4 +1,5 @@
 const std = @import("std");
+const change_ring = @import("change_ring.zig");
 const os = @import("os/os.zig");
 const socket_os = @import("os/socket.zig");
 const pages = @import("os/pages.zig");
@@ -265,6 +266,7 @@ const Intake = struct {
                 error.EnvironmentRequired => "environment_required",
                 error.EnvironmentTooLarge => "environment_too_large",
                 error.InvalidEnvironment => "invalid_environment",
+                error.InvalidSince => "invalid_since",
                 else => @errorName(err),
             };
             const kind: protocol.ErrorType = switch (err) {
@@ -1618,12 +1620,12 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             fd.timing = timing;
         },
         .observe_command => |*command| {
-            var observation: store_module.CommandObservation = undefined;
-            host.store.observeCommand(command.key.slice(), &observation) catch |err| {
+            var observation: store_module.Observed = undefined;
+            host.store.observeCommand(command.key.slice(), command.since, &observation) catch |err| {
                 fenceDispatch(host, "command observation", err);
                 return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
             };
-            try fd.jsonGrowing(200, protocol.command_observation_reply.max_bytes, renderCommandObservation, .{ command.key.slice(), &observation });
+            try fd.json(200, commandObservationBytes(&observation), renderCommandObservation, .{ command.key.slice(), &observation });
         },
         .read_result => |*command| {
             const reference = host.store.commandResult(command.key.slice()) catch |err| switch (err) {
@@ -2222,15 +2224,34 @@ fn renderPermissionDecisionReply(
     };
 }
 
-fn renderCommandObservation(
+fn commandObservationBytes(observed: *const store_module.Observed) usize {
+    const shapes = protocol.command_observation_reply;
+    return switch (observed.*) {
+        .not_modified => protocol.shapeBytes(shapes.not_modified),
+        .full => |*full| if (full.observation.status == .absent) protocol.shapeBytes(shapes.absent) else switch (full.observation.kind) {
+            inline else => |_, kind| shapes.maxBytes(kind),
+        },
+    };
+}
+
+fn renderCommandObservation(response: protocol.JsonOut, key: []const u8, observed: *const store_module.Observed) !void {
+    var token: [change_ring.SessionToken.max_bytes]u8 = undefined;
+    switch (observed.*) {
+        .not_modified => |since| try response.appendShape(protocol.command_observation_reply.not_modified, .{ key, since.format(&token) }),
+        .full => |*full| try renderFullCommandObservation(response, key, &full.observation, if (full.token) |since| since.format(&token) else null),
+    }
+}
+
+fn renderFullCommandObservation(
     response: protocol.JsonOut,
     key: []const u8,
     observation: *const store_module.CommandObservation,
+    since: ?[]const u8,
 ) !void {
     const shapes = protocol.command_observation_reply;
     if (observation.status == .absent) return response.appendShape(shapes.absent, .{key});
     switch (observation.kind) {
-        inline else => |_, kind| try response.appendShape(shapes.head(kind), .{ key, observation.status, observation.target.slice() }),
+        inline else => |_, kind| try response.appendShape(shapes.head(kind), .{ key, since, observation.status, observation.target.slice() }),
     }
     if (observation.code.len != 0) try response.appendShape(shapes.code, .{observation.code.slice()});
     if (observation.kind == .message) try response.appendShape(shapes.state, .{observation.requestState() orelse return error.InvalidCommandObservation});
@@ -2385,7 +2406,7 @@ const Reply = struct {
     /// exact length. Allocation or header failure leaves no body and the exchange
     /// retires unanswered: it cannot revoke an already saved semantic answer.
     /// Only the renderer's own failure, or outgrowing `max_bytes`, returns.
-    fn json(self: *Reply, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
+    fn json(self: *Reply, status: u16, max_bytes: usize, comptime render: anytype, args: anytype) !void {
         const body = std.Io.Writer.Allocating.initCapacity(self.allocator, max_bytes) catch return;
         return self.jsonInto(body, status, max_bytes, render, args);
     }
@@ -2395,7 +2416,7 @@ const Reply = struct {
         return self.jsonInto(.init(self.allocator), status, max_bytes, render, args);
     }
 
-    fn jsonInto(self: *Reply, initial: std.Io.Writer.Allocating, status: u16, comptime max_bytes: usize, comptime render: anytype, args: anytype) !void {
+    fn jsonInto(self: *Reply, initial: std.Io.Writer.Allocating, status: u16, max_bytes: usize, comptime render: anytype, args: anytype) !void {
         std.debug.assert(self.body == .none);
         var body = initial;
         defer body.deinit();
@@ -2934,7 +2955,7 @@ test "delayed control replies retain command identity after request storage reus
 test "message observation renders Host state binding live work and persistent recovery byte exactly" {
     const zero_digest = "0000000000000000000000000000000000000000000000000000000000000000";
     const full_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    const head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{";
+    const head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{";
     const accepted = head ++ "\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",\"state\":\"";
     const input = ",\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ zero_digest ++ "\"}";
     const queue = ",\"queue\":{\"admission\":\"1\",\"admitted_at\":\"11\"}";
@@ -2943,7 +2964,7 @@ test "message observation renders Host state binding live work and persistent re
     const Expect = struct {
         fn rendered(observation: *const store_module.CommandObservation, expected: []const u8) !void {
             var response: protocol.CommandObservationBuffer = .{};
-            try response.render(renderCommandObservation, .{ "k", observation });
+            try response.render(renderFullCommandObservation, .{ "k", observation, null });
             try std.testing.expectEqualStrings(expected, response.slice());
         }
     };
@@ -2985,6 +3006,66 @@ test "message observation renders Host state binding live work and persistent re
     try Expect.rendered(&observation, accepted ++ "cancelled\"" ++ input ++ queue ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}");
 }
 
+test "command observation full and both unchanged tiers render byte exactly with independent reservations" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite", .{root}), root);
+    defer storage.close() catch unreachable;
+    storage.instance = @splat(0xab);
+    var configure = try store_module.testingCompleteConfiguration("tier-create", "", root, "model-a");
+    const configured = storage.configure(&configure, .{});
+    try std.testing.expect(configured == .accepted);
+    const session = configured.accepted.session;
+    var observed: store_module.Observed = undefined;
+    try storage.observeCommand("tier-create", null, &observed);
+    const first = observed.full.token.?;
+    const Expect = struct {
+        fn full(value: *const store_module.Observed, id: []const u8, generation: u64) !void {
+            var response: protocol.CommandObservationBuffer = .{};
+            try response.render(renderCommandObservation, .{ "tier-create", value });
+            var expected: [1024]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"tier-create\",\"delta\":\"full\",\"since\":\"abababababababababababababababab.{d}.{s}\",\"observation\":{{\"status\":\"accepted\",\"kind\":\"configure\",\"target\":\"{s}\",\"revision\":\"1\",\"created\":true}}}}", .{ generation, id, id }), response.slice());
+            try std.testing.expectEqual(protocol.command_observation_reply.maxBytes(.configure), commandObservationBytes(value));
+        }
+        fn unchanged(value: *const store_module.Observed, id: []const u8, generation: u64) !void {
+            var response: protocol.CommandObservationBuffer = .{};
+            try response.render(renderCommandObservation, .{ "tier-create", value });
+            var expected: [256]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"tier-create\",\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.{d}.{s}\"}}", .{ generation, id }), response.slice());
+            try std.testing.expectEqual(protocol.shapeBytes(protocol.command_observation_reply.not_modified), commandObservationBytes(value));
+            try std.testing.expect(commandObservationBytes(value) < protocol.command_observation_reply.max_bytes);
+        }
+    };
+    try Expect.full(&observed, session.slice(), first.generation);
+    // Tier 1 returns exactly the generation already seen, without a holder.
+    try storage.observeCommand("tier-create", first, &observed);
+    try Expect.unchanged(&observed, session.slice(), first.generation);
+    // Tier 2 advances over a sibling's commit, without a read access.
+    try configure.key.set("tier-sibling");
+    try std.testing.expect(storage.configure(&configure, .{}) == .accepted);
+    try storage.observeCommand("tier-create", first, &observed);
+    try std.testing.expect(observed.not_modified.generation > first.generation);
+    try Expect.unchanged(&observed, session.slice(), storage.commitGeneration());
+    const sibling = observed.not_modified;
+    var update: protocol.ConfigureCommand = .{};
+    try update.key.set("tier-update");
+    try update.session.set(session.slice());
+    update.configuration.label.state = .value;
+    try update.configuration.label.value.set("changed");
+    try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+    try storage.observeCommand("tier-create", sibling, &observed);
+    try Expect.full(&observed, session.slice(), storage.commitGeneration());
+    try storage.observeCommand("absent", null, &observed);
+    var absent: protocol.CommandObservationBuffer = .{};
+    try absent.render(renderCommandObservation, .{ "absent", &observed });
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"absent\",\"delta\":\"full\",\"since\":null,\"observation\":{\"status\":\"absent\"}}", absent.slice());
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.command_observation_reply.absent), commandObservationBytes(&observed));
+}
+
 test "Message observation work and recovery fit the unchanged resident response bound" {
     const max = std.math.maxInt(u64);
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
@@ -3001,7 +3082,7 @@ test "Message observation work and recovery fit the unchanged resident response 
     observation.kind.message.?.recovery.count = protocol.message_recovery_limit;
     for (&observation.kind.message.?.recovery.calls) |*call| call.* = .{ .action_id = max, .operation_id = max, .call = max, .description = description, .at = max };
     var response: protocol.CommandObservationBuffer = .{};
-    try response.render(renderCommandObservation, .{ &escaped_key, &observation });
+    try response.render(renderFullCommandObservation, .{ &escaped_key, &observation, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
     try std.testing.expectEqual(protocol.command_observation_reply.maxBytes(.message) - protocol.shapeBytes(protocol.command_observation_reply.code), response.len);
     // The existing response owner is sized by host-info's escaped Store path,
     // not these added per-observation facts; no resident pool grows.
@@ -3055,7 +3136,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.CommandObservationBuffer = .{};
-            try response.render(renderCommandObservation, .{ key, &observation });
+            try response.render(renderFullCommandObservation, .{ key, &observation, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
             try std.testing.expectEqual(expected, response.len);
         }
     };
@@ -3216,7 +3297,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 
         fn observation(key: []const u8, value: store_module.CommandObservation) !usize {
             var response: protocol.CommandObservationBuffer = .{};
-            try response.render(renderCommandObservation, .{ key, &value });
+            try response.render(renderFullCommandObservation, .{ key, &value, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
             return response.len;
         }
     };
@@ -4042,10 +4123,10 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
             defer std.testing.allocator.free(body);
             try Probe.send(peer.socket.handle, control.route, body, false);
             try Probe.response(peer.socket.handle);
-            var saved: store_module.CommandObservation = undefined;
-            try storage.observeCommand(control.key, &saved);
-            try std.testing.expectEqual(control.kind, std.meta.activeTag(saved.kind));
-            try std.testing.expectEqual(control.status, saved.status);
+            var saved: store_module.Observed = undefined;
+            try storage.observeCommand(control.key, null, &saved);
+            try std.testing.expectEqual(control.kind, std.meta.activeTag(saved.full.observation.kind));
+            try std.testing.expectEqual(control.status, saved.full.observation.status);
             try std.testing.expect(!Probe.released.load(.acquire));
         }
         const discovery = try address.connect(std.testing.io);

@@ -11168,3 +11168,164 @@ test "Message observation keeps bounded newest Action recovery across continuati
         }
     }.run);
 }
+
+test "observation since sibling Session commit advances an unchanged token" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("observe-parent", "", workspace, "model-a");
+            const parent = storage.configure(&create, .{});
+            try std.testing.expect(parent == .accepted);
+            var observed: store_core.Observed = undefined;
+            try storage.observeCommand("observe-parent", null, &observed);
+            try std.testing.expect(observed == .full);
+            const token = observed.full.token.?;
+            try std.testing.expectEqualSlices(u8, parent.accepted.session.slice(), &token.session);
+            try std.testing.expectEqual(storage.commit_generation.load(.acquire), token.generation);
+            try storage.observeCommand("observe-parent", token, &observed);
+            try std.testing.expect(observed == .not_modified);
+            try std.testing.expectEqualDeep(token, observed.not_modified);
+
+            var sibling = try completeConfiguration("observe-sibling", "", workspace, "model-a");
+            try std.testing.expect(storage.configure(&sibling, .{}) == .accepted);
+            const generation = storage.commit_generation.load(.acquire);
+            try std.testing.expect(generation > token.generation);
+            try storage.observeCommand("observe-parent", token, &observed);
+            try std.testing.expect(observed == .not_modified);
+            try std.testing.expectEqualDeep(token.at(generation), observed.not_modified);
+        }
+    }.run);
+}
+
+test "observation since own Session commit reads full at its generation" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("observe-own", "", workspace, "model-a");
+            const parent = storage.configure(&create, .{});
+            try std.testing.expect(parent == .accepted);
+            var observed: store_core.Observed = undefined;
+            try storage.observeCommand("observe-own", null, &observed);
+            try std.testing.expect(observed == .full);
+            const token = observed.full.token.?;
+            var update = try completeConfiguration("observe-update", parent.accepted.session.slice(), workspace, "model-a");
+            update.configuration.label.state = .value;
+            try update.configuration.label.value.set("Changed");
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            const generation = storage.commit_generation.load(.acquire);
+            try std.testing.expect(generation > token.generation);
+            try storage.observeCommand("observe-own", token, &observed);
+            try std.testing.expect(observed == .full);
+            try std.testing.expectEqualDeep(token.at(generation), observed.full.token.?);
+            try std.testing.expectEqual(protocol.CommandObservationStatus.accepted, observed.full.observation.status);
+            try std.testing.expectEqualStrings(parent.accepted.session.slice(), observed.full.observation.target.slice());
+        }
+    }.run);
+}
+
+test "observation since falls back for foreign future uncovered and restarted tokens" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var saved: change_ring.SessionToken = undefined;
+            {
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("observe-fallback", "", workspace, "model-a");
+                try std.testing.expect(storage.configure(&create, .{}) == .accepted);
+                var observed: store_core.Observed = undefined;
+                try storage.observeCommand("observe-fallback", null, &observed);
+                try std.testing.expect(observed == .full);
+                saved = observed.full.token.?;
+                var foreign = saved;
+                foreign.instance[0] ^= 1;
+                try expectFull(&storage, foreign, saved, &observed);
+                try expectFull(&storage, saved.at(saved.generation + 1), saved, &observed);
+
+                // An older token is uncovered after the ring has forgotten a
+                // generation, even when that generation only names a sibling.
+                var sibling = try completeConfiguration("observe-fallback-sibling", "", workspace, "model-a");
+                try std.testing.expect(storage.configure(&sibling, .{}) == .accepted);
+                const generation = storage.commit_generation.load(.acquire);
+                storage.changes.forget(generation);
+                try std.testing.expect(!storage.changes.covers(saved.generation));
+                try expectFull(&storage, saved, saved.at(generation), &observed);
+            }
+            {
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var observed: store_core.Observed = undefined;
+                try storage.observeCommand("observe-fallback", saved, &observed);
+                try std.testing.expect(observed == .full);
+                const token = observed.full.token.?;
+                try std.testing.expect(!std.mem.eql(u8, &saved.instance, &token.instance));
+                try std.testing.expectEqualSlices(u8, &storage.instance, &token.instance);
+                try std.testing.expectEqualSlices(u8, &saved.session, &token.session);
+                try std.testing.expectEqual(storage.commit_generation.load(.acquire), token.generation);
+            }
+        }
+
+        fn expectFull(storage: *Store, since: change_ring.SessionToken, expected: change_ring.SessionToken, observed: *store_core.Observed) !void {
+            try storage.observeCommand("observe-fallback", since, observed);
+            try std.testing.expect(observed.* == .full);
+            try std.testing.expectEqualDeep(expected, observed.full.token.?);
+            try std.testing.expectEqual(protocol.CommandObservationStatus.accepted, observed.full.observation.status);
+        }
+    }.run);
+}
+
+test "observation since leaves absent and non Session targets untokened and reports fencing" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var observed: store_core.Observed = undefined;
+            try storage.observeCommand("observe-absent", null, &observed);
+            try std.testing.expect(observed == .full);
+            try std.testing.expectEqual(protocol.CommandObservationStatus.absent, observed.full.observation.status);
+            try std.testing.expect(observed.full.token == null);
+            var request: protocol.ConfigureCommand = .{ .preset = .{} };
+            try request.key.set("observe-no-session");
+            try request.preset.?.set("missing");
+            const rejected = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
+            try std.testing.expect(rejected == .rejected);
+            try storage.observeCommand("observe-no-session", null, &observed);
+            try std.testing.expect(observed == .full);
+            try std.testing.expectEqual(protocol.CommandObservationStatus.rejected, observed.full.observation.status);
+            try std.testing.expect(!protocol.validSessionId(observed.full.observation.target.slice()));
+            try std.testing.expect(observed.full.token == null);
+
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("observe-before-fence", "", workspace, "model-a");
+            try std.testing.expect(storage.configure(&create, .{}) == .accepted);
+            try storage.observeCommand("observe-before-fence", null, &observed);
+            try std.testing.expect(observed == .full);
+            const token = observed.full.token.?;
+            var failed = try completeConfiguration("observe-fence", "", workspace, "model-a");
+            try std.testing.expect(storage.configure(&failed, .{ .before_commit = true }) == .infrastructure_failure);
+            try std.testing.expectError(error.StoreFenced, storage.observeCommand("observe-before-fence", token, &observed));
+            try std.testing.expectError(error.StoreFenced, storage.observeCommand("observe-before-fence", null, &observed));
+        }
+    }.run);
+}

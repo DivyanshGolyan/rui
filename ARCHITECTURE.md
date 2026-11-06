@@ -297,6 +297,21 @@ Supported metadata for CLI consumers is:
 | Session stop | Original selected nullable Turn, admission cutoff and pending/completed semantic completion |
 | Model Interruption / Permission Decision | Original Session/Turn/Operation or Action/decision, including retained rejected targets |
 
+**Unchanged observations.**
+`observe-command` accepts an optional `since` hint, `<32-hex instance>.<generation>.<6-character Session>`.
+Malformed token strings return 400 `invalid_since`.
+Every full reply has `delta:"full"` and `since` beside `observation`; `since` is null for absent keys or non-Session targets.
+A repeat read can instead return only the version, type, key, `delta:"not_modified"` and its token.
+Store owns both unchanged tiers: the opening identity and unchanged commit-generation atomics answer without a holder; otherwise, under the Store holder and before read access, the existing change ring walks backward only through entries after the token.
+If that covered history names no change to its Session, the token advances to the current generation without SQLite.
+Otherwise the full observation carries the generation captured before its reads.
+Foreign, future, uncovered or pre-restart tokens get a full observation.
+Tokens are hints, not revisions or durable state, and the token's Session scopes the check; editing one can mislead only its caller.
+Nothing is retained per reader and no Host thread is added.
+Each reply reserves its own shape's bound, not the global observation maximum.
+A retry becoming past due commits nothing: readers apply `WorkState.asOf`, as Session listing does.
+`request inspect` always asks for full facts; it exposes neither a `--since` flag nor the token in its output.
+
 One bounded parse validates the entire keyed envelope, consumed duplicates, string-only named statuses/kinds, canonical decimal IDs, content-reference syntax and operation applicability.
 An omitted field is distinct from invalid present null; only fields declared nullable, such as selection Turn and `work.first_action`, accept null.
 Unknown extensions are syntax-validated and discarded, not retained as a DOM or emitted through ordinary output.

@@ -92,6 +92,20 @@ pub const Ring = struct {
         return since >= self.forgotten_through;
     }
 
+    /// Whether this Session may have changed in (since, through]. Walk only
+    /// entries newer than `since`, newest first; uncovered history is unknown.
+    pub fn mayHaveChanged(self: *const Ring, session: *const Id, since: u64, through: u64) bool {
+        if (!self.covers(since)) return true;
+        var index = self.next;
+        for (0..self.len) |_| {
+            index = (index + capacity - 1) % capacity;
+            const generation = self.generations[index];
+            if (generation <= since) break;
+            if (generation <= through and std.mem.eql(u8, &self.sessions[index], session)) return true;
+        }
+        return false;
+    }
+
     /// The first `out.len` distinct Sessions after `after`, in ID order,
     /// changed in (since, through] in `workspace`, or in any Workspace when
     /// null. Fewer means there are no more.
@@ -142,6 +156,37 @@ pub const Token = struct {
         for (decimal) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidSince;
         token.generation = std.fmt.parseInt(u64, decimal, 10) catch return error.InvalidSince;
         return token;
+    }
+};
+
+/// Opaque per-Session observation hint: "<32 hex instance>.<generation>.<session>".
+/// Like Token, it is neither stored nor meaningful across Host openings.
+pub const SessionToken = struct {
+    instance: [16]u8,
+    generation: u64,
+    session: Id,
+
+    pub const max_bytes = Token.max_bytes + 1 + id_bytes;
+
+    pub fn format(self: SessionToken, buffer: *[max_bytes]u8) []const u8 {
+        const token: Token = .{ .instance = self.instance, .generation = self.generation };
+        const prefix = token.format(buffer[0..Token.max_bytes]);
+        buffer[prefix.len] = '.';
+        buffer[prefix.len + 1 ..][0..id_bytes].* = self.session;
+        return buffer[0 .. prefix.len + 1 + id_bytes];
+    }
+
+    pub fn parse(text: []const u8) error{InvalidSince}!SessionToken {
+        if (text.len < 34 + 1 + id_bytes) return error.InvalidSince;
+        const separator = text.len - id_bytes - 1;
+        if (text[separator] != '.' or !@import("session_id.zig").valid(text[separator + 1 ..])) return error.InvalidSince;
+        const token = try Token.parse(text[0..separator]);
+        return .{ .instance = token.instance, .generation = token.generation, .session = text[separator + 1 ..][0..id_bytes].* };
+    }
+
+    /// Advances a scope whose unchanged state the caller has proved.
+    pub fn at(self: SessionToken, generation: u64) SessionToken {
+        return .{ .instance = self.instance, .generation = generation, .session = self.session };
     }
 };
 
@@ -246,4 +291,61 @@ test "a token is a lowercase instance and a canonical generation" {
         "ababababababababababababababababa.1",
         "abababababababababababababababab.1 ",
     }) |invalid| try std.testing.expectError(error.InvalidSince, Token.parse(invalid));
+}
+
+test "a Session token reuses canonical instance and generation and validates its scope" {
+    const token: SessionToken = .{ .instance = @splat(0xab), .generation = 42, .session = "k7m2qx".* };
+    var buffer: [SessionToken.max_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("abababababababababababababababab.42.k7m2qx", token.format(&buffer));
+    const parsed = try SessionToken.parse(token.format(&buffer));
+    try std.testing.expectEqualSlices(u8, &token.instance, &parsed.instance);
+    try std.testing.expectEqual(token.generation, parsed.generation);
+    try std.testing.expectEqualSlices(u8, &token.session, &parsed.session);
+    const advanced = token.at(std.math.maxInt(u64));
+    try std.testing.expectEqual(SessionToken.max_bytes, advanced.format(&buffer).len);
+    const parsed_advanced = try SessionToken.parse(advanced.format(&buffer));
+    try std.testing.expectEqualSlices(u8, &advanced.instance, &parsed_advanced.instance);
+    try std.testing.expectEqual(advanced.generation, parsed_advanced.generation);
+    try std.testing.expectEqualSlices(u8, &advanced.session, &parsed_advanced.session);
+    const zero = token.at(0);
+    const parsed_zero = try SessionToken.parse("abababababababababababababababab.0.k7m2qx");
+    try std.testing.expectEqualSlices(u8, &zero.instance, &parsed_zero.instance);
+    try std.testing.expectEqual(zero.generation, parsed_zero.generation);
+    try std.testing.expectEqualSlices(u8, &zero.session, &parsed_zero.session);
+    for ([_][]const u8{
+        "",                                            "abababababababababababababababab.42",        "abababababababababababababababab.42.k7m2q",
+        "abababababababababababababababab.42.k7m2qxx", "abababababababababababababababab.42.K7m2qx", "abababababababababababababababab.42.k7m2qi",
+        "abababababababababababababababab.42.k7m2ql",  "abababababababababababababababab.42.k7m2qo", "abababababababababababababababab.42.k7m2qu",
+        "abababababababababababababababab.042.k7m2qx", "abababababababababababababababab.-1.k7m2qx", "abababababababababababababababab.18446744073709551616.k7m2qx",
+        "ABABABABABABABABABABABABABABABAB.42.k7m2qx",  "abababababababababababababababab..k7m2qx",   "abababababababababababababababab.42.k7m2qx ",
+    }) |invalid| try std.testing.expectError(error.InvalidSince, SessionToken.parse(invalid));
+}
+
+test "Session change hints distinguish sibling changes and covered interval boundaries" {
+    var ring: Ring = .{};
+    const session: Id = "k7m2qx".*;
+    try std.testing.expect(!ring.mayHaveChanged(&session, 0, 0));
+    recordAll(&ring, 1, 1, &.{&session});
+    recordAll(&ring, 2, 2, &.{"a00000"});
+    recordAll(&ring, 3, 1, &.{ "a00000", &session });
+    try std.testing.expect(ring.mayHaveChanged(&session, 0, 1));
+    try std.testing.expect(!ring.mayHaveChanged(&session, 1, 2));
+    try std.testing.expect(ring.mayHaveChanged(&session, 2, 3));
+    try std.testing.expect(!ring.mayHaveChanged(&session, 3, 3));
+    ring.forget(4);
+    try std.testing.expect(ring.mayHaveChanged(&session, 3, 4));
+    try std.testing.expect(!ring.mayHaveChanged(&session, 4, 4));
+}
+
+test "Session change hints walk wrapped entries and conservatively report uncovered history" {
+    var ring: Ring = .{};
+    const session: Id = "k7m2qx".*;
+    recordAll(&ring, 1, 1, &.{&session});
+    for (2..capacity + 2) |generation| recordAll(&ring, generation, 2, &.{"a00000"});
+    try std.testing.expect(ring.mayHaveChanged(&session, 0, capacity + 1));
+    try std.testing.expect(!ring.mayHaveChanged(&session, 1, capacity + 1));
+    recordAll(&ring, capacity + 2, 1, &.{&session});
+    try std.testing.expect(ring.mayHaveChanged(&session, capacity, capacity + 2));
+    try std.testing.expect(!ring.mayHaveChanged(&session, capacity, capacity + 1));
+    try std.testing.expect(!ring.mayHaveChanged(&session, capacity + 2, capacity + 2));
 }

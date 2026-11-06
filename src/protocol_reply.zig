@@ -3,6 +3,7 @@
 //! client.zig owns transport and request capture.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+pub const SessionToken = @import("change_ring.zig").SessionToken;
 const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
 const transport_policy = @import("transport_policy.zig");
@@ -542,8 +543,22 @@ pub const ResultReply = union(enum) {
 };
 
 pub const ObservationReply = union(enum) {
-    observation: CommandObservation,
+    observation: struct { facts: CommandObservation, since: ?SessionToken },
+    not_modified: SessionToken,
     failure: ReadFailure,
+
+    pub fn parse(reply: CommandReply, key: []const u8, since: ?SessionToken) !ObservationReply {
+        if (reply.status != 200) return .{ .failure = try decodeReadFailure(reply, false) };
+        const result = try CommandObservation.parseReply(reply, key);
+        if (result == .not_modified) {
+            const previous = since orelse return error.InvalidObservation;
+            const next = result.not_modified;
+            if (!std.mem.eql(u8, &previous.instance, &next.instance) or
+                !std.mem.eql(u8, &previous.session, &next.session) or next.generation < previous.generation)
+                return error.RequestBindingMismatch;
+        }
+        return result;
+    }
 };
 
 pub const ResultReadReply = union(enum) {
@@ -1414,6 +1429,13 @@ pub const CommandObservation = struct {
     }
 
     pub fn parse(reply: CommandReply, key: []const u8) !CommandObservation {
+        return switch (try parseReply(reply, key)) {
+            .observation => |full| full.facts,
+            else => error.InvalidObservation,
+        };
+    }
+
+    fn parseReply(reply: CommandReply, key: []const u8) !ObservationReply {
         try checkCanonicalFailure(reply);
         if (reply.status != 200) return error.ObservationFailed;
         if (reply.body.len > protocol.command_observation_reply.max_bytes) return error.ResponseTooLarge;
@@ -1453,7 +1475,13 @@ pub const CommandObservation = struct {
             interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
             permission_target: OmittableJson(struct { action: JsonString(20), decision: JsonEnum(protocol.PermissionDecision) }) = .{},
         };
-        const Wire = struct { version: JsonString(8), type: JsonString(32), key: JsonString(protocol.max_key_bytes), observation: Facts, code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{}, answer: OmittableJson(struct {}) = .{} };
+        const Since = struct {
+            value: ?JsonString(SessionToken.max_bytes),
+            pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+                return .{ .value = try std.json.innerParse(?JsonString(SessionToken.max_bytes), allocator, source, options) };
+            }
+        };
+        const Wire = struct { version: JsonString(8), type: JsonString(32), key: JsonString(protocol.max_key_bytes), delta: JsonEnum(enum { full, not_modified }), since: Since, observation: OmittableJson(Facts) = .{}, code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{}, answer: OmittableJson(struct {}) = .{} };
         const capacity = comptime std.ArrayList(u8).growCapacity((protocol.command_observation_reply.max_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.command_observation_reply.max_bytes);
         var storage: [capacity]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
@@ -1463,7 +1491,12 @@ pub const CommandObservation = struct {
         const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &scanner, .{ .ignore_unknown_fields = true }) catch return error.InvalidObservation;
         if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("command_observation") or wire.code.value != null or wire.answer.value != null) return error.InvalidObservation;
         if (!wire.key.eql(key)) return error.RequestBindingMismatch;
-        const facts = wire.observation;
+        const since = if (wire.since.value) |text| SessionToken.parse(text.slice()) catch return error.InvalidObservation else null;
+        if (wire.delta.value == .not_modified) {
+            if (wire.observation.isPresent()) return error.InvalidObservation;
+            return .{ .not_modified = since orelse return error.InvalidObservation };
+        }
+        const facts = wire.observation.value orelse return error.InvalidObservation;
         var observed: CommandObservation = .{ .key = wire.key.value, .status = facts.status.value, .kind = if (facts.kind.value) |kind| kind.value else null, .created = facts.created.value };
         inline for (.{ "target", "code" }) |name| if (@field(facts, name).value) |value| {
             @field(observed, name) = value.value;
@@ -1495,7 +1528,11 @@ pub const CommandObservation = struct {
         if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try mutationId(value.turn, true), .operation = try mutationId(value.operation, true) };
         if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try mutationId(value.action, true), .decision = value.decision.value };
         try observed.validate();
-        return observed;
+        if (since) |token| {
+            const target = observed.target orelse return error.InvalidObservation;
+            if (!target.eql(&token.session)) return error.RequestBindingMismatch;
+        }
+        return .{ .observation = .{ .facts = observed, .since = since } };
     }
 
     fn decodeReference(value: anytype) !ContentReference {
@@ -3040,7 +3077,7 @@ const testing_observation_input = ",\"input\":{\"type\":\"text\",\"bytes\":\"11\
 const testing_observation_queue = ",\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}";
 const testing_observation_work = ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null}";
 const testing_observation_binding = ",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
-const testing_observation_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":";
+const testing_observation_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":";
 const testing_observation_message = "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\"";
 
 test "keyed observation retains Host state independently of admission and binding" {
@@ -3075,7 +3112,7 @@ test "keyed observation retains Host state independently of admission and bindin
 }
 
 test "keyed observation validates all five operation shapes and binding" {
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"k7m2qx\",";
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"target\":\"k7m2qx\",";
     inline for (.{
         .{ "configure", ",\"revision\":\"31\",\"created\":true", "" },
         .{ "message", ",\"state\":\"queued\"" ++ testing_observation_input ++ testing_observation_queue ++ testing_observation_work, ",\"state\":\"rejected\"" },
@@ -3105,7 +3142,7 @@ test "keyed observation validates all five operation shapes and binding" {
     }
     inline for (.{ "configure", "message" }) |kind| {
         const state = comptime if (std.mem.eql(u8, kind, "message")) ",\"state\":\"rejected\"" else "";
-        const creation = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"" ++ kind ++ "\",\"status\":\"rejected\"" ++ state ++ ",\"code\":\"invalid_workspace\"";
+        const creation = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"kind\":\"" ++ kind ++ "\",\"status\":\"rejected\"" ++ state ++ ",\"code\":\"invalid_workspace\"";
         const rejected = try CommandObservation.parse(.{ .status = 200, .body = creation ++ ",\"target\":\"\"}}" }, "k");
         try std.testing.expectEqualStrings("", rejected.target.?.slice());
         inline for (.{ "", ",\"target\":null", ",\"target\":17" }) |target|
@@ -3606,5 +3643,55 @@ test "approval and ending activity require a valid explicit child session" {
             defer std.testing.allocator.free(malformed);
             try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(malformed, .{}));
         }
+    }
+}
+
+test "keyed observation decodes full and unchanged metadata with request binding" {
+    const token_text = "abababababababababababababababab.42.k7m2qx";
+    const token = try SessionToken.parse(token_text);
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":";
+    const full = prefix ++ "\"full\",\"since\":\"" ++ token_text ++ "\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"code\":\"unknown_session\",\"state\":\"rejected\"}}";
+    const observed = try ObservationReply.parse(.{ .status = 200, .body = full }, "k", null);
+    try std.testing.expectEqualDeep(token, observed.observation.since.?);
+    try std.testing.expectEqual(.rejected, observed.observation.facts.status);
+    const absent = try ObservationReply.parse(.{ .status = 200, .body = testing_observation_prefix ++ "{\"status\":\"absent\"}}" }, "k", token);
+    try std.testing.expectEqual(@as(?SessionToken, null), absent.observation.since);
+    const unchanged = prefix ++ "\"not_modified\",\"since\":\"" ++ token_text ++ "\"}";
+    const repeated = try ObservationReply.parse(.{ .status = 200, .body = unchanged }, "k", token.at(41));
+    try std.testing.expectEqualDeep(token, repeated.not_modified);
+    try std.testing.expectError(error.RequestBindingMismatch, ObservationReply.parse(.{ .status = 200, .body = unchanged }, "other", token));
+    try std.testing.expectError(error.InvalidObservation, ObservationReply.parse(.{ .status = 200, .body = unchanged }, "k", null));
+    try std.testing.expectError(error.RequestBindingMismatch, ObservationReply.parse(.{ .status = 200, .body = unchanged }, "k", token.at(43)));
+    var foreign = token;
+    foreign.instance[0] = 0;
+    try std.testing.expectError(error.RequestBindingMismatch, ObservationReply.parse(.{ .status = 200, .body = unchanged }, "k", foreign));
+    foreign = token;
+    foreign.session = "abc123".*;
+    try std.testing.expectError(error.RequestBindingMismatch, ObservationReply.parse(.{ .status = 200, .body = unchanged }, "k", foreign));
+    const mismatched = prefix ++ "\"full\",\"since\":\"abababababababababababababababab.42.abc123\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"code\":\"unknown_session\",\"state\":\"rejected\"}}";
+    try std.testing.expectError(error.RequestBindingMismatch, ObservationReply.parse(.{ .status = 200, .body = mismatched }, "k", null));
+}
+
+test "keyed observation requires valid delta since and shape-specific facts" {
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",";
+    const token = try SessionToken.parse("abababababababababababababababab.42.k7m2qx");
+    inline for (.{
+        "\"observation\":{\"status\":\"absent\"}",
+        "\"delta\":\"full\",\"observation\":{\"status\":\"absent\"}",
+        "\"since\":null,\"observation\":{\"status\":\"absent\"}",
+        "\"delta\":\"changed\",\"since\":null,\"observation\":{\"status\":\"absent\"}",
+        "\"delta\":null,\"since\":null,\"observation\":{\"status\":\"absent\"}",
+        "\"delta\":\"full\",\"since\":false,\"observation\":{\"status\":\"absent\"}",
+        "\"delta\":\"full\",\"since\":\"invalid\",\"observation\":{\"status\":\"absent\"}",
+        "\"delta\":\"full\",\"since\":null",
+        "\"delta\":\"full\",\"since\":null,\"observation\":null",
+        "\"delta\":\"not_modified\",\"since\":null",
+        "\"delta\":\"not_modified\"",
+        "\"delta\":\"not_modified\",\"since\":\"invalid\"",
+        "\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42.k7m2qx\",\"observation\":{\"status\":\"absent\"}",
+        "\"delta\":\"not_modified\",\"since\":\"abababababababababababababababab.42.k7m2qx\",\"observation\":null",
+        "\"delta\":\"full\",\"since\":\"abababababababababababababababab.42.k7m2qx\",\"observation\":{\"status\":\"absent\"}",
+    }) |fields| {
+        try std.testing.expectError(error.InvalidObservation, ObservationReply.parse(.{ .status = 200, .body = prefix ++ fields ++ "}" }, "k", token));
     }
 }

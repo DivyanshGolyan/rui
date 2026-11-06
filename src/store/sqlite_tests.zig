@@ -10796,15 +10796,15 @@ test "Message recovery observation seeks stay bounded as the Turn accumulates re
         _ = try tests.recoverPairForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "bounded-recovery-{d}", .{i}));
         if (i == 2 or i == 11) {
             // Warm every statement before metering the actual observation.
-            var out: command_domain.CommandObservation = undefined;
-            try storage.observeCommand("bounded-recovery", &out);
+            var out: store_core.Observed = undefined;
+            try storage.observeCommand("bounded-recovery", null, &out);
             var meter: TestingSteps = .{};
             meter.begin(storage.sqliteDatabase());
             defer meter.end(storage.sqliteDatabase());
-            try storage.observeCommand("bounded-recovery", &out);
+            try storage.observeCommand("bounded-recovery", null, &out);
             costs[if (i == 2) 0 else 1] = meter.steps;
-            try std.testing.expectEqual(@as(u8, 4), out.kind.message.?.recovery.count);
-            try std.testing.expect(out.kind.message.?.recovery.more);
+            try std.testing.expectEqual(@as(u8, 4), out.full.observation.kind.message.?.recovery.count);
+            try std.testing.expect(out.full.observation.kind.message.?.recovery.more);
         }
     }
     try std.testing.expectEqual(costs[0], costs[1]);

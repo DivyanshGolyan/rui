@@ -41,6 +41,7 @@ pub const McpExecutionInput = action_domain.McpExecutionInput;
 pub const McpAction = action_domain.McpAction;
 pub const BashExecutionInput = action_domain.BashExecutionInput;
 pub const CommandObservation = command_domain.CommandObservation;
+pub const Observed = store_core.Observed;
 pub const ConfigureReply = configuration_domain.ConfigureReply;
 pub const PresetDecision = configuration_domain.PresetDecision;
 pub const ContentLocation = content_domain.ContentLocation;

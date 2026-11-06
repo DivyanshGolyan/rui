@@ -1698,6 +1698,9 @@ export interface components {
             /** @constant */
             type: "command_observation";
             key: string;
+            /** @constant */
+            delta: "full";
+            since: null;
             observation: {
                 /** @constant */
                 status: "absent";
@@ -1708,6 +1711,9 @@ export interface components {
             /** @constant */
             type: "command_observation";
             key: string;
+            /** @constant */
+            delta: "full";
+            since: string | null;
             observation: {
                 /** @enum {string} */
                 status: "absent" | "accepted" | "rejected";
@@ -1745,6 +1751,9 @@ export interface components {
             /** @constant */
             type: "command_observation";
             key: string;
+            /** @constant */
+            delta: "full";
+            since: string | null;
             observation: {
                 /** @enum {string} */
                 status: "absent" | "accepted" | "rejected";
@@ -2551,6 +2560,9 @@ export interface components {
             /** @constant */
             type: "command_observation";
             key: string;
+            /** @constant */
+            delta: "full";
+            since: string | null;
             observation: {
                 /** @enum {string} */
                 status: "absent" | "accepted" | "rejected";
@@ -2600,6 +2612,9 @@ export interface components {
             /** @constant */
             type: "command_observation";
             key: string;
+            /** @constant */
+            delta: "full";
+            since: string | null;
             observation: {
                 /** @enum {string} */
                 status: "absent" | "accepted" | "rejected";
@@ -2643,6 +2658,9 @@ export interface components {
             /** @constant */
             type: "command_observation";
             key: string;
+            /** @constant */
+            delta: "full";
+            since: string | null;
             observation: {
                 /** @enum {string} */
                 status: "absent" | "accepted" | "rejected";
@@ -2680,6 +2698,15 @@ export interface components {
                     decision: "allow_once" | "deny";
                 };
             };
+        } | {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            type: "command_observation";
+            key: string;
+            /** @constant */
+            delta: "not_modified";
+            since: string;
         };
         ObserveCommandRequest: {
             /** @constant */
@@ -2688,6 +2715,14 @@ export interface components {
             kind: "observe_command";
             store: string;
             key: string;
+        } | {
+            /** @constant */
+            version: "9";
+            /** @constant */
+            kind: "observe_command";
+            store: string;
+            key: string;
+            since: string | null;
         };
         PageWork: {
             state: components["schemas"]["WorkStateJson"];
