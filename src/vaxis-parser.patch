@@ -653,17 +653,33 @@ diff --git a/src/Window.zig b/src/Window.zig
                  var iter = unicode.graphemeIterator(segment.text);
                  while (iter.next()) |grapheme| {
                      if (col >= self.width) break :blk true;
-@@ -443,6 +508,19 @@
+@@ -443,6 +508,35 @@
      return false;
  }
  
++// Delimiters are whole graphemes, not their leading ASCII byte. In
++// particular, a space with extending marks is visible word content and must
++// keep its bytes, style and link when tokenized or inspected by lookahead.
++const WordDelimiter = enum { none, space, tab, line_break };
++
++fn wordDelimiter(grapheme: []const u8) WordDelimiter {
++    if (grapheme.len == 1) return switch (grapheme[0]) {
++        ' ' => .space,
++        '\t' => .tab,
++        '\r', '\n' => .line_break,
++        else => .none,
++    };
++    if (std.mem.eql(u8, grapheme, "\r\n")) return .line_break;
++    return .none;
++}
++
 +// Exact fit classification, not a saturated whole-string width: the sum is
 +// at most window width + one grapheme (both u16), so u32 cannot overflow.
 +fn measureWordPrefix(self: Window, text: []const u8, width: *u32) bool {
 +    var iterator = unicode.graphemeIterator(text);
 +    while (iterator.next()) |grapheme| {
 +        const bytes = grapheme.bytes(text);
-+        if (std.mem.indexOfScalar(u8, " \t\r\n", bytes[0]) != null) return false;
++        if (wordDelimiter(bytes) != .none) return false;
 +        width.* += self.gwidth(bytes);
 +        if (width.* > self.width) return false;
 +    }
@@ -673,7 +689,7 @@ diff --git a/src/Window.zig b/src/Window.zig
  /// print a single segment. This is just a shortcut for print(&.{segment}, opts)
  pub fn printSegment(self: Window, segment: Segment, opts: PrintOptions) PrintResult {
      return self.print(&.{segment}, opts);
-@@ -815,7 +893,7 @@
+@@ -815,7 +909,7 @@
  
          const start = self.index;
          const end = std.mem.indexOfAnyPos(u8, self.buf, self.index, "\r\n") orelse {
@@ -682,6 +698,60 @@ diff --git a/src/Window.zig b/src/Window.zig
              self.index = self.buf.len;
              return self.buf[start..];
          };
+@@ -852,35 +946,25 @@
+ 
+     fn next(self: *WhitespaceTokenizer) ?Token {
+         if (self.index >= self.buf.len) return null;
+-        const Mode = enum {
+-            whitespace,
+-            word,
+-        };
+-        const first = self.buf[self.index];
+-        const mode: Mode = if (first == ' ' or first == '\t') .whitespace else .word;
+-        switch (mode) {
+-            .whitespace => {
+-                var len: usize = 0;
+-                while (self.index < self.buf.len) : (self.index += 1) {
+-                    switch (self.buf[self.index]) {
+-                        ' ' => len += 1,
+-                        '\t' => len += 8,
+-                        else => break,
+-                    }
+-                }
+-                return .{ .whitespace = len };
+-            },
+-            .word => {
+-                const start = self.index;
+-                while (self.index < self.buf.len) : (self.index += 1) {
+-                    switch (self.buf[self.index]) {
+-                        ' ', '\t' => break,
+-                        else => {},
+-                    }
+-                }
+-                return .{ .word = self.buf[start..self.index] };
+-            },
++        const start = self.index;
++        const text = self.buf[start..];
++        var iterator = unicode.graphemeIterator(text);
++        const first = iterator.next().?;
++        const delimiter = wordDelimiter(first.bytes(text));
++        const whitespace = delimiter == .space or delimiter == .tab;
++        var len: usize = if (delimiter == .tab) 8 else 1;
++        self.index += first.len;
++        while (iterator.next()) |grapheme| {
++            const next_delimiter = wordDelimiter(grapheme.bytes(text));
++            const next_whitespace = next_delimiter == .space or next_delimiter == .tab;
++            if (next_whitespace != whitespace) break;
++            self.index += grapheme.len;
++            if (whitespace) len += if (next_delimiter == .tab) @as(usize, 8) else 1;
+         }
++        return if (whitespace)
++            .{ .whitespace = len }
++        else
++            .{ .word = self.buf[start..self.index] };
+     }
+ };
+ 
 diff --git a/src/gwidth.zig b/src/gwidth.zig
 index 0cb1ae6..04dc46a 100644
 --- a/src/gwidth.zig

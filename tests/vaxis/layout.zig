@@ -73,12 +73,14 @@ test "layout: all grapheme-boundary style partitions preserve layout" {
     // Grapheme clusters (including CRLF, combining marks and ZWJ) stay intact:
     // arbitrary mid-UTF8 or mid-grapheme segment cuts are not this API contract.
     const corpus = [_][]const u8{
-        "abcde",   "ab cde", "  abcde", "a     b", "ab\nc d", "ab\rc d",
+        "abcde",        "ab cde",             "  abcde",     "a     b", "ab\nc d", "ab\rc d",
         "a\r\nbc",
         "a界bcde",
         "éab界 c",
         "👩‍💻ab cd",
-        "a\t b",   "ab\nc",
+        "a\t b",        "ab\nc",              "> \u{0301}X",
+        "a \u{0301}界",
+        "a \u{0301} b", " \u{0301} \u{0308}",
     };
     for (corpus) |text| {
         var boundaries: [16]usize = undefined;
@@ -273,4 +275,111 @@ test "layout: wide glyph crossing the maximum column moves whole" {
         const result = win.print(&.{.{ .text = text }}, .{ .wrap = mode, .commit = false });
         try testing.expectEqualDeep(vaxis.Window.PrintResult{ .col = 2, .row = 1, .overflow = false }, result);
     }
+}
+
+test "layout: word printing retains a space plus combining mark as one cell" {
+    const source = "> \u{0301}X";
+    const segment: vaxis.Segment = .{ .text = source, .style = .{ .bold = true }, .link = .{ .uri = "contract:space-cluster", .params = "id=quote" } };
+    var cells: [128]vaxis.Cell = undefined;
+    const result = try paintAndMeasure(&.{segment}, 6, 2, .{ .wrap = .word }, &cells);
+    try testing.expectEqualDeep(vaxis.Window.PrintResult{ .col = 3, .row = 0, .overflow = false }, result);
+    try testing.expectEqualStrings(">", cells[0].char.grapheme);
+    try testing.expectEqualStrings(" \u{0301}", cells[1].char.grapheme);
+    try testing.expectEqualStrings("X", cells[2].char.grapheme);
+    try testing.expectEqual(@as(u8, 1), cells[1].char.width);
+    try testing.expect(cells[1].style.bold);
+    try testing.expectEqualStrings("contract:space-cluster", cells[1].link.uri);
+    try testing.expectEqualStrings("id=quote", cells[1].link.params);
+    try testing.expectEqualStrings("> \u{0301}X", source);
+}
+
+test "layout: replayable word source retains complete styled space clusters" {
+    const source = "> \u{0301}X";
+    inline for (.{ .word, .grapheme, .none }) |mode| {
+        var cells: [128]vaxis.Cell = @splat(.{});
+        const result = iteratorPrint(StyledSource{ .text = source }, 6, 2, .{ .wrap = mode }, &cells);
+        try testing.expectEqualDeep(vaxis.Window.PrintResult{ .col = 3, .row = 0, .overflow = false }, result);
+        try testing.expectEqualStrings(">", cells[0].char.grapheme);
+        try testing.expectEqualStrings(" \u{0301}", cells[1].char.grapheme);
+        try testing.expectEqualStrings("X", cells[2].char.grapheme);
+        try testing.expect(!cells[1].style.bold);
+        try testing.expectEqualStrings("contract:iterator", cells[1].link.uri);
+        var untouched: [128]vaxis.Cell = @splat(.{ .char = .{ .grapheme = "?", .width = 1 } });
+        const measured = iteratorPrint(StyledSource{ .text = source }, 6, 2, .{ .wrap = mode, .commit = false }, &untouched);
+        try testing.expectEqualDeep(result, measured);
+        for (untouched) |cell| try testing.expectEqualStrings("?", cell.char.grapheme);
+    }
+}
+
+test "layout: fit lookahead does not split a styled space cluster from its word" {
+    const source = "a \u{0301}X";
+    const segments: []const vaxis.Segment = &.{ .{ .text = "a" }, .{ .text = " \u{0301}", .style = .{ .bold = true }, .link = .{ .uri = "contract:fit" } }, .{ .text = "X" } };
+    var cells: [128]vaxis.Cell = undefined;
+    const result = try paintAndMeasure(segments, 4, 2, .{ .wrap = .word, .col_offset = 2 }, &cells);
+    try testing.expectEqualDeep(vaxis.Window.PrintResult{ .col = 3, .row = 1, .overflow = false }, result);
+    try testing.expectEqualStrings(" ", cells[2].char.grapheme);
+    try testing.expectEqualStrings("a", cells[4].char.grapheme);
+    try testing.expectEqualStrings(" \u{0301}", cells[5].char.grapheme);
+    try testing.expectEqualStrings("X", cells[6].char.grapheme);
+    try testing.expect(cells[5].style.bold);
+    try testing.expectEqualStrings("contract:fit", cells[5].link.uri);
+    @memset(&cells, .{});
+    const lazy = iteratorPrint(StyledSource{ .text = source }, 4, 2, .{ .wrap = .word, .col_offset = 2 }, &cells);
+    try testing.expectEqualDeep(result, lazy);
+    try testing.expectEqualStrings("a", cells[4].char.grapheme);
+    try testing.expectEqualStrings(" \u{0301}", cells[5].char.grapheme);
+    try testing.expectEqualStrings("X", cells[6].char.grapheme);
+}
+
+test "layout: styled space cluster survives an oversized word and wide edge" {
+    const source = "a \u{0301}界";
+    var cells: [128]vaxis.Cell = undefined;
+    const result = try paintAndMeasure(&.{ .{ .text = "a" }, .{ .text = " \u{0301}", .link = .{ .uri = "contract:edge" } }, .{ .text = "界", .style = .{ .bold = true } } }, 3, 2, .{ .wrap = .word }, &cells);
+    try testing.expectEqualDeep(vaxis.Window.PrintResult{ .col = 2, .row = 1, .overflow = false }, result);
+    try testing.expectEqualStrings("a", cells[0].char.grapheme);
+    try testing.expectEqualStrings(" \u{0301}", cells[1].char.grapheme);
+    try testing.expectEqualStrings(" ", cells[2].char.grapheme);
+    try testing.expectEqualStrings("界", cells[3].char.grapheme);
+    try testing.expectEqual(@as(u8, 2), cells[3].char.width);
+    try testing.expect(cells[3].style.bold);
+    try testing.expectEqualStrings("contract:edge", cells[1].link.uri);
+    @memset(&cells, .{});
+    const lazy = iteratorPrint(StyledSource{ .text = source }, 3, 2, .{ .wrap = .word }, &cells);
+    try testing.expectEqualDeep(result, lazy);
+    try testing.expectEqualStrings(" \u{0301}", cells[1].char.grapheme);
+    try testing.expectEqualStrings("界", cells[3].char.grapheme);
+}
+
+test "layout: ordinary ASCII tab space and CRLF keep their existing cells" {
+    const source = "A\tB\r\nC D";
+    var cells: [128]vaxis.Cell = undefined;
+    const result = try paintAndMeasure(&.{.{ .text = source }}, 12, 3, .{ .wrap = .word }, &cells);
+    try testing.expectEqualDeep(vaxis.Window.PrintResult{ .col = 3, .row = 1, .overflow = false }, result);
+    try testing.expectEqualStrings("A", cells[0].char.grapheme);
+    for (cells[1..9]) |cell| try testing.expectEqualStrings(" ", cell.char.grapheme);
+    try testing.expectEqualStrings("B", cells[9].char.grapheme);
+    try testing.expectEqualStrings("C", cells[12].char.grapheme);
+    try testing.expectEqualStrings(" ", cells[13].char.grapheme);
+    try testing.expectEqualStrings("D", cells[14].char.grapheme);
+    @memset(&cells, .{});
+    const lazy = iteratorPrint(StyledSource{ .text = source }, 12, 3, .{ .wrap = .word }, &cells);
+    try testing.expectEqualDeep(result, lazy);
+    try testing.expectEqualStrings("B", cells[9].char.grapheme);
+    try testing.expectEqualStrings("C", cells[12].char.grapheme);
+    try testing.expectEqualStrings("D", cells[14].char.grapheme);
+}
+
+test "layout: CRLF remains one hard delimiter during styled fit lookahead" {
+    const source = "a\r\nb";
+    var cells: [128]vaxis.Cell = undefined;
+    const result = try paintAndMeasure(&.{ .{ .text = "a" }, .{ .text = "\r\n" }, .{ .text = "b" } }, 4, 3, .{ .wrap = .word, .col_offset = 3 }, &cells);
+    try testing.expectEqualDeep(vaxis.Window.PrintResult{ .col = 1, .row = 2, .overflow = false }, result);
+    try testing.expectEqualStrings("a", cells[3].char.grapheme);
+    try testing.expectEqualStrings(" ", cells[4].char.grapheme);
+    try testing.expectEqualStrings("b", cells[8].char.grapheme);
+    @memset(&cells, .{});
+    const lazy = iteratorPrint(StyledSource{ .text = source }, 4, 3, .{ .wrap = .word, .col_offset = 3 }, &cells);
+    try testing.expectEqualDeep(result, lazy);
+    try testing.expectEqualStrings("a", cells[3].char.grapheme);
+    try testing.expectEqualStrings("b", cells[8].char.grapheme);
 }
