@@ -6,7 +6,7 @@ Physical keys and the mouse wheel in a real GUI terminal (Terminal.app, iTerm2, 
 
 - `hw-keys`: typed text, Enter, PgUp/PgDn, arrows, Esc, Ctrl-G and Ctrl-C from the physical keyboard.
 - `hw-wheel`: physical wheel notches scroll the conversation. The terminal sends mouse reports or arrows (alternate scroll).
-- `hw-consent`: physical `a`/`d` Enter on a fully read Action.
+- `hw-consent`: physical Left/Right selects Allow once/Deny on a fully read Action; a separate fresh Enter confirms the shown selection.
 - `hw-focus-click`: clicking or focusing the window injects no draft text.
 
 ## How to get to it (user POV)
@@ -21,13 +21,23 @@ Preconditions:
 - The pinned build exists for the head under test.
 - Do not change Accessibility or Input Monitoring. None is needed: the window is an owned Terminal.app window running Rui under the tap, so only that window's bytes are recorded.
 
-- **Guided session, about 5–6 minutes.** Run `$V physical FULLSHA`. It:
+- **Consent automation limitation.** The current `physical` coach/grader and rehearsal still expect the obsolete `Run Bash` / `a + Enter` prompt and `a`/`d` inputs.
+  They cannot verify the current read gate or arrow/Enter consent contract; do not report their consent steps or rehearsal as current consent PASS.
+  No helper change is made by this recipe correction.
+- **Manual current-consent route (not yet executed as L4 proof here).** With a human present, use the normal fresh run and doctor checks, then `$V term "$RUN" hw-consent --surface tmux-detached --session approve` and `$V gui "$RUN" hw-consent --open`.
+  Follow [consent](./consent.md) using only the physical keyboard for text, PgDn, Left/Right and Enter; use helper waits/screens for observation, not input injection.
+  Read through `wc -l progress.log`, then wait for the ready Allow once/Deny selector.
+  Press Right, observe Deny highlighted in a newly delivered frame, then press Enter separately; retain the Denied row, exact provider denial and unchanged/absent `progress.log`.
+  Test Left/Allow only as a separate explicitly authorized proposal, with its own read gate and shown selection; the existing L2 evidence establishes denial, not native allow or L4.
+  Save the actual received bytes and before/after snapshots, run `evidence`, and always `cleanup`, including on failure.
+- **Legacy guided session, about 5–6 minutes.** `$V physical FULLSHA` remains available for its other recorded steps, subject to the consent limitation above.
+  It:
   - creates its own run and requires `doctor` PASS;
   - opens two Terminal.app windows: `verify-rui phys (owned test window)`, which runs Rui on Session `approve`, and `verify-rui COACH (read only)`, which shows one instruction at a time;
   - grades each step automatically from the bytes Rui received, committed frames, provider requests, capture keys and `project/progress.log`;
   - after the 13 direct steps, opens a third window attached to an owned tmux window on Session `demo` for 4 tmux steps;
   - ends with cleanup, keeping the evidence.
-- **Direct steps:**
+- **Direct steps (current consent actions below are manual replacements, not the legacy coach/grader instructions):**
   - type `hello physical`: typed one key per chunk, no paste marker, draft shown;
   - Enter: one CR, one provider request with the exact text, one capture key with the same text, answer shown;
   - PgUp ×2: Browsing;
@@ -36,15 +46,17 @@ Preconditions:
   - wheel down: live;
   - arrows ↑×3 ↓×3;
   - PgUp then Esc;
-  - `consent check` + Enter: `Run Bash` shown;
-  - PgDn until the choices are enabled;
-  - `a` + Enter: exactly 30 lines in `progress.log`, tool summary sent;
-  - a second proposal, then `d` + Enter: still 30 lines, tool result delivered;
+  - `consent check` + Enter: Action disclosure and `PgDn reads the rest` shown;
+  - PgDn through `wc -l progress.log` until the ready Allow once/Deny choice is shown;
+  - optional allow case: Left to Allow once, observe the shown selection, then a separate fresh Enter; verify exactly 30 new lines in `progress.log` and the command result;
+  - separate deny case: read a new proposal, Right to Deny, observe the new selected-choice frame, then a separate fresh Enter; verify unchanged/absent `progress.log` and provider result `Permission denied.`;
   - Ctrl-C: rc 0, termios restored, alternate screen left.
 - **tmux steps:** `hello tmux` + Enter; wheel up then Ctrl-G; `/status` (page shown, no provider request); Esc then Ctrl-C.
 - **Result.** It prints `VERDICT PASS|ISSUES` and writes `evidence/physical/result.json` and `steps.jsonl`. Each step records its received bytes with monotonic times, its facts and a snapshot (`terms/phys*/shots/phys-NN-*`). A step not observed within its timeout is `MISSING`. The command then prints `FAIL: physical events missing` and exits 1. A missing step is never a pass.
 - **Launch check, no human needed.** Run `$V physical FULLSHA --smoke`. It opens the owned window, reaches the composer, ends Rui with SIGTERM and checks restoration. It injects no input and is not hardware evidence.
-- **Tooling rehearsal.** Run `$V physical FULLSHA --rehearse` (synthetic L1/L3 input, `REHEARSAL-PASS`). Run `--rehearse --no-tmux --rehearse-omit pgup wheel-up` as the negative control: it must print `REHEARSAL-ISSUES` and exit 1. A rehearsal validates the grader only.
+- **Tooling rehearsal.** Run `$V physical FULLSHA --rehearse` (synthetic L1/L3 input, `REHEARSAL-PASS`).
+  Run `--rehearse --no-tmux --rehearse-omit pgup wheel-up` as the negative control: it must print `REHEARSAL-ISSUES` and exit 1.
+  A rehearsal validates the legacy grader only, not current consent behavior; its stale consent controls must not be treated as product failures or current-consent proof.
 
 ## Gotchas
 

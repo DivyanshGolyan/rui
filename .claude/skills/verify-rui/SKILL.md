@@ -101,7 +101,8 @@ Stable handles from the product:
 - `Session: NAME` and `Work:`: the /status page.
 - `Start of conversation`.
 - `Detached. Host work continues.` and `Resume: rui session resume …`: shown after exit.
-- `Run Bash`: the consent prompt.
+- `PgDn reads the rest`: the long-Action consent read gate; after reading, `Allow once` / `Deny` and `←→ choose · enter confirms` identify the choice.
+  Do not wait for `Run Bash` before paging the disclosure; use the [consent recipe](features/consent.md).
 - `Fixture answer N: received "…"`: the fixture echoes the exact received text.
 
 Fixture policy, chosen by the latest user text:
