@@ -556,7 +556,7 @@ def compaction_cases(state, processes, endpoints, releases):
     session = configure(state, store, "irreducible-config", None, "gpt-6-sol")
     message(state, store, "irreducible", session, "input cannot fit")
     outcome = wait_for(lambda: (value := observe(store, "irreducible")).get("result") and value, "irreducible overflow settlement")
-    assert outcome["queue"]["status"] == "failed" and outcome["result"]["code"] == "ResourceExceeded", outcome
+    assert outcome["state"] == "failed" and outcome["result"]["code"] == "ResourceExceeded", outcome
     assert len(endpoint.requests) == 3, endpoint.requests
     address = model_instructions(ROOT, store=store, session=session)
     assert [json.loads(request)["instructions"] for request in endpoint.requests] == [address] * 3, endpoint.requests
@@ -615,7 +615,7 @@ def http_quota_cases(state, processes, endpoints):
                           "permanent HTTP quota failure")
         code = "provider_" + refusal
         assert result["result"]["code"] == code, result
-        assert result["processing"]["attempt"] == "1", result
+        assert result["binding"]["attempt"] == "1", result
         stop_host(host)
         processes.remove(host)
         with sqlite3.connect(store / "rui.sqlite3") as database:
@@ -655,7 +655,7 @@ def http_quota_cases(state, processes, endpoints):
     session = configure(state, store, "rate-config", None, "gpt-6-sol")
     message(state, store, "rate-message", session, "retry a temporary rate limit")
     result = wait_for(lambda: completed_observation(store, "rate-message"), "rate limit recovery")
-    assert result["processing"]["attempt"] == "2", result
+    assert result["binding"]["attempt"] == "2", result
     assert read_result(store, "rate-message") == b"rate limit recovered"
     stop_host(host)
     processes.remove(host)
@@ -683,7 +683,7 @@ def http_quota_cases(state, processes, endpoints):
         result = wait_for(lambda: (value := observe(store, f"refusal-{status}")).get("result") and value,
                           "permanent HTTP refusal")
         assert result["result"] == {"status": "failed", "code": code}, result
-        assert result["processing"]["attempt"] == "1", result
+        assert result["binding"]["attempt"] == "1", result
         report = command("session", "inspect", "--store", store, "--session", session, "--profile", "full")
         assert report["full"]["turns"][0]["outcome"]["content"] == content_reference(words), report
         stop_host(host)
@@ -735,13 +735,13 @@ def failure_correlation_cases(state, processes, endpoints, selected="all"):
         assert result["result"]["code"] == code, result
         resources = wait_model_cleanup(diagnostics, store, session, result, deadline)
         assert not resources["dispatch_fenced"], resources
-        assert result["processing"]["attempt"] == str(len(request_ids)), result
+        assert result["binding"]["attempt"] == str(len(request_ids)), result
         attempts = [
-            {"processing": dict(result["processing"], attempt=str(ordinal))}
+            {"binding": dict(result["binding"], attempt=str(ordinal))}
             for ordinal in range(1, len(request_ids) + 1)
         ]
         for attempt in attempts:
-            diagnostics.wait_model_cleanup(attempt["processing"], deadline)
+            diagnostics.wait_model_cleanup(attempt["binding"], deadline)
         stop_host(host)
         assert_model_cleanup_census(diagnostics, *attempts)
         processes.remove(host)
@@ -869,7 +869,7 @@ def stream_failure_cases(state, processes, endpoints):
         key = "stream-" + label
         message(state, store, key, session, "input")
         result = wait_for(lambda: (value := observe(store, key)).get("result") and value, label)
-        assert result["processing"]["attempt"] == str(attempts), (label, result)
+        assert result["binding"]["attempt"] == str(attempts), (label, result)
         if code == "completed":
             assert result["result"]["status"] == "completed", (label, result)
             assert read_result(store, key) == b"recovered", (label, result)
@@ -1664,7 +1664,7 @@ def main(mode="all", correlation_case="all"):
         assert complete_results["actions"]["unresolved"] == [], complete_results
         assert [item["call_ordinal"] for item in complete_results["actions"]["resolved"]] == ["0", "3"]
         assert len(continuation_endpoint.requests) == 1, continuation_endpoint.requests
-        continuation_first_processing = observe(continuation_store, "continuation-first")["processing"]
+        continuation_first_processing = observe(continuation_store, "continuation-first")["binding"]
         continuation_before_admission_crash = crash_host(
             continuation_host, state, "continuation-before-admission-crash"
         )
@@ -1688,8 +1688,8 @@ def main(mode="all", correlation_case="all"):
             value = observe(continuation_store, "continuation-first", deadline=continuation_deadline)
             return (
                 value
-                if value.get("queue", {}).get("status") == "processing"
-                and value.get("processing") == {
+                if value.get("state") == "processing"
+                and value.get("binding") == {
                     "turn": continuation_first_processing["turn"], "operation": "2", "attempt": "1",
                 }
                 else None
@@ -1929,7 +1929,7 @@ def main(mode="all", correlation_case="all"):
             lambda: completed_observation(success_store, "success-first"),
             "first complete model answer",
         )
-        assert first_complete["queue"]["status"] == "completed", first_complete
+        assert first_complete["state"] == "completed", first_complete
         assert read_result(success_store, "success-first") == first_answer
         assert hashlib.sha256(read_result(success_store, "success-first")).digest() == hashlib.sha256(
             first_answer
@@ -2136,7 +2136,7 @@ def main(mode="all", correlation_case="all"):
             "temporary failures followed by saved answer",
             timeout=8,
         )
-        assert retry_complete["processing"]["attempt"] == "3", retry_complete
+        assert retry_complete["binding"]["attempt"] == "3", retry_complete
         assert read_result(retry_store, "retry-message") == b"recovered answer"
         assert len(retry_endpoint.requests) == 3
         assert retry_endpoint.request_times[1] - retry_endpoint.request_times[0] >= 0.04
@@ -2178,7 +2178,7 @@ def main(mode="all", correlation_case="all"):
             lambda: completed_observation(dated_store, "dated-message"),
             "expired Retry-After date after progressing body", timeout=12,
         )
-        assert dated_complete["processing"]["attempt"] == "2", dated_complete
+        assert dated_complete["binding"]["attempt"] == "2", dated_complete
         assert read_result(dated_store, "dated-message") == b"recovered answer"
         assert len(dated_endpoint.requests) == 2
         assert dated_endpoint.requests[0] == dated_endpoint.requests[1]
@@ -2307,7 +2307,7 @@ def main(mode="all", correlation_case="all"):
                 f"{name} permanent disposition",
             )
             assert failure["result"]["code"] == expected_code, failure
-            assert failure["processing"]["attempt"] == "1", failure
+            assert failure["binding"]["attempt"] == "1", failure
             time.sleep(0.3)
             assert len(disposition_endpoint.requests) == case_index
             stop_host(disposition_host)
@@ -2607,7 +2607,7 @@ def main(mode="all", correlation_case="all"):
             lambda: (value := observe(contradictory_store, "contradictory-message")).get("result") and value,
             "differing model evidence completion",
         )
-        assert contradictory_result["queue"]["status"] == "completed", contradictory_result
+        assert contradictory_result["state"] == "completed", contradictory_result
         domain = b"rui/content/v1"
         assert contradictory_result["result"] == {
             "status": "completed",
@@ -2702,11 +2702,11 @@ def main(mode="all", correlation_case="all"):
         message(state, pending_store, "pending-first", pending_session, "before cutoff")
         wait_for(lambda: len(pending_endpoint.requests) == 1, "first frozen pending request")
         message(state, pending_store, "pending-second", pending_session, "after cutoff")
-        assert observe(pending_store, "pending-second")["queue"]["status"] == "queued"
+        assert observe(pending_store, "pending-second")["state"] == "queued"
         first_release.set()
         wait_for(lambda: len(pending_endpoint.requests) == 2, "next input boundary request")
         assert "result" not in observe(pending_store, "pending-first")
-        assert observe(pending_store, "pending-second")["queue"]["status"] == "processing"
+        assert observe(pending_store, "pending-second")["state"] == "processing"
         pending_request = json.loads(pending_endpoint.requests[1])
         expected_pending_reasoning = dict(pending_reasoning)
         expected_pending_reasoning.pop("created_by")
@@ -2986,7 +2986,7 @@ def main(mode="all", correlation_case="all"):
                 f"invalid output {index}",
             )
             assert rejected["result"]["code"] == expected_code, rejected
-            assert rejected["processing"]["attempt"] == "1", rejected
+            assert rejected["binding"]["attempt"] == "1", rejected
             expected_request_id = None if index == 0 else f"request-{index + 1}"
             before_operation = command(
                 "session", "inspect", "--store", invalid_store,
@@ -3521,8 +3521,8 @@ def main(mode="all", correlation_case="all"):
             and value,
             "saved permanent failure", deadline=frozen_deadline,
         )
-        assert failed["queue"]["status"] == "failed", failed
-        assert failed["processing"]["attempt"] == "1", failed
+        assert failed["state"] == "failed", failed
+        assert failed["binding"]["attempt"] == "1", failed
         post_failure_model_change = frozen_peers.call("configure", lambda: command(
             "session", "configure",
             "--store",
@@ -3618,7 +3618,7 @@ def main(mode="all", correlation_case="all"):
         assert observe(store, "message-a")["result"]["code"] == "provider_http_422"
         assert observe(store, "message-b")["result"]["code"] == "provider_http_422"
         message(state, store, "message-c", main_session, "after restart")
-        assert observe(store, "message-c")["queue"]["status"] == "queued"
+        assert observe(store, "message-c")["state"] == "queued"
         stop_host(offline)
         processes.remove(offline)
 
@@ -3697,7 +3697,7 @@ def main(mode="all", correlation_case="all"):
 
         def known_preparation_settled():
             observation = observe(preparation_store, "preparation-message")
-            if observation.get("processing", {}).get("attempt") != "1":
+            if observation.get("binding", {}).get("attempt") != "1":
                 return None
             resources = command(
                 "session", "inspect",
@@ -3715,7 +3715,7 @@ def main(mode="all", correlation_case="all"):
             "publicly observed saved preparation failure",
             timeout=15,
         )
-        assert preparation_observation["queue"]["status"] == "processing"
+        assert preparation_observation["state"] == "processing"
         assert preparation_resources["dispatch_fenced"] is False
         assert preparation_endpoint.requests == []
         preparation_crash = crash_host(
@@ -3762,7 +3762,7 @@ def main(mode="all", correlation_case="all"):
             lambda: completed_observation(preparation_store, "preparation-message"),
             "known preparation retry",
         )
-        assert observe(preparation_store, "preparation-message")["processing"]["attempt"] == "2"
+        assert observe(preparation_store, "preparation-message")["binding"]["attempt"] == "2"
         assert len(preparation_endpoint.requests) == 1
         resources = command(
             "session", "inspect",
@@ -3811,7 +3811,7 @@ def main(mode="all", correlation_case="all"):
             observation = observe(prelaunch_store, "prelaunch-message")
             return (
                 observation
-                if observation.get("processing", {}).get("attempt") == "1"
+                if observation.get("binding", {}).get("attempt") == "1"
                 else None
             )
 
@@ -3819,7 +3819,7 @@ def main(mode="all", correlation_case="all"):
             prelaunch_attempt_one,
             "publicly observed prelaunch Attempt 1",
         )
-        assert prelaunch_observation["queue"]["status"] == "processing"
+        assert prelaunch_observation["state"] == "processing"
         assert prelaunch_endpoint.requests == []
         prelaunch_crash = crash_host(prelaunch_host, state, "prelaunch-crash")
         processes.remove(prelaunch_host)
@@ -3860,7 +3860,7 @@ def main(mode="all", correlation_case="all"):
             lambda: completed_observation(prelaunch_store, "prelaunch-message"),
             "prelaunch replacement",
         )
-        assert observe(prelaunch_store, "prelaunch-message")["processing"]["attempt"] == "2"
+        assert observe(prelaunch_store, "prelaunch-message")["binding"]["attempt"] == "2"
         assert len(prelaunch_endpoint.requests) == 1
         resources = command(
             "session", "inspect",
@@ -3957,7 +3957,7 @@ def main(mode="all", correlation_case="all"):
         wait_for(lambda: len(sealed_endpoint.requests) == 1, "sealed response delivery")
         time.sleep(0.5)
         sealed_observation = observe(sealed_store, "sealed-message")
-        assert sealed_observation["processing"]["attempt"] == "1" and "result" not in sealed_observation, sealed_observation
+        assert sealed_observation["binding"]["attempt"] == "1" and "result" not in sealed_observation, sealed_observation
         stop_host(sealed_host)
         processes.remove(sealed_host)
         database = sqlite3.connect(sealed_store / "rui.sqlite3")
@@ -4102,7 +4102,7 @@ def main(mode="all", correlation_case="all"):
         ))["execution"]["scratch_used_bytes"]
         assert scratch_after == scratch_before, (scratch_before, scratch_after)
         queued_observation = capacity_peers.call("observe", lambda: observe(durable_wait_store, "capacity-wait-message-b"))
-        assert queued_observation["queue"]["status"] == "queued" and "processing" not in queued_observation, queued_observation
+        assert queued_observation["state"] == "queued" and "binding" not in queued_observation, queued_observation
         assert len(capacity_endpoint.requests) == 1
         capacity_release_started = time.monotonic()
         capacity_release.set()
@@ -4468,7 +4468,7 @@ def main(mode="all", correlation_case="all"):
             lambda: (
                 value
                 if (value := observe(recovery_store, "recovery-due-message"))
-                .get("processing", {})
+                .get("binding", {})
                 .get("attempt")
                 == "2"
                 else None
@@ -4477,7 +4477,7 @@ def main(mode="all", correlation_case="all"):
         )
         assert "result" not in due_admitted, due_admitted
         unresolved_sentinel = observe(recovery_store, "recovery-sentinel-message")
-        assert unresolved_sentinel["processing"]["attempt"] == "4", unresolved_sentinel
+        assert unresolved_sentinel["binding"]["attempt"] == "4", unresolved_sentinel
         assert "result" not in unresolved_sentinel, unresolved_sentinel
         inspection = command(
             "session", "inspect",
@@ -4492,22 +4492,20 @@ def main(mode="all", correlation_case="all"):
             new_admitted = wait_for(
                 lambda: (
                     value
-                    if (value := observe(recovery_store, "recovery-new-message"))[
-                        "queue"
-                    ]["status"]
+                    if (value := observe(recovery_store, "recovery-new-message"))["state"]
                     == "processing"
                     else None
                 ),
                 "new admission during exhausted recovery",
             )
-            assert new_admitted["processing"]["attempt"] == "1", new_admitted
+            assert new_admitted["binding"]["attempt"] == "1", new_admitted
             wait_for(lambda: len(recovery_endpoint.requests) >= 4, "recovery new launch")
             # Both attempts must remain in flight while their responses are
             # held. Global custody may also contain a transient reservation
             # while the Host probes the Store for more work.
             for key, attempt in (("recovery-due-message", "2"), ("recovery-new-message", "1")):
                 held = observe(recovery_store, key)
-                assert held["processing"]["attempt"] == attempt, held
+                assert held["binding"]["attempt"] == attempt, held
                 assert "result" not in held, held
             assert "result" not in observe(
                 recovery_store, "recovery-sentinel-message"
@@ -4533,7 +4531,7 @@ def main(mode="all", correlation_case="all"):
                 sentinel_terminal = sentinel_observation
                 break
             assert (
-                sentinel_observation["processing"]["attempt"] == "4"
+                sentinel_observation["binding"]["attempt"] == "4"
             ), sentinel_observation
             recovery_latencies.append(recovery_latency)
         assert sentinel_terminal is not None
@@ -4628,7 +4626,7 @@ def main(mode="all", correlation_case="all"):
             exhaustion_session,
             "unselected later",
         )
-        assert observe(exhaustion_store, "exhaustion-later")["queue"]["status"] == "queued"
+        assert observe(exhaustion_store, "exhaustion-later")["state"] == "queued"
         exhaustion_release.set()
         exhausted = wait_for(
             lambda: (
@@ -4639,7 +4637,7 @@ def main(mode="all", correlation_case="all"):
             "retry exhaustion",
             timeout=10,
         )
-        assert exhausted["processing"]["attempt"] == "4", exhausted
+        assert exhausted["binding"]["attempt"] == "4", exhausted
         wait_for(
             lambda: completed_observation(exhaustion_store, "exhaustion-later"),
             "unselected input successor",
@@ -4698,7 +4696,7 @@ def main(mode="all", correlation_case="all"):
             "second concurrent request completing first",
         )
         alpha_pending = observe(capacity_store, "capacity-message-a")
-        assert alpha_pending["queue"]["status"] == "processing", alpha_pending
+        assert alpha_pending["state"] == "processing", alpha_pending
         assert "result" not in alpha_pending, alpha_pending
         assert read_result(capacity_store, "capacity-message-b") == b"beta answer"
         alpha_release.set()
@@ -4799,7 +4797,7 @@ def main(mode="all", correlation_case="all"):
             and value,
             "progressing completion",
         )
-        assert slow_failure["queue"]["status"] == "failed", slow_failure
+        assert slow_failure["state"] == "failed", slow_failure
         stop_host(slow_host)
         processes.remove(slow_host)
         silent_release.set()
@@ -4857,7 +4855,7 @@ def main(mode="all", correlation_case="all"):
             and value,
             "rollback retry result",
         )
-        assert rollback_failed["processing"]["attempt"] == "1", rollback_failed
+        assert rollback_failed["binding"]["attempt"] == "1", rollback_failed
         assert rollback_failed["result"]["code"] == "provider_http_422", rollback_failed
         stop_host(host)
         processes.remove(host)
@@ -4894,9 +4892,9 @@ def main(mode="all", correlation_case="all"):
             and value,
             "saved first-step preparation failure",
         )
-        assert failed["processing"]["attempt"] == "1", failed
+        assert failed["binding"]["attempt"] == "1", failed
         assert endpoint.requests == []
-        first_processing = failed["processing"]
+        first_processing = failed["binding"]
         first_replay = retry_message(state, first_store, "first-message")
         assert first_replay["answer"]["status"] == "accepted", first_replay
         assert first_replay["answer"]["replayed"] is True, first_replay
@@ -4915,8 +4913,8 @@ def main(mode="all", correlation_case="all"):
             and value,
             "later saved first-step preparation failure",
         )
-        assert later_failed["processing"]["attempt"] == "1", later_failed
-        assert later_failed["processing"]["operation"] != first_processing["operation"], later_failed
+        assert later_failed["binding"]["attempt"] == "1", later_failed
+        assert later_failed["binding"]["operation"] != first_processing["operation"], later_failed
         original_after_later = retry_message(state, first_store, "first-message")
         assert original_after_later["answer"]["status"] == "accepted", original_after_later
         assert original_after_later["answer"]["replayed"] is True, original_after_later
@@ -4962,7 +4960,7 @@ def main(mode="all", correlation_case="all"):
                 f"saved {fault} failure",
                 deadline=fault_deadline,
             )
-            assert failed["processing"]["attempt"] == "1", failed
+            assert failed["binding"]["attempt"] == "1", failed
             assert endpoint.requests == []
             wait_model_cleanup(
                 fault_diagnostics, fault_store, session, failed, fault_deadline,
@@ -5124,7 +5122,7 @@ def main(mode="all", correlation_case="all"):
             ),
             "preparation shutdown recovery",
         )
-        assert recovered_shutdown["processing"]["attempt"] == "2", recovered_shutdown
+        assert recovered_shutdown["binding"]["attempt"] == "2", recovered_shutdown
         assert len(preparation_shutdown_endpoint.requests) == 1
         assert read_result(
             preparation_shutdown_store, "preparation-shutdown-message"
@@ -5159,8 +5157,8 @@ def main(mode="all", correlation_case="all"):
         offline = start_host(save_store, None)
         processes.append(offline)
         uncertain = observe(save_store, "save-message")
-        assert uncertain["queue"]["status"] == "processing", uncertain
-        assert uncertain["processing"]["attempt"] == "1", uncertain
+        assert uncertain["state"] == "processing", uncertain
+        assert uncertain["binding"]["attempt"] == "1", uncertain
         assert "result" not in uncertain, uncertain
         stop_host(offline)
         processes.remove(offline)
@@ -5285,7 +5283,7 @@ def main(mode="all", correlation_case="all"):
             "pre-dispatch framing capacity failure",
             deadline=limit_deadline,
         )
-        assert limited["processing"]["attempt"] == "1", limited
+        assert limited["binding"]["attempt"] == "1", limited
         assert endpoint.requests == []
         wait_model_cleanup(
             limit_diagnostics, framing_limit_store, framing_limit_session,
@@ -5330,7 +5328,7 @@ def main(mode="all", correlation_case="all"):
             "progressing response beyond inactivity interval",
             timeout=8,
         )
-        assert progress_failure["queue"]["status"] == "failed"
+        assert progress_failure["state"] == "failed"
         stop_host(host)
         processes.remove(host)
 
@@ -5361,15 +5359,15 @@ def main(mode="all", correlation_case="all"):
         )
         assert stalled_resources["scratch_used_bytes"] == "0", stalled_resources
         stalled = observe(stall_store, "stall-message")
-        assert stalled["queue"]["status"] == "processing" and "result" not in stalled, stalled
-        assert stalled["processing"]["attempt"] == "1", stalled
+        assert stalled["state"] == "processing" and "result" not in stalled, stalled
+        assert stalled["binding"]["attempt"] == "1", stalled
         stop_host(host)
         processes.remove(host)
         # The interrupted body keeps its one received byte, never called complete.
         (stalled_record, stalled_body), = failed_response_records(stall_store)
         assert stalled_body == b"x", stalled_body
         assert (stalled_record["status"], stalled_record["transfer"], stalled_record["truncated"]) == ("partial", "interrupted", False), stalled_record
-        assert (stalled_record["operation"], stalled_record["attempt"]) == (stalled["processing"]["operation"], "1"), stalled_record
+        assert (stalled_record["operation"], stalled_record["attempt"]) == (stalled["binding"]["operation"], "1"), stalled_record
         assert (stalled_record["code"], stalled_record["http_status"]) == ("provider_transport_failure", None), stalled_record
         with sqlite3.connect(stall_store / "rui.sqlite3") as database:
             retry = database.execute(
@@ -5407,10 +5405,10 @@ def main(mode="all", correlation_case="all"):
             if path == "/large-422":
                 assert observation["result"]["code"] == "provider_http_422", observation
             else:
-                assert observation["queue"]["status"] == "processing" and "result" not in observation, observation
-                assert observation["processing"]["attempt"] == "1", observation
+                assert observation["state"] == "processing" and "result" not in observation, observation
+                assert observation["binding"]["attempt"] == "1", observation
                 message(case_state, transient_store, "later", transient_session, "later")
-                assert observe(transient_store, "later")["queue"]["status"] == "queued"
+                assert observe(transient_store, "later")["state"] == "queued"
             retry_observed_at_ms = int(time.time() * 1000)
             stop_host(host)
             processes.remove(host)
@@ -5479,7 +5477,7 @@ def main(mode="all", correlation_case="all"):
         processes.append(host)
         message(state, race_store, "race-message", race_session, "race")
         wait_for(
-            lambda: observe(race_store, "race-message")["queue"]["status"] == "processing",
+            lambda: observe(race_store, "race-message")["state"] == "processing",
             "admitted request before launch",
         )
         canonical_read = subprocess.run(

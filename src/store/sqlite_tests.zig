@@ -737,8 +737,8 @@ test "Current selects active then queued work and bounds recent Message identiti
         }
     }
     try submitTestMessage(&storage, &tmp, "selection-next-file", "selection-next", session.slice(), "next");
-    try std.testing.expectEqual(protocol.MessageProgressStatus.runnable, (try storage.observeCommand("selection-next")).message.?.progress.?.status);
-    try std.testing.expect((try storage.observeCommand("selection-message-11")).message.?.progress == null);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.runnable, (try store_testing.observeCommandForTesting(&storage, "selection-next")).kind.message.?.work.?.state.progress().?);
+    try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "selection-message-11")).kind.message.?.work == null);
     {
         const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
         defer std.testing.allocator.free(bytes);
@@ -748,10 +748,10 @@ test "Current selects active then queued work and bounds recent Message identiti
     }
     _ = (try storage.admitNextModelAttempt(.{})).?;
     try submitTestMessage(&storage, &tmp, "selection-queued-file", "selection-queued", session.slice(), "queued");
-    const queued = (try storage.observeCommand("selection-queued")).message.?;
+    const queued = (try store_testing.observeCommandForTesting(&storage, "selection-queued")).kind.message.?;
     try std.testing.expect(queued.queue.?.state == .queued);
-    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, queued.progress.?.status);
-    try std.testing.expect(queued.progress.?.action_id == null);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, queued.work.?.state.progress().?);
+    try std.testing.expect(queued.work.?.first_action == null);
     {
         const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
         defer std.testing.allocator.free(bytes);
@@ -829,7 +829,7 @@ test "Action settlement atomically yields to an earlier Session stop" {
     try std.testing.expectEqual(protocol.SessionStopCompletion.pending, pending_stop.accepted.completion);
     try std.testing.expectEqual(
         protocol.SessionStopCompletion.pending,
-        (try storage.observeCommand("settlement-stop")).session_stop.?.completion,
+        (try store_testing.observeCommandForTesting(&storage, "settlement-stop")).kind.session_stop.?.completion,
     );
     try std.testing.expectEqual(
         ActionSettlement.session_stop,
@@ -837,7 +837,7 @@ test "Action settlement atomically yields to an earlier Session stop" {
     );
     try std.testing.expectEqual(
         protocol.SessionStopCompletion.completed,
-        (try storage.observeCommand("settlement-stop")).session_stop.?.completion,
+        (try store_testing.observeCommandForTesting(&storage, "settlement-stop")).kind.session_stop.?.completion,
     );
     const completed_replay = storage.stopSession(&stop, .{});
     try std.testing.expect(completed_replay == .accepted);
@@ -3237,7 +3237,7 @@ test "configuration rejections bypass content effects and replay committed answe
         var storage: Store = undefined;
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
-        try std.testing.expect((try storage.observeCommand("rejected-content")).status == .absent);
+        try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "rejected-content")).status == .absent);
         const rolled_back_content = try sqlite.prepare(storage.sqliteDatabase(), "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)");
         defer _ = c.sqlite3_finalize(rolled_back_content);
         try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(rolled_back_content));
@@ -3504,7 +3504,7 @@ test "an outside SQLite writer cannot take the open Store's lock" {
     var reopened: Store = undefined;
     try reopened.open(std.testing.io, database, root);
     defer reopened.close() catch unreachable;
-    try std.testing.expect((try reopened.observeCommand("busy-save")).status != .absent);
+    try std.testing.expect((try store_testing.observeCommandForTesting(&reopened, "busy-save")).status != .absent);
     try std.testing.expect((try reopened.inspectSessionForTesting(configured.accepted.session.slice())).found);
 }
 
@@ -3555,14 +3555,14 @@ test "real SQLite full during import publishes no canonical prefix" {
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
     store_core.fence(&storage, error.CanonicalStorageFull) catch {};
     try std.testing.expect(storage.isFenced());
-    try std.testing.expectError(error.StoreFenced, storage.observeCommand("full-import"));
+    try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "full-import"));
     try storage.close();
     storage_open = false;
 
     var reopened: Store = undefined;
     try testingStore(&reopened, &tmp, std.testing.io);
     defer reopened.close() catch unreachable;
-    try std.testing.expect((try reopened.observeCommand("full-import")).status == .absent);
+    try std.testing.expect((try store_testing.observeCommandForTesting(&reopened, "full-import")).status == .absent);
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&reopened, "SELECT count(*) FROM session", .{}));
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&reopened, "SELECT count(*) FROM content WHERE byte_length=131072", .{}));
 }
@@ -3623,16 +3623,16 @@ test "message admissions remain queued in order and retain bounded canonical con
 
     const session = try storage.inspectSessionForTesting(created_session_0.slice());
     try std.testing.expectEqual(@as(u64, 2), session.pending_messages);
-    const observed = try storage.observeCommand("message-1");
+    const observed = try store_testing.observeCommandForTesting(&storage, "message-1");
     try std.testing.expect(observed.status == .accepted);
     try std.testing.expect(observed.kind == .message);
-    try std.testing.expect(observed.message != null);
-    const accepted_observation = observed.message.?.queue.?;
+    try std.testing.expect(observed.kind.message != null);
+    const accepted_observation = observed.kind.message.?.queue.?;
     try std.testing.expectEqual(first_reply.accepted.admission_id, accepted_observation.admission_id);
     try std.testing.expect(accepted_observation.state == .queued);
 
     var reader: ContentReader = undefined;
-    reader.open(try storage.openContent(observed.message.?.content));
+    reader.open(try storage.openContent(observed.kind.message.?.content));
     var actual: [first_text.len]u8 = undefined;
     var offset: usize = 0;
     while (offset < actual.len) {
@@ -3646,8 +3646,8 @@ test "message admissions remain queued in order and retain bounded canonical con
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    const restarted = try storage.observeCommand("message-1");
-    try std.testing.expectEqual(first_reply.accepted.admission_id, restarted.message.?.queue.?.admission_id);
+    const restarted = try store_testing.observeCommandForTesting(&storage, "message-1");
+    try std.testing.expectEqual(first_reply.accepted.admission_id, restarted.kind.message.?.queue.?.admission_id);
     try std.testing.expectEqual(@as(u64, 2), (try storage.inspectSessionForTesting(created_session_0.slice())).pending_messages);
     try std.testing.expectEqual(@as(u32, 1000), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT admitted_at FROM message_admission WHERE admission_id=1"));
 }
@@ -3798,9 +3798,9 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
     {
         var storage: Store = undefined;
         try testingStore(&storage, &tmp, std.testing.io);
-        try std.testing.expect((try storage.observeCommand("rollback-configure")).status == .accepted);
+        try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "rollback-configure")).status == .accepted);
         try std.testing.expect(
-            (try storage.observeCommand("rollback-message")).message.?.queue.?.state == .queued,
+            (try store_testing.observeCommandForTesting(&storage, "rollback-message")).kind.message.?.queue.?.state == .queued,
         );
         {
             const partial = try sqlite.prepare(
@@ -3840,7 +3840,7 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
         var storage: Store = undefined;
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
-        const observation = (try storage.observeCommand("rollback-message")).message.?.queue.?;
+        const observation = (try store_testing.observeCommandForTesting(&storage, "rollback-message")).kind.message.?.queue.?;
         const observed_binding = switch (observation.state) {
             .processing => |value| value,
             else => return error.ExpectedProcessingObservation,
@@ -3848,7 +3848,7 @@ test "rollback failure fences mutation until fresh reopen restores committed fac
         try std.testing.expectEqual(binding.operation_id, observed_binding.operation_id);
         try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
         try std.testing.expect(
-            (try storage.observeCommand("rollback-message")).message.?.queue.?.state == .failed,
+            (try store_testing.observeCommandForTesting(&storage, "rollback-message")).kind.message.?.queue.?.state == .failed,
         );
     }
 }
@@ -4348,7 +4348,7 @@ test "canonical observation failure fences later admission" {
 
     var later = try completeConfiguration("later", "", workspace, "model-a");
     try std.testing.expect(storage.configure(&later, .{}) == .infrastructure_failure);
-    try std.testing.expectError(error.StoreFenced, storage.observeCommand("later"));
+    try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "later"));
 }
 
 test "public content SQL failure fences Store instead of reporting absence" {
@@ -4934,11 +4934,11 @@ test "one committed selection freezes its settings and input prefix" {
         error.InjectedAttemptCommitFailure,
         storage.admitNextModelAttempt(.{ .attempt_before_commit = true }),
     );
-    try std.testing.expectError(error.StoreFenced, storage.observeCommand("dispatch-1"));
+    try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "dispatch-1"));
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
     try std.testing.expect(
-        (try storage.observeCommand("dispatch-1")).message.?.queue.?.state == .queued,
+        (try store_testing.observeCommandForTesting(&storage, "dispatch-1")).kind.message.?.queue.?.state == .queued,
     );
 
     // Failed admission publishes neither projection nor instruction
@@ -4949,10 +4949,10 @@ test "one committed selection freezes its settings and input prefix" {
     var admitted = (try storage.admitNextModelAttempt(.{})).?;
     const binding = try admitted.permit.consume();
     try std.testing.expectError(error.DispatchPermitConsumed, admitted.permit.consume());
-    const first_observation = (try storage.observeCommand("dispatch-1")).message.?.queue.?;
-    const second_observation = (try storage.observeCommand("dispatch-2")).message.?.queue.?;
-    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, (try storage.observeCommand("dispatch-1")).message.?.progress.?.status);
-    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, (try storage.observeCommand("dispatch-2")).message.?.progress.?.status);
+    const first_observation = (try store_testing.observeCommandForTesting(&storage, "dispatch-1")).kind.message.?.queue.?;
+    const second_observation = (try store_testing.observeCommandForTesting(&storage, "dispatch-2")).kind.message.?.queue.?;
+    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, (try store_testing.observeCommandForTesting(&storage, "dispatch-1")).kind.message.?.work.?.state.progress().?);
+    try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, (try store_testing.observeCommandForTesting(&storage, "dispatch-2")).kind.message.?.work.?.state.progress().?);
     const first_binding = switch (first_observation.state) {
         .processing => |value| value,
         else => return error.ExpectedProcessingObservation,
@@ -5029,14 +5029,14 @@ test "one committed selection freezes its settings and input prefix" {
 
     try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
     try expectActivityOutcome(&storage, created_session_0.slice(), binding, .provider_refused, "provider_http_422");
-    const failed = (try storage.observeCommand("dispatch-1")).message.?.queue.?;
+    const failed = (try store_testing.observeCommandForTesting(&storage, "dispatch-1")).kind.message.?.queue.?;
     const failure = switch (failed.state) {
         .failed => |value| value,
         else => return error.ExpectedFailedObservation,
     };
     try std.testing.expectEqualStrings("provider_http_422", failure.code.slice());
     try std.testing.expect(
-        (try storage.observeCommand("dispatch-3")).message.?.queue.?.state == .queued,
+        (try store_testing.observeCommandForTesting(&storage, "dispatch-3")).kind.message.?.queue.?.state == .queued,
     );
     try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(created_session_0.slice())).pending_messages);
 
@@ -5215,7 +5215,7 @@ test "continued accepted output keeps model immutable and public text readable" 
     // consumed. Only the owning Turn's completion decision differs.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='answer'", .{}));
     try expectBindingPreserved(&storage, created_session_0.slice(), "after-output");
-    const completed = (try storage.observeCommand("continued-first")).message.?.queue.?;
+    const completed = (try store_testing.observeCommandForTesting(&storage, "continued-first")).kind.message.?.queue.?;
     const completion = switch (completed.state) {
         .completed => |value| value,
         else => return error.ExpectedCompletedObservation,
@@ -5265,7 +5265,7 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
         var storage: Store = undefined;
         try testingStore(&storage, &tmp, std.testing.io);
         defer storage.close() catch unreachable;
-        const observation = (try storage.observeCommand("failure-message")).message.?.queue.?;
+        const observation = (try store_testing.observeCommandForTesting(&storage, "failure-message")).kind.message.?.queue.?;
         const observed_binding = switch (observation.state) {
             .processing => |value| value,
             else => return error.ExpectedProcessingObservation,
@@ -5278,7 +5278,7 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
             replacement_binding.operation_id,
             observed_binding.operation_id,
         );
-        const recovered = (try storage.observeCommand("failure-message")).message.?.queue.?;
+        const recovered = (try store_testing.observeCommandForTesting(&storage, "failure-message")).kind.message.?.queue.?;
         const recovered_binding = switch (recovered.state) {
             .processing => |value| value,
             else => return error.ExpectedProcessingObservation,
@@ -5311,7 +5311,7 @@ test "failed model settlement recovers uncertainty with a fresh consumed Attempt
         try std.testing.expect(
             try storage.recoverOneExhaustedModelAttempt(ActiveOperationFilter.empty()),
         );
-        const exhausted = (try storage.observeCommand("failure-message")).message.?.queue.?;
+        const exhausted = (try store_testing.observeCommandForTesting(&storage, "failure-message")).kind.message.?.queue.?;
         const failure = switch (exhausted.state) {
             .failed => |value| value,
             else => return error.ExpectedFailedObservation,
@@ -5522,7 +5522,7 @@ test "temporary model failures conserve allowance and exhaust after four Attempt
         .{},
     );
 
-    const observation = (try storage.observeCommand("retry-message")).message.?.queue.?;
+    const observation = (try store_testing.observeCommandForTesting(&storage, "retry-message")).kind.message.?.queue.?;
     const failure = switch (observation.state) {
         .failed => |value| value,
         else => return error.ExpectedFailedObservation,
@@ -8428,7 +8428,7 @@ test "a Store at the migration baseline with its rows takes every migration at o
     try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }
 
-test "schema 53 moves forward to 54 with loaded tools defaulting to NULL" {
+test "schema 53 moves forward with loaded tools defaulting to NULL" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -8460,7 +8460,7 @@ test "schema 53 moves forward to 54 with loaded tools defaulting to NULL" {
     var storage: Store = undefined;
     try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, 54), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+    try std.testing.expectEqual(@as(u64, schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
     inline for (.{ "session", "session_revision" }) |table| {
         try std.testing.expect((try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table, .{})) > 0);
         try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM " ++ table ++ " WHERE loaded_tool_set_id IS NOT NULL", .{}));
@@ -10747,4 +10747,65 @@ test "K4 malformed delivered approval forwards fence page cursor and direct hydr
         try std.testing.expectError(error.CorruptStore, result);
         try std.testing.expect(storage.isFenced());
     }
+}
+
+test "schema 53 migrates recovery index and wire 8 together to schema 54 wire 9" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        for (store_schema.migrations) |step| {
+            if (step.from >= 53) break;
+            for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+        }
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=53", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('store_selector',?1),('format','53')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, root);
+        try sqlite.expectDone(meta);
+    }
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, path, root);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(@as(u32, 54), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
+    try std.testing.expectEqual(@as(u64, 9), try store_testing.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='wire_version'", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='action_operation_indeterminate'", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+}
+
+test "Message recovery observation seeks stay bounded as the Turn accumulates recovered Actions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try tests.configureTestSessionWithMode(&storage, "bounded-recovery-config", "bypass");
+    try submitTestMessage(&storage, &tmp, "bounded-recovery-input", "bounded-recovery", session.slice(), "run");
+    var costs: [2]u64 = undefined;
+    for (0..12) |i| {
+        const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+        var prefix: [40]u8 = undefined;
+        _ = try tests.recoverPairForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "bounded-recovery-{d}", .{i}));
+        if (i == 2 or i == 11) {
+            // Warm every statement before metering the actual observation.
+            var out: command_domain.CommandObservation = undefined;
+            try storage.observeCommand("bounded-recovery", &out);
+            var meter: TestingSteps = .{};
+            meter.begin(storage.sqliteDatabase());
+            defer meter.end(storage.sqliteDatabase());
+            try storage.observeCommand("bounded-recovery", &out);
+            costs[if (i == 2) 0 else 1] = meter.steps;
+            try std.testing.expectEqual(@as(u8, 4), out.kind.message.?.recovery.count);
+            try std.testing.expect(out.kind.message.?.recovery.more);
+        }
+    }
+    try std.testing.expectEqual(costs[0], costs[1]);
 }

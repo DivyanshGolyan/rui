@@ -116,7 +116,7 @@ def run(*, observed=False, intake=100):
                 store, key, session, deadline,
             )
             if observed:
-                processing = observation["processing"]
+                processing = observation["binding"]
                 preparations = fixture.wait_for(
                     lambda: diagnostics.matching("preparation_completed", **processing),
                     "preparation_completed", deadline=deadline,

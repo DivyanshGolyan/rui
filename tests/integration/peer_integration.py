@@ -636,7 +636,7 @@ def stdin_start_contract():
         assert receipt["input"] == {"type": "text", "bytes": str(len(text)),
             "sha256": hashlib.sha256(len(domain).to_bytes(8, "big") + domain + text).hexdigest()}, receipt
         observed = fixture.observe(store, "first")
-        assert observed["target"] == session and "result" not in observed and observed["queue"]["status"] == "queued", observed
+        assert observed["target"] == session and "result" not in observed and observed["state"] == "queued", observed
         listing = fixture.command("session", "list", "--store", store, "--all")["sessions"]
         assert [row["reference"] for row in listing] == [session], listing
         snapshot = fixture.command("session", "inspect", "--store", store, "--session", session)

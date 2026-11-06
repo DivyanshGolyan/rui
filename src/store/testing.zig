@@ -17,6 +17,7 @@ const mysql_testing = @import("mysql_testing.zig");
 const mysql_dialect_check = @import("mysql_dialect_check.zig");
 const required_engines = @import("wire/required_engines.zig");
 const Store = store_core.Store;
+const command_domain = @import("domain/command.zig");
 const historical_domain = @import("domain/historical.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const AttemptBinding = store_core.AttemptBinding;
@@ -647,3 +648,10 @@ pub fn settleSelectedItemsForTesting(storage: *Store, tmp: *std.testing.TmpDir, 
 pub const content_beside_tools = "SELECT count(*) FROM content WHERE (content_id NOT IN (SELECT description_content_id FROM tool_record) " ++
     "AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)) OR content_id IN (SELECT instructions_content_id FROM session_revision) " ++
     "OR content_id IN (SELECT output_schema_content_id FROM session_revision WHERE output_schema_content_id IS NOT NULL)";
+
+/// Tests may own the large observation value; the Store entry returns only void.
+pub fn observeCommandForTesting(storage: *Store, key: []const u8) !command_domain.CommandObservation {
+    var out: command_domain.CommandObservation = undefined;
+    try storage.observeCommand(key, &out);
+    return out;
+}

@@ -32,7 +32,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 51, .digest = 0x645a2e73aee4e799 },
     .{ .schema_version = 52, .digest = 0xa0ecf02ad8b7ca02 },
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
-    .{ .schema_version = 54, .digest = 0xae916e0373329df9 },
+    .{ .schema_version = 54, .digest = 0x1093a2102a263fe3 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -123,6 +123,7 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session ADD COLUMN parent_ref VARCHAR(6),ADD FOREIGN KEY(parent_ref) REFERENCES session(session_ref),ADD CHECK(parent_ref IS NULL OR parent_ref<>session_ref)",
         },
     },
+    // Schema 54 also adds bounded outcome-unknown Message recovery and wire 9.
     // Schema 54: the stops an attached child owes (D38) and the endings
     // its parent is owed (D39), and independently loaded tools (T4a):
     // NULL loaded_tool_set_id keeps the full configured set.
@@ -165,6 +166,8 @@ pub const migrations = [_]Migration{
             "CREATE TABLE session_forward(\n forward_id INTEGER PRIMARY KEY NOT NULL CHECK(forward_id>0),\n target_ref TEXT NOT NULL REFERENCES session(session_ref),\n child_ref TEXT NOT NULL REFERENCES session(session_ref),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 2),\n source_id INTEGER NOT NULL CHECK(source_id>0),\n position INTEGER CHECK(position IS NULL OR position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal=0),\n delivered_at INTEGER CHECK(delivered_at IS NULL OR delivered_at>0),\n UNIQUE(target_ref,kind,source_id),\n CHECK((position IS NULL)=(delivered_at IS NULL)),\n CHECK(target_ref<>child_ref)\n) STRICT",
             "CREATE INDEX session_forward_open ON session_forward(forward_id) WHERE position IS NULL",
             "CREATE INDEX session_forward_feed ON session_forward(target_ref,position)",
+            "CREATE INDEX action_operation_indeterminate ON action_operation(session_ref,parent_operation_id,call_ordinal) WHERE resolution_code='indeterminate'",
+            "UPDATE store_meta SET meta_value='9' WHERE meta_key='wire_version' AND meta_value='8'",
         },
         .mysql = &.{
             "CREATE TABLE session_stop_owed(\n child_ref VARCHAR(6) NOT NULL,\n cause_ref VARCHAR(6) NOT NULL,\n cause_position BIGINT NOT NULL,\n settled BIGINT NOT NULL,\n PRIMARY KEY(child_ref,cause_ref,cause_position),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n FOREIGN KEY(cause_ref) REFERENCES session(session_ref),\n CHECK(cause_position>0),\n CHECK(settled BETWEEN 0 AND 1)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
@@ -192,6 +195,8 @@ pub const migrations = [_]Migration{
             "CREATE TABLE session_forward(\n forward_id BIGINT NOT NULL,\n target_ref VARCHAR(6) NOT NULL,\n child_ref VARCHAR(6) NOT NULL,\n kind BIGINT NOT NULL,\n source_id BIGINT NOT NULL,\n position BIGINT,\n ordinal BIGINT NOT NULL,\n delivered_at BIGINT,\n session_forward_open_lead BIGINT GENERATED ALWAYS AS (CASE WHEN position IS NULL THEN forward_id END) STORED,\n PRIMARY KEY(forward_id),\n UNIQUE(target_ref,kind,source_id),\n FOREIGN KEY(target_ref) REFERENCES session(session_ref),\n FOREIGN KEY(child_ref) REFERENCES session(session_ref),\n CHECK(forward_id>0),\n CHECK(kind BETWEEN 1 AND 2),\n CHECK(source_id>0),\n CHECK(position IS NULL OR position>0),\n CHECK(ordinal=0),\n CHECK(delivered_at IS NULL OR delivered_at>0),\n CHECK((position IS NULL)=(delivered_at IS NULL)),\n CHECK(target_ref<>child_ref)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE INDEX session_forward_open ON session_forward(session_forward_open_lead)",
             "CREATE INDEX session_forward_feed ON session_forward(target_ref,position)",
+            "ALTER TABLE action_operation ADD COLUMN action_operation_indeterminate_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN resolution_code='indeterminate' THEN session_ref END) STORED, ADD INDEX action_operation_indeterminate(action_operation_indeterminate_lead,parent_operation_id,call_ordinal)",
+            "UPDATE store_meta SET meta_value='9' WHERE meta_key='wire_version' AND meta_value='8'",
         },
     },
 };
@@ -1068,6 +1073,7 @@ pub const indexes = [_]Index{
     .{ .name = "action_operation_approval", .table = "action_operation", .columns = &.{ "session_ref", "approval_position" }, .where = "approval_position IS NOT NULL" },
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
+    .{ .name = "action_operation_indeterminate", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "call_ordinal" }, .where = "resolution_code='indeterminate'" },
     // Calls walk it (`report.full_calls`).
     .{ .name = "model_tool_call_session_order", .table = "model_tool_call", .columns = &.{ "session_ref", "operation_id", "call_ordinal" } },
     // Results walk it: the predicate holds exactly for a rejected call
@@ -2080,6 +2086,9 @@ test "a leading index's MySQL table computes its first column" {
     const mysql_ddl = comptime ddl(.mysql);
     try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, " session_stop_unpositioned_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN position IS NULL THEN session_ref END) STORED,") != null);
     try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, "CREATE INDEX session_stop_unpositioned ON session_stop(session_stop_unpositioned_lead);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, " action_operation_indeterminate_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN resolution_code='indeterminate' THEN session_ref END) STORED,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, "CREATE INDEX action_operation_indeterminate ON action_operation(action_operation_indeterminate_lead,parent_operation_id,call_ordinal);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, comptime ddl(.sqlite), "CREATE INDEX action_operation_indeterminate ON action_operation(session_ref,parent_operation_id,call_ordinal) WHERE resolution_code='indeterminate';") != null);
     // SQLite keeps its partial index.
     try std.testing.expect(std.mem.indexOf(u8, comptime ddl(.sqlite), "CREATE INDEX session_stop_unpositioned ON session_stop(session_ref) WHERE position IS NULL;") != null);
 }

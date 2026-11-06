@@ -6830,9 +6830,10 @@ def main(selected="all"):
 
         # One-shot observations replace the removed waits: the original request
         # and its Session both report the same pending Action.
-        progress = fixture.wait_for(lambda: (value if (value := fixture.observe(store, first).get("progress", {})).get("status")
+        attention = fixture.wait_for(lambda: (value if (value := fixture.observe(store, first))["state"]
             == "waiting_for_permission" else None), "first request attention")
-        action = progress["action"]
+        assert attention["work"]["state"]["kind"] == "approval", attention
+        action = attention["work"]["first_action"]
         blocked = fixture.command("session", "inspect", "--store", store, "--session", session)
         assert blocked["selected_message"] == first and blocked["work"]["state"]["kind"] == "approval", blocked
         assert [entry["action"] for entry in blocked["actionable_permissions"]] == [action], blocked
@@ -6840,8 +6841,8 @@ def main(selected="all"):
             input="queued behind permission")["request"]
         queued_fact = fixture.command("request", "inspect", "--store", store, "--key", queued)["observation"]
         assert queued_fact["status"] == "accepted" and "result" not in queued_fact, queued_fact
-        assert queued_fact["queue"]["status"] == "queued" and queued_fact["progress"] == {
-            "status": "waiting_for_permission", "action": action}, queued_fact
+        assert queued_fact["state"] == "waiting_for_permission" and "binding" not in queued_fact, queued_fact
+        assert queued_fact["work"]["state"]["kind"] == "approval" and queued_fact["work"]["first_action"] == action, queued_fact
         scratch = state / "render-scratch"
         scratch.mkdir()
         render_environment = {"TMPDIR": str(scratch)}
@@ -7040,8 +7041,9 @@ def main(selected="all"):
         report = fixture.wait_for(two_actions, "two actionable siblings")
         pending, running = [row["action"] for row in report["actionable_permissions"]]
         assert report["selected_message"] == sibling_key, report
-        attention = fixture.observe(store, sibling_key)["progress"]
-        assert attention == {"status": "waiting_for_permission", "action": pending}, attention
+        attention = fixture.observe(store, sibling_key)
+        assert attention["state"] == "waiting_for_permission", attention
+        assert attention["work"]["state"]["kind"] == "approval" and attention["work"]["first_action"] == pending, attention
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
         entered = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
@@ -7068,9 +7070,10 @@ def main(selected="all"):
         run(home, "action", "allow", "--store", store, "--session", sibling_session,
             "--action", running)
         fixture.wait_for(lambda: sibling_started.exists(), "approved sibling in flight")
-        attention = fixture.wait_for(lambda: (value if (value := fixture.observe(store, sibling_key)).get("progress", {}).get("action")
+        attention = fixture.wait_for(lambda: (value if (value := fixture.observe(store, sibling_key)).get("work", {}).get("first_action")
             == pending else None), "sibling attention while another Action runs")
-        assert attention["progress"] == {"status": "in_flight", "action": pending}, attention
+        assert attention["state"] == "processing", attention
+        assert attention["work"]["state"]["kind"] == "bash" and attention["work"]["first_action"] == pending, attention
         assert attention["status"] == "accepted" and "result" not in attention, attention
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
@@ -7130,7 +7133,7 @@ def main(selected="all"):
         queued_key = admit(home, "session", "send", "--to", failure_session,
             input="queued successor")["request"]
         waiting = fixture.observe(store, queued_key)
-        assert waiting["status"] == "accepted" and waiting["queue"]["status"] == "queued" and "result" not in waiting, waiting
+        assert waiting["status"] == "accepted" and waiting["state"] == "queued" and "result" not in waiting, waiting
         failure_release.set()
         failed_result = fixture.wait_for(lambda: fixture.command("request", "inspect", "--store", store,
             "--key", failed_key)["observation"].get("result"), "failed first Turn")
@@ -7160,7 +7163,7 @@ def main(selected="all"):
         excluded_key = admit(home, "session", "send", "--to", stop_session,
             input="queued when stopped")["request"]
         excluded = fixture.observe(store, excluded_key)
-        assert excluded["status"] == "accepted" and excluded["queue"]["status"] == "queued" and "result" not in excluded, excluded
+        assert excluded["status"] == "accepted" and excluded["state"] == "queued" and "result" not in excluded, excluded
         stopped = fixture.command("session", "stop", "--store", store, "--session", stop_session,
             "--record", state / "stop.json", "--key", "human-stop")
         assert stopped["answer"]["status"] == "accepted", stopped
@@ -7251,7 +7254,7 @@ def main(selected="all"):
         fixture.wait_for(lambda: len(endpoint.requests) == 10, "held predecessor request")
         message_a = admit(home, "session", "send", "--to", race_session, input="A")["request"]
         queued_a = fixture.observe(store, message_a)
-        assert queued_a["queue"]["status"] == "queued" and "result" not in queued_a, queued_a
+        assert queued_a["state"] == "queued" and "result" not in queued_a, queued_a
         race_predecessor_release.set()
         fixture.wait_for(lambda: len(endpoint.requests) == 11, "A processing request")
         race_message_release.set()

@@ -3787,8 +3787,9 @@ test "an encode failure settles unanswered and releases request scratch" {
     try std.testing.expectEqual(@as(u64, 0), host.scratch_used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), host.custody.occupied());
     try std.testing.expect(!storage.isFenced() and host.launchAllowed());
-    const observed = try storage.observeCommand("encode-failure-key");
-    const failed = observed.message.?.queue.?.state.failed;
+    var observed: store_module.CommandObservation = undefined;
+    try storage.observeCommand("encode-failure-key", &observed);
+    const failed = observed.kind.message.?.queue.?.state.failed;
     try std.testing.expectEqualStrings("provider_codec_failed", failed.code.slice());
     try std.testing.expectEqual(binding.attempt_ordinal, failed.binding.attempt_ordinal);
 }

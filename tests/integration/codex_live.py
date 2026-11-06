@@ -206,7 +206,7 @@ def run(model, external_credential=None):
         reasoning_tokens = [reasoning_token_count(store, record["operation"]) for record in first_observations]
         print(f"Pre-restart reasoning: private item counts={reasoning_counts}, token usage={reasoning_tokens}", flush=True)
         assert reasoning_counts[0] > 0, "no accepted private reasoning to replay; live qualification incomplete"
-        assert first_observations[0]["operation"] == reasoning["processing"]["operation"]
+        assert first_observations[0]["operation"] == reasoning["binding"]["operation"]
         before = evidence(store)
         assert len(before) == 3 and all(row[0] for row in before), "missing response identities"
         host, later_observations, reader, restarted_dependencies = start()
@@ -233,7 +233,7 @@ def run(model, external_credential=None):
             "architecture": platform.machine(), "requested_model": model,
             "route": "/backend-api/codex/responses", "authentication": "Rui device code",
             "native_dependencies": dependencies,
-            "public_result_identity": {"reasoning": reasoning["processing"], "first": first["processing"], "later": later["processing"]},
+            "public_result_identity": {"reasoning": reasoning["binding"], "first": first["binding"], "later": later["binding"]},
             "served_model_evidence": [
                 {"body": row[1] or None, "openai_model": row[2] or None, "x_openai_model": row[3] or None,
                  "correlation_present": bool(row[4])} for row in after

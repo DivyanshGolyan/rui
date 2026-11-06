@@ -111,7 +111,7 @@ pub const Requests = struct {
         return .{ .done = result };
     }
 
-    pub fn observeCommand(self: Requests, store_path: []const u8, key: []const u8, reply_buffer: *ReplyBuffer) !protocol_reply.ObservationReply {
+    pub fn observeCommand(self: Requests, store_path: []const u8, key: []const u8, reply_buffer: *ObservationBuffer) !protocol_reply.ObservationReply {
         reply_buffer.len = 0;
         try self.check();
         if (key.len > protocol.max_key_bytes or !std.unicode.utf8ValidateSlice(key)) return error.InvalidKey;
@@ -124,7 +124,7 @@ pub const Requests = struct {
     }
 
     pub fn observeMessage(self: Requests, address: *const protocol_reply.MessageAddress) !protocol_reply.ObservationReply {
-        var buffer: ReplyBuffer = .{};
+        var buffer: ObservationBuffer = .{};
         const reply = try self.observeCommand(address.store.slice(), address.key.slice(), &buffer);
         return switch (reply) {
             .observation => |observation| .{ .observation = try observation.forMessage(address) },
@@ -493,6 +493,9 @@ pub const PermissionDecisionInput = struct {
 };
 
 pub const ReplyBuffer = protocol.ResponseBuffer;
+/// Larger keyed reads own their storage only for the observation; mutation
+/// custody and persistent frontend buffers retain the small reply bound.
+pub const ObservationBuffer = protocol.CommandObservationBuffer;
 
 pub const HostStopInput = struct {
     store: []const u8,
@@ -686,7 +689,7 @@ pub fn observeCommand(
     io: std.Io,
     store_path: []const u8,
     key: []const u8,
-    reply_buffer: *ReplyBuffer,
+    reply_buffer: *ObservationBuffer,
 ) !protocol_reply.ObservationReply {
     return (Requests{ .io = io }).observeCommand(store_path, key, reply_buffer);
 }
@@ -1563,7 +1566,7 @@ fn openRead(requests: Requests, paths: *const platform.Paths, comptime route: []
     return fd;
 }
 
-pub const SendError = ErrorOf(std.Io.net.UnixAddress.init) || ErrorOf(connectRequest) || ErrorOf(uploadRequest) || ErrorOf(readCommandResponseRequest);
+pub const SendError = ErrorOf(std.Io.net.UnixAddress.init) || ErrorOf(connectRequest) || ErrorOf(uploadRequest) || ErrorOf(readCommandResponse);
 pub const MutationSendError = SendError || ErrorOf(platform.resolveClientPaths) || error{ Cancelled, EnvironmentTooLarge };
 
 /// The client environment a Message carries for its Session's Bash: the
@@ -1656,7 +1659,7 @@ fn sendSource(
     bytes: ?[]const u8,
     instance: ?*const protocol.InstanceId,
     environment: ?Environment,
-    reply_buffer: *ReplyBuffer,
+    reply_buffer: anytype,
     until: ?i128,
 ) Stepped(SendError, protocol_reply.CommandReply) {
     const address = std.Io.net.UnixAddress.init(paths.socket.slice()) catch |err| return .fail(.endpoint, err);
@@ -1913,7 +1916,7 @@ fn readCommandResponse(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer) !protocol
     return readCommandResponseRequest(.{ .io = std.Io.Threaded.global_single_threaded.io() }, fd, reply_buffer, .{}, null);
 }
 
-fn readCommandResponseRequest(requests: Requests, fd: std.posix.fd_t, reply_buffer: *ReplyBuffer, timing: ResponseTiming, until: ?i128) !protocol_reply.CommandReply {
+fn readCommandResponseRequest(requests: Requests, fd: std.posix.fd_t, reply_buffer: anytype, timing: ResponseTiming, until: ?i128) !protocol_reply.CommandReply {
     reply_buffer.len = 0;
     const head = try readResponseHeadUntil(requests, fd, timing, until);
     if (head.kind != .command_json) return error.InvalidResponse;
@@ -1990,10 +1993,10 @@ fn readResponseBody(requests: Requests, fd: std.posix.fd_t, length: u64, sink: a
     }
 }
 
-fn readCommandBodyUntil(requests: Requests, fd: std.posix.fd_t, head: ResponseHead, reply_buffer: *ReplyBuffer, timing: ResponseTiming, until: ?i128) !protocol_reply.CommandReply {
+fn readCommandBodyUntil(requests: Requests, fd: std.posix.fd_t, head: ResponseHead, reply_buffer: anytype, timing: ResponseTiming, until: ?i128) !protocol_reply.CommandReply {
     reply_buffer.len = 0;
     errdefer reply_buffer.len = 0;
-    if (head.content_length > protocol.max_response_bytes) return error.ResponseTooLarge;
+    if (head.content_length > reply_buffer.bytes.len) return error.ResponseTooLarge;
     const body_length: usize = @intCast(head.content_length);
     var offset: usize = 0;
     while (offset < body_length) {
@@ -2090,6 +2093,34 @@ fn socketPair() ![2]std.posix.fd_t {
         return error.SocketPairFailed;
     }
     return sockets;
+}
+
+test "observation transport owns a larger buffer without growing ordinary replies" {
+    try std.testing.expectEqual(@sizeOf(protocol.ResponseBuffer), @sizeOf(ReplyBuffer));
+    try std.testing.expectEqual(@sizeOf(protocol.CommandObservationBuffer), @sizeOf(ObservationBuffer));
+    const sockets = try socketPair();
+    defer closeTestDescriptor(sockets[0]);
+    defer closeTestDescriptor(sockets[1]);
+    var body: [protocol.max_response_bytes + 1]u8 = @splat(' ');
+    body[0] = '{';
+    body[1] = '}';
+    var header: [256]u8 = undefined;
+    try writeAll(sockets[1], try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len}));
+    try writeAll(sockets[1], &body);
+    var observation: ObservationBuffer = .{};
+    const read = readCommandResponseRequest(.{ .io = std.testing.io }, sockets[0], &observation, .{}, null);
+    try std.testing.expectEqual(@as(?anyerror, null), if (read) |_| @as(?anyerror, null) else |err| @as(?anyerror, err));
+    const reply = try read;
+    try std.testing.expectEqualStrings(&body, reply.body);
+    // Each transport invocation is bounded by its caller-owned storage, not
+    // by whichever reply variant currently has the largest wire bound.
+    const head: ResponseHead = .{ .status = 200, .kind = .command_json, .content_length = body.len, .total = null, .next = null };
+    var ordinary: ReplyBuffer = .{};
+    try std.testing.expectError(error.ResponseTooLarge, readCommandBodyUntil(.{ .io = std.testing.io }, sockets[0], head, &ordinary, .{}, null));
+    var too_large = head;
+    too_large.content_length = observation.bytes.len + 1;
+    try std.testing.expectError(error.ResponseTooLarge, readCommandBodyUntil(.{ .io = std.testing.io }, sockets[0], too_large, &observation, .{}, null));
+    try std.testing.expectEqual(@as(usize, 0), observation.len);
 }
 
 test "Host processing wait starts inactivity only after the first response byte" {
@@ -3685,7 +3716,8 @@ test "transport cancellation preserves caller capture and rejects before path ac
     try std.testing.expectEqual(@as(std.posix.fd_t, -1), captured.file.handle);
     const file = captured.file;
     const address = try protocol_reply.MessageAddress.init("/never-open", "k7m2qx", "k");
-    try std.testing.expectError(error.Cancelled, requests.observeCommand("/never-open", "k", &buffer));
+    var observation_buffer: ObservationBuffer = .{};
+    try std.testing.expectError(error.Cancelled, requests.observeCommand("/never-open", "k", &observation_buffer));
     try std.testing.expectError(error.Cancelled, requests.observeMessage(&address));
     try std.testing.expectError(error.Cancelled, requests.readResult("/never-open", "k", file, &buffer));
     try std.testing.expectError(error.Cancelled, requests.readResultStream("/never-open", "k", file, &buffer));

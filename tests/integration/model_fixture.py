@@ -655,14 +655,35 @@ def retry_message(state, store, key):
     )
 
 
+TERMINAL_MESSAGE_STATES = frozenset(("completed", "failed", "cancelled", "rejected"))
+
+
 def observe(store, key, *, deadline=None):
     if deadline is not None:
         deadline = min(deadline, time.monotonic() + 15)
     remaining = 15 if deadline is None else deadline - time.monotonic()
     assert remaining > 0, "result observation exhausted original deadline"
-    result = command(
+    before = int(time.time())
+    reply = command(
         "request", "inspect", "--store", store, "--key", key, timeout=remaining,
-    )["observation"]
+    )
+    after = int(time.time())
+    as_of = reply["as_of"]
+    assert isinstance(as_of, str) and as_of.isascii() and as_of.isdecimal(), reply
+    assert str(int(as_of)) == as_of and before <= int(as_of) <= after, reply
+    result = reply["observation"]
+    if result.get("kind") == "message":
+        assert result["state"] in TERMINAL_MESSAGE_STATES | {"queued", "processing", "waiting_for_permission"}, result
+        assert "processing" not in result and "progress" not in result, result
+        if "queue" in result:
+            assert "status" not in result["queue"], result
+            admitted_at = result["queue"]["admitted_at"]
+            assert isinstance(admitted_at, str) and admitted_at.isascii() and admitted_at.isdecimal(), result
+            assert str(int(admitted_at)) == admitted_at, result
+        if result["state"] in TERMINAL_MESSAGE_STATES:
+            assert "work" not in result, result
+        else:
+            assert "state" in result["work"] and "first_action" in result["work"], result
     assert deadline is None or time.monotonic() < deadline, "result observation exceeded original deadline"
     return result
 
@@ -702,16 +723,16 @@ def read_action(store, session, action, field):
 
 def completed_observation(store, key, *, deadline=None):
     value = observe(store, key, deadline=deadline)
-    return value if value.get("result", {}).get("status") == "completed" else None
+    return value if value.get("state") == "completed" else None
 
 
 def wait_for_result_release(store, key, session, deadline, *, inspect=None):
     """Read one terminal result and its release within the original budget."""
     observation = wait_for(
-        lambda: (value if (value := observe(store, key, deadline=deadline)).get("result") else None),
+        lambda: (value if (value := observe(store, key, deadline=deadline)).get("state") in TERMINAL_MESSAGE_STATES else None),
         f"{key} terminal result", deadline=deadline,
     )
-    answer = read_result(store, key, deadline=deadline) if observation["result"]["status"] == "completed" else None
+    answer = read_result(store, key, deadline=deadline) if observation["state"] == "completed" else None
     if inspect is None:
         def inspect(remaining):
             return command("session", "inspect", "--store", store, "--session", session,
@@ -723,7 +744,7 @@ def wait_for_result_release(store, key, session, deadline, *, inspect=None):
 def wait_model_cleanup(diagnostics, store, session, observation, deadline, *, peers=None):
     # A saved result is semantic authority, not physical release. Match the
     # admitted owner before checking its final accounting, with no fresh budget.
-    diagnostics.wait_model_cleanup(observation["processing"], deadline)
+    diagnostics.wait_model_cleanup(observation["binding"], deadline)
 
     def inspect(remaining):
         diagnostics.claim_inspection(limit=49)
@@ -738,4 +759,4 @@ def wait_model_cleanup(diagnostics, store, session, observation, deadline, *, pe
 
 
 def assert_model_cleanup_census(diagnostics, *observations):
-    diagnostics.assert_model_cleanup_census(*(value["processing"] for value in observations))
+    diagnostics.assert_model_cleanup_census(*(value["binding"] for value in observations))

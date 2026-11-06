@@ -752,7 +752,7 @@ def held_population(root):
                 held_fds = open_descriptors(host.pid)
                 assert held_cpu <= 1, f"held-stream Host used {held_cpu} CPU seconds in 3 wall seconds"
                 pending = requests.call("observe_command", key=held_key)["observation"]
-                assert (pending.get("processing") or {}).get("attempt") == "1", pending
+                assert (pending.get("binding") or {}).get("attempt") == "1", pending
                 assert pending.get("result") is None, pending
                 inspection = requests.call(
                     "inspect_session", session=sessions[int(held_key.rsplit("-", 1)[1])],
@@ -822,7 +822,7 @@ def held_streams(root, endpoint, after_progress=False):
         assert int(held["custody_occupied"]) == 100, held
         # After progress, the interrupt target is mid-body: 10,000 bytes in.
         assert endpoint.held_prefixes["held-0"] == (10_000 if after_progress else 0), endpoint.held_prefixes
-        processing = dispatch.observe(store, "held-message-0")["processing"]
+        processing = dispatch.observe(store, "held-message-0")["binding"]
         result_deadline = time.monotonic() + 45
         reply = dispatch.command(
             "session", "interrupt-model", "--store", store, "--record", records / "held-interrupt.json",
@@ -1052,7 +1052,7 @@ def isolated_terminal_stream(root, endpoint, mode):
             dispatch.message(root, store, f"{mode}-{name}-message", sessions[name], f"isolation-{name}")
         assert endpoint.ready.wait(20), f"both {mode} streams did not become live"
         if mode == "cancel":
-            processing = dispatch.observe(store, "cancel-target-message")["processing"]
+            processing = dispatch.observe(store, "cancel-target-message")["binding"]
             reply = dispatch.command(
                 "session", "interrupt-model", "--store", store, "--record", root / "cancel-interrupt.json",
                 "--key", "cancel-interrupt", "--session", sessions["target"],

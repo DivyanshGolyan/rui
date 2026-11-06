@@ -91,7 +91,8 @@ def held(state, binary, label, handle):
         assert process.returncode == 0, (output, errors)
         reply = json.loads(output)
         observation = reply["observation"]
-        assert reply["key"] == handle and observation["progress"]["status"] == "in_flight", reply
+        assert reply["key"] == handle and observation["state"] == "processing", reply
+        assert observation["work"]["state"]["kind"] == "working" and observation["work"]["first_action"] is None, reply
         assert "result" not in observation, reply
         return {"binary": label, "decoded_snapshot": measured}
     finally:

@@ -845,8 +845,8 @@ def keyed_observation_cases(state, only="keyed"):
             value = json.loads(body)
             observation = value["observation"]
             if omitted:
-                assert observation["status"] == "accepted" and "processing" in observation and "result" in observation, observation
-                del observation["processing"]
+                assert observation["status"] == "accepted" and "binding" in observation and "result" in observation, observation
+                del observation["binding"]
             else:
                 observation["wire_only"] = "must-not-be-presented"
             encoded = json.dumps(value, indent=2, ensure_ascii=True).encode()
@@ -860,13 +860,13 @@ def keyed_observation_cases(state, only="keyed"):
                 for args in (["request", "inspect", "--store", store, "--key", key], ["request", "inspect", key]):
                     result = invoke(home, *args)
                     if omitted:
-                        assert result.returncode == 1 and "[internal_unexpected]" in result.stderr, ("omitted processing binding was confirmed", result)
+                        assert result.returncode == 1 and "[internal_unexpected]" in result.stderr, ("omitted Message binding was confirmed", result)
                         assert not result.stdout, result
                     else:
                         assert result.returncode == 0 and "must-not-be-presented" not in result.stdout, ("unknown DOM leaked", result)
                         rendered = json.loads(result.stdout)["observation"]
                         assert rendered["status"] == "accepted" and rendered["result"]["status"] == "failed", ("accepted request confused with failed work", rendered)
-                        assert all(field in rendered for field in ("input", "queue", "processing")), rendered
+                        assert all(field in rendered for field in ("input", "queue", "binding")), rendered
             finally:
                 proxy.close()
         # The saved handle reads only the original answer: failed work, not a substitute.

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections import Counter
 
 import model_fixture as fixture
@@ -429,8 +430,10 @@ def prove_reused_session(state):
             "queued during permission",
         )
         queued = fixture.observe(store, "reuse-queued")
-        assert queued["queue"]["status"] == "queued", queued
-        first_processing = fixture.observe(store, "reuse-first")["processing"]
+        assert queued["state"] == "waiting_for_permission" and "binding" not in queued, queued
+        assert queued["work"]["state"]["kind"] == "approval", queued
+        assert queued["work"]["first_action"] == actions_by_ordinal["0"]["action"], queued
+        first_processing = fixture.observe(store, "reuse-first")["binding"]
         report = fixture.command(
             "session", "inspect",
             "--store",
@@ -499,7 +502,7 @@ def prove_reused_session(state):
             lambda: fixture.completed_observation(store, "reuse-queued"),
             "queued message progress without another submission",
         )
-        assert queued_completed["processing"]["turn"] == first_processing["turn"], queued_completed
+        assert queued_completed["binding"]["turn"] == first_processing["turn"], queued_completed
         assert fixture.read_result(store, "reuse-first") == b"first-turn-answer"
         assert fixture.read_result(store, "reuse-queued") == b"first-turn-answer"
         assert settlement_order.read_text() == "fastslow"
@@ -585,7 +588,7 @@ def prove_reused_session(state):
         )["execution"]
         second_live_custody = int(second_live["custody_occupied"])
         assert second_live_custody >= 2, second_live
-        second_processing = fixture.observe(store, "reuse-second")["processing"]
+        second_processing = fixture.observe(store, "reuse-second")["binding"]
         assert second_processing["turn"] != first_processing["turn"], second_processing
         retry_failure_release.set()
         # The failed Attempt releases its own custody at settlement, while
@@ -1562,6 +1565,7 @@ def main():
         pending = fixture.wait_for(
             lambda: action_for(store, session), "pre-launch Bash Action"
         )
+        before_launch_binding = fixture.observe(store, "before-launch-message")["binding"]
         fixture.stop_host(host)
         host, milestones = None, None
         host = fixture.start_host(store, endpoint_url, active_capacity=0)
@@ -1601,16 +1605,27 @@ def main():
         assert crash["returncode"] == -signal.SIGKILL
         before_launch_gate.release()
         before_launch_gate = None
+        before_recovery = int(time.time())
         host = fixture.start_host(store, endpoint_url)
         assert not list((store / "scratch").glob("bash-*-*.tmp"))
         fixture.wait_for(
             lambda: resolution(store, session) == "indeterminate",
             "pre-launch indeterminate recovery",
         )
-        fixture.wait_for(
+        recovered = fixture.wait_for(
             lambda: fixture.completed_observation(store, "before-launch-message"),
             "pre-launch recovery continuation",
         )
+        assert recovered["state"] == "completed" and "work" not in recovered, recovered
+        recovery = recovered["recovery"]
+        assert recovery["more"] is False and len(recovery["unknown_outcomes"]) == 1, recovered
+        unknown = recovery["unknown_outcomes"][0]
+        assert unknown == {
+            "action": pending["action"], "operation": before_launch_binding["operation"],
+            "call": pending["call_ordinal"], "description": "Run before-launch command", "at": unknown["at"],
+        }, recovered
+        assert str(int(unknown["at"])) == unknown["at"] and before_recovery <= int(unknown["at"]) <= int(time.time()), recovered
+        assert fixture.observe(store, "before-launch-message")["recovery"] == recovery, "terminal recovery disappeared"
         assert not before_launch_marker.exists()
 
         session = configure(state, store, "changed-config")

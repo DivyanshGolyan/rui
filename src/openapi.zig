@@ -410,13 +410,7 @@ fn observationSchema(d: *Document) anyerror!Value {
     inline for (comptime std.meta.tags(protocol.CommandKind), 1..) |kind, index| {
         const bodies = switch (kind) {
             .configure => .{ .{}, o.revision },
-            .message => .{
-                .{},                                   o.input,
-                o.input ++ o.queued,                   o.input ++ o.queued ++ o.progress,
-                o.input ++ o.excluded,                 o.input ++ o.processing,
-                o.input ++ o.processing ++ o.progress, o.input ++ o.completed,
-                o.input ++ o.cancelled,                o.input ++ o.failed,
-            },
+            .message => o.message_variants,
             .session_stop => .{ .{}, o.session_stop },
             .model_interruption => .{ .{}, o.model_interruption },
             .permission_decision => .{ .{}, o.permission_decision },
@@ -551,6 +545,19 @@ pub const Document = struct {
             try d.shapeSchema(T.failed_shape),
             try d.shapeSchema(T.stopped_shape),
         });
+        if (T == protocol.MessageRecoveryJson) {
+            const Calls = struct {
+                pub const is_list = true;
+                pub fn openapi_inline(document: *Document) !Value {
+                    return document.object(.{
+                        .type = Value{ .string = "array" },
+                        .items = try document.shapeSchema(protocol.MessageRecoveryJson.item),
+                        .maxItems = Value{ .integer = protocol.message_recovery_limit },
+                    });
+                }
+            };
+            return d.shapeSchema(T.head ++ .{Calls} ++ T.tail);
+        }
         if (T == protocol.CallActivity) return d.shapeSchema(T.head ++ .{ListOf(T.entry_shape)} ++ T.tail);
         if (T == protocol.ActivityItem) {
             const kinds = comptime std.meta.tags(protocol.ActivityItem.Kind);
@@ -1283,6 +1290,46 @@ test "replies the Host renders conform to their schemas" {
     // These are the Store's real streaming reports, not schema examples:
     // an added hand-written field must fail additionalProperties here.
     try store.checkSessionReportsForTesting(Case{ .schemas = schemas, .allocator = a });
+}
+
+test "Message observation schema requires Host state and bounds recovery" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var document: Document = .init(allocator);
+    const built = try document.build();
+    const schemas = built.object.get("components").?.object.get("schemas").?.object;
+    const schema = schemas.get("ObserveCommandReply").?;
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{";
+    const head = prefix ++ "\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\",";
+    const input = "\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ "0000000000000000000000000000000000000000000000000000000000000000" ++ "\"},\"queue\":{\"admission\":\"1\",\"admitted_at\":\"2\"}";
+    const binding = ",\"binding\":{\"turn\":\"3\",\"operation\":\"4\",\"attempt\":\"1\"}";
+    const recovery = ",\"recovery\":{\"unknown_outcomes\":[{\"action\":\"5\",\"operation\":\"4\",\"call\":\"0\",\"description\":null,\"at\":\"6\"}],\"more\":false}";
+    const cases = .{
+        prefix ++ "\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\",\"code\":\"unknown_session\",\"state\":\"rejected\"}}",
+        head ++ "\"state\":\"queued\"," ++ input ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"2\"},\"first_action\":null}}}",
+        head ++ "\"state\":\"waiting_for_permission\"," ++ input ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"2\"},\"first_action\":\"5\"}}}",
+        head ++ "\"state\":\"processing\"," ++ input ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"2\"},\"first_action\":null}" ++ recovery ++ "}}",
+        head ++ "\"state\":\"completed\"," ++ input ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ "0000000000000000000000000000000000000000000000000000000000000000" ++ "\"}}" ++ recovery ++ "}}",
+        head ++ "\"state\":\"failed\"," ++ input ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"failed\"}" ++ recovery ++ "}}",
+        head ++ "\"state\":\"cancelled\"," ++ input ++ binding ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" ++ recovery ++ "}}",
+    };
+    inline for (cases) |text| {
+        const value = try std.json.parseFromSliceLeaky(Value, allocator, text, .{});
+        try std.testing.expect(conforms(schemas, schema, value));
+    }
+    const missing_state = try std.json.parseFromSliceLeaky(Value, allocator, prefix ++ "\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"k7m2qx\"}}", .{});
+    try std.testing.expect(!conforms(schemas, schema, missing_state));
+
+    const calls: [protocol.message_recovery_limit]protocol.MessageUnknownOutcome = @splat(.{ .action_id = 1, .operation_id = 2, .call = 0, .at = 3 });
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    try (protocol.MessageRecoveryJson{ .calls = &calls, .more = true }).writeJson(&out.writer);
+    var value = try std.json.parseFromSliceLeaky(Value, allocator, out.written(), .{});
+    const recovery_schema = schemas.get("MessageRecoveryJson").?;
+    try std.testing.expect(conforms(schemas, recovery_schema, value));
+    const outcomes = &value.object.getPtr("unknown_outcomes").?.array;
+    try outcomes.append(outcomes.items[0]);
+    try std.testing.expect(!conforms(schemas, recovery_schema, value));
 }
 
 test "statuses, media types and required headers match what the Host sends" {

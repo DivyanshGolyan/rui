@@ -976,7 +976,7 @@ def stop_receipt_case(state, library):
         fixture.message(root, store, "capture-message", session, "hello")
         fixture.message(root, store, "stop-message", stop_session, "stop")
         fixture.wait_for(lambda: len(endpoint.requests) == 2, "held provider requests", timeout=3)
-        processing = fixture.observe(store, "stop-message")["processing"]
+        processing = fixture.observe(store, "stop-message")["binding"]
         arm.write_text(session)
         # A specific optional write may lose custody or output credit. Seek an
         # actual hold without requiring delivery of any one inspection trace.
