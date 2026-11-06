@@ -5,7 +5,7 @@ description: Triage CI: find why a Rui run is red and whether the commit under t
 
 # rui-ci-triage
 
-Name the failing fixture and assertion from the log, decide whether the commit under test caused it, and route the fix. Rerun, retry and assertion rules live in [Landing](../../../AGENTS.md#landing) and [Evidence](../../../CODING_STANDARDS.md#evidence); this skill never relaxes them.
+Name the failing fixture and assertion from the log, decide whether the commit under test caused it, and route the fix. Rerun, retry and assertion rules live in [Landing](../../../docs/agents/landing.md#ci-failures) and [Evidence](../../../CODING_STANDARDS.md#evidence); this skill never relaxes them.
 
 ## 1. Find the failure record
 
@@ -26,7 +26,7 @@ Before blaming the commit under test or calling it a stale base, look up the sig
 - **Caused by the diff** when the signature is new and the diff touches the fixture's owner.
 - **A job that stalled or hit its timeout** shows as cancelled, not failed, and has no per-fixture `timed out` record. Treat it as a failure. Find the last test that started. If the diff added tests to that binary, suspect them first. Compare the same job's duration on main and other PRs before an A/B run or asking the user.
 
-Search the open `stable-red` and CI-red issues for the signature before filing, and group them by fixture; several signatures in one fixture are often one race. [Landing](../../../AGENTS.md#landing) says who owns a recurring red and when it counts as fixed.
+Search the open `stable-red` and CI-red issues for the signature before filing, and group them by fixture; several signatures in one fixture are often one race. [Landing](../../../docs/agents/landing.md#ci-failures) says who owns a recurring red and when it counts as fixed.
 
 ## 4. Fix and prove an intermittent
 

@@ -309,6 +309,34 @@ pub fn failedResponseBinding(a: *ReadAccess, session: []const u8, selection: pro
     return .{ .turn_id = row.turn_id.get(), .operation_id = selection.operation, .attempt_ordinal = selection.attempt };
 }
 
+/// The archive request's selected Turn decides completion, exactly as a
+/// stop observation does. Restoring clears the intent, not its history.
+/// Callers already read the Session; seek only its optional intent here,
+/// so an active Session with no archive history needs no further reads.
+pub const archive_state = rsql.Read(.{
+    .sql = "SELECT " ++ command_domain.archive_state_sql ++ " AS archive_state FROM session_archive session WHERE session_ref=?1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { archive_state: protocol.SessionArchiveState },
+    .cardinality = .optional,
+});
+
+fn archiveStateFromIntent(intent: archive_state.Result) protocol.SessionArchiveState {
+    return if (intent) |row| row.archive_state else .active;
+}
+
+pub fn archiveState(a: *ReadAccess, session: []const u8) !protocol.SessionArchiveState {
+    var row: archive_state.Result = undefined;
+    a.read(archive_state, .{ .session = session }, &row);
+    try store_access.runAs(a, error.SessionReadFailed);
+    return archiveStateFromIntent(row);
+}
+
+/// Active includes a stop still completing. All avoids archive seeks;
+/// otherwise compare whether the Session is completely archived.
+fn archiveFilterSql(comptime parameter: []const u8) []const u8 {
+    return " AND (" ++ parameter ++ "='all' OR ((" ++ command_domain.archive_state_sql ++ ")='archived')=(" ++ parameter ++ "='archived'))";
+}
+
 /// The newest Session's creation sequence, the ceiling of a list that
 /// starts from the beginning.
 const list_ceiling = rsql.Read(.{
@@ -323,10 +351,11 @@ const list_ceiling = rsql.Read(.{
 const list_limit = protocol.session_list_page_size + 1;
 
 /// A full traversal's page of Sessions in creation order, with the one
-/// after it.
+/// after it. The index walks hidden candidates until nine pass the derived
+/// archive filter; the result retains only those nine references.
 const list_page = rsql.Read(.{
-    .sql = "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
-    .Args = struct { after: u64, ceiling: u64 },
+    .sql = "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2" ++ archiveFilterSql("?3") ++ " ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
+    .Args = struct { after: u64, ceiling: u64, archive: protocol.SessionArchiveFilter },
     .Row = ListPage.Row,
     .cardinality = .each,
 });
@@ -334,8 +363,8 @@ const list_page = rsql.Read(.{
 /// `list_page` within one Workspace.
 const workspace_list_page = rsql.Read(.{
     .sql = "SELECT created_seq,session_ref FROM session @index(session_workspace_list) " ++
-        "WHERE workspace_digest=?3 AND workspace=?4 AND created_seq>?1 AND created_seq<=?2 ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
-    .Args = struct { after: u64, ceiling: u64, digest: [32]u8, workspace: []const u8 },
+        "WHERE workspace_digest=?3 AND workspace=?4 AND created_seq>?1 AND created_seq<=?2" ++ archiveFilterSql("?5") ++ " ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
+    .Args = struct { after: u64, ceiling: u64, digest: [32]u8, workspace: []const u8, archive: protocol.SessionArchiveFilter },
     .Row = ListPage.Row,
     .cardinality = .each,
 });
@@ -393,8 +422,9 @@ pub fn renderSessionList(a: *ReadAccess, request: *const protocol.ListSessions, 
 }
 
 /// Every Session in scope, in creation order, eight per page. A full
-/// traversal reads only the request's scope, `after` and `ceiling`. A
-/// list from the beginning reads its ceiling in the page's round: every
+/// traversal applies the archive filter before LIMIT, within the request's
+/// scope, `after` and `ceiling`. A list from the beginning reads its ceiling
+/// in the page's round: every
 /// Session is at or below the newest, so the page needs no bound then.
 fn renderAllSessions(a: *ReadAccess, request: *const protocol.ListSessions, generation: u64, capture: *SessionReportCapture) !void {
     // An aggregate has one row, stepped once, as main did.
@@ -403,9 +433,9 @@ fn renderAllSessions(a: *ReadAccess, request: *const protocol.ListSessions, gene
     const bound: u64 = if (request.after == 0) std.math.maxInt(i64) else request.ceiling;
     var page: ListPage = .{};
     if (request.workspace) |*workspace|
-        a.readEach(workspace_list_page, .{ .after = request.after, .ceiling = bound, .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice() }, list_limit, &page)
+        a.readEach(workspace_list_page, .{ .after = request.after, .ceiling = bound, .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice(), .archive = request.archive }, list_limit, &page)
     else
-        a.readEach(list_page, .{ .after = request.after, .ceiling = bound }, list_limit, &page);
+        a.readEach(list_page, .{ .after = request.after, .ceiling = bound, .archive = request.archive }, list_limit, &page);
     try store_access.runAs(a, error.SessionReadFailed);
     if (page.failure) |err| return err;
     const ceiling = if (request.after == 0) (maximum.row orelse return error.SessionReadFailed).ceiling else request.ceiling;
@@ -422,7 +452,10 @@ fn renderAllSessions(a: *ReadAccess, request: *const protocol.ListSessions, gene
 /// The Sessions in scope that the hint says changed in (since, through],
 /// in ID order, eight per page: the Workspace's key, then one pass over
 /// the ring in memory, then the shown rows. A Session it names may be
-/// unchanged; one it omits did not change.
+/// unchanged; one it omits did not change. The archive filter deliberately
+/// does not apply: caches need transitions out of their visible set too.
+/// Tokens are scope-unbound hints; a changed archive/workspace filter needs
+/// a fresh full traversal, not reuse of the previous scope's token.
 fn renderChangedSessions(a: *ReadAccess, request: *const protocol.ListSessions, since: u64, through: u64, capture: *SessionReportCapture) !void {
     var workspace: ?u64 = null;
     if (request.workspace) |*scope| {
@@ -557,7 +590,8 @@ fn writeToolNames(writer: *std.Io.Writer, names: []const []const u8) std.Io.Writ
     try writer.writeAll("]");
 }
 
-const settings_columns = "s.session_ref,s.parent_ref,s.workspace,s.provider,s.model," ++ tool_set.namesSql("s.tool_set_id") ++ " AS tools,s.permission_mode,s.label,s.created_at,s.revision,s.next_position," ++
+const settings_columns = "session.session_ref,session.parent_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
+    command_domain.archive_state_sql ++ " AS archive_state," ++
     "(" ++ person_message_sql ++ ") AS from_person_at,";
 
 /// One list row: the Session's settings, its latest Message from no
@@ -565,8 +599,8 @@ const settings_columns = "s.session_ref,s.parent_ref,s.workspace,s.provider,s.mo
 /// or content finds no row. Its Row is over 1 KiB, so its visitor owns
 /// it (`RowsRender`).
 const list_row = rsql.Read(.{
-    .sql = "SELECT " ++ settings_columns ++ first_message_columns ++ " FROM session s " ++
-        "JOIN message_admission m ON m.admission_id=?2 AND m.session_ref=s.session_ref " ++ first_content_join ++ " WHERE s.session_ref=?1",
+    .sql = "SELECT " ++ settings_columns ++ first_message_columns ++ " FROM session " ++
+        "JOIN message_admission m ON m.admission_id=?2 AND m.session_ref=session.session_ref " ++ first_content_join ++ " WHERE session.session_ref=?1",
     .Args = struct { session: []const u8, first: u64 },
     .Row = ListRow,
     .cardinality = .each,
@@ -575,7 +609,7 @@ const list_row = rsql.Read(.{
 /// `list_row` of a Session with no first Message.
 const list_row_bare = rsql.Read(.{
     .sql = "SELECT " ++ settings_columns ++ "NULL AS first_admission,NULL AS first_position,NULL AS first_admitted_at,NULL AS first_sender," ++
-        "NULL AS first_length,NULL AS first_digest,NULL AS first_private FROM session s WHERE s.session_ref=?1",
+        "NULL AS first_length,NULL AS first_digest,NULL AS first_private FROM session WHERE session.session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = ListRow,
     .cardinality = .each,
@@ -593,6 +627,7 @@ const ListRow = struct {
     created_at: rsql.Positive,
     revision: rsql.Positive,
     next_position: rsql.Positive,
+    archive_state: protocol.SessionArchiveState,
     from_person_at: ?rsql.Positive,
     first_admission: ?rsql.Positive,
     first_position: ?rsql.Positive,
@@ -704,6 +739,7 @@ fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: 
     const work: protocol.SessionWork = .fromCore(try rows[index].work.work(row.created_at.get(), now_ms));
     const peers: protocol.PeerFacts = .{ .from_person_at = optional(row.from_person_at) };
     const fields: protocol.SessionRow.Fields = .{
+        .archive_state = row.archive_state,
         .reference = row.session_ref.slice(),
         .parent = if (row.parent_ref) |*parent| parent.slice() else null,
         .workspace = row.workspace.slice(),
@@ -746,7 +782,7 @@ pub const json_shapes = struct {
     const H = protocol.Hole;
     const head = .{"{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\""};
     const current_head = .{"{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\""};
-    const facts = .{ "\",\"session\":", H{ .json = CurrentJson.Settings }, ",\"pending_messages\":\"", H.decimal, "\",\"work\":", H{ .json = CurrentJson.Work }, ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = protocol.max_key_bytes }, ",\"recent_messages\":", ListOf(CurrentJson.Recent), ",\"actions\":", H{ .json = CurrentJson.Actions }, ",\"rejected_calls\":", H{ .json = CurrentJson.RejectedCalls }, ",\"actionable_permissions\":", ListOf(CurrentJson.Actionable) };
+    const facts = .{ "\",\"session\":", H{ .json = CurrentJson.Settings }, ",\"archive_state\":\"", H{ .tag = protocol.SessionArchiveState }, "\",\"pending_messages\":\"", H.decimal, "\",\"work\":", H{ .json = CurrentJson.Work }, ",\"peers\":", H{ .json = protocol.PeerFacts }, ",\"first_message\":", H{ .optional_json = protocol.FirstMessage }, ",\"selected_message\":", H{ .optional_string = protocol.max_key_bytes }, ",\"recent_messages\":", ListOf(CurrentJson.Recent), ",\"actions\":", H{ .json = CurrentJson.Actions }, ",\"rejected_calls\":", H{ .json = CurrentJson.RejectedCalls }, ",\"actionable_permissions\":", ListOf(CurrentJson.Actionable) };
     const tail = .{ ",\"execution\":", H{ .json = ExecutionJson }, "}" };
     const missing = "\",\"session\":null,\"pending_messages\":\"0\",\"execution\":{\"status\":\"unavailable\",\"reason\":\"session_not_found\"}}";
     pub const current = current_head ++ .{"current"} ++ facts ++ tail;
@@ -1069,6 +1105,7 @@ const actionable_permissions = rsql.Read(.{
 /// reads, which main named apart, are its list's own columns now, so
 /// they take its list's name.
 pub const current_failures = .{
+    .{ archive_state, error.SessionReadFailed },
     .{ selected_active, error.TurnReadFailed },
     .{ selected_queued, error.MessageAdmissionReadFailed },
     .{ recent_messages, error.TurnReadFailed },
@@ -1086,6 +1123,7 @@ fn runCurrent(a: *ReadAccess) !void {
 
 /// What the Current report reads before its lists.
 const CurrentFacts = struct {
+    archive: archive_state.Result = null,
     instructions: content_domain.content_metadata.Row = undefined,
     output_schema: content_domain.content_metadata.Row = undefined,
     counts: SessionCounts,
@@ -1138,6 +1176,7 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
     const metadata = content_domain.content_metadata;
     a.read(metadata, .{ .content_id = @intCast(instructions_id) }, &facts.instructions);
     if (current.output_schema_id) |content_id| a.read(metadata, .{ .content_id = @intCast(content_id) }, &facts.output_schema);
+    a.read(archive_state, .{ .session = session_ref }, &facts.archive);
     facts.counts.queue(a);
     _ = facts.compaction.queue(a);
     _ = facts.work.queue(a);
@@ -1208,7 +1247,7 @@ noinline fn renderCurrent(a: *ReadAccess, session_ref: []const u8, current: *con
     }
     try capture.append(",\"label\":");
     if (current.label) |*label| try capture.appendJsonString(label.slice()) else try capture.append("null");
-    try capture.appendFmt(",\"created_at\":\"{d}\"}},\"pending_messages\":\"{d}\",\"work\":", .{ current.created_at, counted.pending });
+    try capture.appendFmt(",\"created_at\":\"{d}\"}},\"archive_state\":\"{s}\",\"pending_messages\":\"{d}\",\"work\":", .{ current.created_at, @tagName(archiveStateFromIntent(facts.archive)), counted.pending });
     const work: protocol.SessionWork = .fromCore(try facts.work.work(current.created_at, std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange));
     try capture.appendShape(.{"{"} ++ protocol.SessionWork.fields, work.args());
     if (outcome) |found| {

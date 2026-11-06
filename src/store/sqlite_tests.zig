@@ -328,6 +328,155 @@ test "a Workspace's changed page reads only its own Sessions, however many other
     try std.testing.expectEqual(alone, try Page.steps(&storage, &tmp, request, &watched));
 }
 
+/// Archive transitions use the command boundary, never seeded projection rows.
+const ArchiveReportTesting = struct {
+    fn set(storage: *Store, key: []const u8, session: []const u8, archived: bool) !protocol.SessionStopCompletion {
+        var command: protocol.SessionArchiveCommand = .{ .archived = archived };
+        try command.key.set(key);
+        try command.session.set(session);
+        const reply = storage.archiveSession(&command, .{});
+        try std.testing.expect(reply == .accepted);
+        try std.testing.expectEqual(archived, reply.accepted.archived);
+        return reply.accepted.completion;
+    }
+
+    fn expectListState(storage: *Store, tmp: *std.testing.TmpDir, request: protocol.ListSessions, session: []const u8, expected: protocol.SessionArchiveState) !void {
+        var used = std.atomic.Value(u64).init(0);
+        const bytes = try testingSessionList(storage, tmp, request, &used, 81);
+        defer std.testing.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+        defer parsed.deinit();
+        const rows = parsed.value.object.get("sessions").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), rows.len);
+        try std.testing.expectEqualStrings(session, rows[0].object.get("reference").?.string);
+        try std.testing.expectEqualStrings(@tagName(expected), rows[0].object.get("archive_state").?.string);
+    }
+
+    fn expectState(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, expected: protocol.SessionArchiveState) !void {
+        const inspected = try storage.inspectSessionForTesting(session);
+        try std.testing.expectEqual(expected, inspected.archive_state);
+        for ([_]protocol.ReportProfile{ .current, .full }) |profile| {
+            const bytes = try testingSessionReportWithProfile(storage, tmp, session, 1024 * 1024, profile);
+            defer std.testing.allocator.free(bytes);
+            const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings(session, parsed.value.object.get("session").?.object.get("reference").?.string);
+            try std.testing.expectEqualStrings(@tagName(expected), parsed.value.object.get("archive_state").?.string);
+        }
+        try expectListState(storage, tmp, .{ .archive = .all }, session, expected);
+    }
+};
+
+test "archive reports expose idle state and ignore restored historical requests" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "archive-idle-session");
+    try ArchiveReportTesting.expectState(&storage, &tmp, session.slice(), .active);
+    try std.testing.expectEqual(protocol.SessionStopCompletion.completed, try ArchiveReportTesting.set(&storage, "archive-idle", session.slice(), true));
+    try ArchiveReportTesting.expectState(&storage, &tmp, session.slice(), .archived);
+    const hidden = try TestingListing.read(&storage, &tmp, .{});
+    try hidden.expectReferences(&.{});
+    try std.testing.expectEqual(protocol.SessionStopCompletion.completed, try ArchiveReportTesting.set(&storage, "archive-idle-restore", session.slice(), false));
+    try ArchiveReportTesting.expectState(&storage, &tmp, session.slice(), .active);
+    _ = try ArchiveReportTesting.set(&storage, "archive-idle-again", session.slice(), true);
+    try submitTestMessage(&storage, &tmp, "archive-idle-message", "archive-idle-message", session.slice(), "restore by Message");
+    try ArchiveReportTesting.expectState(&storage, &tmp, session.slice(), .active);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "archive reports retain pending stops and changed rows outside the full filter" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "archive-pending-session");
+    const action = try attemptBashForTesting(&storage, &tmp, session.slice());
+    const before = try TestingListing.read(&storage, &tmp, .{});
+    try std.testing.expectEqual(protocol.SessionStopCompletion.pending, try ArchiveReportTesting.set(&storage, "archive-pending", session.slice(), true));
+    try ArchiveReportTesting.expectState(&storage, &tmp, session.slice(), .archiving);
+    try ArchiveReportTesting.expectListState(&storage, &tmp, .{}, session.slice(), .archiving);
+    const archived_before = try TestingListing.read(&storage, &tmp, .{ .archive = .archived });
+    try archived_before.expectReferences(&.{});
+    const pending = try TestingListing.read(&storage, &tmp, .{ .since = before.since });
+    try std.testing.expectEqual(protocol.ListDelta.changed, pending.delta);
+    try pending.expectReferences(&.{session.slice()[0..protocol.session_id_bytes].*});
+    try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+    try ArchiveReportTesting.expectState(&storage, &tmp, session.slice(), .archived);
+    const active_delta: protocol.ListSessions = .{ .since = pending.since };
+    const closed = try TestingListing.read(&storage, &tmp, active_delta);
+    try std.testing.expectEqual(protocol.ListDelta.changed, closed.delta);
+    try ArchiveReportTesting.expectListState(&storage, &tmp, active_delta, session.slice(), .archived);
+    const active_after = try TestingListing.read(&storage, &tmp, .{});
+    try active_after.expectReferences(&.{});
+    try ArchiveReportTesting.expectListState(&storage, &tmp, .{ .archive = .archived }, session.slice(), .archived);
+    const archived_after = try TestingListing.read(&storage, &tmp, .{ .archive = .archived });
+    _ = try ArchiveReportTesting.set(&storage, "archive-pending-restore", session.slice(), false);
+    const archived_delta: protocol.ListSessions = .{ .archive = .archived, .since = archived_after.since };
+    const restored = try TestingListing.read(&storage, &tmp, archived_delta);
+    try std.testing.expectEqual(protocol.ListDelta.changed, restored.delta);
+    try ArchiveReportTesting.expectListState(&storage, &tmp, archived_delta, session.slice(), .active);
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "archive full list filtering precedes pagination and keeps the creation ceiling" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    var references: [19]change_ring.Id = undefined;
+    for (&references, 0..) |*reference, index| {
+        var key: [40]u8 = undefined;
+        const session = try configureTestSession(&storage, try std.fmt.bufPrint(&key, "archive-page-session-{d}", .{index}));
+        reference.* = session.slice()[0..protocol.session_id_bytes].*;
+        if (index < 10) _ = try ArchiveReportTesting.set(&storage, try std.fmt.bufPrint(&key, "archive-page-request-{d}", .{index}), reference, true);
+    }
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var scope: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    try scope.set(try canonicalCwd(std.testing.io, &workspace_buffer));
+    for ([_]?protocol.Bounded(protocol.max_workspace_bytes){ null, scope }) |workspace| {
+        for ([_]protocol.SessionArchiveFilter{ .active, .archived, .all }) |filter| {
+            const expected: []const change_ring.Id = switch (filter) {
+                .active => references[10..],
+                .archived => references[0..10],
+                .all => references[0..],
+            };
+            var request: protocol.ListSessions = .{ .workspace = workspace, .archive = filter };
+            var offset: usize = 0;
+            while (true) {
+                const page = try TestingListing.read(&storage, &tmp, request);
+                try std.testing.expectEqual(protocol.ListDelta.full, page.delta);
+                const count = @min(protocol.session_list_page_size, expected.len - offset);
+                try page.expectReferences(expected[offset..][0..count]);
+                offset += count;
+                if (offset == expected.len) {
+                    try std.testing.expect(page.next == null);
+                    break;
+                }
+                try std.testing.expect(page.next != null);
+                request = page.next.?;
+                // The generic test helper predates archive filters; clients
+                // retain the invocation's filter across every continuation.
+                request.archive = filter;
+                try std.testing.expectEqual(@as(u64, references.len), request.ceiling);
+            }
+        }
+    }
+    const first = try TestingListing.read(&storage, &tmp, .{});
+    var continued = first.next.?;
+    try std.testing.expectEqual(@as(u64, references.len), continued.ceiling);
+    _ = try configureTestSession(&storage, "archive-page-late");
+    continued.archive = .active;
+    const last = try TestingListing.read(&storage, &tmp, continued);
+    try last.expectReferences(references[18..]);
+    try std.testing.expect(last.next == null);
+    try std.testing.expect(!storage.isFenced());
+}
+
 /// Interrupts the one statement whose text is `sql` as it steps, the way an
 /// I/O fault fails a read. No schema changes, so no cached plan expires.
 const TestingStatementFault = struct {
@@ -1374,7 +1523,7 @@ test "closed value columns accept exactly their values" {
     const not_efforts = [_][]const u8{ "'minimal'", "'Medium'", "''" };
     const Column = struct { update: []const u8, accepted: []const []const u8, rejected: []const []const u8 };
     const columns = [_]Column{
-        .{ .update = "UPDATE core_command SET kind={s}", .accepted = &.{ "1", "2", "3", "4", "5" }, .rejected = &.{ "0", "6" } },
+        .{ .update = "UPDATE core_command SET kind={s}", .accepted = &.{ "1", "2", "3", "4", "5", "6" }, .rejected = &.{ "0", "7" } },
         .{ .update = "UPDATE model_output_item SET item_kind=v.k,message_content_id=CASE WHEN v.k=2 THEN extras_content_id END FROM (SELECT {s} AS k) v", .accepted = &.{ "1", "2", "3", "4", "5" }, .rejected = &.{ "0", "6" } },
         .{
             .update = "UPDATE conversation_entry SET entry_kind=v.k,source_admission_id=CASE WHEN v.k=1 THEN source_admission_id END," ++
@@ -8428,6 +8577,125 @@ test "a Store at the migration baseline with its rows takes every migration at o
     try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }
 
+test "schema 57 refusal rows migrate to wire 10 without changing command identity or sender positions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+    const Legacy = struct {
+        const cases = [_]struct { key: []const u8, target: []const u8, code: protocol.MessageRejection }{
+            .{ .key = "legacy-empty-addressed", .target = "", .code = .invalid_session_reference },
+            .{ .key = "legacy-invalid-addressed", .target = &@as([protocol.max_session_bytes]u8, @splat('A')), .code = .invalid_session_reference },
+            .{ .key = "legacy-unknown-addressed", .target = "absent", .code = .unknown_session },
+        };
+
+        fn expectSaved(database: *c.sqlite3, commands: []const protocol.MessageCommand) !void {
+            for (commands, cases, 0..) |*command, case, index| {
+                const digest = command.semanticDigest();
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(database, "SELECT count(*) FROM core_command c JOIN sent_rejection s ON s.command_key=c.command_key " ++
+                    "WHERE c.command_key=?1 AND c.kind=2 AND c.target=?2 AND c.input_digest=?3 " ++
+                    "AND c.accepted=0 AND c.code=?4 AND c.command_seq=?5 AND c.revision=0 AND c.created=0 " ++
+                    "AND c.primary_content_id IS NULL AND c.secondary_content_id IS NULL " ++
+                    "AND s.sender_session_ref='brhkcj' AND s.sender_position=?6 AND s.rejected_at=?7", .{ case.key, case.target, store_testing.Blob{ .bytes = &digest }, @tagName(case.code), 1000 + index, 6 + index, 1793781800 + index }));
+            }
+            try std.testing.expectEqual(@as(u64, 3), try store_testing.sqliteQueryU64(database, "SELECT count(*) FROM sent_rejection", .{}));
+            try std.testing.expectEqual(@as(u64, 12), try store_testing.sqliteQueryU64(database, "SELECT count(*) FROM core_command", .{}));
+            try std.testing.expectEqual(@as(u64, 9), try store_testing.sqliteQueryU64(database, "SELECT next_position FROM session WHERE session_ref='brhkcj'", .{}));
+        }
+    };
+    var payload: protocol.MessageCommand = .{ .text = try testingBytesContent(&tmp, "legacy-refused-body", "a saved rejected Message") };
+    defer payload.removeTemporaryContent(std.testing.io) catch unreachable;
+    const commands = try arena.alloc(protocol.MessageCommand, Legacy.cases.len);
+    for (commands, Legacy.cases) |*command, case| {
+        command.* = .{ .text = payload.text, .sender = .{}, .sender_handle = .{} };
+        try command.key.set(case.key);
+        try command.session.set(case.target);
+        try command.sender.?.store.set(root);
+        try command.sender.?.session.set("brhkcj");
+        // A historical refusal outlives its live sender handle. Its saved
+        // digest is the production request identity, not a normalized target.
+        try command.sender_handle.?.set("00112233445566778899aabbccddeeff");
+    }
+    {
+        const raw = try openRaw(path);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        for (store_schema.migrations) |step| {
+            if (step.from >= 57) break;
+            for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+        }
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=57;PRAGMA foreign_keys=ON;PRAGMA legacy_alter_table=OFF", .{store_schema.application_id}));
+        try store_testing.sqliteExec(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','9'),('store_selector',?1),('format','57')", .{root});
+        // These are historical addressed rejections, including an empty
+        // address. None asserts that creation was requested or refused.
+        for (commands, Legacy.cases, 0..) |*command, case, index| {
+            const digest = command.semanticDigest();
+            try store_testing.sqliteExec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,?2,?3,0,?4,0,0,?5)", .{ case.key, case.target, store_testing.Blob{ .bytes = &digest }, @tagName(case.code), 1000 + index });
+            try store_testing.sqliteExec(raw, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,'brhkcj',?2,?3)", .{ case.key, 6 + index, 1793781800 + index });
+        }
+        try sqlite.exec(raw, "UPDATE session SET next_position=9 WHERE session_ref='brhkcj'");
+        try Legacy.expectSaved(raw, commands);
+        try std.testing.expectEqual(@as(u32, 57), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='9'", .{}));
+        try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(raw, "SELECT count(*) FROM pragma_foreign_key_check"));
+    }
+    // Both the migrating open and a subsequent current-format open use the
+    // production owner, including canonical schema and foreign-key checks.
+    var sender: protocol.Bounded(protocol.max_session_bytes) = .{};
+    try sender.set("brhkcj");
+    const facts = try arena.create(protocol.ActivityFacts);
+    for (0..2) |_| {
+        var storage: Store = undefined;
+        try storage.open(std.testing.io, path, root);
+        defer storage.close() catch unreachable;
+        try std.testing.expectEqual(@as(u32, 58), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value='58'", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='10'", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+        try Legacy.expectSaved(storage.sqliteDatabase(), commands);
+        inline for (.{ .forward, .backward }) |direction| {
+            const request: protocol.ActivityPage = .{ .session = sender, .direction = direction, .kinds = .initOne(.send_failed) };
+            try storage.activityPage(&request, facts);
+            var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer json.deinit();
+            try facts.writeJson(&json.writer);
+            const parsed = try arena.create(protocol_reply.ActivityPage);
+            parsed.* = try protocol_reply.ActivityPage.parse(json.written(), .{ .direction = direction, .kinds = request.kinds });
+            try std.testing.expectEqual(@as(usize, Legacy.cases.len), parsed.facts.count);
+            try std.testing.expect(!parsed.facts.more);
+            for (parsed.facts.items[0..parsed.facts.count], 0..) |item, ordinal| {
+                const index = if (direction == .forward) ordinal else Legacy.cases.len - ordinal - 1;
+                const failed = item.value.send_failed;
+                try std.testing.expectEqual(@as(u64, 6 + index), item.position);
+                try std.testing.expectEqual(@as(u64, 0), item.ordinal);
+                try std.testing.expectEqual(@as(u64, 1793781800 + index), item.at);
+                try std.testing.expectEqualStrings(Legacy.cases[index].key, failed.key.slice());
+                try std.testing.expectEqualStrings(@tagName(Legacy.cases[index].code), failed.code.slice());
+                if (index < 2) {
+                    try std.testing.expect(failed.target == null);
+                } else {
+                    try std.testing.expectEqualStrings("absent", failed.target.?.session.slice());
+                    try std.testing.expectEqual(@as(usize, 0), failed.target.?.label.len);
+                }
+            }
+        }
+        for (commands, Legacy.cases) |*command, case| {
+            const replay = storage.submitMessageWithModel(command, null, .{});
+            try std.testing.expect(replay == .rejected);
+            try std.testing.expect(replay.rejected.replayed);
+            try std.testing.expectEqual(case.code, replay.rejected.code);
+        }
+        try Legacy.expectSaved(storage.sqliteDatabase(), commands);
+    }
+}
+
 test "schema 53 moves forward with loaded tools defaulting to NULL" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -9452,37 +9720,98 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer memory.deinit();
     const arena = memory.allocator();
-    const source = try configureMessagingSession(&storage, "transcript-source");
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    var source_command = try completeConfiguration("transcript-source", "", workspace, "model-a");
+    source_command.configuration.tools = try .of(&.{ "bash", "message_agent" });
+    const source_reply = storage.configure(&source_command, .{});
+    try std.testing.expect(source_reply == .accepted);
+    const source = source_reply.accepted.session;
     try submitTestMessage(&storage, &tmp, "transcript-source-message", "transcript-source-message", source.slice(), "make calls");
     const source_model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const source_arguments = "{\"id\":\"zzzzzz\",\"text\":\"hello\"}";
     const quoted = try std.json.Stringify.valueAlloc(arena, source_arguments, .{});
+    const sender_arguments = "{\"cmd\":\"true\",\"description\":\"Send peer Messages\",\"timeout_ms\":null}";
+    const quoted_sender = try std.json.Stringify.valueAlloc(arena, sender_arguments, .{});
     const source_calls = [_]TestingCall{
         .{ .item_id = "unknown", .name = "not_offered", .encoded_call_id = "unknown", .decoded_call_id = "unknown", .encoded_arguments = "{}", .decoded_arguments = "{}" },
         .{ .item_id = "message", .name = "message_agent", .encoded_call_id = "message", .decoded_call_id = "message", .encoded_arguments = quoted[1 .. quoted.len - 1], .decoded_arguments = source_arguments },
+        .{ .item_id = "sender", .name = "bash", .encoded_call_id = "sender", .decoded_call_id = "sender", .encoded_arguments = quoted_sender[1 .. quoted_sender.len - 1], .decoded_arguments = sender_arguments },
     };
     try settleCallsForTesting(&storage, &tmp, source_model, "transcript-source-calls", &source_calls);
     const work = (try storage.nextCoreWork()).?.action;
     try std.testing.expect(try storage.deliverAgentMessage(work.binding, "zzzzzz", "hello", .{}) == .failed);
+    const sender_action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+    var sender_input: BashExecutionInput = undefined;
+    try storage.readBashExecutionInput(sender_action, &sender_input);
+    var rename: protocol.ConfigureCommand = .{};
+    try rename.key.set("transcript-source-label");
+    rename.session = source;
+    rename.configuration.label.state = .value;
+    try rename.configuration.label.value.set("Never expose this target label");
+    try std.testing.expect(storage.configure(&rename, .{}) == .accepted);
+    // The real Bash sender writes refusal positions and command identities
+    // together; this fixture never bypasses the open Store's identity owner.
+    const refusals = [_]struct { key: []const u8, target: []const u8, code: protocol.MessageRejection }{
+        .{ .key = "transcript-invalid-target", .target = "BAD/attempt", .code = .invalid_session_reference },
+        .{ .key = "transcript-unknown-target", .target = "absent", .code = .unknown_session },
+        .{ .key = "transcript-named-target", .target = source.slice(), .code = .invalid_session_reference },
+    };
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    for (refusals, 0..) |refusal, index| {
+        var refused: protocol.MessageCommand = .{
+            .text = try testingBytesContent(&tmp, refusal.key, "Rejected text is never transcript content."),
+            .sender = .{},
+            .sender_handle = sender_input.sender_handle,
+            // A nonempty target on an initial Message is refused, while
+            // its canonical spelling still identifies a named public peer.
+            .configuration = if (index == 2) .{} else null,
+        };
+        defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
+        try refused.key.set(refusal.key);
+        try refused.session.set(refusal.target);
+        try refused.sender.?.store.set(root);
+        refused.sender.?.session = source;
+        const reply = storage.submitMessageWithModel(&refused, null, .{});
+        try std.testing.expect(reply == .rejected);
+        try std.testing.expectEqual(refusal.code, reply.rejected.code);
+    }
     var stop = try completeSessionStop("transcript-source-stop", source.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+    try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(sender_action, .cancelled, "Sender stopped.", .{}));
     const page = try arena.create(protocol.ActivityFacts);
-    try storage.activityPage(&.{ .session = source, .direction = .backward }, page);
+    try storage.activityPage(&.{ .session = source, .direction = .backward, .kinds = .initMany(&.{ .call, .stop, .send_failed }) }, page);
     var call_address: u64 = 0;
     var stop_address: u64 = 0;
+    var refusal_addresses: [refusals.len]u64 = @splat(0);
     for (page.items[0..page.count]) |*item| switch (item.value) {
         .call => |call| if (call.call_ordinal == 1) {
             call_address = item.position;
         },
         .stop => stop_address = item.position,
+        .send_failed => |failed| {
+            for (refusals, 0..) |refusal, index| {
+                if (std.mem.eql(u8, refusal.key, failed.key.slice())) {
+                    refusal_addresses[index] = item.position;
+                    if (index == 0) {
+                        try std.testing.expect(failed.target == null);
+                    } else {
+                        try std.testing.expectEqualStrings(refusal.target, failed.target.?.session.slice());
+                        try std.testing.expectEqualStrings(if (index == 1) "" else "Never expose this target label", failed.target.?.label.slice());
+                    }
+                }
+            }
+        },
         else => {},
     };
     try std.testing.expect(call_address != 0 and stop_address != 0);
-    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-    const workspace = try store_testing.canonicalCwd(std.testing.io, &workspace_buffer);
+    for (refusal_addresses) |address| try std.testing.expect(address != 0);
     var command = try completeConfiguration("transcript-reader", "", workspace, "model-a");
     command.configuration.tools = try .of(&.{"read_transcript"});
-    const reader_session = storage.configure(&command, .{}).accepted.session;
+    const reader_reply = storage.configure(&command, .{});
+    try std.testing.expect(reader_reply == .accepted);
+    const reader_session = reader_reply.accepted.session;
     try submitTestMessage(&storage, &tmp, "transcript-reader-message", "transcript-reader-message", reader_session.slice(), "read calls");
     const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     const full_text = "message_agent\n" ++ source_arguments;
@@ -9495,6 +9824,10 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
         try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\",\"offset\":{d}}}", .{ source.slice(), call_address, full_text.len + 1 }),
         "{" ++ @as([4096]u8, @splat(' ')),
         "{",
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"kinds\":[\"send_failed\"]}}", .{source.slice()}),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ source.slice(), refusal_addresses[0] }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ source.slice(), refusal_addresses[1] }),
+        try std.fmt.allocPrint(arena, "{{\"id\":\"{s}\",\"full\":\"{d}.0\"}}", .{ source.slice(), refusal_addresses[2] }),
     };
     var calls: [arguments.len]TestingCall = undefined;
     for (&calls, arguments, 0..) |*call, args, index| {
@@ -9513,7 +9846,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
         defer reader.close();
         const bytes = try arena.alloc(u8, @intCast(reference.length));
         try std.testing.expectEqual(bytes.len, try reader.readRange(0, bytes));
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ input.binding.action_id, if (index < 5) "succeeded" else "failed" }));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code=?2", .{ input.binding.action_id, if (index < 5 or index >= 8) "succeeded" else "failed" }));
         switch (index) {
             0 => {
                 try std.testing.expect(std.mem.indexOf(u8, bytes, ".2 tool_result message_agent failed") != null);
@@ -9530,7 +9863,26 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
             5 => try std.testing.expect(std.mem.indexOf(u8, bytes, "offset must be within") != null),
             6 => try std.testing.expect(std.mem.indexOf(u8, bytes, "more than 4096 bytes") != null),
             7 => try std.testing.expect(std.mem.indexOf(u8, bytes, "not one well-formed JSON object") != null),
+            8 => {
+                for (refusal_addresses, 0..) |address, refusal| {
+                    const suffix = if (refusal == 0) "(no valid target reference)" else refusals[refusal].target;
+                    const line = try std.fmt.allocPrint(arena, "{d}.0 send_failed {s}\n", .{ address, suffix });
+                    try std.testing.expect(std.mem.indexOf(u8, bytes, line) != null);
+                }
+            },
+            9, 10, 11 => {
+                const refusal = index - 9;
+                const suffix = if (refusal == 0) "(no valid target reference)" else refusals[refusal].target;
+                const expected = try std.fmt.allocPrint(arena, "{d}.0 send_failed {s}\n", .{ refusal_addresses[refusal], suffix });
+                try std.testing.expectEqualStrings(expected, bytes);
+            },
             else => unreachable,
+        }
+        if (index >= 8) {
+            try std.testing.expect(std.mem.indexOf(u8, bytes, "Never expose this target label") == null);
+            try std.testing.expect(std.mem.indexOf(u8, bytes, "BAD/attempt") == null);
+            try std.testing.expect(std.mem.indexOf(u8, bytes, "invalid_session_reference") == null);
+            try std.testing.expect(std.mem.indexOf(u8, bytes, "Rejected text is never transcript content.") == null);
         }
     }
 }
@@ -10749,7 +11101,7 @@ test "K4 malformed delivered approval forwards fence page cursor and direct hydr
     }
 }
 
-test "schema 55 migrates recovery index and wire 8 together to schema 56 wire 9" {
+test "schema 55 migrates recovery index and wire 8 together to the current schema and wire" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -10776,9 +11128,9 @@ test "schema 55 migrates recovery index and wire 8 together to schema 56 wire 9"
     var storage: Store = undefined;
     try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value='56'", .{}));
-    try std.testing.expectEqual(@as(u32, 56), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='9'", .{}));
+    try std.testing.expectEqual(@as(u64, schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+    try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='action_operation_indeterminate'", .{}));
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
 }

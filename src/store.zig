@@ -77,6 +77,7 @@ pub const session_report_shapes = report_domain.json_shapes;
 pub const checkSessionReportsForTesting = @import("store/tests.zig").checkSessionReportsForTesting;
 pub const SessionReportExecution = report_domain.SessionReportExecution;
 pub const SessionStopReply = command_domain.SessionStopReply;
+pub const SessionArchiveReply = command_domain.SessionArchiveReply;
 pub const settleCompactionForTesting = store_testing.settleCompactionForTesting;
 pub const setLoadedToolsForTesting = store_testing.setLoadedToolsForTesting;
 pub const setLegacyNullEffortForTesting = store_testing.setLegacyNullEffortForTesting;
@@ -99,6 +100,7 @@ test {
     _ = @import("store/domain/action.zig");
     _ = @import("store/domain/history_floor.zig");
     _ = @import("store/tests.zig");
+    _ = @import("store/archive_tests.zig");
     _ = @import("store/find_tools_tests.zig");
     _ = @import("store/sqlite_tests.zig");
     _ = @import("store/mysql_dialect_check.zig");

@@ -71,7 +71,7 @@ If that happens, run your terminal's reset command.
 ## Sessions
 
 Rui calls a saved conversation a **Session**.
-Bare `rui` opens the overview of every Session in this Store; each row shows its project.
+Bare `rui` opens the overview of unarchived Sessions in this Store; each row shows its project.
 Type in its composer to start a new Session; Enter on a row opens one, and Esc returns.
 Ctrl-X stops the selected Session, and Ctrl-D leaves.
 `rui session resume` still opens one Session directly, inside the overview.
@@ -115,6 +115,34 @@ rui session list --all             # Sessions from every project
 ```
 
 Existing Sessions keep their saved settings, including approval mode and model.
+
+### Archive Sessions
+
+Select a Session in the overview and press **Alt+A** or enter `/archive`.
+If it has work, confirm **Stop and archive**.
+The Session stays visible until the stop completes.
+You can also press **Alt+A** or enter `/archive` inside its conversation.
+Alt+A keeps your draft intact.
+For **Stop and archive**, press Enter to confirm or Esc to cancel; neither sends or clears your draft.
+
+Use `/sessions archived` to show archived Sessions, `/sessions all` to show both views, or `/sessions unarchived` to return.
+Enter `/unarchive` to restore the selected Session without starting work.
+After an archive hides a row, `/undo` restores that last archived Session.
+
+Archive keeps history, saved results, settings, and files.
+Opening an archived Session does not restore it.
+Sending a new Message restores it, but a Message sent while it is still archiving is rejected.
+
+From a script, use these commands.
+
+```sh
+rui session archive --session SESSION_REF
+rui session list --archived
+rui session list --include-archived
+rui session unarchive --session SESSION_REF
+```
+
+`--all` still means every Workspace, not archived Sessions.
 
 ## Models
 

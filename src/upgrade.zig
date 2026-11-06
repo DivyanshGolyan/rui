@@ -96,7 +96,7 @@ pub const Result = struct {
 pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []const u8, cancellation: ?*client.Cancellation) !Check {
     const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
     const endpoint = init.environ_map.get("RUI_TEST_UPGRADE_API_URL") orelse release.default_endpoint;
-    var selected = try Installation.inspect(allocator, init.io, home);
+    var selected = try Installation.inspectCancellable(allocator, init.io, home, cancellation);
     errdefer selected.deinit(allocator);
     var candidate = try release.discover(allocator, init.io, endpoint, cancellation);
     errdefer candidate.deinit(allocator);

@@ -262,7 +262,10 @@ def main():
             dormant = [create(f"dormant-{index}", str(root)) for index in range(88)]
             after_growth = listing(str(root))
             assert after_growth[0] == 200 and len(after_growth[1]["sessions"]) == 8
-            assert len(json.dumps(after_growth[1]).encode()) < 4096
+            # Preserve the pre-archive 4 KiB budget plus one wire field per row.
+            # The independent archive-state contract's longest value is archiving.
+            archive_field_bytes = len(', "archive_state": "archiving"'.encode())
+            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * archive_field_bytes
             safe = subprocess.run([binary, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert safe.returncode == 0 and "\\u0000" in safe.stdout and "\x00" not in safe.stdout, safe

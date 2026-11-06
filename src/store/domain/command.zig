@@ -67,6 +67,7 @@ pub const CommandObservation = struct {
         configure: struct { revision: u64 = 0, created: bool = false },
         message: ?MessageObservation,
         session_stop: ?SessionStopObservation,
+        session_archive: ?protocol.SessionArchiveObservation,
         model_interruption: ModelInterruptionTarget,
         permission_decision: struct { action_id: u64, decision: protocol.PermissionDecision },
     } = .{ .configure = .{} },
@@ -121,6 +122,18 @@ pub const SessionStopReply = union(enum) {
 pub const ModelInterruptionReply = union(enum) {
     accepted: struct { replayed: bool },
     rejected: struct { replayed: bool, code: protocol.ModelInterruptionRejection },
+    conflict,
+    infrastructure_failure,
+};
+
+pub const SessionArchiveReply = union(enum) {
+    accepted: struct {
+        replayed: bool,
+        archived: bool,
+        completion: protocol.SessionStopCompletion,
+        interrupted_operation_id: ?u64 = null,
+    },
+    rejected: struct { replayed: bool, code: protocol.SessionArchiveRejection },
     conflict,
     infrastructure_failure,
 };
@@ -381,11 +394,14 @@ noinline fn submitTo(
         .invalid_sender_handle
     else if (target == null)
         .unknown_session
+    else if (target.?.archive_state == .archiving)
+        .session_archiving
     else if (command.require_model and !configuration_domain.servesProviderOf(served, null, target.?.provider))
         .model_capability_unavailable
     else
         null;
     if (rejection) |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, code, faults);
+    if (target.?.archive_state == .archived) a.write(clear_archive, .{ .session = target.?.session });
     return admitMessage(a, io, command, reads, target.?.session, command.session, null, committed, faults);
 }
 
@@ -481,9 +497,11 @@ pub fn deliverAgentMessage(
         return .stopped;
     }
     var result_buffer: [160]u8 = undefined;
-    const delivered = receiver != null and saved == null;
+    const delivered = receiver != null and receiver.?.archive_state != .archiving and saved == null;
     const result = if (receiver == null)
         std.fmt.bufPrint(&result_buffer, "No Session {s} in this Store; nothing was sent.", .{target}) catch unreachable
+    else if (receiver.?.archive_state == .archiving)
+        "Rui could not send this Message: the Session is archiving. Nothing was sent."
     else if (saved != null)
         "Rui could not send this Message: its command key is already taken. Nothing was sent."
     else
@@ -495,6 +513,7 @@ pub fn deliverAgentMessage(
     if (faults.content_import) return error.InjectedContentImportFailure;
     if (delivered) {
         const head = receiver.?.session;
+        if (receiver.?.archive_state == .archived) a.write(clear_archive, .{ .session = head });
         const text_id = try content_domain.importBytes(a, &message, text);
         var digest = std.crypto.hash.sha2.Sha256.init(.{});
         digest.update("rui/core/message_agent/v1");
@@ -587,7 +606,13 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, faults: Faults) !bool {
     if (outcome != .completed) content_domain.lookup(a, &message);
     try a.run();
     if (faults.content_import) return error.InjectedContentImportFailure;
-    const head = (receiver orelse return error.CorruptStore).session;
+    const parent = receiver orelse return error.CorruptStore;
+    if (parent.archive_state != .active) {
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        try a.commit();
+        return true;
+    }
+    const head = parent.session;
     const content_id: u64, const content_digest: [32]u8 = switch (outcome) {
         .completed => |answer| .{ @intCast(answer), found.digest orelse return error.CorruptStore },
         else => .{ try content_domain.importBytes(a, &message, text), protocol.contentDigest(text) },
@@ -811,8 +836,8 @@ const cancellable_actions = rsql.Read(.{
 });
 
 const insert_stop = rsql.Write(.{
-    .sql = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at) VALUES(?1,@session(?2),?3,?4,?5,@now)",
-    .Args = struct { key: []const u8, session: rsql.SessionHead, selected_turn_id: ?u64, admission_cutoff: u64, position: u64 },
+    .sql = "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,position,stopped_at,parent_caused) VALUES(?1,@session(?2),?3,?4,?5,@now,?6)",
+    .Args = struct { key: []const u8, session: rsql.SessionHead, selected_turn_id: ?u64, admission_cutoff: u64, position: u64, parent_caused: bool },
     // A replay was classified first, so the key is free.
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -918,7 +943,7 @@ fn stopObservation(row: *const stop_selection.Row) SessionStopObservation {
 /// A stop's own interruption finding the Operation changed is the stop's
 /// selection changing, as on main.
 pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
-    return stopRounds(a, command, false, faults) catch |err| switch (err) {
+    return stopRounds(a, command, false, faults, null) catch |err| switch (err) {
         error.InterruptionTargetChanged => error.StopSelectionChanged,
         else => err,
     };
@@ -930,7 +955,7 @@ pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faul
 /// Session owes, and a newer obligation has another key: an owed stop
 /// whose key is not the one owed now runs nothing and answers conflict.
 pub fn stopOwedSession(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
-    return stopRounds(a, command, true, faults) catch |err| switch (err) {
+    return stopRounds(a, command, true, faults, null) catch |err| switch (err) {
         error.InterruptionTargetChanged => error.StopSelectionChanged,
         else => err,
     };
@@ -951,17 +976,24 @@ pub fn stopOwedSession(a: anytype, command: *const protocol.SessionStopCommand, 
 /// the text is new). The last page's write and the Turn's close run in the
 /// final round, at commit, with the position advance. With no Actions to
 /// cancel, every write runs at commit.
-fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: bool, faults: Faults) !SessionStopReply {
-    const digest = command.semanticDigest();
+fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: bool, faults: Faults, archive: ?*const protocol.SessionArchiveCommand) !SessionStopReply {
+    const digest = if (archive) |request| request.semanticDigest() else command.semanticDigest();
+    const kind: protocol.CommandKind = if (archive != null) .session_archive else .session_stop;
     const key = command.key.slice();
     const session = command.session.slice();
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     var target: stop_target.Result = null;
     var turn: stop_turn.Result = null;
+    var archive_existing: archive_record.Result = null;
+    var archive_endings: archive_ending_count.Row = .{ .count = 0 };
     if (protocol.validSessionId(session)) {
         a.read(stop_target, .{ .session = session }, &target);
         a.read(stop_turn, .{ .session = session }, &turn);
+        if (archive != null) {
+            a.read(archive_record, .{ .session = session }, &archive_existing);
+            a.read(archive_ending_count, .{ .parent = session }, &archive_endings);
+        }
     }
     try a.run();
     // An owed stop runs only while its obligation stands: a stop under
@@ -970,7 +1002,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
         try a.abandon(.{});
         return .conflict;
     }
-    switch (try classify(protocol.SessionStopRejection, &saved, .session_stop, session, &digest)) {
+    switch (try classify(protocol.SessionStopRejection, &saved, kind, session, &digest)) {
         .fresh => {},
         .conflict => {
             try a.abandon(.{});
@@ -1001,7 +1033,7 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
     if (rejection) |code| {
         var answer = StoredAnswer{ .accepted = false };
         try answer.code.set(@tagName(code));
-        try queueCommand(a, key, .session_stop, session, &digest, null, null, &answer);
+        try queueCommand(a, key, kind, session, &digest, null, null, &answer);
         if (faults.before_commit) return error.InjectedCommitFailure;
         try a.commit();
         return .{ .rejected = .{ .replayed = false, .code = code } };
@@ -1011,10 +1043,15 @@ fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: boo
     const head = found.session;
     const positions = try a.positions(head);
     const answer: StoredAnswer = .{ .accepted = true };
-    try queueCommand(a, key, .session_stop, session, &digest, null, null, &answer);
+    try queueCommand(a, key, kind, session, &digest, null, null, &answer);
     const selection = SessionStopSelection{ .selected_turn_id = if (turn) |open| open.turn_id.get() else null, .admission_cutoff = found.admission_cutoff };
     const stop_position = try positions.take(1);
-    a.write(insert_stop, .{ .key = key, .session = head, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position });
+    a.write(insert_stop, .{ .key = key, .session = head, .selected_turn_id = selection.selected_turn_id, .admission_cutoff = selection.admission_cutoff, .position = stop_position, .parent_caused = found.owed_cause != null });
+    if (archive != null) {
+        a.write(insert_archive_command, .{ .key = key, .archived = true });
+        if (archive_existing != null) a.write(update_archive, .{ .session = head, .key = key }) else a.write(insert_archive, .{ .session = head, .key = key });
+        if (archive_endings.count != 0) a.writeCount(suppress_archive_endings, .{ .parent = &head.ref }, archive_endings.count);
+    }
     // A stop settles any stop this Session owed, and its attached children
     // now owe theirs (D38).
     if (found.owed_cause != null) a.write(settle_owed_stop, .{ .session = &head.ref });
@@ -1092,12 +1129,129 @@ fn cancelActions(
     if (cancelled != open.cancellable) return error.StopSelectionChanged;
 }
 
+const archive_ending_count = rsql.Read(.{
+    .sql = "SELECT count(*) AS count FROM session_ending_owed ending JOIN turn t ON t.turn_id=ending.turn_id " ++
+        "JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref=?1 AND ending.delivered=0 AND ending.suppress_message=0",
+    .Args = struct { parent: []const u8 },
+    .Row = struct { count: u64 },
+    .cardinality = .one,
+});
+
+const suppress_archive_endings = rsql.Write(.{
+    .sql = "UPDATE session_ending_owed SET suppress_message=1 WHERE delivered=0 AND suppress_message=0 AND turn_id IN(" ++
+        "SELECT t.turn_id FROM turn t JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref=?1)",
+    .Args = struct { parent: []const u8 },
+    .expect = .{ .counted = .{ .otherwise = error.StopSelectionChanged } },
+});
+
+pub const archive_state_sql =
+    "CASE WHEN EXISTS(SELECT 1 FROM session_archive ar JOIN session_stop astop ON astop.command_key=ar.command_key " ++
+    "JOIN turn aturn ON aturn.turn_id=astop.selected_turn_id WHERE ar.session_ref=session.session_ref AND aturn.outcome_code IS NULL) THEN 'archiving' " ++
+    "WHEN EXISTS(SELECT 1 FROM session_archive ar WHERE ar.session_ref=session.session_ref AND ar.command_key IS NOT NULL) THEN 'archived' ELSE 'active' END";
+
+const insert_archive_command = rsql.Write(.{
+    .sql = "INSERT INTO session_archive_command(command_key,archived) VALUES(?1,?2)",
+    .Args = struct { key: []const u8, archived: bool },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+const insert_archive = rsql.Write(.{
+    .sql = "INSERT INTO session_archive(session_ref,command_key) VALUES(@session(?1),?2)",
+    .Args = struct { session: rsql.SessionHead, key: []const u8 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+const clear_archive = rsql.Write(.{
+    .sql = "UPDATE session_archive SET command_key=NULL WHERE session_ref=@session(?1) AND command_key IS NOT NULL",
+    .Args = struct { session: rsql.SessionHead },
+    .expect = .{ .at_most = 1 },
+});
+
+const archive_record = rsql.Read(.{
+    .sql = "SELECT 1 AS present FROM session_archive WHERE session_ref=?1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { present: bool },
+    .cardinality = .optional,
+});
+
+const update_archive = rsql.Write(.{
+    .sql = "UPDATE session_archive SET command_key=?2 WHERE session_ref=@session(?1)",
+    .Args = struct { session: rsql.SessionHead, key: []const u8 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+});
+
+const archive_request = rsql.Read(.{
+    .sql = "SELECT archived FROM session_archive_command WHERE command_key=?1",
+    .Args = struct { key: []const u8 },
+    .Row = struct { archived: bool },
+    .cardinality = .one,
+});
+
+pub fn archiveSession(a: anytype, command: *const protocol.SessionArchiveCommand, faults: Faults) !SessionArchiveReply {
+    if (!command.archived) return restoreSession(a, command, faults);
+    const stop: protocol.SessionStopCommand = .{ .store = command.store, .key = command.key, .session = command.session };
+    const result = try stopRounds(a, &stop, false, faults, command);
+    return switch (result) {
+        .accepted => |accepted| .{ .accepted = .{
+            .replayed = accepted.replayed,
+            .archived = true,
+            .completion = accepted.completion,
+            .interrupted_operation_id = accepted.interrupted_operation_id,
+        } },
+        .rejected => |rejected| .{ .rejected = .{ .replayed = rejected.replayed, .code = switch (rejected.code) {
+            .invalid_session_reference => .invalid_session_reference,
+            .unknown_session => .unknown_session,
+        } } },
+        .conflict => .conflict,
+        .infrastructure_failure => .infrastructure_failure,
+    };
+}
+
+fn restoreSession(a: anytype, command: *const protocol.SessionArchiveCommand, faults: Faults) !SessionArchiveReply {
+    const digest = command.semanticDigest();
+    const key = command.key.slice();
+    const session = command.session.slice();
+    var saved: saved_command.Result = undefined;
+    lookupCommand(a, key, &saved);
+    var target: target_session.Result = null;
+    readTarget(a, session, &target);
+    try a.run();
+    switch (try classify(protocol.SessionArchiveRejection, &saved, .session_archive, session, &digest)) {
+        .fresh => {},
+        .conflict => {
+            try a.abandon(.{});
+            return .conflict;
+        },
+        .accepted => {
+            try a.abandon(.{});
+            return .{ .accepted = .{ .replayed = true, .archived = false, .completion = .completed } };
+        },
+        .rejected => |code| {
+            try a.abandon(.{});
+            return .{ .rejected = .{ .replayed = true, .code = code } };
+        },
+    }
+    const rejection: ?protocol.SessionArchiveRejection = if (!protocol.validSessionId(session)) .invalid_session_reference else if (target == null) .unknown_session else if (target.?.archive_state == .archiving) .archive_pending else null;
+    var answer: StoredAnswer = .{ .accepted = rejection == null };
+    if (rejection) |code| try answer.code.set(@tagName(code));
+    try queueCommand(a, key, .session_archive, session, &digest, null, null, &answer);
+    if (rejection == null) {
+        a.write(insert_archive_command, .{ .key = key, .archived = false });
+        const head = target.?.session;
+        a.write(clear_archive, .{ .session = head });
+        _ = try (try a.positions(head)).take(1);
+    }
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    return if (rejection) |code| .{ .rejected = .{ .replayed = false, .code = code } } else .{ .accepted = .{ .replayed = false, .archived = false, .completion = .completed } };
+}
+
 /// A Session a command names, as a round reads it: its head, and the
 /// provider a Message's model check needs.
 const target_session = rsql.Read(.{
-    .sql = "SELECT session_ref,workspace_key,next_position,provider FROM session WHERE session_ref=?1",
+    .sql = "SELECT session_ref,workspace_key,next_position,provider," ++ archive_state_sql ++ " AS archive_state FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { session: rsql.SessionHead, provider: protocol.Provider },
+    .Row = struct { session: rsql.SessionHead, provider: protocol.Provider, archive_state: protocol.SessionArchiveState },
     .cardinality = .optional,
 });
 
@@ -1413,6 +1567,7 @@ fn kindCode(kind: protocol.CommandKind) u8 {
         .session_stop => 3,
         .model_interruption => 4,
         .permission_decision => 5,
+        .session_archive => 6,
     };
 }
 
@@ -1614,6 +1769,21 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
             a.read(stop_selection, .{ .key = key }, &row);
             try a.run();
             observation.kind.session_stop = stopObservation(&row);
+        },
+        .session_archive => {
+            observation.kind = .{ .session_archive = null };
+            if (!command.accepted) return;
+            var request: archive_request.Row = undefined;
+            a.read(archive_request, .{ .key = key }, &request);
+            try a.run();
+            var completion: protocol.SessionStopCompletion = .completed;
+            if (request.archived) {
+                var selection: stop_selection.Row = undefined;
+                a.read(stop_selection, .{ .key = key }, &selection);
+                try a.run();
+                completion = stopObservation(&selection).completion;
+            }
+            observation.kind.session_archive = .{ .archived = request.archived, .completion = completion };
         },
         .model_interruption => {
             var row: interruption_target.Row = undefined;

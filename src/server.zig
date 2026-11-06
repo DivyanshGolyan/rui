@@ -345,6 +345,7 @@ const Intake = struct {
                         .host_stop => protocol.max_host_stop_request_bytes,
                         .host_pause => protocol.max_host_pause_request_bytes,
                         .session_stop => protocol.max_session_stop_request_bytes,
+                        .session_archive => protocol.max_session_archive_request_bytes,
                         .model_interruption => protocol.max_model_interruption_request_bytes,
                         .permission_decision => protocol.max_permission_decision_request_bytes,
                         else => std.math.maxInt(u64),
@@ -1399,6 +1400,7 @@ const Route = enum {
     configure,
     message,
     session_stop,
+    session_archive,
     model_interruption,
     permission_decision,
     observe,
@@ -1416,7 +1418,7 @@ const Route = enum {
     unsupported_control,
 
     fn isControl(self: Route) bool {
-        return self == .host_stop or self == .host_pause or self == .session_stop or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
+        return self == .host_stop or self == .host_pause or self == .session_stop or self == .session_archive or self == .model_interruption or self == .permission_decision or self == .unsupported_control;
     }
 
     /// Answered on the listener from atomics and fixed values alone,
@@ -1586,6 +1588,22 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .infrastructure_failure => 500,
             };
             try fd.json(status, protocol.max_response_bytes, renderSessionStopReply, .{ command, result });
+            fd.timing = timing;
+        },
+        .session_archive => |*command| {
+            var timing = ControlTiming.init(host, command.key, "session_archive", accepted_at_ns);
+            const result = host.store.archiveSession(command, host.hooks.storeFaults(.{ .control = timing.storeTrace() }));
+            if (result == .infrastructure_failure) {
+                fenceDispatch(host, "Session archive save", error.CanonicalStoreFailure);
+            }
+            if (result == .accepted) publishControlHint(host, command.key.slice());
+            if (header.drop == .after_commit and result != .infrastructure_failure) return;
+            const status: u16 = switch (result) {
+                .accepted, .rejected => 200,
+                .conflict => 409,
+                .infrastructure_failure => 500,
+            };
+            try fd.json(status, protocol.max_response_bytes, renderSessionArchiveReply, .{ command, result });
             fd.timing = timing;
         },
         .model_interruption => |*command| {
@@ -1984,7 +2002,7 @@ fn renderConfigureReply(
 
 test "canonical failure classifier accepts every production mutation failure envelope" {
     const protocol_reply = @import("protocol_reply.zig");
-    inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderModelInterruptionReply, renderPermissionDecisionReply }) |render| {
+    inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderSessionArchiveReply, renderModelInterruptionReply, renderPermissionDecisionReply }) |render| {
         const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child;
         var response = protocol.ResponseBuffer{};
         try response.render(render, .{ &Command{}, .infrastructure_failure });
@@ -2003,7 +2021,7 @@ fn expectMutationFieldPresence(body: []const u8, status: u16, session: []const u
     const Section = struct { path: []const []const u8, fields: []const []const u8 };
     const sections = [_]Section{
         .{ .path = &.{}, .fields = &.{ "version", "type", "code", "answer", "input", "queue", "execution", "completion" } },
-        .{ .path = &.{"answer"}, .fields = &.{ "status", "replayed", "session", "code", "revision", "created", "admission", "action", "decision", "selection", "target" } },
+        .{ .path = &.{"answer"}, .fields = &.{ "status", "replayed", "session", "code", "revision", "created", "admission", "archived", "action", "decision", "selection", "target" } },
         .{ .path = &.{"input"}, .fields = &.{ "type", "bytes", "sha256" } },
         .{ .path = &.{"queue"}, .fields = &.{ "status", "admission" } },
         .{ .path = &.{"execution"}, .fields = &.{ "status", "reason" } },
@@ -2046,11 +2064,11 @@ fn expectMutationFieldPresence(body: []const u8, status: u16, session: []const u
     }
 }
 
-test "mutation decoder validates all five actual producers and preserved domain answers" {
+test "mutation decoder validates all six actual producers and preserved domain answers" {
     const protocol_reply = @import("protocol_reply.zig");
     const session = "k7m2qx";
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
-    inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderModelInterruptionReply, renderPermissionDecisionReply }, 0..) |render, index| {
+    inline for (.{ renderConfigureReply, renderMessageReply, renderSessionStopReply, renderModelInterruptionReply, renderPermissionDecisionReply, renderSessionArchiveReply }, 0..) |render, index| {
         const Command = @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child;
         const MutationReply = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
         var command: Command = .{};
@@ -2066,6 +2084,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
             2 => .session_stop,
             3 => .{ .model_interruption = .{ .turn = 3, .operation = 11 } },
             4 => .{ .permission_decision = .{ .action = 7, .decision = .deny } },
+            5 => .{ .session_archive = .{ .archived = true } },
             else => unreachable,
         };
         const accepted: MutationReply = switch (index) {
@@ -2073,6 +2092,7 @@ test "mutation decoder validates all five actual producers and preserved domain 
             1 => .{ .accepted = .{ .replayed = true, .admission_id = 17, .content = content, .session = command.session } },
             2 => .{ .accepted = .{ .replayed = true, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending } },
             3, 4 => .{ .accepted = .{ .replayed = true } },
+            5 => .{ .accepted = .{ .replayed = true, .archived = true, .completion = .pending } },
             else => unreachable,
         };
         const rejected: MutationReply = if (index == 1)
@@ -2107,6 +2127,10 @@ test "mutation decoder validates all five actual producers and preserved domain 
                     .session_stop => |value| {
                         try std.testing.expectEqual(@as(?u64, 19), value.turn);
                         try std.testing.expectEqual(@as(u64, 23), value.admission_cutoff);
+                        try std.testing.expectEqual(.pending, value.completion);
+                    },
+                    .session_archive => |value| {
+                        try std.testing.expect(value.archived);
                         try std.testing.expectEqual(.pending, value.completion);
                     },
                     .model_interruption, .permission_decision => {},
@@ -2211,6 +2235,21 @@ fn renderSessionStopReply(
     };
 }
 
+fn renderSessionArchiveReply(
+    response: protocol.JsonOut,
+    command: *const protocol.SessionArchiveCommand,
+    result: store_module.SessionArchiveReply,
+) !void {
+    const shapes = protocol.session_archive_reply;
+    const session = command.session.slice();
+    try switch (result) {
+        .accepted => |value| response.appendShape(shapes.accepted, .{ value.replayed, session, value.archived, value.completion }),
+        .rejected => |value| response.appendShape(shapes.rejected, .{ value.replayed, session, value.code }),
+        .conflict => response.appendShape(shapes.conflict, .{session}),
+        .infrastructure_failure => renderStatic(response, .invocation_error, "canonical_store_failure"),
+    };
+}
+
 fn renderModelInterruptionReply(
     response: protocol.JsonOut,
     command: *const protocol.ModelInterruptionCommand,
@@ -2303,6 +2342,7 @@ fn renderFullCommandObservation(
             }
         },
         .session_stop => |maybe_stop| if (maybe_stop) |stop| try response.appendShape(shapes.session_stop, .{ stop.selection.selected_turn_id, stop.selection.admission_cutoff, stop.completion }),
+        .session_archive => |archive| if (archive) |value| try response.appendShape(shapes.session_archive, .{ value.archived, value.completion }),
         .model_interruption => |target| try response.appendShape(shapes.model_interruption, .{ target.session.slice(), target.turn_id, target.operation_id }),
         .permission_decision => |permission| try response.appendShape(shapes.permission_decision, .{ permission.action_id, permission.decision }),
     }
@@ -2921,7 +2961,7 @@ test "reply delivery interrupted poll consumes the existing inactivity budget" {
 
 test "delayed control replies retain command identity after request storage reuse" {
     const native = @import("posix");
-    inline for (.{ "session_stop", "model_interruption", "permission_decision" }) |kind| {
+    inline for (.{ "session_stop", "session_archive", "model_interruption", "permission_decision" }) |kind| {
         var descriptors: [2]c_int = undefined;
         try std.testing.expectEqual(@as(c_int, 0), native.pipe(&descriptors));
         defer _ = native.close(descriptors[0]);
@@ -3381,6 +3421,14 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         store_module.SessionStopReply.conflict,
     }));
 
+    var archive: protocol.SessionArchiveCommand = .{};
+    try archive.session.set(&escaped_session);
+    try std.testing.expectEqual(protocol.session_archive_reply.max_bytes, try Worst.reply(renderSessionArchiveReply, &archive, .{
+        store_module.SessionArchiveReply{ .accepted = .{ .replayed = false, .archived = false, .completion = Worst.tag(protocol.SessionStopCompletion) } },
+        store_module.SessionArchiveReply{ .rejected = .{ .replayed = false, .code = Worst.tag(protocol.SessionArchiveRejection) } },
+        store_module.SessionArchiveReply.conflict,
+    }));
+
     var interruption: protocol.ModelInterruptionCommand = .{ .turn_id = max, .operation_id = max };
     try interruption.session.set(&escaped_session);
     try std.testing.expectEqual(protocol.model_interruption_reply.max_bytes, try Worst.reply(renderModelInterruptionReply, &interruption, .{
@@ -3421,6 +3469,13 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     } } };
     try stopped.target.set(&escaped_session);
     try std.testing.expectEqual(observations.maxBytes(.session_stop), try Worst.observation(&escaped_key, stopped));
+
+    var archived = store_module.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .session_archive = .{
+        .archived = false,
+        .completion = Worst.tag(protocol.SessionStopCompletion),
+    } } };
+    try archived.target.set(&escaped_session);
+    try std.testing.expectEqual(observations.maxBytes(.session_archive), try Worst.observation(&escaped_key, archived));
 
     var interrupted = store_module.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .model_interruption = .{
         .session = session,
@@ -3525,6 +3580,26 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_activity_page_response_bytes, page_writer.end);
 }
 
+test "failed send without a canonical target writes explicit null within activity bounds" {
+    var key: protocol.Bounded(protocol.max_key_bytes) = .{};
+    try key.set("refused-creation");
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+    try code.set("unsupported_reasoning_effort");
+    const item: protocol.ActivityItem = .{
+        .position = 7,
+        .ordinal = 0,
+        .at = 1,
+        .value = .{ .send_failed = .{ .key = key, .target = null, .code = code } },
+    };
+    var buffer: [protocol.ActivityItem.max_json_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try item.writeJson(&writer);
+    try std.testing.expectEqualStrings(
+        "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused-creation\",\"target\":null,\"code\":\"unsupported_reasoning_effort\"}}}",
+        writer.buffered(),
+    );
+}
+
 test "retired reserved exchanges cannot block their successors while workers are occupied" {
     for (std.enums.values(Route)) |route| {
         if (!route.isControl() and route != .host_info) continue;
@@ -3558,6 +3633,7 @@ test "retired reserved exchanges cannot block their successors while workers are
                 .host_stop => "control/host-stop",
                 .host_pause => "control/host-pause",
                 .session_stop => "control/session-stop",
+                .session_archive => "control/session-archive",
                 .model_interruption => "control/model-interruption",
                 .permission_decision => "control/permission-decision",
                 .unsupported_control => "control/unknown",
@@ -4169,6 +4245,8 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try std.testing.expectEqual(before_uploads + 2, host.request_counter.load(.acquire));
         for ([_]struct { route: []const u8, body: []const u8, key: []const u8, kind: protocol.CommandKind, status: @FieldType(store_module.CommandObservation, "status") }{
             .{ .route = "/v1/control/session-stop", .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"session_stop\",\"store\":\"s\",\"key\":\"stop\",\"session\":\"peer\"}", .key = "stop", .kind = .session_stop, .status = .accepted },
+            .{ .route = "/v1/control/session-archive", .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"session_archive\",\"store\":\"s\",\"key\":\"archive\",\"session\":\"peer\",\"archived\":true}", .key = "archive", .kind = .session_archive, .status = .accepted },
+            .{ .route = "/v1/control/session-archive", .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"session_archive\",\"store\":\"s\",\"key\":\"restore\",\"session\":\"peer\",\"archived\":false}", .key = "restore", .kind = .session_archive, .status = .accepted },
             .{ .route = "/v1/control/model-interruption", .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"model_interruption\",\"store\":\"s\",\"key\":\"interrupt\",\"target\":{\"session\":\"peer\",\"turn\":\"1\",\"operation\":\"1\"}}", .key = "interrupt", .kind = .model_interruption, .status = .rejected },
             .{ .route = "/v1/control/permission-decision", .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"permission_decision\",\"store\":\"s\",\"key\":\"decision\",\"session\":\"peer\",\"action\":\"1\",\"decision\":\"deny\"}", .key = "decision", .kind = .permission_decision, .status = .rejected },
         }) |control| {
@@ -4694,4 +4772,34 @@ test "presets seed configure before Store validation and idempotency" {
     const update_replay = submitConfigure(&host, invalid);
     try std.testing.expect(update_replay == .rejected and update_replay.rejected.replayed);
     try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, update_replay.rejected.code);
+}
+
+test "session archive renders accepted intent and completion for both archive and restore" {
+    const protocol_reply = @import("protocol_reply.zig");
+    var command: protocol.SessionArchiveCommand = .{};
+    try command.session.set("k7m2qx");
+    inline for (.{ false, true }) |archived| {
+        command.archived = archived;
+        for (std.meta.tags(protocol.SessionStopCompletion)) |completion| {
+            for ([_]bool{ false, true }) |replayed| {
+                var response: protocol.ResponseBuffer = .{};
+                try response.render(renderSessionArchiveReply, .{ &command, store_module.SessionArchiveReply{ .accepted = .{
+                    .replayed = replayed,
+                    .archived = archived,
+                    .completion = completion,
+                } } });
+                const decoded = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "k7m2qx", .{ .session_archive = .{ .archived = archived } }).answer;
+                try std.testing.expectEqual(replayed, decoded.replayed);
+                try std.testing.expectEqual(archived, decoded.result.accepted.session_archive.archived);
+                try std.testing.expectEqual(completion, decoded.result.accepted.session_archive.completion);
+                try expectMutationFieldPresence(response.slice(), 200, "k7m2qx", .{ .session_archive = .{ .archived = archived } });
+            }
+        }
+    }
+    for (std.meta.tags(protocol.SessionArchiveRejection)) |code| {
+        var response: protocol.ResponseBuffer = .{};
+        try response.render(renderSessionArchiveReply, .{ &command, store_module.SessionArchiveReply{ .rejected = .{ .replayed = true, .code = code } } });
+        const decoded = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "k7m2qx", .{ .session_archive = .{ .archived = true } }).answer;
+        try std.testing.expectEqualStrings(@tagName(code), decoded.result.rejected.slice());
+    }
 }

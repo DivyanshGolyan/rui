@@ -90,7 +90,18 @@ Rui then shows each command above an Allow once / Deny choice: ← and → pick 
 
 To leave, type `/exit` or press Ctrl+C.
 Work continues in the background.
-Run `rui` again to see every conversation and press Enter on one to return to it.
+Run `rui` again to see your unarchived conversations and press Enter on one to return to it.
+
+## Archive a conversation
+
+In the overview, select a Session and enter `/archive`.
+If it has work, confirm **Stop and archive**.
+Rui waits for the stop to complete before it hides the Session.
+
+Use `/sessions archived` to find archived Sessions, or `/sessions all` to show both views.
+Enter `/unarchive` to restore a Session without starting work.
+Sending a new Message to an archived Session also restores it.
+Archive keeps the conversation history and files.
 
 ## Build from source
 

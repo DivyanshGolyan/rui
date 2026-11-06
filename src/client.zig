@@ -183,6 +183,11 @@ pub const Requests = struct {
 
     /// Same synchronous sink contract as inspectSession; no complete page copy.
     pub fn listSessions(self: Requests, store_path: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
+        return self.listSessionsFiltered(store_path, workspace, .active, cursor, sink, reply_buffer);
+    }
+
+    /// Archive visibility is independent of Workspace scope and Session work.
+    pub fn listSessionsFiltered(self: Requests, store_path: []const u8, workspace: ?[]const u8, archive: protocol.SessionArchiveFilter, cursor: protocol_reply.SessionListCursor, sink: anytype, reply_buffer: *ReplyBuffer) !protocol_reply.ReportReply {
         reply_buffer.len = 0;
         try self.check();
         if (workspace) |value| {
@@ -192,7 +197,7 @@ pub const Requests = struct {
         try cursor.validate();
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try appendListSessions(&body, paths.store.slice(), workspace, cursor);
+        try appendListSessions(&body, paths.store.slice(), workspace, archive, cursor);
         const fd = try openRead(self, &paths, "/v1/list-sessions", body.slice());
         defer closeSocket(self.io, fd);
         return readReportResponse(self, fd, sink, reply_buffer);
@@ -483,6 +488,12 @@ pub const SessionStopInput = struct {
     session: []const u8,
 };
 
+pub const SessionArchiveInput = struct {
+    store: []const u8,
+    session: []const u8,
+    archived: bool = true,
+};
+
 pub const ModelInterruptionInput = struct {
     store: []const u8,
     session: []const u8,
@@ -562,25 +573,198 @@ pub const ObservedHost = struct {
 };
 
 pub fn observeHostProcess(io: std.Io, store_path: []const u8, deadline: ?i128) !ObservedHost {
-    const paths = try platform.resolveClientPaths(io, store_path);
-    var body: protocol.RequestBuffer = .{};
-    try body.appendShape(protocol.host_info_request, .{paths.store.slice()});
+    const observed = try observeHostForUpgradeProfile(io, store_path, .current, deadline);
+    return .{ .ready = observed.facts, .pid = observed.pid };
+}
+
+/// Control facts only: a historical profile never establishes ordinary readiness.
+pub const HostControlObservation = struct {
+    profile: protocol_reply.HostInfoProfile,
+    facts: protocol_reply.HostInfoFacts,
+    pid: c_int,
+};
+
+pub fn observeHostForUpgrade(io: std.Io, store_path: []const u8, deadline: ?i128) !HostControlObservation {
+    // Both attempts share one absolute discovery budget, including connection.
+    const until = hostObservationDeadline(io, deadline);
+    return observeHostForUpgradeProfile(io, store_path, .current, until) catch |err| switch (err) {
+        error.WrongWireVersion => observeHostForUpgradeProfile(io, store_path, .released_9, until),
+        else => return err,
+    };
+}
+
+fn hostObservationDeadline(io: std.Io, deadline: ?i128) i128 {
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
-    const until = @min(probe_end, deadline orelse probe_end);
+    return @min(probe_end, deadline orelse probe_end);
+}
+
+/// Reobserves exactly one read-only profile; never falls back to a different peer protocol.
+pub fn observeHostForUpgradeProfile(io: std.Io, store_path: []const u8, profile: protocol_reply.HostInfoProfile, deadline: ?i128) !HostControlObservation {
+    const until = hostObservationDeadline(io, deadline);
+    const paths = try platform.resolveClientPaths(io, store_path);
     const requests: Requests = .{ .io = io };
     const address = try std.Io.net.UnixAddress.init(paths.socket.slice());
     const fd = try connectRequest(requests, address, until);
     defer closeSocket(io, fd);
     const pid = try @import("host_identity.zig").peer(fd);
-    try uploadRequest(requests, fd, "/v1/host-info", .{}, body.len, null, body.slice(), null, null, until);
+    try uploadHostInfoRequest(requests, fd, paths.store.slice(), profile, until);
     var reply_buffer: ReplyBuffer = .{};
-    const reply = try readCommandResponseRequest(requests, fd, &reply_buffer, .{}, until);
+    const head = try readResponseHeadForProfileUntil(requests, fd, .{}, until, profile);
+    if (head.kind != .command_json) return error.InvalidResponse;
+    const reply = try readCommandBodyUntil(requests, fd, head, &reply_buffer, .{}, until);
     if (reply.status != 200) return error.InvalidHostInfo;
-    const ready = switch (try protocol_reply.parseHostInfo(reply.body, paths.store.slice())) {
-        .ready => |value| value,
-        else => return error.InvalidHostInfo,
+    return .{
+        .profile = profile,
+        .facts = try protocol_reply.parseHostInfoForProfile(reply.body, paths.store.slice(), profile),
+        .pid = pid,
     };
-    return .{ .ready = ready, .pid = pid };
+}
+
+// This is the only historical request encoder: it cannot carry mutation routes,
+// instance authority, files, environment or captured records.
+fn uploadHostInfoRequest(requests: Requests, fd: std.posix.fd_t, store: []const u8, profile: protocol_reply.HostInfoProfile, until: i128) !void {
+    var body: protocol.RequestBuffer = .{};
+    try body.appendShape(.{ "{\"version\":", protocol.Hole{ .string = 8 }, ",\"kind\":\"host_info\",\"store\":", protocol.Hole{ .string = protocol.max_store_bytes }, "}" }, .{ profile.wire(), store });
+    var header_buffer: [protocol.max_header_bytes]u8 = undefined;
+    const header = try std.fmt.bufPrint(&header_buffer, "POST /v1/host-info HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ profile.wire(), body.len });
+    try writeAllRequest(requests, fd, header, until);
+    try writeAllRequest(requests, fd, body.slice(), until);
+}
+
+test "upgrade Host observation uses exact read-only profiles on each authenticated connection" {
+    const Mode = enum { current, historical, strict, exact, body_mismatch, malformed_header, unavailable, unknown, budget };
+    const Clock = struct {
+        var nanoseconds: std.atomic.Value(i64) = .init(0);
+        fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+            return .{ .nanoseconds = nanoseconds.load(.acquire) };
+        }
+    };
+    const Peer = struct {
+        listener: *std.Io.net.Server,
+        store: []const u8,
+        mode: Mode,
+        seen: usize = 0,
+        failure: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.serve() catch |err| {
+                self.failure = err;
+            };
+        }
+
+        fn serve(self: *@This()) !void {
+            const io = std.testing.io;
+            const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 2 * std.time.ns_per_s;
+            const count: usize = switch (self.mode) {
+                .historical, .body_mismatch, .unknown, .budget => 2,
+                else => 1,
+            };
+            for (0..count) |index| {
+                if (!try waitRequest(.{ .io = io }, self.listener.socket.handle, std.posix.POLL.IN, until)) return error.TestPeerConnectionMissing;
+                const connection = try self.listener.accept(io);
+                defer connection.close(io);
+                const fd = connection.socket.handle;
+                const expected_wire = if (self.mode == .exact or index == 1) "9" else protocol.wire_version;
+                var expected_buffer: [1024]u8 = undefined;
+                const expected = try std.fmt.bufPrint(&expected_buffer, "{{\"version\":\"{s}\",\"kind\":\"host_info\",\"store\":\"{s}\"}}", .{ expected_wire, self.store });
+                var request: [2048]u8 = undefined;
+                var used: usize = 0;
+                while (used < request.len) {
+                    if (used >= 4 and std.mem.endsWith(u8, request[0..used], "\r\n\r\n")) break;
+                    const n = try readRequest(.{ .io = io }, fd, request[used .. used + 1], until);
+                    if (n == 0) return error.TestPeerRequestTruncated;
+                    used += n;
+                } else return error.TestPeerRequestTooLarge;
+                try std.testing.expect(std.mem.startsWith(u8, request[0..used], "POST /v1/host-info HTTP/1.1\r\n"));
+                var field_buffer: [128]u8 = undefined;
+                const wire_field = try std.fmt.bufPrint(&field_buffer, "\r\nX-Rui-Wire-Version: {s}\r\n", .{expected_wire});
+                try std.testing.expect(std.mem.indexOf(u8, request[0..used], wire_field) != null);
+                const length_field = try std.fmt.bufPrint(&field_buffer, "\r\nContent-Length: {d}\r\n", .{expected.len});
+                try std.testing.expect(std.mem.indexOf(u8, request[0..used], length_field) != null);
+                try std.testing.expect(std.mem.indexOf(u8, request[0..used], "X-Rui-Host-Instance") == null);
+                var body_used: usize = 0;
+                while (body_used < expected.len) {
+                    const n = try readRequest(.{ .io = io }, fd, request[body_used..expected.len], until);
+                    if (n == 0) return error.TestPeerRequestTruncated;
+                    body_used += n;
+                }
+                try std.testing.expectEqualStrings(expected, request[0..body_used]);
+                // Record the complete independent request before replying: joining
+                // the peer later cannot turn a missed attempt into evidence.
+                self.seen += 1;
+                if (self.mode == .budget) Clock.nanoseconds.store(if (index == 0) 900 * std.time.ns_per_ms else 1100 * std.time.ns_per_ms, .release);
+                const response_wire = switch (self.mode) {
+                    .current, .unavailable => protocol.wire_version,
+                    .unknown => "8",
+                    else => "9",
+                };
+                const body_wire = if (self.mode == .body_mismatch) protocol.wire_version else response_wire;
+                var body_buffer: [1024]u8 = undefined;
+                const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}}}}", .{ body_wire, self.store });
+                var response_buffer: [2048]u8 = undefined;
+                const response = try std.fmt.bufPrint(&response_buffer, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: {s}\r\n{s}\r\n{s}", .{ if (self.mode == .unavailable) "503 Unavailable" else "200 OK", body.len, response_wire, if (self.mode == .malformed_header) "Content-Length: 0\r\n" else "", body });
+                try writeAllRequest(.{ .io = io }, fd, response, until);
+            }
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var lease = try platform.StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    const paths = lease.paths;
+    for (std.meta.tags(Mode)) |mode| {
+        var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+        defer {
+            listener.deinit(io);
+            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+        }
+        var peer: Peer = .{ .listener = &listener, .store = paths.store.slice(), .mode = mode };
+        const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+        var joined = false;
+        defer if (!joined) thread.join();
+        var clock_vtable = io.vtable.*;
+        clock_vtable.now = Clock.now;
+        Clock.nanoseconds.store(0, .release);
+        const observation_io: std.Io = if (mode == .budget) .{ .userdata = io.userdata, .vtable = &clock_vtable } else io;
+        const result: anyerror!HostControlObservation = switch (mode) {
+            .strict => if (observeHostProcess(io, root, null)) |_| error.TestUnexpectedResult else |err| err,
+            .exact => observeHostForUpgradeProfile(io, root, .released_9, null),
+            else => observeHostForUpgrade(observation_io, root, null),
+        };
+        thread.join();
+        joined = true;
+        switch (mode) {
+            .strict, .unknown => try std.testing.expectError(error.WrongWireVersion, result),
+            .budget => try std.testing.expectError(error.ResponseInactive, result),
+            .body_mismatch, .unavailable => try std.testing.expectError(error.InvalidHostInfo, result),
+            .malformed_header => try std.testing.expectError(error.InvalidResponse, result),
+            .current, .historical, .exact => {
+                const observed = try result;
+                try std.testing.expectEqual(if (mode == .current) protocol_reply.HostInfoProfile.current else .released_9, observed.profile);
+                try std.testing.expectEqual(std.c.getpid(), observed.pid);
+                try std.testing.expect(observed.facts.store.eql(paths.store.slice()));
+                try std.testing.expectEqual(@as(usize, 17), observed.facts.active_capacity);
+                try std.testing.expectEqual(@as(usize, 10), observed.facts.intake_capacity);
+                try std.testing.expectEqual(@as(?usize, 256), observed.facts.descriptor_limit);
+                try std.testing.expectEqual(@as(usize, 3), observed.facts.custody_occupied);
+                try std.testing.expect(observed.facts.paused);
+                try std.testing.expectEqual(protocol.Route.endpoint, observed.facts.capabilities.providers.codex);
+            },
+        }
+        try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
+        try std.testing.expectEqual(@as(usize, switch (mode) {
+            .historical, .body_mismatch, .unknown, .budget => 2,
+            else => 1,
+        }), peer.seen);
+    }
+    const expired = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1;
+    try std.testing.expectError(error.TransferInactive, observeHostForUpgrade(io, root, expired));
+    try std.testing.expectError(error.TransferInactive, observeHostForUpgradeProfile(io, root, .released_9, expired));
 }
 
 pub const HostLockState = enum { free, held, failure };
@@ -705,6 +889,21 @@ pub fn captureSessionStop(io: std.Io, input: SessionStopInput, target: CaptureTa
     const location = try target.resolve(io, &path_buffer, &key_buffer);
     try protocol_reply.validateIdentityInputs(location.key, input.session);
     return writeSessionStopCapture(io, &paths, input, location);
+}
+
+/// Captures archive or restore intent before any Host exchange. Restoration
+/// changes organization only; it never resumes previously stopped work.
+pub fn captureSessionArchive(io: std.Io, input: SessionArchiveInput, target: CaptureTarget) !CapturedRecord {
+    const paths = try platform.resolveClientPaths(io, input.store);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var key_buffer: [36]u8 = undefined;
+    const location = try target.resolve(io, &path_buffer, &key_buffer);
+    try protocol_reply.validateIdentityInputs(location.key, input.session);
+    var output_buffer: [protocol.content_window_bytes]u8 = undefined;
+    var capture = try Capture.open(io, location.record, &output_buffer);
+    errdefer capture.abort();
+    try capture.writeRequest(protocol.session_archive_request, .{ paths.store.slice(), location.key, input.session, input.archived });
+    return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .session_archive);
 }
 
 pub fn captureModelInterruption(io: std.Io, input: ModelInterruptionInput, target: CaptureTarget) !CapturedRecord {
@@ -886,8 +1085,20 @@ pub fn listSessions(
 
 /// The request a list cursor names: a full traversal's keyset, a token's
 /// first page, or a changed continuation.
-fn appendListSessions(body: anytype, store: []const u8, workspace: ?[]const u8, cursor: protocol_reply.SessionListCursor) !void {
-    const head = .{ store, workspace, cursor.after, cursor.ceiling };
+pub fn listSessionsFiltered(
+    io: std.Io,
+    store_path: []const u8,
+    workspace: ?[]const u8,
+    archive: protocol.SessionArchiveFilter,
+    cursor: protocol_reply.SessionListCursor,
+    destination: std.Io.File,
+    reply_buffer: *ReplyBuffer,
+) !protocol_reply.ReportReply {
+    return (Requests{ .io = io }).listSessionsFiltered(store_path, workspace, archive, cursor, destination, reply_buffer);
+}
+
+fn appendListSessions(body: anytype, store: []const u8, workspace: ?[]const u8, archive: protocol.SessionArchiveFilter, cursor: protocol_reply.SessionListCursor) !void {
+    const head = .{ store, workspace, archive, cursor.after, cursor.ceiling };
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
     const since = cursor.since orelse return body.appendShape(protocol.list_sessions_request, head);
     if (cursor.changed) |*changed|
@@ -1136,6 +1347,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         session: ?protocol_reply.JsonString(protocol.max_session_bytes) = null,
         configuration: ?CapturedConfiguration = null,
         require_model: ?bool = null,
+        archived: bool = true,
         sender: ?protocol_reply.JsonAddress = null,
         sender_handle: ?protocol_reply.JsonString(32) = null,
         text: ?struct { state: protocol_reply.JsonString(8), value: CapturedText } = null,
@@ -1173,6 +1385,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest, .creates_session = fields.configuration != null } };
         },
         .session_stop => .session_stop,
+        .session_archive => .{ .session_archive = .{ .archived = fields.archived } },
         .model_interruption => .{ .model_interruption = .{
             .turn = protocol_reply.mutationId(fields.target.?.turn, true) catch return error.InvalidRequestRecord,
             .operation = protocol_reply.mutationId(fields.target.?.operation, true) catch return error.InvalidRequestRecord,
@@ -1943,6 +2156,10 @@ fn readResponseHeadWithInactivity(fd: std.posix.fd_t, inactivity_ms: i32) !Respo
 }
 
 fn readResponseHeadUntil(requests: Requests, fd: std.posix.fd_t, timing: ResponseTiming, until: ?i128) !ResponseHead {
+    return readResponseHeadForProfileUntil(requests, fd, timing, until, .current);
+}
+
+fn readResponseHeadForProfileUntil(requests: Requests, fd: std.posix.fd_t, timing: ResponseTiming, until: ?i128, profile: protocol_reply.HostInfoProfile) !ResponseHead {
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
     const first_deadline = timing.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, until, false);
     const first_count = try readRequest(requests, fd, header_buffer[0..1], first_deadline);
@@ -1955,12 +2172,16 @@ fn readResponseHeadUntil(requests: Requests, fd: std.posix.fd_t, timing: Respons
         if (count == 0) return error.TruncatedResponse;
         used += count;
     } else return error.ResponseHeaderTooLarge;
-    return parseResponseHead(header_buffer[0..used]);
+    return parseResponseHeadForProfile(header_buffer[0..used], profile);
 }
 
 // Rui uses Content-Length framing. Validate the entire bounded header before
 // interpreting any field; an ignored extension cannot repair invalid syntax.
 fn parseResponseHead(bytes: []const u8) !ResponseHead {
+    return parseResponseHeadForProfile(bytes, .current);
+}
+
+fn parseResponseHeadForProfile(bytes: []const u8, profile: protocol_reply.HostInfoProfile) !ResponseHead {
     if (!std.mem.endsWith(u8, bytes, "\r\n\r\n")) return error.InvalidResponse;
     var lines = std.mem.splitSequence(u8, bytes[0 .. bytes.len - 4], "\r\n");
     const status_line = lines.next() orelse return error.InvalidResponse;
@@ -1995,7 +2216,7 @@ fn parseResponseHead(bytes: []const u8) !ResponseHead {
             length = std.fmt.parseInt(u64, value, 10) catch return error.InvalidResponse;
         } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
             if (wire_ok != null) return error.InvalidResponse;
-            wire_ok = std.mem.eql(u8, value, protocol.wire_version);
+            wire_ok = std.mem.eql(u8, value, profile.wire());
         } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Content-Bytes")) {
             if (total != null) return error.InvalidResponse;
             total = try std.fmt.parseInt(u64, value, 10);
@@ -2018,14 +2239,16 @@ fn parseResponseHead(bytes: []const u8) !ResponseHead {
             return error.InvalidResponse;
         }
     }
-    if (wire_ok != true) return error.WrongWireVersion;
-    return .{
+    const head: ResponseHead = .{
         .status = status,
         .content_length = length orelse return error.InvalidResponse,
         .kind = kind orelse return error.InvalidResponse,
         .total = total,
         .next = next,
     };
+    if (wire_ok == null) return error.InvalidResponse;
+    if (!wire_ok.?) return error.WrongWireVersion;
+    return head;
 }
 
 fn readCommandResponse(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer) !protocol_reply.CommandReply {
@@ -2202,6 +2425,66 @@ const empty_test_response =
     "Content-Length: 0\r\n" ++
     "Connection: close\r\n" ++
     "X-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n";
+
+test "upgrade Host observation encoder sends exactly the selected read-only profile" {
+    const io = std.testing.io;
+    inline for (std.meta.tags(protocol_reply.HostInfoProfile)) |profile| {
+        const sockets = try socketPair();
+        defer closeTestDescriptor(sockets[0]);
+        defer closeTestDescriptor(sockets[1]);
+        const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
+        try uploadHostInfoRequest(.{ .io = io }, sockets[0], "/one\"quoted", profile, until);
+        const wire = if (profile == .released_9) "9" else protocol.wire_version;
+        var body_buffer: [128]u8 = undefined;
+        const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"kind\":\"host_info\",\"store\":\"/one\\\"quoted\"}}", .{wire});
+        var expected_buffer: [1024]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&expected_buffer, "POST /v1/host-info HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ wire, body.len, body });
+        var actual_buffer: [1024]u8 = undefined;
+        var used: usize = 0;
+        while (used < expected.len) {
+            const n = try readRequest(.{ .io = io }, sockets[1], actual_buffer[used..expected.len], until);
+            if (n == 0) return error.TestUnexpectedResult;
+            used += n;
+        }
+        try std.testing.expectEqualStrings(expected, actual_buffer[0..used]);
+    }
+}
+
+test "upgrade Host observation headers preserve strict framing and profile identity" {
+    const old = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 0\r\nX-Rui-Wire-Version: 9\r\n\r\n";
+    _ = try parseResponseHeadForProfile(old, .released_9);
+    try std.testing.expectError(error.WrongWireVersion, parseResponseHead(old));
+    try std.testing.expectError(error.WrongWireVersion, parseResponseHeadForProfile(empty_test_response, .released_9));
+    _ = try parseResponseHead(empty_test_response);
+    inline for (std.meta.tags(protocol_reply.HostInfoProfile)) |profile| {
+        const good = if (profile == .released_9) old else empty_test_response;
+        for ([_]struct { from: []const u8, to: []const u8 }{
+            .{ .from = "Content-Length: 0", .to = "Content-Length: 0\r\nContent-Length: 0" },
+            .{ .from = "Content-Length: 0", .to = "Content-Length: +0" },
+            .{ .from = "Content-Length: 0\r\n", .to = "" },
+            .{ .from = "Content-Type: application/json\r\n", .to = "" },
+            .{ .from = "Content-Type: application/json", .to = "Content-Type: application/json\r\nTransfer-Encoding: chunked" },
+            .{ .from = "Content-Type: application/json", .to = "Content-Type: application/json\r\nContent-Encoding: gzip" },
+            .{ .from = "Content-Type: application/json", .to = "Content-Type: application/json\r\nBad Name: x" },
+            .{ .from = "Content-Type: application/json", .to = "Content-Type: application/json\r\nX-Extension: \x01" },
+            .{ .from = "X-Rui-Wire-Version:", .to = "X-Rui-Wire-Version: 9\r\nX-Rui-Wire-Version:" },
+        }) |case| {
+            const bad = try std.mem.replaceOwned(u8, std.testing.allocator, good, case.from, case.to);
+            defer std.testing.allocator.free(bad);
+            try std.testing.expectError(error.InvalidResponse, parseResponseHeadForProfile(bad, profile));
+        }
+        for ([_][]const u8{ "8", "11", "09", "unknown", "" }) |wire| {
+            const field = try std.fmt.allocPrint(std.testing.allocator, "X-Rui-Wire-Version: {s}", .{wire});
+            defer std.testing.allocator.free(field);
+            const bad = try std.mem.replaceOwned(u8, std.testing.allocator, good, if (profile == .released_9) "X-Rui-Wire-Version: 9" else "X-Rui-Wire-Version: " ++ protocol.wire_version, field);
+            defer std.testing.allocator.free(bad);
+            try std.testing.expectError(error.WrongWireVersion, parseResponseHeadForProfile(bad, profile));
+        }
+    }
+    // A malformed historical header must not become authority for a fallback.
+    try std.testing.expectError(error.InvalidResponse, parseResponseHead("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Rui-Wire-Version: 9\r\n\r\n"));
+    try std.testing.expectError(error.InvalidResponse, parseResponseHead("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 0\r\n\r\n"));
+}
 
 fn socketPair() ![2]std.posix.fd_t {
     var sockets: [2]std.posix.fd_t = undefined;
@@ -2415,9 +2698,44 @@ test "client activity peer boundary rejects noncanonical IDs and owns canonical 
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
-            try std.testing.expectEqualStrings(session, page.facts.items[0].value.send_failed.target.session.slice());
+            try std.testing.expectEqualStrings(session, page.facts.items[0].value.send_failed.target.?.session.slice());
             try std.testing.expectEqualStrings("key\x00雪", page.facts.items[0].value.send_failed.key.slice());
         } else try std.testing.expectError(error.InvalidResponse, protocol_reply.ActivityPage.parse(body.slice(), .{}));
+    }
+}
+
+test "client failed-send target is required and nullable without relaxing peers" {
+    const cases = [_]struct { field: []const u8, failure: ?anyerror }{
+        .{ .field = "\"target\":null,", .failure = null },
+        .{ .field = "\"target\":{\"session\":\"absent\",\"label\":\"Review\"},", .failure = null },
+        .{ .field = "", .failure = error.InvalidActivityPage },
+        .{ .field = "\"target\":\"\",", .failure = error.InvalidActivityPage },
+        .{ .field = "\"target\":false,", .failure = error.InvalidActivityPage },
+        .{ .field = "\"target\":{},", .failure = error.InvalidActivityPage },
+        .{ .field = "\"target\":{\"session\":null},", .failure = error.InvalidActivityPage },
+        .{ .field = "\"target\":{\"session\":\"\",\"label\":null},", .failure = error.InvalidResponse },
+        .{ .field = "\"target\":{\"session\":\"absent\",\"label\":\"bad\\nlabel\"},", .failure = error.InvalidResponse },
+    };
+    for (cases, 0..) |case, index| {
+        var body: protocol.RequestBuffer = .{};
+        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused\",");
+        try body.append(case.field);
+        try body.append("\"code\":\"unsupported_reasoning_effort\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, protocol_reply.ActivityPage.parse(body.slice(), .{}));
+            continue;
+        }
+        const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
+        @memset(body.bytes[0..body.len], 'x');
+        const failed = page.facts.items[0].value.send_failed;
+        try std.testing.expectEqualStrings("refused", failed.key.slice());
+        try std.testing.expectEqualStrings("unsupported_reasoning_effort", failed.code.slice());
+        if (index == 0) {
+            try std.testing.expect(failed.target == null);
+        } else {
+            try std.testing.expectEqualStrings("absent", failed.target.?.session.slice());
+            try std.testing.expectEqualStrings("Review", failed.target.?.label.slice());
+        }
     }
 }
 
@@ -2467,6 +2785,7 @@ test "client capture rejects noncanonical Session references before publication"
                 .configure => captureConfigure(io, .{ .store = root, .session = .{ .named = session } }, target).get(),
                 .message => captureMessage(io, .{ .store = root, .session = session, .text_path = "", .text = "input\x00雪" }, target).get(),
                 .session_stop => captureSessionStop(io, .{ .store = root, .session = session }, target),
+                .session_archive => captureSessionArchive(io, .{ .store = root, .session = session }, target),
                 .model_interruption => captureModelInterruption(io, .{ .store = root, .session = session, .turn_id = 1, .operation_id = 1 }, target),
                 .permission_decision => capturePermissionDecision(io, .{ .store = root, .session = session, .action_id = 1 }, target),
             };
@@ -2505,6 +2824,7 @@ test "client recovery rejects noncanonical Session references without retransmis
                     .configure => ",\"configuration\":{}}",
                     .message => ",\"text\":{\"state\":\"value\",\"value\":\"input\\u0000雪\"}}",
                     .session_stop => "}",
+                    .session_archive => ",\"archived\":true}",
                     .model_interruption => ",\"turn\":\"1\",\"operation\":\"1\"}}",
                     .permission_decision => ",\"action\":\"1\",\"decision\":\"deny\"}",
                 });
@@ -3416,6 +3736,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
     const Direction = @FieldType(protocol.ActivityPage, "direction");
     const cases = .{
         .{ protocol.session_stop_request, .{ &store, &key, &session }, protocol.max_session_stop_request_bytes },
+        .{ protocol.session_archive_request, .{ &store, &key, &session, false }, protocol.max_session_archive_request_bytes },
         .{ protocol.model_interruption_request, .{ &store, &key, &session, id, id }, protocol.max_model_interruption_request_bytes },
         .{ protocol.permission_decision_request, .{ &store, &key, &session, id, protocol.PermissionDecision.allow_once }, protocol.max_permission_decision_request_bytes },
         .{ protocol.observe_command_request, .{ &store, &key, @as(?[]const u8, &observation_token) }, protocol.max_observe_command_request_bytes },
@@ -3424,7 +3745,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.read_result_request, .{ &store, &key }, protocol.max_read_result_request_bytes },
         .{ protocol.inspect_session_request.failed_response, .{ &store, &session, protocol.FailedResponsePart.metadata, id, id }, comptime protocol.shapeBytes(protocol.inspect_session_request.failed_response) },
         .{ protocol.inspect_session_request.current_since, .{ &store, &session, @as(?[]const u8, &observation_token) }, comptime protocol.shapeBytes(protocol.inspect_session_request.current_since) },
-        .{ protocol.list_sessions_changed_request, .{ &store, @as(?[]const u8, &workspace), id, id, &token, id, &reference }, protocol.max_list_sessions_request_bytes },
+        .{ protocol.list_sessions_changed_request, .{ &store, @as(?[]const u8, &workspace), protocol.SessionArchiveFilter.archived, id, id, &token, id, &reference }, protocol.max_list_sessions_request_bytes },
         .{ protocol.read_action_arguments_request, .{ &store, &session, id }, protocol.max_read_action_arguments_request_bytes },
         .{ protocol.read_action_call_id_request, .{ &store, &session, id }, protocol.max_read_action_call_id_request_bytes },
         .{ protocol.conversation_content_request, .{ &store, &session, id, id }, protocol.max_conversation_content_request_bytes },
@@ -3440,8 +3761,8 @@ test "every request renders its exact worst-case bound from the shape it writes"
         try body.appendShape(case[0], case[1]);
         try std.testing.expectEqual(@as(usize, case[2]), body.len);
         try std.testing.expect(try std.json.validate(std.testing.allocator, body.slice()));
-        // The first three are control requests, captured to a record file.
-        if (index >= 3) largest = @max(largest, body.len);
+        // The first four are control requests, captured to a record file.
+        if (index >= 4) largest = @max(largest, body.len);
     }
     try std.testing.expectEqual(protocol.max_client_request_bytes, largest);
     try std.testing.expectEqual(protocol.max_control_request_bytes, protocol.max_model_interruption_request_bytes);
@@ -3455,16 +3776,16 @@ test "Session list client renders each cursor's request exactly, within the boun
         .{ protocol_reply.SessionListCursor{ .since = token }, ",\"since\":\"abababababababababababababababab.42\"" },
         .{ protocol_reply.SessionListCursor{ .since = token, .changed = .{ .through = 48, .after_reference = "k7m2qx".* } }, ",\"since\":\"abababababababababababababababab.42\",\"through\":\"48\",\"after_reference\":\"k7m2qx\"" },
     };
-    inline for (cases) |case| {
+    inline for (comptime std.meta.tags(protocol.SessionArchiveFilter)) |archive| inline for (cases) |case| {
         var body: protocol.RequestBuffer = .{};
-        try appendListSessions(&body, "/store", null, case[0]);
+        try appendListSessions(&body, "/store", null, archive, case[0]);
         var expected: [512]u8 = undefined;
-        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"after\":\"{d}\",\"ceiling\":\"{d}\"{s}}}", .{ case[0].after, case[0].ceiling, case[1] }), body.slice());
-    }
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":\"/store\",\"workspace\":null,\"archive\":\"{s}\",\"after\":\"{d}\",\"ceiling\":\"{d}\"{s}}}", .{ @tagName(archive), case[0].after, case[0].ceiling, case[1] }), body.slice());
+    };
     const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const escaped_workspace = @as([protocol.max_workspace_bytes]u8, @splat(1));
     var maximum: protocol.RequestBuffer = .{};
-    try appendListSessions(&maximum, &escaped_store, &escaped_workspace, .{ .since = .{ .instance = @splat(0xff), .generation = std.math.maxInt(u64) }, .changed = .{ .through = std.math.maxInt(u64), .after_reference = "zzzzzz".* } });
+    try appendListSessions(&maximum, &escaped_store, &escaped_workspace, .active, .{ .since = .{ .instance = @splat(0xff), .generation = std.math.maxInt(u64) }, .changed = .{ .through = std.math.maxInt(u64), .after_reference = "zzzzzz".* } });
     try std.testing.expect(maximum.len <= protocol.max_list_sessions_request_bytes);
     try std.testing.expect(std.mem.endsWith(u8, maximum.slice(), "\"since\":\"ffffffffffffffffffffffffffffffff.18446744073709551615\",\"through\":\"18446744073709551615\",\"after_reference\":\"zzzzzz\"}"));
 }
@@ -4296,5 +4617,69 @@ test "request wait maps actual protocol state and kind domains" {
     for (std.enums.values(protocol.CommandKind)) |kind| {
         const observation: protocol_reply.CommandObservation = .{ .key = .{}, .status = .accepted, .kind = kind, .state = .queued };
         try std.testing.expectEqual(@as(?WaitDisposition, if (kind == .message) null else .done), policy.disposition(observation));
+    }
+}
+
+test "archive captures preserve archive and restore intent through generated and explicit recovery" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_]bool{ true, false }) |archived| {
+        var captured = try captureSessionArchive(io, .{ .store = root, .session = "k7m2qx", .archived = archived }, .{ .generated = root });
+        const identity = captured.saved;
+        var original: [2048]u8 = undefined;
+        const count = try captured.file.readPositionalAll(io, &original, 0);
+        try std.testing.expectEqual(protocol.CommandKind.session_archive, identity.kind);
+        try std.testing.expectEqual(archived, captured.target.session_archive.archived);
+        captured.close(io);
+        var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = identity.key.slice() } });
+        try std.testing.expectEqual(archived, recovered.target.session_archive.archived);
+        var replayed: [2048]u8 = undefined;
+        const replayed_count = try recovered.file.readPositionalAll(io, &replayed, 0);
+        try std.testing.expectEqualSlices(u8, original[0..count], replayed[0..replayed_count]);
+        recovered.close(io);
+        var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try requestPath(root, identity.key.slice(), &path_buffer);
+        var explicit = try openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_archive } });
+        try std.testing.expectEqual(archived, explicit.target.session_archive.archived);
+        explicit.close(io);
+        try std.testing.expectEqual(protocol.CommandKind.session_archive, (try inspectCaptured(io, root, identity.key.slice())).kind);
+        try std.testing.expectError(error.RequestBindingMismatch, openCaptured(io, .{ .explicit = .{ .store = root, .record = path, .kind = .session_stop } }));
+    }
+}
+
+test "archive recovery preserves the protocol default and refuses ambiguous or malformed intent" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const handle = "00000000-0000-4000-8000-000000000001";
+    const cases = .{
+        .{ "", @as(?bool, true) },
+        .{ ",\"archived\":false", @as(?bool, false) },
+        .{ ",\"archived\":null", @as(?bool, null) },
+        .{ ",\"archived\":\"true\"", @as(?bool, null) },
+        .{ ",\"archived\":true,\"archived\":false", @as(?bool, null) },
+    };
+    inline for (cases) |case| {
+        var body: protocol.RequestBuffer = .{};
+        try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"kind\":\"session_archive\",\"store\":");
+        try body.appendJsonString(root);
+        try body.append(" ,\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\"");
+        try body.append(case[0]);
+        try body.append("}");
+        const file = try tmp.dir.createFile(io, handle ++ ".json", .{});
+        try file.writeStreamingAll(io, body.slice());
+        file.close(io);
+        if (case[1]) |expected| {
+            var recovered = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } });
+            defer recovered.close(io);
+            try std.testing.expectEqual(expected, recovered.target.session_archive.archived);
+        } else try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } }));
     }
 }

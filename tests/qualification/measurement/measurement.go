@@ -29,7 +29,7 @@ import (
 )
 
 // WireVersion is the Host's src/protocol.zig wire_version; tests/ci checks they agree.
-const WireVersion = "9"
+const WireVersion = "10"
 
 const (
 	GoVersion         = "go1.27.1"

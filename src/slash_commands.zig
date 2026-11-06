@@ -72,6 +72,9 @@ pub const Context = struct {
 pub const Copy = enum { answer, code, file };
 
 pub const Command = struct {
+    /// A short name for a long choice list in usage; completion still
+    /// offers each admitted word.
+    choice_name: ?[]const u8 = null,
     argument: Argument = .none,
     /// Null keeps the command out of the list and /help: it exists only to
     /// say where the thing it names lives.
@@ -101,6 +104,7 @@ const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider",
 /// The conversation's commands, declared in the order its list and /help
 /// show them.
 const ConversationName = enum {
+    archive,
     configure,
     copy,
     details,
@@ -118,12 +122,14 @@ const ConversationName = enum {
     result,
     setup,
     status,
+    unarchive,
     upgrade,
     wait,
 };
 
 /// A conversation's commands.
 pub const conversation = Commands(ConversationName, .{
+    .archive = .{ .description = "stop active work and archive this Session" },
     .configure = .{ .argument = .{ .options = live_options }, .description = "change this Session's settings" },
     .copy = .{ .argument = .{ .choice = copy_words }, .description = "copy the last answer; code its last block, file saves it here" },
     .details = .{ .description = "saved tool output" },
@@ -141,6 +147,7 @@ pub const conversation = Commands(ConversationName, .{
     .result = .{ .argument = .{ .required = "KEY" }, .description = "a saved answer", .listed = false },
     .setup = .{ .argument = .{ .options = setup_options }, .description = "future defaults" },
     .status = .{ .description = "settings and work" },
+    .unarchive = .{ .description = "restore this Session without restarting work" },
     .upgrade = .{ .description = "check stable Rui; install restarts this Store's Host" },
     .wait = .{ .description = null },
 });
@@ -151,13 +158,23 @@ const start_options: Options = .of(cli_args.live_configure, &.{ "permission-mode
 
 /// The overview's commands. /rename and /setup run as a conversation runs
 /// them; /rename names the selected Session.
-pub const overview = Commands(enum { configure, exit, help, model, rename, setup, upgrade }, .{
+const session_views = &[_]Choice{
+    .{ .word = "unarchived", .description = "Sessions not archived, including work being stopped for archive" },
+    .{ .word = "archived", .description = "archived Sessions" },
+    .{ .word = "all", .description = "unarchived and archived Sessions" },
+};
+
+pub const overview = Commands(enum { archive, configure, exit, help, model, rename, sessions, setup, unarchive, undo, upgrade }, .{
+    .archive = .{ .description = "archive the selected Session; stop active work first" },
     .configure = .{ .argument = .{ .options = start_options }, .description = "hold settings for the next Session" },
     .exit = .{ .description = "leave; Host work continues" },
     .help = conversation.table.get(.help),
     .model = .{ .description = "choose the model new Sessions use" },
     .rename = .{ .argument = conversation.table.get(.rename).argument, .description = "name the selected Session" },
+    .sessions = .{ .choice_name = "VIEW", .argument = .{ .choice = session_views }, .description = "view Unarchived, Archived or All Sessions" },
     .setup = conversation.table.get(.setup),
+    .unarchive = .{ .description = "restore the selected Session without restarting work" },
+    .undo = .{ .description = "restore the last Session archived here" },
     .upgrade = conversation.table.get(.upgrade),
 });
 
@@ -235,6 +252,7 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
                     .optional => |word| text ++ " [" ++ word ++ "]",
                     .required => |word| text ++ " " ++ word,
                     .choice => |choices| choice: {
+                        if (table.get(name).choice_name) |shape| break :choice text ++ " [" ++ shape ++ "]";
                         var joined: []const u8 = text ++ " [";
                         for (choices, 0..) |choice, index| joined = joined ++ (if (index == 0) "" else "|") ++ choice.word;
                         break :choice joined ++ "]";
@@ -742,7 +760,7 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "rename ", "setup ", "status", "upgrade" } },
+        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "rename ", "setup ", "status", "unarchive", "upgrade" } },
         .{ .draft = "/c", .shown = &.{ "configure ", "copy " }, .first = "onfigure " },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
         .{ .draft = "/st", .shown = &.{"status"}, .first = "atus" },
@@ -952,4 +970,45 @@ test "upgrade is a local no-argument command on both screens" {
         try std.testing.expectEqualStrings("upgrade", list.shown()[0].word);
         try std.testing.expect(list.enter(0).runs);
     }
+}
+
+test "archive commands and server archive view choices parse on their owning screens" {
+    for ([_][]const u8{ "/archive", "/unarchive" }) |line| {
+        try std.testing.expect(conversation.parse(line) == .command);
+        try std.testing.expect(overview.parse(line) == .command);
+        const extra = try std.fmt.allocPrint(std.testing.allocator, "{s} extra", .{line});
+        defer std.testing.allocator.free(extra);
+        try std.testing.expect(conversation.parse(extra) == .misused);
+        try std.testing.expect(overview.parse(extra) == .misused);
+    }
+    for ([_][]const u8{ "unarchived", "archived", "all" }) |view| {
+        const line = try std.fmt.allocPrint(std.testing.allocator, "/sessions {s}", .{view});
+        defer std.testing.allocator.free(line);
+        const parsed = overview.parse(line);
+        try std.testing.expectEqual(.sessions, parsed.command.name);
+        try std.testing.expectEqualStrings(view, parsed.command.argument);
+    }
+    try std.testing.expect(overview.parse("/sessions") == .command);
+    try std.testing.expect(overview.parse("/sessions active") == .misused);
+    try std.testing.expect(overview.parse("/undo") == .command);
+    try std.testing.expect(conversation.parse("/sessions archived") == .unknown);
+}
+
+test "archive and upgrade retain separate local command identities after merge" {
+    inline for (.{ conversation, overview }) |screen| {
+        inline for (.{ "archive", "unarchive", "upgrade", "exit" }) |name| {
+            const parsed = screen.parse("/" ++ name);
+            try std.testing.expect(parsed == .command);
+            try std.testing.expectEqualStrings(name, @tagName(parsed.command.name));
+            try std.testing.expectEqualStrings("", parsed.command.argument);
+            try std.testing.expect(screen.parse("/" ++ name ++ " other") == .misused);
+            const list = screen.suggest("/" ++ name, .{}).?;
+            try std.testing.expectEqual(@as(usize, 1), list.count);
+            try std.testing.expectEqualStrings(name, list.shown()[0].word);
+            try std.testing.expect(list.enter(0).runs);
+        }
+    }
+    const restored = overview.parse("/undo").command;
+    try std.testing.expectEqual(.undo, restored.name);
+    try std.testing.expect(conversation.parse("/undo") == .unknown);
 }

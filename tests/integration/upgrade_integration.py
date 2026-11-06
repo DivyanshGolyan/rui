@@ -754,6 +754,86 @@ def signal_after_publication(root, binary, releases, artifacts):
 
 
 
+def cancel_selected_version_check(root, binary, releases, artifacts):
+    """Cancel the selected build probe itself, before release discovery starts."""
+    for action in ("escape", "sigint"):
+        with case(root, binary, releases, f"selected-version-cancel-{action}") as c:
+            c.old_selection()
+            host, previous = c.start_host()
+            session, credential = terminal_setup(c)
+            gate = c.root / "selected-version.fifo"
+            os.mkfifo(gate, mode=0o600)
+            receipt = c.root / "selected-version.pid"
+            # This is only the selected release's metadata/version fixture.
+            # Its real runtime Host remains the separately copied native actor.
+            c.original.write_text(
+                '#!/bin/sh\n[ "$1" = --version ] || exit 91\n'
+                f'printf "%s\\n" "$$" > {shlex.quote(str(receipt))}\n'
+                f'IFS= read -r released < {shlex.quote(str(gate))}\n'
+                "printf '%s\\n' 'rui 0.1.0 (synthetic gated metadata fixture)'\n")
+            start = len(releases.requests)
+            args = [str(binary), "session", "resume", "--store", str(c.store), "--", session]
+
+            def release_version():
+                descriptor = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+                try:
+                    os.write(descriptor, b"continue\n")
+                finally:
+                    os.close(descriptor)
+
+            with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
+                try:
+                    screen = TerminalScreen(master, process)
+                    screen.contains("›")
+                    screen.send("/upgrade\r")
+
+                    def child_started():
+                        if not receipt.exists():
+                            return False
+                        return receipt.read_text().strip().isdigit()
+
+                    screen.until(child_started, "selected --version child receipt before discovery")
+                    child_pid = int(receipt.read_text().strip())
+                    running = subprocess.run(["ps", "-p", str(child_pid), "-o", "stat="],
+                                             env=c.env, capture_output=True, text=True, timeout=5)
+                    assert running.returncode == 0 and not running.stdout.strip().startswith("Z"), running
+                    assert releases.requests[start:] == [], "latest discovery ran before selected probe completed"
+                    if action == "escape":
+                        screen.send("\x1b")
+                        screen.contains("Upgrade check failed: Cancelled")
+                        screen.save(artifacts, "selected-version-escape")
+                    else:
+                        process.send_signal(signal.SIGINT)
+
+                        def exited():
+                            screen.read_output()
+                            return process.poll() is not None
+
+                        wait_for(exited, "SIGINT exit while selected version child is gated")
+                        assert b"\x1b[?1049l" in screen.tail, "selected-probe signal did not restore terminal"
+                        if artifacts is not None:
+                            (artifacts / "selected-version-sigint.txt").write_text(screen.capture.plain)
+
+                    def reaped():
+                        observed = subprocess.run(["ps", "-p", str(child_pid), "-o", "stat="],
+                                                  env=c.env, capture_output=True, text=True, timeout=5)
+                        if observed.returncode == 1 and not observed.stdout and not observed.stderr:
+                            return True
+                        assert observed.returncode == 0 and observed.stdout.strip(), observed
+                        return False  # A zombie is not a reaped version child.
+
+                    wait_for(reaped, "cancelled exact selected --version child reap")
+                    assert releases.requests[start:] == [], "cancelled check reached latest discovery"
+                    assert c.link.resolve() == c.original
+                    assert host.poll() is None and c.status()["instance"] == previous["instance"]
+                    assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+                finally:
+                    # Failure disposal can unblock the child, but never supplies
+                    # credit before the cancellation/reap assertions above.
+                    dispose_all(release_version)
+
+
+
 def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
     with case(root, binary, releases, "terminal-dual-failure") as c:
         c.old_selection()
@@ -927,6 +1007,8 @@ def main():
         for suite in (discovery_cases, install_cases, lifecycle_cases):
             suite(root, binary, releases)
             print(f"upgrade native: {suite.__name__} passed", flush=True)
+        cancel_selected_version_check(root, binary, releases, artifacts)
+        print("upgrade native: Escape and SIGINT reaped selected version probes before discovery", flush=True)
         terminal_cases(root, binary, releases, artifacts)
         print("upgrade native: both terminal /upgrade entry points passed", flush=True)
         cancel_after_publication(root, binary, releases, artifacts)

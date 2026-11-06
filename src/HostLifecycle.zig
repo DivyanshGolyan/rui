@@ -37,7 +37,7 @@ pub const LaunchSpecification = struct {
 };
 
 pub const Plan = struct {
-    observed: client.ObservedHost,
+    observed: client.HostControlObservation,
     snapshot: identity.Snapshot,
     launch: LaunchSpecification,
     version: candidate.Version,
@@ -73,12 +73,12 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store
     switch (client.hostStatus(io, store)) {
         .unavailable => return .absent,
         .owned_unavailable => return .{ .unsupported = .ownership_unconfirmed },
-        .incompatible => return .{ .unsupported = .incompatible },
+        .incompatible => {},
         .access_failure => return .{ .unsupported = .inaccessible },
         .ready => {},
     }
     if (platform.mysqlRuntimeDirectory(store) != null) return .{ .unsupported = .application_owned };
-    const observed = client.observeHostProcess(io, store, null) catch return .{ .unsupported = .ownership_unconfirmed };
+    const observed = client.observeHostForUpgrade(io, store, null) catch return .{ .unsupported = .ownership_unconfirmed };
     var snapshot = identity.snapshot(allocator, observed.pid) catch return .{ .unsupported = .configuration_unavailable };
     errdefer snapshot.deinit(allocator);
     if (!std.mem.endsWith(u8, snapshot.executable, "/bin/rui")) {
@@ -103,7 +103,7 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store
         return .{ .unsupported = .configuration_unavailable };
     };
     errdefer launch.deinit(allocator);
-    const confirmed = client.observeHostProcess(io, store, null) catch {
+    const confirmed = client.observeHostForUpgradeProfile(io, store, observed.profile, null) catch {
         launch.deinit(allocator);
         snapshot.deinit(allocator);
         return .{ .unsupported = .ownership_unconfirmed };
@@ -116,8 +116,8 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store
     return .{ .managed = .{ .observed = observed, .snapshot = snapshot, .launch = launch, .version = version } };
 }
 
-fn sameHost(a: client.ObservedHost, b: client.ObservedHost) bool {
-    return a.pid == b.pid and std.mem.eql(u8, &a.ready.instance, &b.ready.instance) and std.mem.eql(u8, a.ready.store.slice(), b.ready.store.slice());
+fn sameHost(a: client.HostControlObservation, b: client.HostControlObservation) bool {
+    return a.profile == b.profile and a.pid == b.pid and std.mem.eql(u8, &a.facts.instance, &b.facts.instance) and std.mem.eql(u8, a.facts.store.slice(), b.facts.store.slice());
 }
 
 fn sameSnapshot(a: *const identity.Snapshot, b: *const identity.Snapshot) bool {
@@ -205,32 +205,35 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
         .managed => |*value| value,
     };
     const io = init.io;
-    const store = plan.observed.ready.store.slice();
+    const store = plan.observed.facts.store.slice();
     process.check(cancellation) catch return .cancelled;
     if (plan.version.order(version) == .gt) return .superseded;
-    const target_executable = try std.fmt.allocPrint(allocator, "{s}/bin/rui", .{target});
-    defer allocator.free(target_executable);
-    const canonical_target = try std.Io.Dir.cwd().realPathFileAlloc(io, target_executable, allocator);
-    defer allocator.free(canonical_target);
-    if (std.mem.eql(u8, canonical_target, plan.snapshot.executable)) {
+    var prepared = PreparedActivation.init(init, allocator, plan, target, cancellation) catch |err| {
+        if (err == error.Cancelled) return .cancelled;
+        return .{ .unsupported = .configuration_unavailable };
+    };
+    defer prepared.deinit(allocator);
+    if (std.mem.eql(u8, prepared.executable, plan.snapshot.executable)) {
         const current = client.observeHostProcess(io, store, null) catch return .{ .unconfirmed = .verifying };
-        if (!sameHost(plan.observed, current)) return .replacement_observed;
+        if (plan.observed.profile != .current or current.pid != plan.observed.pid or !std.mem.eql(u8, &current.ready.instance, &plan.observed.facts.instance)) return .{ .unconfirmed = .verifying };
         return .{ .already_ready = .{ .instance = current.ready.instance, .pid = current.pid } };
     }
-    const help = process.output(allocator, io, &.{ canonical_target, "host", "serve", "--help" }, cancellation, 32768) catch return .{ .unsupported = .configuration_unavailable };
-    defer allocator.free(help);
-    if (!supportedByHelp(&plan.launch, help)) return .{ .unsupported = .configuration_unavailable };
+    process.check(cancellation) catch return .cancelled;
     if (client.hostLockState(io, store) != .free) {
-        const current = client.observeHostProcess(io, store, null) catch return .{ .unconfirmed = .stopping };
+        const current = client.observeHostForUpgradeProfile(io, store, plan.observed.profile, null) catch return .{ .unconfirmed = .stopping };
         if (!sameHost(plan.observed, current)) return .replacement_observed;
         var fresh = identity.snapshot(allocator, current.pid) catch return .{ .unconfirmed = .stopping };
         defer fresh.deinit(allocator);
         if (!sameSnapshot(&plan.snapshot, &fresh)) return .{ .unsupported = .configuration_unavailable };
         Progress.send(progress, .stopping);
-        var reply: client.ReplyBuffer = .{};
-        const stopped = client.stopHost(io, .{ .store = store, .instance = plan.observed.ready.instance }, &reply) catch {
-            if (client.hostLockState(io, store) != .free) return .{ .unconfirmed = .stopping };
-            return startPinned(init, allocator, plan, target, version, progress);
+        const stopped = stopObserved(io, allocator, plan) catch {
+            if (client.hostLockState(io, store) != .free) {
+                if (client.observeHostForUpgrade(io, store, null)) |replacement| {
+                    if (!sameHost(plan.observed, replacement)) return .replacement_observed;
+                } else |_| {}
+                return .{ .unconfirmed = .stopping };
+            }
+            return startPinned(init, allocator, plan, &prepared, version, progress);
         };
         switch (stopped) {
             .instance_changed => return .replacement_observed,
@@ -239,15 +242,70 @@ pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observatio
         }
         Progress.send(progress, .awaiting_retirement);
         if (!try awaitRetirement(io, store)) {
-            switch (client.hostStatus(io, store)) {
-                .ready => |ready| if (!std.mem.eql(u8, &ready.instance, &plan.observed.ready.instance)) return .replacement_observed,
-                else => {},
-            }
+            if (client.observeHostForUpgrade(io, store, null)) |replacement| {
+                if (!sameHost(plan.observed, replacement)) return .replacement_observed;
+            } else |_| {}
             return .{ .unconfirmed = .awaiting_retirement };
         }
     }
-    return startPinned(init, allocator, plan, target, version, progress);
+    return startPinned(init, allocator, plan, &prepared, version, progress);
 }
+
+fn stopObserved(io: std.Io, allocator: std.mem.Allocator, plan: *const Plan) !client.HostStopResult {
+    const store = plan.observed.facts.store.slice();
+    switch (plan.observed.profile) {
+        .current => {
+            var reply: client.ReplyBuffer = .{};
+            return client.stopHost(io, .{ .store = store, .instance = plan.observed.facts.instance }, &reply);
+        },
+        .released_9 => {
+            const instance = std.fmt.bytesToHex(plan.observed.facts.instance, .lower);
+            const result = try process.runWithTimeout(allocator, io, &.{ plan.snapshot.executable, "host", "pause", "--store", store, "--instance", &instance }, null, 8192, .fromSeconds(product_defaults.host_shutdown_seconds + 5));
+            defer process.dispose(allocator, result);
+            if (!result.term.success()) return error.UpgradeChildFailed;
+            return .acknowledged;
+        },
+    }
+}
+
+const PreparedActivation = struct {
+    executable: [:0]u8,
+    helper: [:0]u8,
+    buffers: ?PrivateLaunch,
+
+    fn init(process_init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, target: []const u8, cancellation: ?*const client.Cancellation) !PreparedActivation {
+        if (plan.observed.profile == .released_9) {
+            const stop_help = try process.output(allocator, process_init.io, &.{ plan.snapshot.executable, "host", "pause", "--help" }, cancellation, 32768);
+            defer allocator.free(stop_help);
+            const first = stop_help[0 .. std.mem.indexOfScalar(u8, stop_help, '\n') orelse stop_help.len];
+            if (std.mem.indexOf(u8, first, "[--instance ") == null or std.mem.indexOf(u8, first, "[--store ") == null) return error.UnsupportedHostConfiguration;
+        }
+        const target_path = try std.fmt.allocPrint(allocator, "{s}/bin/rui", .{target});
+        defer allocator.free(target_path);
+        const resolved = try std.Io.Dir.cwd().realPathFileAlloc(process_init.io, target_path, allocator);
+        defer allocator.free(resolved);
+        const executable = try allocator.dupeSentinel(u8, resolved, 0);
+        errdefer allocator.free(executable);
+        const help = try process.output(allocator, process_init.io, &.{ executable, "host", "serve", "--help" }, cancellation, 32768);
+        defer allocator.free(help);
+        if (!supportedByHelp(&plan.launch, help)) return error.UnsupportedHostConfiguration;
+        const helper = try std.process.executablePathAlloc(process_init.io, allocator);
+        errdefer allocator.free(helper);
+        const buffers = try PrivateLaunch.init(allocator, executable, plan.launch.options, plan.observed.facts.store.slice(), plan.observed.facts.active_capacity, plan.snapshot.environment);
+        return .{ .executable = executable, .helper = helper, .buffers = buffers };
+    }
+
+    fn releaseBuffers(self: *PreparedActivation, allocator: std.mem.Allocator) void {
+        if (self.buffers) |*buffers| buffers.deinit(allocator);
+        self.buffers = null;
+    }
+
+    fn deinit(self: *PreparedActivation, allocator: std.mem.Allocator) void {
+        self.releaseBuffers(allocator);
+        allocator.free(self.helper);
+        allocator.free(self.executable);
+    }
+};
 
 extern "c" fn rui_launch_pinned(helper: [*:0]const u8, executable: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, envp: [*:null]const ?[*:0]const u8, startup_read: *c_int, launched_pid: *c_int, launched_started: *c_ulonglong) c_int;
 
@@ -331,25 +389,17 @@ const PrivateLaunch = struct {
     }
 };
 
-fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, target: []const u8, version: candidate.Version, progress: ?Progress) !ActivationOutcome {
+fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *const Plan, prepared: *PreparedActivation, version: candidate.Version, progress: ?Progress) !ActivationOutcome {
     const io = init.io;
-    const store = plan.observed.ready.store.slice();
+    const store = plan.observed.facts.store.slice();
     if (client.hostLockState(io, store) != .free) return .replacement_observed;
-    const executable = try std.fmt.allocPrintSentinel(allocator, "{s}/bin/rui", .{target}, 0);
-    defer allocator.free(executable);
-    const canonical = try std.Io.Dir.cwd().realPathFileAlloc(io, executable, allocator);
-    defer allocator.free(canonical);
-    const helper = try std.process.executablePathAlloc(io, allocator);
-    defer allocator.free(helper);
     var startup_read: c_int = -1;
     var launched_pid: c_int = -1;
     var launched_started: c_ulonglong = 0;
-    const launched = launch: {
-        var buffers = try PrivateLaunch.init(allocator, executable, plan.launch.options, store, plan.observed.ready.active_capacity, plan.snapshot.environment);
-        defer buffers.deinit(allocator);
-        Progress.send(progress, .starting);
-        break :launch rui_launch_pinned(helper.ptr, executable.ptr, buffers.argv.ptr, buffers.argv.len, buffers.envp.ptr, &startup_read, &launched_pid, &launched_started);
-    };
+    Progress.send(progress, .starting);
+    const buffers = &prepared.buffers.?;
+    const launched = rui_launch_pinned(prepared.helper.ptr, prepared.executable.ptr, buffers.argv.ptr, buffers.argv.len, buffers.envp.ptr, &startup_read, &launched_pid, &launched_started);
+    prepared.releaseBuffers(allocator);
     defer if (startup_read >= 0) {
         _ = std.c.close(startup_read);
     };
@@ -368,13 +418,13 @@ fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *cons
             if (observed.pid != launched_pid) return .replacement_observed;
             var snapshot = identity.snapshot(allocator, observed.pid) catch return .{ .unconfirmed = .verifying };
             defer snapshot.deinit(allocator);
-            if (!matchesLaunch(launched_pid, launched_started, &snapshot, canonical)) return .{ .unconfirmed = .verifying };
-            const reported = process.output(allocator, io, &.{ canonical, "--version" }, null, 512) catch return .{ .unconfirmed = .verifying };
+            if (!matchesLaunch(launched_pid, launched_started, &snapshot, prepared.executable)) return .{ .unconfirmed = .verifying };
+            const reported = process.output(allocator, io, &.{ prepared.executable, "--version" }, null, 512) catch return .{ .unconfirmed = .verifying };
             defer allocator.free(reported);
             if (releaseVersion(reported)) |actual| {
                 if (actual.order(version) != .eq) return .{ .unconfirmed = .verifying };
             } else return .{ .unconfirmed = .verifying };
-            if (observed.ready.active_capacity != plan.observed.ready.active_capacity) return .{ .unconfirmed = .verifying };
+            if (observed.ready.active_capacity != plan.observed.facts.active_capacity) return .{ .unconfirmed = .verifying };
             return .{ .ready = .{ .instance = observed.ready.instance, .pid = observed.pid } };
         } else |_| {}
         const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
@@ -519,4 +569,26 @@ test "upgrade lifecycle derives launch semantics before disruption" {
     try std.testing.expect(restartableEnvironment(&.{ "HOME=/home/fixture", "SSL_CERT_DIR=/one:/two", "PRIVATE=synthetic-only" }));
     try std.testing.expect(releaseVersion("rui unreleased (abc)\n") == null);
     try std.testing.expectEqual(@as(u32, 56), releaseVersion("rui 0.56.4 (abc)\n").?.schema);
+}
+
+test "upgrade lifecycle control cannot equate different wire profiles or instances" {
+    var original: client.HostControlObservation = .{
+        .profile = .released_9,
+        .pid = 123,
+        .facts = .{ .store = .{ .len = 0 }, .instance = @splat(1), .active_capacity = 2, .started_at = 0, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .unserved } } },
+    };
+    try original.facts.store.set("/fixture/store");
+    try std.testing.expect(sameHost(original, original));
+    var replacement = original;
+    replacement.profile = .current;
+    try std.testing.expect(!sameHost(original, replacement));
+    replacement = original;
+    replacement.facts.instance = @splat(2);
+    try std.testing.expect(!sameHost(original, replacement));
+    replacement = original;
+    replacement.pid += 1;
+    try std.testing.expect(!sameHost(original, replacement));
+    replacement = original;
+    try replacement.facts.store.set("/fixture/other");
+    try std.testing.expect(!sameHost(original, replacement));
 }

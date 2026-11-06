@@ -137,15 +137,37 @@ A Label is display text: it never addresses a Session or reaches the model.
 
 ## Watch Sessions
 
-`rui session list` reports each Session's Label, its work state and when that began, who sent its first Message, and when a person or script last wrote to it.
+`rui session list` reports each unarchived Session's Label, archive state, work state and when that began, who sent its first Message, and when a person or script last wrote to it.
+Use `--archived` for archived Sessions or `--include-archived` for both.
+`--all` still selects every Workspace.
 
 To watch many Sessions:
 
 1. List once and keep the reply's `since`.
 2. List again with `--since` that value.
-   `delta` says `not_modified` (keep your rows), `changed` (replace only the rows returned) or `full` (a complete listing).
+   `delta` says `not_modified` (keep your rows), `changed` (replace the rows returned and remove any whose `archive_state` no longer matches your filter) or `full` (a complete listing).
    Every reply carries the next `since`.
 
+Keep the same Workspace and archive filters when you reuse the token.
+When you change either filter, discard the old rows and token and start a fresh listing.
 The token is opaque and does not survive a Host restart.
 A retry falling due changes no row, so compare `due_at_ms` with the clock yourself.
 To watch one Session, use `rui session inspect --session ID` rather than a listing.
+
+## Archive a Session
+
+```sh
+rui session archive --session ID
+rui session unarchive --session ID
+```
+
+Archive saves a stop-and-archive intent.
+Its accepted reply reports `completion.status` as `pending` or `completed`.
+The Session remains unarchived until its selected work has stopped.
+Inspect the original request to follow completion, or recover its captured command after a lost reply.
+Recovery uses kind `session-archive` for archive and unarchive.
+
+Unarchive restores visibility without starting work.
+A new Message to an archived Session also restores it in the admission transaction.
+Messages during archive settlement reject as `session_archiving`.
+Exact Session reads remain available in every archive state.
