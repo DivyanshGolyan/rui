@@ -224,7 +224,6 @@ const launch_conflicts = &[_]Conflict{
     .{ .code = .launch_frame_excludes_store, .a = "launch-frame", .b = "store-hex" },
     .{ .code = .launch_frame_excludes_provider, .a = "launch-frame", .b = "provider" },
     .{ .code = .launch_frame_excludes_provider_endpoint, .a = "launch-frame", .b = "provider-endpoint" },
-    .{ .code = .launch_frame_excludes_provider_ca_file, .a = "launch-frame", .b = "provider-ca-file" },
     .{ .code = .launch_frame_excludes_active_capacity, .a = "launch-frame", .b = "active-capacity" },
     .{ .code = .launch_frame_excludes_codex_fixture, .a = "launch-frame", .b = "test-codex-fixture-endpoint" },
     .{ .code = .launch_frame_excludes_openai_fixture, .a = "launch-frame", .b = "test-openai-fixture-endpoint" },
@@ -933,6 +932,18 @@ test "parser refusals identify each invocation cause and its witness" {
     try std.testing.expectEqual(.memory_exhausted, refusal.code);
 }
 
+test "a launch frame can use an explicit provider CA file in either option order" {
+    for ([_][]const []const u8{
+        &.{ "--launch-frame", "--provider-ca-file", "/fixture/ca.pem" },
+        &.{ "--provider-ca-file", "/fixture/ca.pem", "--launch-frame" },
+    }) |args| {
+        var storage: [256]u8 = undefined;
+        const parsed = try testParse(Command.host_serve.definition(), args, &storage);
+        try std.testing.expect(parsed.has("launch-frame"));
+        try std.testing.expectEqualStrings("/fixture/ca.pem", parsed.get("provider-ca-file").?);
+    }
+}
+
 test "every declared conflict emits its own catalog code" {
     inline for (comptime std.meta.tags(Command)) |command| {
         const definition = command.definition();
@@ -1075,7 +1086,6 @@ test "conflict golden lines name every incompatible spelling and complete repair
         .{ .command = .host_serve, .args = &.{ "--launch-frame", "--store-hex", "x" }, .code = .launch_frame_excludes_store, .token = "launch-frame", .expected = "rui host serve: --launch-frame with --store-hex: The launch frame already supplies the Store. Accepted: --launch-frame, or --store PATH or --store-hex HEX without --launch-frame. Next: Remove the Store flag or stop using --launch-frame. Nothing was captured or sent. [launch_frame_excludes_store]\n" },
         .{ .command = .host_serve, .args = &.{ "--launch-frame", "--provider", "x" }, .code = .launch_frame_excludes_provider, .token = "launch-frame", .expected = "rui host serve: --launch-frame with --provider: A launch frame cannot be combined with a separate provider option. Accepted: --launch-frame without --provider, or --provider without --launch-frame. Next: Remove --provider or stop using --launch-frame. Nothing was captured or sent. [launch_frame_excludes_provider]\n" },
         .{ .command = .host_serve, .args = &.{ "--launch-frame", "--provider-endpoint", "x" }, .code = .launch_frame_excludes_provider_endpoint, .token = "launch-frame", .expected = "rui host serve: --launch-frame with --provider-endpoint: A launch frame cannot be combined with a separate provider endpoint option. Accepted: --launch-frame without --provider-endpoint, or --provider-endpoint without --launch-frame. Next: Remove --provider-endpoint or stop using --launch-frame. Nothing was captured or sent. [launch_frame_excludes_provider_endpoint]\n" },
-        .{ .command = .host_serve, .args = &.{ "--launch-frame", "--provider-ca-file", "x" }, .code = .launch_frame_excludes_provider_ca_file, .token = "launch-frame", .expected = "rui host serve: --launch-frame with --provider-ca-file: A launch frame cannot be combined with a separate provider CA file option. Accepted: --launch-frame without --provider-ca-file, or --provider-ca-file without --launch-frame. Next: Remove --provider-ca-file or stop using --launch-frame. Nothing was captured or sent. [launch_frame_excludes_provider_ca_file]\n" },
         .{ .command = .host_serve, .args = &.{ "--launch-frame", "--active-capacity", "x" }, .code = .launch_frame_excludes_active_capacity, .token = "launch-frame", .expected = "rui host serve: --launch-frame with --active-capacity: A launch frame cannot be combined with a separate active capacity option. Accepted: --launch-frame without --active-capacity, or --active-capacity without --launch-frame. Next: Remove --active-capacity or stop using --launch-frame. Nothing was captured or sent. [launch_frame_excludes_active_capacity]\n" },
         .{ .command = .host_serve, .args = &.{ "--launch-frame", "--test-codex-fixture-endpoint", "x" }, .code = .launch_frame_excludes_codex_fixture, .token = "launch-frame", .expected = "rui host serve: --launch-frame with --test-codex-fixture-endpoint: A launch frame cannot be combined with a separate Codex fixture endpoint option. Accepted: --launch-frame without --test-codex-fixture-endpoint, or --test-codex-fixture-endpoint without --launch-frame. Next: Remove --test-codex-fixture-endpoint or stop using --launch-frame. Nothing was captured or sent. [launch_frame_excludes_codex_fixture]\n" },
         .{ .command = .host_serve, .args = &.{ "--launch-frame", "--test-openai-fixture-endpoint", "x" }, .code = .launch_frame_excludes_openai_fixture, .token = "launch-frame", .expected = "rui host serve: --launch-frame with --test-openai-fixture-endpoint: A launch frame cannot be combined with a separate OpenAI fixture endpoint option. Accepted: --launch-frame without --test-openai-fixture-endpoint, or --test-openai-fixture-endpoint without --launch-frame. Next: Remove --test-openai-fixture-endpoint or stop using --launch-frame. Nothing was captured or sent. [launch_frame_excludes_openai_fixture]\n" },

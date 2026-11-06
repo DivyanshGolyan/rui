@@ -3573,6 +3573,7 @@ Orphan tools may retain each bounded unlinked stdin file until exit; replacement
 
 A launched Host (`rui host serve --launch-frame`) is the exception: its shutdown is bounded.
 The program that starts it writes one frame to its stdin, a 4-byte big-endian length and then UTF-8 JSON naming `v` (1), the Store directory, the OpenAI key provider `{kind: "openai_key", baseUrl, key}`, the `runtimeDir` that holds its socket `rui.sock`, and optionally `activeCapacity`.
+An explicit `--provider-ca-file PATH` may accompany `--launch-frame` to trust only that PEM file, on macOS as on Linux; it changes transport trust, not the provider or credentials supplied by the frame.
 The optional `presets` object maps at most 64 names (1–64 bytes of `[a-z0-9_-]`) to complete agent specs, checked by the shared agent-spec parser and held only in Host memory (D22, D112).
 A `start_agent` call may name a preset and override its fields, but still refuses provider or Workspace fields, including those supplied by the preset (D221).
 The key stays in memory only, never on disk, in argv or in the environment.

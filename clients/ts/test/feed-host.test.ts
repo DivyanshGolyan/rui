@@ -31,11 +31,11 @@ test("follow wakes for two local sends and makes no requests between them while 
 	const cert = join(root, "cert.pem");
 	const key = join(root, "key.pem");
 	execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1", "-days", "1"], { stdio: "pipe" });
-	// The launched client intentionally does not pass through TLS environment overrides.
-	// This test-only executable trusts just the local certificate, then execs the real binary.
+	// System trust uses Apple SecTrust on macOS, not SSL_CERT_FILE.
+	// Give the real Host explicit trust in only this fixture certificate on every platform.
 	const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
 	const wrapper = join(root, "rui-with-test-ca");
-	writeFileSync(wrapper, `#!/bin/sh\nexport SSL_CERT_FILE=${quote(cert)}\nexec ${quote(resolve(binary ?? "rui"))} "$@"\n`, { mode: 0o700 });
+	writeFileSync(wrapper, `#!/bin/sh\nexec ${quote(resolve(binary ?? "rui"))} "$@" --provider-ca-file ${quote(cert)}\n`, { mode: 0o700 });
 	const provider = createSecureServer({ key: readFileSync(key), cert: readFileSync(cert) });
 	const requests: string[] = [];
 	const paths: string[] = [];
@@ -97,7 +97,11 @@ test("follow wakes for two local sends and makes no requests between them while 
 		const firstIdle = once(events, "idle", { signal: controller.signal });
 		consume = (async () => {
 			for await (const entry of session.listActivity({ follow: true, signal: controller.signal })) {
-				if (entry.kind === "assistant") texts.push(entry.text ?? "");
+				if (entry.kind === "assistant") {
+					texts.push(entry.text ?? "");
+					events.emit("answer");
+				}
+				if (entry.kind === "turn_ended") assert.equal(entry.ending, "done", `unexpected turn ending: ${JSON.stringify(entry)}`);
 			}
 		})();
 		const unexpectedEnd = consume.then(() => {
@@ -109,15 +113,18 @@ test("follow wakes for two local sends and makes no requests between them while 
 		assert.equal(pages, initialPages, "initial idle follower must not poll");
 
 		for (let index = 1; index <= 2; index++) {
+			const answered = once(events, "answer", { signal: controller.signal });
 			const idle = once(events, "idle", { signal: controller.signal });
 			// Deliberately use a new handle, not the handle the follower belongs to.
 			await rui.getSession(session.id).send(`message ${index}`, { idempotencyKey: `feed:message:${index}` });
-			await Promise.race([idle, unexpectedEnd]);
+			// An empty dormant page is not proof that the follower yielded the answer.
+			await Promise.race([Promise.all([answered, idle]), unexpectedEnd]);
 			assert.deepEqual(texts, Array.from({ length: index }, (_, i) => `answer ${i + 1}`));
 			const atIdle = pages;
 			await sleep(2_200); // Also catches the old implementation's capped 2 s polling.
 			assert.equal(pages, atIdle, "completed idle follower must not poll");
 		}
+		assert.deepEqual(texts, ["answer 1", "answer 2"]);
 		assert.equal(requests.length, 2);
 		assert.ok(paths.every((path) => path === "/v1/models" || path === "/v1/responses"));
 		assert.equal(idlePages, 3);
