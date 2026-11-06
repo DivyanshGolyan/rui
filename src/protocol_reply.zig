@@ -146,7 +146,7 @@ pub const ActivityPage = struct {
         const Fact = protocol.ActivityItem;
         const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
-        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
+        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: ?JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
         const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
@@ -245,7 +245,7 @@ pub const ActivityPage = struct {
                 .compacted => |compacted| fact.value = .{ .compacted = .{ .operation = try id(compacted.operation, false), .dropped = try id(compacted.dropped, true) } },
                 .send_failed => |failed| {
                     if (failed.code.slice().len == 0) return error.InvalidActivityPage;
-                    fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = try failed.target.peer(), .code = failed.code.value } };
+                    fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = if (failed.target) |peer| try peer.peer() else null, .code = failed.code.value } };
                 },
                 .assistant => |assistant| fact.value = .{ .assistant = .{ .content = try content(assistant.content), .final = assistant.final } },
                 .tool_result => |result| {

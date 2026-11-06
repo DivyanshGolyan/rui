@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 57;
+pub const schema_version: u32 = 58;
 /// `digest()` of each schema_version, oldest first. Each format PR appends
 /// its own version and forward step (D226); main's digests and steps are
 /// immutable even before release. tests/ci/test_store_schema_version.py
@@ -35,6 +35,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 55, .digest = 0x4acf921dca365b6e },
     .{ .schema_version = 56, .digest = 0xbdf9ac7b6016b1da },
     .{ .schema_version = 57, .digest = 0x75359f28a14f23a9 },
+    .{ .schema_version = 58, .digest = 0x4cd0a6b38d4904ed },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -254,6 +255,17 @@ pub const migrations = [_]Migration{
             "ALTER TABLE session_stop ADD COLUMN parent_caused TINYINT NOT NULL DEFAULT 0 AFTER stopped_at, ADD CHECK(parent_caused IN (0,1))",
             "UPDATE session_stop SET parent_caused=1 WHERE command_key>='rui.core/stop/' AND command_key<'rui.core/stop0'",
             "ALTER TABLE session_ending_owed ADD COLUMN suppress_message TINYINT NOT NULL DEFAULT 0, ADD CHECK(suppress_message IN (0,1))",
+        },
+    },
+    // Schema 58: failed-send targets become nullable on wire 10. Saved
+    // Commands and sender refusals keep their original identity and position.
+    .{
+        .from = 57,
+        .sqlite = &.{
+            "UPDATE store_meta SET meta_value='10' WHERE meta_key='wire_version' AND meta_value='9'",
+        },
+        .mysql = &.{
+            "UPDATE store_meta SET meta_value='10' WHERE meta_key='wire_version' AND meta_value='9'",
         },
     },
 };
@@ -2264,6 +2276,17 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
     }
 }
 
+test "schema 58 migration updates only wire metadata on SQLite and MySQL" {
+    const step = migrations[57 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 57), step.from);
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        try std.testing.expectEqual(@as(usize, 1), statements.len);
+        try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='10' WHERE meta_key='wire_version' AND meta_value='9'", statements[0]);
+    }
+    try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='10' WHERE meta_key='wire_version' AND meta_value='9';\n", mysqlMigration(57));
+}
+
 test "schema 57 migration creates the canonical archive objects on SQLite and MySQL" {
     const step = migrations[56 - migration_baseline];
     inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
@@ -2343,9 +2366,9 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try sqlite.exec(database, "CREATE TEMP TABLE original_endings AS SELECT * FROM session_ending_owed");
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE core_command SET kind=6 WHERE command_key='fixture-stop'"));
     try openExisting(std.testing.io, database, root);
-    try std.testing.expectEqual(@as(u32, 57), try sqlite.pragmaInt(database, "PRAGMA user_version"));
-    try std.testing.expect(try metaEquals(database, "format", "57"));
-    try std.testing.expect(try metaEquals(database, "wire_version", "9"));
+    try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
+    try std.testing.expect(try metaEquals(database, "format", format_text));
+    try std.testing.expect(try metaEquals(database, "wire_version", protocol.wire_version));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop)"));

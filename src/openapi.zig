@@ -1425,3 +1425,31 @@ test "Activity schema distinguishes full pages and token-only repeats" {
         try std.testing.expectEqual(case[1], conforms(schemas, schema, value));
     }
 }
+
+test "Activity schema requires a nullable failed-send target without weakening other peers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var document: Document = .init(allocator);
+    const built = try document.build();
+    const schemas = built.object.get("components").?.object.get("schemas").?.object;
+    const schema = schemas.get("ActivityItem").?;
+    const prefix = "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused\",\"code\":\"invalid_session_reference\"";
+    const cases = .{
+        .{ prefix ++ ",\"target\":null}}}", true },
+        .{ prefix ++ ",\"target\":{\"session\":\"absent\",\"label\":null}}}}", true },
+        // NamedPeer's generated schema describes bounded wire strings, not
+        // canonical ID semantics. Native JsonNamedPeer still rejects this.
+        .{ prefix ++ ",\"target\":{\"session\":\"\",\"label\":null}}}}", true },
+        .{ prefix ++ "}}}", false },
+        .{ prefix ++ ",\"target\":{}}}}", false },
+        .{ prefix ++ ",\"target\":\"\"}}}", false },
+        .{ prefix ++ ",\"target\":{\"session\":\"absent\"}}}}", false },
+        .{ prefix ++ ",\"target\":{\"session\":null,\"label\":null}}}}", false },
+        .{ "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"sent\":{\"admission\":\"1\",\"admitted_at\":\"1\",\"target\":null,\"content\":{\"bytes\":\"0\",\"sha256\":\"" ++ "abababababababababababababababababababababababababababababababab" ++ "\"}}}}", false },
+    };
+    inline for (cases) |case| {
+        const value = try std.json.parseFromSliceLeaky(Value, allocator, case[0], .{});
+        try std.testing.expectEqual(case[1], conforms(schemas, schema, value));
+    }
+}

@@ -123,6 +123,43 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
         S ++ "← Received message from Review\\x1b[2m the WAL" ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
 }
 
+test "failed peer Messages distinguish absent targets and reset grouping without changing named output" {
+    const Sink = struct {
+        bytes: [1024]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("k7m2qx");
+    var named = peer;
+    try named.label.set("Review\x1b[2m the WAL");
+    const cases = [_]struct { target: ?protocol.NamedPeer, line: []const u8 }{
+        .{ .target = null, .line = "! Message rejected — No valid target reference" },
+        .{ .target = peer, .line = "! Messaged k7m2qx — Failed" },
+        .{ .target = named, .line = "! Messaged Review\\x1b[2m the WAL — Failed" },
+    };
+    for (cases) |case| {
+        for ([_]bool{ false, true }) |grouped| {
+            var sink: Sink = .{};
+            var compact = grouped;
+            try sendFailed(&sink, case.target, &compact);
+            try std.testing.expect(!compact);
+            var expected: [1024]u8 = undefined;
+            const line = try std.fmt.bufPrint(&expected, "\n" ++ Mark.summary ++ "{s}" ++ Mark.reset ++ "\n", .{case.line});
+            try std.testing.expectEqualStrings(line, sink.bytes[0..sink.length]);
+            // The next ordinary peer row starts a new group, even when the
+            // rejected Message interrupted an existing compact group.
+            const boundary = sink.length;
+            try peerLine(&sink, .outbound, peer, std.math.maxInt(u64), &compact);
+            try std.testing.expect(compact);
+            try std.testing.expectEqualStrings("\n" ++ Mark.summary ++ "→ Messaged k7m2qx" ++ Mark.reset ++ "\n", sink.bytes[boundary..sink.length]);
+        }
+    }
+}
+
 /// One peer Message as one upright dim line, never `›`, in the tool rows'
 /// group: `← Received message from NAME` from a peer, `→ Messaged NAME` sent
 /// to one, NAME being its label or, with none, its ID. Its admission time goes
@@ -143,13 +180,17 @@ pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: prot
     try sink.feed(Mark.reset ++ "\n");
 }
 
-/// A send this Session made that its target refused: set apart, as a failed
-/// tool row is.
-pub fn sendFailed(sink: anytype, target: protocol.NamedPeer, compact: *bool) !void {
+/// A Message this Session sent that was rejected: set apart, as a failed
+/// tool row is. No target means the attempt named no valid Session reference.
+pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer, compact: *bool) !void {
     compact.* = false;
-    try sink.feed("\n" ++ Mark.summary ++ "! Messaged ");
-    try peerName(sink, target);
-    try sink.feed(" — Failed" ++ Mark.reset ++ "\n");
+    try sink.feed("\n" ++ Mark.summary);
+    if (target) |peer| {
+        try sink.feed("! Messaged ");
+        try peerName(sink, peer);
+        try sink.feed(" — Failed");
+    } else try sink.feed("! Message rejected — No valid target reference");
+    try sink.feed(Mark.reset ++ "\n");
 }
 
 /// A peer's label, escaped as any label is, or its ID when it has none.
