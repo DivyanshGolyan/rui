@@ -211,7 +211,7 @@ const reject_sent = rsql.Write(.{
 
 /// What every Message reads in round 1, besides its Session or its
 /// creation, and keeps until commit.
-const MessageReads = struct {
+pub const MessageReads = struct {
     digest: [32]u8,
     saved: saved_command.Result = undefined,
     sender: message_sender.Result = null,
@@ -451,14 +451,16 @@ noinline fn submitCreating(
     faults: Faults,
 ) !MessageReply {
     const configuration = &command.configuration.?;
-    var reads: MessageReads = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
-    // Over 4.6 KB, so held where the Store owns it, as a configure does.
+    // Creation's configuration and Message facts have one address in the
+    // Store's existing scratch until this transaction settles.
     const creation = a.store.configurationReads();
     creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-    readMessage(a, selector, command, &reads);
+    const reads = &creation.message;
+    reads.* = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
+    readMessage(a, selector, command, reads);
     configuration_domain.prepareConfiguration(a, "", configuration, creation);
     try a.run();
-    if (try replayMessage(a, command, &reads)) |reply| return reply;
+    if (try replayMessage(a, command, reads)) |reply| return reply;
     const sender_valid = senderValid(command, selector, reads.sender);
     var rejection: ?protocol.MessageRejection = if (command.session.len != 0)
         .invalid_session_reference
@@ -473,10 +475,10 @@ noinline fn submitCreating(
         .accepted => |applied| {
             content_domain.lookup(a, &reads.text);
             try a.run();
-            return admitMessage(a, io, command, &reads, applied.head, applied.session, &applied, committed, faults);
+            return admitMessage(a, io, command, reads, applied.head, applied.session, &applied, committed, faults);
         },
     };
-    return rejectMessage(a, command, &reads, command.sender != null and sender_valid, rejection.?, faults);
+    return rejectMessage(a, command, reads, command.sender != null and sender_valid, rejection.?, faults);
 }
 
 /// What running a `message_agent` call did.

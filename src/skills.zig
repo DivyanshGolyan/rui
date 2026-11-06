@@ -3,6 +3,7 @@
 //! allocator; callers may use an arena, or the Catalog/Delta deinit helpers.
 const std = @import("std");
 const yaml = @import("yaml");
+const json_scalar = @import("json_scalar.zig");
 const Allocator = std.mem.Allocator;
 
 // Per scan: at most two roots, 4096 direct children each, and 4096 winners.
@@ -19,6 +20,12 @@ pub const Entry = struct {
     name: []const u8,
     description: []const u8,
     path: []const u8,
+
+    pub fn jsonParse(allocator: Allocator, source: anytype, options: std.json.ParseOptions) !Entry {
+        const Text = json_scalar.Text;
+        const fields = try std.json.innerParse(struct { name: Text, description: Text, path: Text }, allocator, source, options);
+        return .{ .name = fields.name.slice, .description = fields.description.slice, .path = fields.path.slice };
+    }
 };
 
 pub const Catalog = struct {
@@ -71,7 +78,7 @@ pub fn discoverWithScratch(allocator: Allocator, scratch_allocator: Allocator, i
         const home_root = try std.fs.path.join(scratch, &.{ directory, ".agents", "skills" });
         try scanRoot(scratch_allocator, scratch, io, home_root, &winners);
     }
-    std.mem.sort(Entry, winners.items, {}, entryLessThan);
+    std.sort.heap(Entry, winners.items, {}, entryLessThan);
     return .{ .entries = try copyEntries(allocator, winners.items) };
 }
 
@@ -307,9 +314,9 @@ pub fn diff(allocator: Allocator, before: Catalog, after: Catalog) !Delta {
     for (before.entries) |entry| {
         if (findEntry(after.entries, entry.name) == null) try removed.append(allocator, entry);
     }
-    std.mem.sort(Entry, added.items, {}, entryLessThan);
-    std.mem.sort(Entry, removed.items, {}, entryLessThan);
-    std.mem.sort(Entry, changed.items, {}, entryLessThan);
+    std.sort.heap(Entry, added.items, {}, entryLessThan);
+    std.sort.heap(Entry, removed.items, {}, entryLessThan);
+    std.sort.heap(Entry, changed.items, {}, entryLessThan);
     const owned_added = try copyEntries(allocator, added.items);
     errdefer freeEntries(allocator, owned_added);
     const owned_removed = try copyEntries(allocator, removed.items);
@@ -377,7 +384,7 @@ pub fn encodeCatalog(allocator: Allocator, catalog: Catalog) ![]const u8 {
     try validateCatalog(catalog);
     const ordered = try allocator.dupe(Entry, catalog.entries);
     defer allocator.free(ordered);
-    std.mem.sort(Entry, ordered, {}, entryLessThan);
+    std.sort.heap(Entry, ordered, {}, entryLessThan);
     const encoded = try std.json.Stringify.valueAlloc(allocator, Catalog{ .entries = ordered }, .{});
     errdefer allocator.free(encoded);
     if (encoded.len > max_catalog_bytes) return error.SkillCatalogLimit;
@@ -390,7 +397,7 @@ pub fn decodeCatalog(allocator: Allocator, encoded: []const u8) !Catalog {
     defer parsed.deinit();
     try validateCatalog(parsed.value);
     const entries = try copyEntries(allocator, parsed.value.entries);
-    std.mem.sort(Entry, @constCast(entries), {}, entryLessThan);
+    std.sort.heap(Entry, @constCast(entries), {}, entryLessThan);
     return .{ .entries = entries };
 }
 
@@ -623,7 +630,8 @@ test "skills discovery propagates unreadable roots and candidates instead of rem
         return error.ExpectedPermissionFailure;
     } else |err| try std.testing.expect(err == error.AccessDenied or err == error.PermissionDenied);
     try std.testing.expectEqual(@as(c_int, 0), std.c.fchmod(file.handle, 0o600));
-    var skills_dir = try tmp.dir.openDir(io, ".agents/skills", .{});
+    // Linux's non-iterable directory handle is O_PATH, which cannot fchmod.
+    var skills_dir = try tmp.dir.openDir(io, ".agents/skills", .{ .iterate = true });
     defer skills_dir.close(io);
     try std.testing.expectEqual(@as(c_int, 0), std.c.fchmod(skills_dir.handle, 0));
     defer std.debug.assert(std.c.fchmod(skills_dir.handle, 0o700) == 0);
@@ -1010,4 +1018,60 @@ test "skills discovery rejects nonUTF8 canonical symlink paths" {
     defer allocator.free(previous_json);
     try std.testing.expect(std.unicode.utf8ValidateSlice(previous_json));
     try std.testing.expect(std.mem.indexOfScalar(u8, previous_json, 0xff) == null);
+}
+
+test "skills catalog wire rejects byte arrays and numeric coercions for every text field" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const fields = [_][]const u8{ "name", "description", "path" };
+    const byte_arrays = [_][]const u8{ "[100,101,109,111]", "[111,107]", "[47,83,75,73,76,76,46,109,100]" };
+    for (fields, byte_arrays) |field, byte_array| {
+        for ([_][]const u8{ byte_array, "[100.0]", "[1e2]", "17", "17.0", "1.7e1", "null", "true", "{}" }) |token| {
+            const encoded = try std.fmt.allocPrint(allocator, "{{\"entries\":[{{\"name\":{s},\"description\":{s},\"path\":{s}}}]}}", .{
+                if (std.mem.eql(u8, field, "name")) token else "\"demo\"",
+                if (std.mem.eql(u8, field, "description")) token else "\"ok\"",
+                if (std.mem.eql(u8, field, "path")) token else "\"/SKILL.md\"",
+            });
+            defer allocator.free(encoded);
+            try std.testing.expectError(error.UnexpectedToken, decodeCatalog(allocator, encoded));
+        }
+    }
+    const escaped = "{\"entries\":[{\"name\":\"d\\u0065mo\",\"description\":\"quote \\\" \\n \\ud83d\\ude00 e\\u0301\",\"path\":\"/skills/\\u03b4/SKILL.md\"}]}";
+    const decoded = try decodeCatalog(allocator, escaped);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("demo", decoded.entries[0].name);
+    try std.testing.expectEqualStrings("quote \" \n 😀 e\xcc\x81", decoded.entries[0].description);
+    try std.testing.expectEqualStrings("/skills/δ/SKILL.md", decoded.entries[0].path);
+    const encoded = try encodeCatalog(allocator, decoded);
+    defer allocator.free(encoded);
+    const roundtrip = try decodeCatalog(allocator, encoded);
+    defer roundtrip.deinit(allocator);
+    try std.testing.expectEqualDeep(decoded.entries, roundtrip.entries);
+}
+
+test "skills catalog full bounded population has deterministic unique-name order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const entries = try allocator.alloc(Entry, max_entries);
+    for (entries, 0..) |*entry, index| {
+        entry.* = .{
+            .name = try std.fmt.allocPrint(allocator, "skill-{d:0>4}", .{max_entries - index - 1}),
+            .description = "one metadata value",
+            .path = "/skills/SKILL.md",
+        };
+    }
+    const reverse_encoded = try encodeCatalog(allocator, .{ .entries = entries });
+    std.mem.reverse(Entry, entries);
+    const ordered_encoded = try encodeCatalog(allocator, .{ .entries = entries });
+    try std.testing.expectEqualStrings(reverse_encoded, ordered_encoded);
+    const decoded = try decodeCatalog(allocator, reverse_encoded);
+    try std.testing.expectEqual(max_entries, decoded.entries.len);
+    for (decoded.entries, 0..) |entry, index| {
+        const expected = try std.fmt.allocPrint(allocator, "skill-{d:0>4}", .{index});
+        try std.testing.expectEqualStrings(expected, entry.name);
+    }
+    const delta = try diff(allocator, .{ .entries = entries }, decoded);
+    try std.testing.expect(delta.isEmpty());
 }

@@ -1693,10 +1693,10 @@ const accepted_settlement_growth = 14352;
 comptime {
     // The settlement batch is the larger use: 19240 bytes, the original
     // 14480 plus 4760 for per-batch call names, membership flags and their
-    // lookup visitor. The configure reads use 13552, including the saved
-    // parent reference and the saved tool and loaded names a subset update
-    // reads. Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 13552 or scratch_bytes != 19240)
+    // lookup visitor. The creation reads use 14472, including command/Message
+    // facts, saved parent reference and the saved tool and loaded names a
+    // subset update reads. Exact, so a change to either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 14472 or scratch_bytes != 19240)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }

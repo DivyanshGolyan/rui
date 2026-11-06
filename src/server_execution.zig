@@ -4092,13 +4092,23 @@ test "catalog answer slims saves and a 304 keeps its generation and facts" {
 }
 
 test "Host resolves MCP calls without Bash admission and continues the Turn" {
-    const records = comptime [_]tools.Record{ tools.record(.bash).*, .{
-        .name = "fetch_page",
-        .owner = .mcp,
-        .server = "docs",
-        .description = "Fetch a page.",
-        .input_schema = "{\"type\":\"object\"}",
-    }, tools.record(.find_tools).*, tools.record(.message_agent).*, tools.record(.read_transcript).*, tools.record(.start_agent).*, tools.record(.web_search).* };
+    // Keep the native catalog complete independently of this Session's
+    // deliberately restricted tools and the MCP behavior asserted below.
+    const records = comptime blk: {
+        var out = tools.built_in.records[0..tools.built_in.records.len].* ++ [_]tools.Record{.{
+            .name = "fetch_page",
+            .owner = .mcp,
+            .server = "docs",
+            .description = "Fetch a page.",
+            .input_schema = "{\"type\":\"object\"}",
+        }};
+        std.sort.heap(tools.Record, &out, {}, struct {
+            fn lessThan(_: void, a: tools.Record, b: tools.Record) bool {
+                return std.mem.lessThan(u8, a.name, b.name);
+            }
+        }.lessThan);
+        break :blk out;
+    };
     const digests = comptime blk: {
         @setEvalBranchQuota(1_000_000);
         var out: [records.len][32]u8 = undefined;
