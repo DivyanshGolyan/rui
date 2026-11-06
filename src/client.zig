@@ -635,8 +635,10 @@ fn uploadHostInfoRequest(requests: Requests, fd: std.posix.fd_t, store: []const 
 
 test "upgrade Host observation uses exact read-only profiles on each authenticated connection" {
     const Mode = enum { current, historical, strict, exact, body_mismatch, malformed_header, unavailable, unknown, budget };
+    const Phase = enum { temporary_store, store_permissions, store_path, lease, runtime, listener, peer_spawn, observation, verification, expired_current, expired_released_9 };
     const Clock = struct {
         var nanoseconds: std.atomic.Value(i64) = .init(0);
+        var observation_finished: std.Io.Event = .unset;
         fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
             return .{ .nanoseconds = nanoseconds.load(.acquire) };
         }
@@ -694,7 +696,20 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 // Record the complete independent request before replying: joining
                 // the peer later cannot turn a missed attempt into evidence.
                 self.seen += 1;
-                if (self.mode == .budget) Clock.nanoseconds.store(if (index == 0) 900 * std.time.ns_per_ms else 1100 * std.time.ns_per_ms, .release);
+                if (self.mode == .budget) {
+                    Clock.nanoseconds.store(if (index == 0) 900 * std.time.ns_per_ms else 1100 * std.time.ns_per_ms, .release);
+                    if (index == 1) {
+                        // The observation expires before any second reply. EOF
+                        // makes a wrongly renewed deadline fail as truncation;
+                        // writing a reply here races the observer's close.
+                        switch (socket_os.shutdown(fd, std.c.SHUT.WR)) {
+                            .done, .peer_gone => {},
+                            .failed => return error.TestPeerShutdownFailed,
+                        }
+                        Clock.observation_finished.waitUncancelable(io);
+                        continue;
+                    }
+                }
                 const response_wire = switch (self.mode) {
                     .current, .unavailable => protocol.wire_version,
                     .unknown => "8",
@@ -709,64 +724,98 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
             }
         }
     };
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.setPermissions(io, .fromMode(0o700));
-    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
-    var lease = try platform.StoreLease.acquire(io, root);
-    defer lease.release();
-    try lease.prepareForServing(false);
-    const paths = lease.paths;
-    for (std.meta.tags(Mode)) |mode| {
-        var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
-        defer {
-            listener.deinit(io);
-            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    const Run = struct {
+        fn execute(phase: *Phase, active_mode: *?Mode) !void {
+            const io = std.testing.io;
+            var tmp = std.testing.tmpDir(.{ .iterate = true });
+            defer tmp.cleanup();
+            phase.* = .store_permissions;
+            try tmp.dir.setPermissions(io, .fromMode(0o700));
+            var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            phase.* = .store_path;
+            const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+            phase.* = .lease;
+            var lease = try platform.StoreLease.acquire(io, root);
+            defer lease.release();
+            phase.* = .runtime;
+            try lease.prepareForServing(false);
+            const paths = lease.paths;
+            for (std.meta.tags(Mode)) |mode| {
+                active_mode.* = mode;
+                phase.* = .listener;
+                var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+                defer {
+                    listener.deinit(io);
+                    std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+                }
+                var peer: Peer = .{ .listener = &listener, .store = paths.store.slice(), .mode = mode };
+                Clock.nanoseconds.store(0, .release);
+                Clock.observation_finished.reset();
+                phase.* = .peer_spawn;
+                const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+                var joined = false;
+                defer if (!joined) {
+                    Clock.observation_finished.set(io);
+                    thread.join();
+                };
+                var clock_vtable = io.vtable.*;
+                clock_vtable.now = Clock.now;
+                const observation_io: std.Io = if (mode == .budget) .{ .userdata = io.userdata, .vtable = &clock_vtable } else io;
+                phase.* = .observation;
+                const result: anyerror!HostControlObservation = switch (mode) {
+                    .strict => if (observeHostProcess(io, root, null)) |_| error.TestUnexpectedResult else |err| err,
+                    .exact => observeHostForUpgradeProfile(io, root, .released_9, null),
+                    else => observeHostForUpgrade(observation_io, root, null),
+                };
+                Clock.observation_finished.set(io);
+                thread.join();
+                joined = true;
+                phase.* = .verification;
+                errdefer {
+                    if (result) |observed| {
+                        std.debug.print("upgrade observation failure phase={s} mode={s} result.profile={s} result.pid={d} peer.failure={any} seen={d}\n", .{ @tagName(phase.*), @tagName(mode), @tagName(observed.profile), observed.pid, peer.failure, peer.seen });
+                    } else |observation_error| {
+                        std.debug.print("upgrade observation failure phase={s} mode={s} result.error={s} peer.failure={any} seen={d}\n", .{ @tagName(phase.*), @tagName(mode), @errorName(observation_error), peer.failure, peer.seen });
+                    }
+                }
+                switch (mode) {
+                    .strict, .unknown => try std.testing.expectError(error.WrongWireVersion, result),
+                    .budget => try std.testing.expectError(error.ResponseInactive, result),
+                    .body_mismatch, .unavailable => try std.testing.expectError(error.InvalidHostInfo, result),
+                    .malformed_header => try std.testing.expectError(error.InvalidResponse, result),
+                    .current, .historical, .exact => {
+                        const observed = try result;
+                        try std.testing.expectEqual(if (mode == .current) protocol_reply.HostInfoProfile.current else .released_9, observed.profile);
+                        try std.testing.expectEqual(std.c.getpid(), observed.pid);
+                        try std.testing.expect(observed.facts.store.eql(paths.store.slice()));
+                        try std.testing.expectEqual(@as(usize, 17), observed.facts.active_capacity);
+                        try std.testing.expectEqual(@as(usize, 10), observed.facts.intake_capacity);
+                        try std.testing.expectEqual(@as(?usize, 256), observed.facts.descriptor_limit);
+                        try std.testing.expectEqual(@as(usize, 3), observed.facts.custody_occupied);
+                        try std.testing.expect(observed.facts.paused);
+                        try std.testing.expectEqual(protocol.Route.endpoint, observed.facts.capabilities.providers.codex);
+                    },
+                }
+                try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
+                try std.testing.expectEqual(@as(usize, switch (mode) {
+                    .historical, .body_mismatch, .unknown, .budget => 2,
+                    else => 1,
+                }), peer.seen);
+            }
+            active_mode.* = null;
+            const expired = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1;
+            phase.* = .expired_current;
+            try std.testing.expectError(error.TransferInactive, observeHostForUpgrade(io, root, expired));
+            phase.* = .expired_released_9;
+            try std.testing.expectError(error.TransferInactive, observeHostForUpgradeProfile(io, root, .released_9, expired));
         }
-        var peer: Peer = .{ .listener = &listener, .store = paths.store.slice(), .mode = mode };
-        const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
-        var joined = false;
-        defer if (!joined) thread.join();
-        var clock_vtable = io.vtable.*;
-        clock_vtable.now = Clock.now;
-        Clock.nanoseconds.store(0, .release);
-        const observation_io: std.Io = if (mode == .budget) .{ .userdata = io.userdata, .vtable = &clock_vtable } else io;
-        const result: anyerror!HostControlObservation = switch (mode) {
-            .strict => if (observeHostProcess(io, root, null)) |_| error.TestUnexpectedResult else |err| err,
-            .exact => observeHostForUpgradeProfile(io, root, .released_9, null),
-            else => observeHostForUpgrade(observation_io, root, null),
-        };
-        thread.join();
-        joined = true;
-        switch (mode) {
-            .strict, .unknown => try std.testing.expectError(error.WrongWireVersion, result),
-            .budget => try std.testing.expectError(error.ResponseInactive, result),
-            .body_mismatch, .unavailable => try std.testing.expectError(error.InvalidHostInfo, result),
-            .malformed_header => try std.testing.expectError(error.InvalidResponse, result),
-            .current, .historical, .exact => {
-                const observed = try result;
-                try std.testing.expectEqual(if (mode == .current) protocol_reply.HostInfoProfile.current else .released_9, observed.profile);
-                try std.testing.expectEqual(std.c.getpid(), observed.pid);
-                try std.testing.expect(observed.facts.store.eql(paths.store.slice()));
-                try std.testing.expectEqual(@as(usize, 17), observed.facts.active_capacity);
-                try std.testing.expectEqual(@as(usize, 10), observed.facts.intake_capacity);
-                try std.testing.expectEqual(@as(?usize, 256), observed.facts.descriptor_limit);
-                try std.testing.expectEqual(@as(usize, 3), observed.facts.custody_occupied);
-                try std.testing.expect(observed.facts.paused);
-                try std.testing.expectEqual(protocol.Route.endpoint, observed.facts.capabilities.providers.codex);
-            },
-        }
-        try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
-        try std.testing.expectEqual(@as(usize, switch (mode) {
-            .historical, .body_mismatch, .unknown, .budget => 2,
-            else => 1,
-        }), peer.seen);
-    }
-    const expired = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1;
-    try std.testing.expectError(error.TransferInactive, observeHostForUpgrade(io, root, expired));
-    try std.testing.expectError(error.TransferInactive, observeHostForUpgradeProfile(io, root, .released_9, expired));
+    };
+    var phase: Phase = .temporary_store;
+    var active_mode: ?Mode = null;
+    Run.execute(&phase, &active_mode) catch |err| {
+        std.debug.print("upgrade observation failure phase={s} mode={s} error={s}\n", .{ @tagName(phase), if (active_mode) |mode| @tagName(mode) else "none", @errorName(err) });
+        return err;
+    };
 }
 
 pub const HostLockState = enum { free, held, failure };

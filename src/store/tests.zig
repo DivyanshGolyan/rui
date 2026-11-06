@@ -8881,7 +8881,7 @@ test "existing Store rejects a different canonical identity" {
             try storage.close();
             var refused: Store = undefined;
             try std.testing.expectError(
-                error.WrongStoreIdentity,
+                if (case.engine == .sqlite) error.StoreIdentityMismatch else error.WrongStoreIdentity,
                 store_testing.testingStoreWith(case, &refused, &tmp, std.testing.io, .{ .identity = "/different/canonical/store" }),
             );
         }

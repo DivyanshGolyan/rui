@@ -736,7 +736,9 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | Limit and schema refusal under 5 s | `host-launch-integration` | 256/256 and minimum-1 refuse; exact minimum serves ten clients. Linux and Apple Silicon macOS |
+| Moved SQLite Store refuses foreground, detached and interactive startup with both escaped canonical folders, `store_identity_mismatch` and exit 6; old-path symlink still refuses, identity stays unchanged, restoration serves | `host_launch_integration.py store-identity` in `host-launch-integration` | Private stopped fixture Store only |
 | [Installed upgrade](ARCHITECTURE.md#store-format-and-upgrades) | `previous-release-upgrade.yml`, `previous_release_upgrade.py` | Exercise supported startup migration and backup as well as unsupported formats; no reset policy |
+| Source and release installer publication | `installer-integration` | All 37 installer boundary cases use an explicitly supplied compiled production Rui for native publication and PATH facts; planning and template policy tests require no compiler |
 | [Standalone stable Upgrade](ARCHITECTURE.md#store-format-and-upgrades) | `upgrade-integration`, Installation, release, Host lifecycle, PATH and panel value tests | Offline metadata and a same-source synthetic release identity; real native Hosts and both PTY/tmux screens prove exact-instance activation and lease retirement, failure reporting and retained drafts without replay. Historical external installers are outside the guarantee |
 
 ### Canonical reads, retained output and SQLite
@@ -787,6 +789,10 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 Only the fixture's build identity differs; installation eligibility, publication, Host lifecycle and terminal code are the production owners.
 Ordinary untagged builds still report `unreleased`.
 `zig build upgrade-fixture` exposes that same native actor for focused terminal evidence without a network download or a stale tagged binary.
+
+`installer-integration` runs source and release installer cases with the compiled production executable supplied by the build graph.
+Their staged test commands delegate publication and PATH facts to that executable, never to a second writer or an on-demand compiler.
+The compiler-free policy suite retains release planning and template checks; its boundary regression runs those checks with no Zig on PATH and confirms every native case receives an explicit publisher.
 
 Package under the Rui identity and verify executable and package names, state and credential identifiers, build and distribution references, and fixtures.
 Fixture recreation under the [Store format policy](ARCHITECTURE.md#store-format-and-upgrades) does not authorize changing user Stores; state packaging, state-path and credential-identifier obligations explicitly before release.
