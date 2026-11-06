@@ -8777,7 +8777,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .readDeclaredTool = 1,
     .readProviderTool = 1,
     .checkAttempt = 1,
-    .saveModelFacts = 3,
+    .saveModelFacts = 2,
     .readModelCatalogSource = 1,
     .modelFact = 1,
     .readOpenAiModelIds = 1,
@@ -11086,6 +11086,53 @@ test "preset on update rejection is durable and replayed before applying fields"
     }.run);
 }
 
+test "model fact refresh reads existence once before batched writes" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const count = 4100;
+            const allocator = std.testing.allocator;
+            const ids = try allocator.alloc([32]u8, count);
+            defer allocator.free(ids);
+            const entries = try allocator.alloc(@import("../model_catalog.zig").Entry, count);
+            defer allocator.free(entries);
+            // First inserts, then a mix of old/new IDs, then only updates.
+            // Input order is deliberately not sorted: existence is by ID.
+            for (0..3) |refresh| {
+                const offset: usize = if (refresh == 0) 0 else count / 2;
+                for (entries, ids, 0..) |*entry, *id, index| entry.* = .{
+                    .id = try std.fmt.bufPrint(id, "catalog-{d}", .{count - index + offset}),
+                    .context_window = @intCast(100 + refresh),
+                    .efforts = .{},
+                    .openai_listed = true,
+                };
+                const rounds = TwinRounds.start(&storage);
+                const before = RoundMeter.QueryShape.snapshot(&storage);
+                try storage.saveModelFacts(entries, "\"batch\"");
+                const shape = RoundMeter.QueryShape.snapshot(&storage).since(before);
+                std.debug.print("model facts: {d} entries, {d} Access rounds\n", .{ count, rounds.taken() });
+                try std.testing.expectEqual(@as(u16, 2), rounds.taken());
+                if (case.engine == .mysql) {
+                    // Both reads share one pass. Access queues eight writes
+                    // per pass, source last; COMMIT is the sole control send.
+                    const write_passes = (count + 1 + 7) / 8;
+                    try std.testing.expectEqual(@as(u64, 1 + write_passes), shape.access_passes);
+                    try std.testing.expectEqual(@as(u64, 1), shape.controls);
+                    try std.testing.expectEqual(@as(u64, 2 + write_passes), shape.queries);
+                    try std.testing.expectEqual(shape.expected(), shape.queries);
+                }
+                try std.testing.expectEqual(@as(u64, refresh + 1), (try storage.readModelCatalogSource()).?.generation);
+                try std.testing.expectEqual(@as(?u32, @intCast(100 + refresh)), (try storage.modelFact(entries[0].id)).?.context_window);
+                try std.testing.expectEqual(@as(u64, count), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_fact fact JOIN model_catalog_source source ON source.generation=fact.generation WHERE source.slot=1", .{}));
+            }
+        }
+    }.run);
+}
+
 test "saved model facts replace generations and hide removed ids" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -11134,6 +11181,15 @@ test "saved model facts replace generations and hide removed ids" {
             }
             try std.testing.expectEqual(@as(usize, 1), current_ids.len);
             try std.testing.expectEqualStrings("b", current_ids[0]);
+            // Hidden IDs still occupy their keys. A later refresh must update
+            // those older-generation rows, not mistake them for new IDs.
+            try storage.saveModelFacts(first, "\"three\"");
+            try std.testing.expectEqual(@as(u64, 3), (try storage.readModelCatalogSource()).?.generation);
+            try std.testing.expectEqual(@as(?u32, 100), (try storage.modelFact("a")).?.context_window);
+            try std.testing.expect((try storage.modelFact("c")) != null);
+            try storage.saveModelFacts(&.{}, null);
+            try std.testing.expectEqual(@as(u64, 4), (try storage.readModelCatalogSource()).?.generation);
+            for ([_][]const u8{ "a", "b", "c" }) |id| try std.testing.expect(try storage.modelFact(id) == null);
         }
     }.run);
 }

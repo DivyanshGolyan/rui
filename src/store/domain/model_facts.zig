@@ -1,5 +1,5 @@
 //! Saved models.dev facts. Publication is one transaction: a model_id is
-//! unique across generations, so committing partial upserts would hide old facts.
+//! unique across generations, so committing a partial refresh would hide old facts.
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
 const catalog = @import("../../model_catalog.zig");
@@ -40,10 +40,10 @@ pub const openai_ids = rsql.Read(.{
 });
 
 const existing = rsql.Read(.{
-    .sql = "SELECT generation FROM model_fact WHERE model_id=?1",
-    .Args = struct { id: []const u8 },
-    .Row = struct { generation: u64 },
-    .cardinality = .optional,
+    .sql = "SELECT model_id FROM model_fact",
+    .Args = struct {},
+    .Row = struct { model_id: protocol.Bounded(256) },
+    .cardinality = .each,
 });
 const FactArgs = struct { id: []const u8, context_window: ?u32, efforts: u8, openai_listed: bool, generation: u64 };
 const insert_fact = rsql.Write(.{
@@ -74,15 +74,30 @@ const update_source = rsql.Write(.{
 /// hot path. The Store releases their prepared forms after the outer commit.
 pub const save_statements = .{ source, existing, insert_fact, update_fact, insert_source, update_source };
 
+/// Keys borrow only this refresh's entries, not rows from the Store. The
+/// bulk read marks which already exist, including IDs in older generations.
+const Existing = struct {
+    ids: std.StringHashMap(bool),
+
+    pub fn visit(self: *Existing, row: *const existing.Row) bool {
+        if (self.ids.getPtr(row.model_id.slice())) |found| found.* = true;
+        return true;
+    }
+};
+
 pub fn save(a: anytype, entries: []const catalog.Entry, etag: ?[]const u8) !void {
+    var known: Existing = .{ .ids = .init(std.heap.page_allocator) };
+    defer known.ids.deinit();
+    for (entries) |entry| try known.ids.put(entry.id, false);
+
     var previous: ?Source = null;
     a.read(source, .{}, &previous);
+    // D202 forbids production DELETE, and rsql has no upsert. Read all
+    // existence once, then let Access batch writes without per-ID waits.
+    a.readEach(existing, .{}, std.math.maxInt(u64), &known);
     try a.run();
     const generation = std.math.add(u64, if (previous) |p| p.generation else 0, 1) catch return error.CorruptStore;
     for (entries) |entry| {
-        var old: ?existing.Row = null;
-        a.read(existing, .{ .id = entry.id }, &old);
-        try a.run();
         const args: FactArgs = .{
             .id = entry.id,
             .context_window = entry.context_window,
@@ -90,7 +105,9 @@ pub fn save(a: anytype, entries: []const catalog.Entry, etag: ?[]const u8) !void
             .openai_listed = entry.openai_listed,
             .generation = generation,
         };
-        if (old != null) a.write(update_fact, args) else a.write(insert_fact, args);
+        const old = known.ids.getPtr(entry.id).?;
+        if (old.*) a.write(update_fact, args) else a.write(insert_fact, args);
+        old.* = true;
     }
     const args: SourceArgs = .{ .etag = etag, .generation = generation };
     if (previous != null) a.write(update_source, args) else a.write(insert_source, args);
