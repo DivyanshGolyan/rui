@@ -1088,6 +1088,30 @@ export interface components {
                     openai: "unserved" | "endpoint" | "chatgpt_device" | "key_file";
                 };
             };
+        } | {
+            /** @constant */
+            version: "8";
+            /** @constant */
+            type: "host_info";
+            store: string;
+            instance: string;
+            active_capacity: components["schemas"]["Decimal"];
+            intake_capacity: components["schemas"]["Decimal"];
+            descriptor_limit: string;
+            started_at: components["schemas"]["Decimal"];
+            custody_occupied: components["schemas"]["Decimal"];
+            paused: boolean;
+            innodb_doublewrite: string;
+            capabilities: {
+                /** @constant */
+                bash: true;
+                providers: {
+                    /** @enum {string} */
+                    codex: "unserved" | "endpoint" | "chatgpt_device" | "key_file";
+                    /** @enum {string} */
+                    openai: "unserved" | "endpoint" | "chatgpt_device" | "key_file";
+                };
+            };
         };
         HostInfoRequest: {
             /** @constant */
@@ -2494,7 +2518,7 @@ export interface components {
         StartError: {
             rui_start_error: {
                 /** @enum {string} */
-                code: "launch_frame_invalid" | "invalid_preset" | "store_locked" | "runtime_dir_unusable" | "tool_name_collision";
+                code: "launch_frame_invalid" | "invalid_preset" | "store_locked" | "store_schema_missing" | "store_schema_behind" | "mysql_version_unsupported" | "mysql_durability_unsafe" | "mysql_read_only" | "mysql_binlog_unsafe" | "store_fenced" | "runtime_dir_unusable" | "tool_name_collision";
                 message: string;
             };
         };

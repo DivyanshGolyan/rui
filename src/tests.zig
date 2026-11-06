@@ -15,6 +15,7 @@ test {
     _ = @import("os/system_path.zig");
     _ = @import("execution_turn.zig");
     _ = @import("launch_frame.zig");
+    _ = @import("mysql_url.zig");
     _ = @import("openapi.zig");
     _ = @import("http1/Exchange.zig");
     _ = @import("mcp/Call.zig");

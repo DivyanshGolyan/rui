@@ -331,6 +331,7 @@ pub const HostStatus = union(enum) {
         started_at: u64,
         custody_occupied: usize,
         paused: bool,
+        innodb_doublewrite: ?protocol.Bounded(32) = null,
         capabilities: @FieldType(protocol.HostInfo, "capabilities"),
     },
     unavailable,
@@ -415,6 +416,11 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
     if (custody_occupied > capacity) return error.InvalidHostInfo;
     var identity: protocol.Bounded(protocol.max_store_bytes) = .{};
     try identity.set(info.store);
+    var doublewrite: ?protocol.Bounded(32) = null;
+    if (info.innodb_doublewrite) |value| {
+        doublewrite = .{};
+        try doublewrite.?.set(value);
+    }
     return .{ .ready = .{
         .store = identity,
         .instance = instance,
@@ -424,6 +430,7 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
         .started_at = started_at,
         .custody_occupied = custody_occupied,
         .paused = info.paused,
+        .innodb_doublewrite = doublewrite,
         .capabilities = info.capabilities,
     } };
 }

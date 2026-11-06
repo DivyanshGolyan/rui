@@ -516,7 +516,24 @@ pub fn build(b: *std.Build) void {
     launch_frame_integration.addFileArg(b.path("tests/integration/launch_frame_integration.py"));
     launch_frame_integration.addFileArg(ci.path(release_safe));
     launch_frame_integration.addArg("--require-mcp-sdk");
-    b.step("launch-frame-integration", "Run a Host started from a launch frame on stdin: readiness, refusals, real MCP SDK catalog and stop on close").dependOn(&launch_frame_integration.step);
+    const mysql_launch_admin = b.addExecutable(.{
+        .name = "rui-mysql-launch-admin",
+        .use_llvm = test_actor_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/mysql_launch_admin.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+        }),
+    });
+    mysql_launch_admin.root_module.addImport("mysql_connection", mysql_connection);
+    const mysql_launch_integration = b.addSystemCommand(&.{"python3"});
+    mysql_launch_integration.addFileArg(b.path("tests/integration/launch_frame_mysql_integration.py"));
+    mysql_launch_integration.addFileArg(ci.path(release_safe));
+    mysql_launch_integration.addFileArg(ci.path(mysql_launch_admin));
+    const launch_frame_step = b.step("launch-frame-integration", "Run SQLite and MySQL launch frames: readiness, safe credentials, ownership and stdin liveness");
+    launch_frame_step.dependOn(&launch_frame_integration.step);
+    launch_frame_step.dependOn(&mysql_launch_integration.step);
 
     // The TypeScript client against the Rui this build makes; Node strips the types.
     const ts_client = b.addSystemCommand(&.{"python3"});

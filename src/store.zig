@@ -18,6 +18,11 @@ const store_test_fixtures = @import("store/tests.zig");
 pub const ModelFact = @import("store/domain/model_facts.zig").Fact;
 pub const ModelCatalogSource = @import("store/domain/model_facts.zig").Source;
 pub const Store = store_core.Store;
+pub const MysqlStartError = @import("store/engine/mysql_refusal.zig").StartError;
+
+/// The DB team applies this file; opening a MySQL Store never performs DDL.
+pub const mysql_schema = store_schema.ddl(.mysql);
+
 pub const ActivityTool = reads_domain.ActivityTool;
 pub const AcceptedMessageQueue = reads_domain.AcceptedMessageQueue;
 pub const ActionAttemptBinding = action_domain.ActionAttemptBinding;

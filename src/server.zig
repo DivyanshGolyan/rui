@@ -858,6 +858,7 @@ pub const Launch = struct {
     runtime_dir: []const u8,
     socket_path: []const u8,
     stdin: std.posix.fd_t,
+    mysql_url: ?*launch_frame.MysqlUrl = null,
     /// Open with Turns paused (D196): set before execution starts, so a Turn
     /// recovered from the Store waits too.
     paused: bool = false,
@@ -972,9 +973,14 @@ pub fn serve(
         try std.fmt.bufPrint(&descriptor_limit_buffer, "{d}", .{limit})
     else
         "unlimited";
-    var lease = try platform.StoreLease.acquire(io, store_path);
+    const mysql_url = if (launch) |value| value.mysql_url else null;
+    var lease: platform.StoreLease = undefined;
+    if (mysql_url != null)
+        try lease.acquireMysql(io, launch.?.runtime_dir, launch.?.socket_path)
+    else
+        lease = try platform.StoreLease.acquire(io, store_path);
     defer lease.release();
-    if (launch) |value| try lease.useRuntimeDirectory(value.runtime_dir, value.socket_path);
+    if (mysql_url == null) if (launch) |value| try lease.useRuntimeDirectory(value.runtime_dir, value.socket_path);
     // fd1 may alias fd2. Exclude flag borrowing before any continuing
     // startup diagnostic, through readiness delivery and failed unwind.
     if (!stderr.tryExclude()) return error.HostReadinessOutputUnavailable;
@@ -989,33 +995,63 @@ pub fn serve(
     if (diagnostics) |*writer| writer.record("begin", "lease_acquired");
     if (diagnostics) |*writer| try recordCapacity(writer, intake_capacity, descriptor_requirement.total, descriptor_limit_text);
     errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");
-    var found_schema_version: u32 = store_module.schema_version;
     // The catalog's records point into this arena, and the Store keeps the
     // catalog for its life, so it outlives the Store.
     var catalog_memory = std.heap.ArenaAllocator.init(allocator);
     defer catalog_memory.deinit();
     var storage: store_module.Store = undefined;
-    storage.openWithOptions(
-        io,
-        lease.paths.database.slice(),
-        lease.paths.store.slice(),
-        .{
-            .served = served.routes(),
-            .cache_spill = limits.sqlite_cache_spill,
-            .cache_kib = limits.sqlite_cache_kib,
-            .found_schema_version = &found_schema_version,
-            // With MCP servers the catalog is saved below, once they are listed.
-            .catalog = if (mcp_servers.len == 0) &tools.built_in else null,
-        },
-    ) catch |err| {
-        if (err == error.WrongStoreVersion) {
-            try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
-            if (diagnostics) |*writer| writer.record("failed", "unsupported_store_version");
-        }
-        return err;
-    };
+    try openStoreForHost(io, &storage, &lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null);
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
-    if (mcp_servers.len != 0) try offerMcpTools(io, catalog_memory.allocator(), allocator, &storage, mcp_servers, if (launch) |value| value.stdin else null);
+    return finishServing(io, &storage, launch != null, serveOpened(
+        io,
+        allocator,
+        &storage,
+        &lease,
+        active_capacity,
+        limits,
+        hooks,
+        served,
+        bash_path,
+        bash_timeout_ms,
+        home,
+        launch,
+        &catalog_memory,
+        mcp_servers,
+        intake_capacity,
+        descriptor_requirement.total,
+        descriptor_observation.soft_limit,
+        descriptor_limit_text,
+        &diagnostics,
+        diagnostic_open_error,
+        &readiness_owned,
+    ));
+}
+
+/// All serving owners drain before the Store's shutdown result is decided.
+fn serveOpened(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    storage: *store_module.Store,
+    lease: *platform.StoreLease,
+    active_capacity: usize,
+    limits: Limits,
+    hooks: Hooks,
+    served: *const providers.Providers,
+    bash_path: []const u8,
+    bash_timeout_ms: u64,
+    home: ?[]const u8,
+    launch: ?Launch,
+    catalog_memory: *std.heap.ArenaAllocator,
+    mcp_servers: []const launch_frame.Frame.McpServer,
+    intake_capacity: usize,
+    descriptor_requirement: usize,
+    descriptor_soft_limit: ?usize,
+    descriptor_limit_text: []const u8,
+    diagnostics: *?HostDiagnostics,
+    diagnostic_open_error: ?anyerror,
+    readiness_owned: *bool,
+) !void {
+    if (mcp_servers.len != 0) try offerMcpTools(io, catalog_memory.allocator(), allocator, storage, mcp_servers, if (launch) |value| value.stdin else null);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
@@ -1053,9 +1089,9 @@ pub fn serve(
         .io = io,
         .allocator = allocator,
         .intake_capacity = intake_capacity,
-        .descriptor_soft_limit = descriptor_observation.soft_limit,
-        .lease = &lease,
-        .store = &storage,
+        .descriptor_soft_limit = descriptor_soft_limit,
+        .lease = lease,
+        .store = storage,
         .hooks = hooks,
         .limits = limits,
         .providers = served,
@@ -1126,19 +1162,29 @@ pub fn serve(
         _ = host.advance(.draining);
         execution_thread.join();
     }
-    try writeReadiness(&lease.paths, active_capacity, intake_capacity, descriptor_requirement.total, descriptor_limit_text, retention_entries.len, served.any());
+    try writeReadiness(&lease.paths, active_capacity, intake_capacity, descriptor_requirement, descriptor_limit_text, retention_entries.len, served.any());
     stderr.release();
-    readiness_owned = false;
+    readiness_owned.* = false;
     if (diagnostic_open_error) |err|
         stderr.print("rui: startup diagnostics unavailable ({s}); continuing under Store lease\n", .{@errorName(err)});
-    if (diagnostics) |*writer| {
+    if (diagnostics.*) |*writer| {
         if (writer.failure != null) writer.reportFailure();
         writer.record("ready", "serving");
         writer.close();
-        diagnostics = null;
+        diagnostics.* = null;
     }
 
     return intake.run(&listener, &listener_open, &socket_owned);
+}
+
+fn finishServing(io: std.Io, storage: *const store_module.Store, launched: bool, result: anyerror!void) !void {
+    // This is the sole decision and publication site, after intake, workers
+    // and execution have drained. A fence wins over every serving outcome.
+    if (launched and storage.engine == .mysql and storage.isFenced()) {
+        launch_frame.writeRefusal(io, .{ .code = .store_fenced, .message = "the MySQL Store lost ownership or its connection; restart the Host" });
+        return error.StoreFenced;
+    }
+    return result;
 }
 
 // serve's frame stays resident for the Host's life, so each startup-only
@@ -1150,6 +1196,43 @@ noinline fn recordCapacity(writer: *HostDiagnostics, intake_capacity: usize, des
         intake_capacity,        product_defaults.intake_capacity, descriptor_capacity.minimum_intake,
         descriptor_requirement, descriptor_limit_text,
     }));
+}
+
+/// Admission's options and login framing are startup scratch, not part of
+/// serve's resident frame on either engine. The caller provides both owners.
+noinline fn openStoreForHost(
+    io: std.Io,
+    storage: *store_module.Store,
+    lease: *platform.StoreLease,
+    served: *const providers.Providers,
+    limits: *const Limits,
+    has_mcp: bool,
+    mysql_url: ?*launch_frame.MysqlUrl,
+    diagnostics: ?*HostDiagnostics,
+) !void {
+    var found_schema_version: u32 = store_module.schema_version;
+    const store_options: store_module.OpenOptions = .{
+        .served = served.routes(),
+        .cache_spill = limits.sqlite_cache_spill,
+        .cache_kib = limits.sqlite_cache_kib,
+        .found_schema_version = &found_schema_version,
+        // With MCP servers the catalog is saved below, once they are listed.
+        .catalog = if (!has_mcp) &tools.built_in else null,
+    };
+    if (mysql_url) |url| {
+        // Only this call borrows the login. Neither metadata nor filesystem
+        // paths ever see the URL, and admission failure wipes it too.
+        defer url.wipe();
+        try storage.openMysql(io, url.options(), url.database.slice(), store_options);
+        lease.paths.store.set(storage.mysqlStoreId()) catch unreachable;
+        storage.selector.set(storage.mysqlStoreId()) catch unreachable;
+    } else storage.openWithOptions(io, lease.paths.database.slice(), lease.paths.store.slice(), store_options) catch |err| {
+        if (err == error.WrongStoreVersion) {
+            try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
+            if (diagnostics) |writer| writer.record("failed", "unsupported_store_version");
+        }
+        return err;
+    };
 }
 
 noinline fn reportWrongStoreVersion(store_path: []const u8, found_schema_version: u32) !void {
@@ -1426,7 +1509,10 @@ noinline fn submitConfigure(host: *Host, command: *const protocol.ConfigureComma
 
 /// `client_environment` holds a Message's checked environment.
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, client_environment: ?*SessionEnvironments.Offer) !void {
-    if (!std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
+    // The first MySQL readiness probe learns the opaque id over the private
+    // socket. All subsequent work must name that exact id, never the URL.
+    const discovering = request.* == .host_info and request.store().len == 0 and host.store.engine == .mysql;
+    if (!discovering and !std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
     if (header.instance) |instance| {
@@ -1446,7 +1532,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             // Atomics and fixed values only: this reply never touches SQLite.
-            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.turns_paused.load(.acquire), host.providers.routes() });
+            try fd.json(200, protocol.max_host_info_response_bytes, renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.turns_paused.load(.acquire), host.providers.routes(), host.store.mysqlDoublewrite() });
         },
         .host_pause => |pause| {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
@@ -2191,10 +2277,14 @@ fn renderHostInfo(
     custody_occupied: u64,
     paused: bool,
     routes: protocol.Routes,
+    doublewrite: ?[]const u8,
 ) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
-    try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, routes.codex, routes.openai });
+    if (doublewrite) |value|
+        try response.appendShape(protocol.host_info_mysql_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, value, routes.codex, routes.openai })
+    else
+        try response.appendShape(protocol.host_info_reply, .{ store, instance, active_capacity, intake_capacity, limit_text, started_at, custody_occupied, paused, routes.codex, routes.openai });
 }
 
 fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
@@ -3188,8 +3278,11 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.max_control_error_response_bytes, failure.len);
 
     var host_info: protocol.ResponseBuffer = .{};
-    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device) });
-    try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
+    try host_info.render(renderHostInfo, .{ &escaped_store, @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device), null });
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), host_info.len);
+    host_info.len = 0;
+    try host_info.render(renderHostInfo, .{ &@as([32]u8, @splat(0x01)), @as(protocol.InstanceId, @splat(0xff)), max, max, max, max, max, false, protocol.routesAll(.chatgpt_device), &@as([32]u8, @splat(0x01)) });
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_mysql_reply), host_info.len);
 
     const observations = protocol.command_observation_reply;
     var configured = store_module.CommandObservation{ .status = .accepted, .kind = .configure, .code = code, .revision = max, .created = false };
@@ -3711,6 +3804,90 @@ test "intake accepts and physically retires a hundred incomplete exchanges" {
     for (sockets) |pair| {
         try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(pair[0], std.c.F.GETFL));
         try std.testing.expectEqual(std.posix.E.BADF, std.posix.errno(@as(c_int, -1)));
+    }
+}
+
+test "launch frame fenced MySQL shutdown is decided once at the return boundary without clients" {
+    const Probe = struct {
+        var storage: *store_module.Store = undefined;
+        var fence_on_delete: bool = false;
+        var output: [1024]u8 = undefined;
+        var used: usize = 0;
+
+        fn delete(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8) std.Io.Dir.DeleteFileError!void {
+            // Listener retirement is after the old loop-top fence check.
+            // Emulate execution fencing in that window, without a thread.
+            if (fence_on_delete) storage.fenced.store(true, .release);
+            return std.testing.io.vtable.dirDeleteFile(userdata, dir, path);
+        }
+
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming and operation.file_write_streaming.file.handle == 1) {
+                const write = operation.file_write_streaming;
+                var out = std.Io.Writer.fixed(output[used..]);
+                out.writeAll(write.header) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                for (write.data, 0..) |part, index| {
+                    const repeats = if (index == write.data.len - 1) write.splat else 1;
+                    for (0..repeats) |_| out.writeAll(part) catch return .{ .file_write_streaming = error.NoSpaceLeft };
+                }
+                used += out.buffered().len;
+                return .{ .file_write_streaming = out.buffered().len };
+            }
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(std.testing.io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/host.sock", .{root[0..root_len]});
+    var vtable = std.testing.io.vtable.*;
+    vtable.dirDeleteFile = Probe.delete;
+    vtable.operate = Probe.operate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    for ([_]struct { mysql: bool, launched: bool, early: bool, late: bool }{
+        .{ .mysql = true, .launched = true, .early = false, .late = true },
+        .{ .mysql = true, .launched = true, .early = true, .late = false },
+        .{ .mysql = true, .launched = true, .early = false, .late = false },
+        .{ .mysql = true, .launched = false, .early = false, .late = true },
+        .{ .mysql = false, .launched = true, .early = false, .late = true },
+    }) |case| {
+        var storage: store_module.Store = .{ .io = io, .engine = undefined, .selector = .{}, .changes = undefined };
+        // No engine operation occurs: only its tag and atomic fence are read.
+        storage.engine = if (case.mysql) .{ .mysql = undefined } else .{ .sqlite = undefined };
+        storage.fenced.store(case.early, .release);
+        Probe.storage = &storage;
+        Probe.fence_on_delete = case.late;
+        Probe.used = 0;
+        var lease: platform.StoreLease = undefined;
+        lease.paths = .{};
+        try lease.paths.socket.set(path);
+        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .phase = .init(.stopping) };
+        var intake: Intake = .{ .host = &host, .launched = case.launched, .deadline_armed = true };
+        // Reuse the real intake owner, with idle workers but no worker threads.
+        for (&intake.workers) |*worker| worker.* = .{ .owner = &intake };
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &intake.wake));
+        try setNonblocking(intake.wake[0]);
+        defer intake.deinit();
+        var stdin: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&stdin));
+        defer _ = std.c.close(stdin[0]);
+        _ = std.c.close(stdin[1]);
+        intake.stdin = stdin[0]; // EOF makes poll ready without a sleep.
+        const address = try std.Io.net.UnixAddress.init(path);
+        var listener = try address.listen(io, .{ .kernel_backlog = 8 });
+        var open = true;
+        var owned = true;
+        defer if (open) listener.deinit(io);
+        const outcome = finishServing(io, &storage, case.launched, intake.run(&listener, &open, &owned));
+        const fenced = case.mysql and case.launched and (case.early or case.late);
+        try std.testing.expectError(if (fenced) error.StoreFenced else error.EffectAwareShutdown, outcome);
+        try std.testing.expectEqualStrings(if (fenced)
+            "{\"rui_start_error\":{\"code\":\"store_fenced\",\"message\":\"the MySQL Store lost ownership or its connection; restart the Host\"}}\n"
+        else
+            "", Probe.output[0..Probe.used]);
+        try std.testing.expectEqual(@as(usize, 0), intake.exchanges.items.len);
     }
 }
 
@@ -4268,6 +4445,20 @@ test "exchange retirement retains failed ingress cleanup through retry" {
         try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(retained_fd, std.c.F.GETFL));
         try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "request-7-1.tmp", .{}));
     }
+}
+
+test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged" {
+    const protocol_reply = @import("protocol_reply.zig");
+    var response: protocol.ResponseBuffer = .{};
+    const id = "0123456789abcdef0123456789abcdef";
+    try response.render(renderHostInfo, .{ id, @as(protocol.InstanceId, @splat(1)), 2, 100, 1024, 1792918800, 0, false, protocol.routesAll(.unserved), "OFF" });
+    const status = try protocol_reply.parseHostInfo(response.slice(), id);
+    try std.testing.expectEqualStrings("OFF", status.ready.innodb_doublewrite.?.slice());
+    response.len = 0;
+    try response.render(renderHostInfo, .{ "/sqlite", @as(protocol.InstanceId, @splat(1)), 2, 100, 1024, 1792918800, 0, false, protocol.routesAll(.unserved), null });
+    try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
+    // MySQL's bounded opaque id fits within SQLite's existing reply budget.
+    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), protocol.max_host_info_response_bytes);
 }
 
 test "MCP socket capacity is reserved beside model and Bash descriptors" {

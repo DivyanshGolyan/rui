@@ -305,13 +305,15 @@ pub const Prepared = struct {
     /// /dev/null stdin unless an unlinked read-only input was supplied.
     /// The child starts from `base`, the Session's client environment, or
     /// from `facts` alone when it has none (`environment.childBlock`).
+    /// `runtime_dir` borrows the socket lease's directory, not scratch's
+    /// canonical storage path. SQLite children do not use this routing hint.
     /// On error.BashArgumentsTooLarge, `refused` holds what the OS refused.
-    pub fn launch(self: *Prepared, facts: environment.HostFacts, base: ?environment.Value, refused: *ArgumentSizes) !Execution {
+    pub fn launch(self: *Prepared, facts: environment.HostFacts, base: ?environment.Value, runtime_dir: ?[]const u8, refused: *ArgumentSizes) !Execution {
         if (self.faults.spawn) return error.BashSpawnFailed;
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
-        const identity: environment.Identity = .{ .address = self.session.slice(), .store = self.store_selector, .sender_handle = self.sender_handle.slice() };
+        const identity: environment.Identity = .{ .address = self.session.slice(), .store = self.store_selector, .sender_handle = self.sender_handle.slice(), .runtime_dir = if (platform.isOpaqueStoreId(self.store_selector)) runtime_dir else null };
         var environment_block = environment.childBlock(arena, base, facts, identity) catch return error.BashSpawnFailed;
         if (self.faults.arguments) environment_block = padArguments(arena, environment_block) catch return error.BashSpawnFailed;
         const path = arena.dupeSentinel(u8, self.bash_path, 0) catch return error.BashSpawnFailed;
@@ -1472,7 +1474,7 @@ fn launchForTest(root: []const u8, budget: ScratchBudget, retention: *output_ret
     prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", ordinal, 1, .none);
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", ordinal, 1, .none);
     var refused: ArgumentSizes = .{};
-    var execution = try prepared.launch(default_facts, null, &refused);
+    var execution = try prepared.launch(default_facts, null, null, &refused);
     var window: [copy_window_bytes]u8 = undefined;
     const service = .{ .execution = &execution, .scratch = scratch, .window = &window };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(30)), service, bash_service.retired);
@@ -1496,6 +1498,73 @@ fn inheritableDevNull(buffer: []u8) ![]const u8 {
         if (stat.kind == .character_device and stat.inode == target) try writer.print("leaked-{d}\n", .{fd});
     }
     return writer.buffered();
+}
+
+test "MySQL Bash preserves a short runtime alias with an overlong canonical target" {
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const long_name: [platform.max_launch_socket_path_bytes + 1]u8 = @splat('d');
+    try tmp.dir.createDir(io, &long_name, .fromMode(0o700));
+    try tmp.dir.symLink(io, &long_name, "runtime", .{ .is_directory = true });
+    var runtime_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const runtime = (try tmp.address("runtime", &runtime_buffer)).path;
+    var socket_buffer: [platform.max_launch_socket_path_bytes]u8 = undefined;
+    const socket = try std.fmt.bufPrint(&socket_buffer, "{s}/rui.sock", .{runtime});
+    const address = try std.Io.net.UnixAddress.init(socket);
+    var lease: platform.StoreLease = undefined;
+    try lease.acquireMysql(io, runtime, socket);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    // Scratch is canonical storage, not the socket's routing address.
+    const canonical_runtime = std.fs.path.dirname(lease.paths.scratch.slice()).?;
+    try std.testing.expect(canonical_runtime.len > platform.max_launch_socket_path_bytes);
+    const store_id = "0123456789abcdef0123456789abcdef";
+    try std.testing.expectError(error.NoSpaceLeft, platform.mysqlClientPaths(io, store_id, canonical_runtime));
+    var listener = try address.listen(io, .{});
+    defer listener.deinit(io);
+
+    var used: std.atomic.Value(u64) = .init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 1 << 20 };
+    const scratch: Scratch = .{ .io = io, .path = lease.paths.scratch.slice(), .budget = budget };
+    var entries: [8]output_retention.Entry = @splat(.{});
+    var retention = output_retention.Queue.initialize(io, scratch.path, budget, &entries);
+    defer retention.cleanupAll();
+    var workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    try workspace.set(runtime);
+    var prepared = Prepared{
+        .scratch = scratch,
+        .allocator = std.testing.allocator,
+        .session = .{},
+        .store_selector = store_id,
+        .workspace = workspace,
+        .bash_path = "/bin/bash",
+        .timeout_ms = 10_000,
+        .faults = .{},
+        .command = try std.testing.allocator.dupeSentinel(u8, "printf '%s' \"$RUI_RUNTIME_DIR\"", 0),
+        .stdout_capture = null,
+        .stderr_capture = null,
+    };
+    defer prepared.cleanup() catch @panic("Bash preparation cleanup failed");
+    prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .none);
+    prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", 1, 1, .none);
+    var refused: ArgumentSizes = .{};
+    var execution = try prepared.launch(default_facts, null, std.fs.path.dirname(lease.paths.socket.slice()), &refused);
+    var window: [copy_window_bytes]u8 = undefined;
+    const service = .{ .execution = &execution, .scratch = scratch, .window = &window };
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(30)), service, bash_service.retired);
+    defer execution.reclaim(scratch, &retention) catch @panic("Bash execution cleanup failed");
+    var output: Outcome = undefined;
+    try execution.outcome(scratch, false, &output);
+    try std.testing.expectEqual(store.ActionResolutionCode.succeeded, output.code);
+    var child_runtime_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const length = try execution.stdout_capture.file.?.readPositionalAll(io, &child_runtime_buffer, 0);
+    const child_runtime = child_runtime_buffer[0..length];
+    try std.testing.expectEqualStrings(runtime, child_runtime);
+    const paths = try platform.mysqlClientPaths(io, store_id, child_runtime);
+    try std.testing.expectEqualStrings(lease.paths.socket.slice(), paths.socket.slice());
+    const peer = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).connect(io);
+    defer peer.close(io);
 }
 
 test "launched Bash starts with default signal actions, an empty mask and no /dev/null added by launch" {
@@ -1593,7 +1662,7 @@ test "an argument list the OS refuses reports the command and environment sizes"
     prepared.stdout_capture = try createOwnedFile(scratch, .@"bash-stdout", 1, 1, .none);
     prepared.stderr_capture = try createOwnedFile(scratch, .@"bash-stderr", 1, 1, .none);
     var refused: ArgumentSizes = .{};
-    try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(default_facts, null, &refused));
+    try std.testing.expectError(error.BashArgumentsTooLarge, prepared.launch(default_facts, null, "/runtime", &refused));
     // The fixed PATH, RUI_ADDRESS=k7m2qx, RUI_STORE=/s and the padding, each with its NUL.
     const environment_bytes = "PATH=".len + system_path.fixed.len + 1 + "RUI_ADDRESS=k7m2qx".len + 1 + "RUI_STORE=/s".len + 1 + "RUI_FAULT_PADDING=".len + fault_padding_bytes + 1;
     try std.testing.expectEqual(ArgumentSizes{ .command = 4, .environment = environment_bytes, .variables = 4 }, refused);

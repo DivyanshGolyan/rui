@@ -2224,7 +2224,12 @@ pub const full_revisions = rsql.Page(.{
             "LEFT JOIN content output_schema ON output_schema.content_id=r.output_schema_content_id",
     }},
     .Row = RevisionRow,
-    .take = chunk_rows,
+    // A revision stops its pass as soon as it must stream owned content.
+    // SQLite can reset there; MySQL must execute and drain the whole result.
+    // A 257-row page repeatedly evaluated almost all of those rows only to
+    // discard them. Keep the initial empty revision and its first change in
+    // one query, but bound the unused tail to two rows at any streaming stop.
+    .take = 2,
 });
 
 /// The owner of revision `r`'s `field` content: the least slot of its

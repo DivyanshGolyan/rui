@@ -87,7 +87,7 @@ RULES = (
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "The wire contract: openapi.json must equal what the wire types emit"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
-    (("src/launch_frame.zig", "tests/integration/launch_frame*", "tests/integration/mcp_sdk/*"), ("test", "launch-frame-integration", "ts-client"),
+    (("src/launch_frame.zig", "src/mysql_url.zig", "tests/integration/mysql_launch_admin.zig", "tests/integration/launch_frame*", "tests/integration/mcp_sdk/*"), ("test", "launch-frame-integration", "ts-client"),
      ("test", "launch-frame-integration", "ts-client"), "The launch frame a program uses to start its own Host"),
     (("src/protocol.zig", "src/cli_value.zig", "src/retention_capacity.zig", "src/provider_name.zig", "src/platform.zig",
       "src/execution.zig", "src/attempt.zig", "src/tools.zig", "src/*Scratch*",
@@ -196,9 +196,10 @@ RULES = (
      "Installer report reads the CLI's defaults and Host status JSON"),
 )
 
-# check.yml's LIVE_MYSQL: the Linux targets whose shards start MySQL for the
-# unit binary's live dialect check (src/store/mysql_dialect_check.zig).
-LIVE_MYSQL_TARGETS = frozenset({"test", "check", "check-full"})
+# check.yml's LIVE_MYSQL: Linux shards for the unit dialect check
+# (src/store/mysql_dialect_check.zig) and the launch-frame Host fixture.
+LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "check", "check-full"})
+LIVE_MYSQL_TARGETS = LIVE_MYSQL_DIALECT_TARGETS | {"launch-frame-integration"}
 # check.yml's Postgres step condition: the Linux targets whose shards start
 # postgres:15 for test-pg's live rounds.
 LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
@@ -208,6 +209,10 @@ LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
 # development too, or its green would say nothing about that server.
 # Development keeps the rule's own targets among them.
 LIVE_RULES = (
+    (("src/launch_frame.zig", "src/mysql_url.zig", "tests/integration/launch_frame*", "tests/integration/mysql_launch_admin.zig"),
+     ("test", "launch-frame-integration"), ("launch-frame-integration",),
+     "The launch-frame Host opens a live MySQL Store on Linux; macOS skips the live server",
+     frozenset({"launch-frame-integration", "check", "check-full"})),
     (("src/store/wire/pg*.zig", "src/store/wire/scram.zig", "src/store/wire/tls.zig", "src/h2/h2.zig", "src/h2/tls.zig",
       "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
      ("test-pg",), ("test-pg",), "The Postgres wire client's own tests, live against postgres:15 on Linux",
@@ -224,7 +229,7 @@ LIVE_RULES = (
       "tests/integration/live_engines.py", "tests/ci/live_engine_step.py"),
      ("test",), (),
      "The Store's live MySQL dialect check drives MySQL 8.4 through the wire client; macOS skips it",
-     LIVE_MYSQL_TARGETS),
+     LIVE_MYSQL_DIALECT_TARGETS),
 )
 RULES += tuple(rule[:4] for rule in LIVE_RULES)
 

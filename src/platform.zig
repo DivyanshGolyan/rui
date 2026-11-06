@@ -38,16 +38,20 @@ pub const StoreLease = struct {
     /// Read-only observation, not lease acquisition or readiness. Returns
     /// owned canonical paths by value; every probe descriptor closes here.
     pub fn observe(io: std.Io, supplied_path: []const u8) Observation {
-        var store_dir = std.Io.Dir.cwd().openDir(io, supplied_path, .{}) catch |err| return switch (err) {
+        const runtime = mysqlRuntimeDirectory(supplied_path);
+        var store_dir = std.Io.Dir.cwd().openDir(io, runtime orelse supplied_path, .{}) catch |err| return switch (err) {
             error.FileNotFound => .unowned,
             else => .access_failure,
         };
         defer store_dir.close(io);
         validatePrivateDirectory(store_dir, io) catch return .access_failure;
-        const paths = pathsFromOpenStore(store_dir, io) catch return .access_failure;
+        const paths = if (runtime) |directory|
+            mysqlClientPaths(io, supplied_path, directory) catch return .access_failure
+        else
+            pathsFromOpenStore(store_dir, io) catch return .access_failure;
         // A hostile FIFO must not wait for a writer; never follow or create
         // a replacement lock node during observation.
-        const fd = std.posix.openat(store_dir.handle, "host.lock", .{
+        const fd = std.posix.openat(store_dir.handle, if (runtime != null) "rui.lock" else "host.lock", .{
             .ACCMODE = .RDONLY,
             .NONBLOCK = true,
             .NOFOLLOW = true,
@@ -98,6 +102,36 @@ pub const StoreLease = struct {
         };
     }
 
+    /// MySQL owns its Store through GET_LOCK. This filesystem lease reserves
+    /// only the private runtime socket, never a Store's host.lock file.
+    pub noinline fn acquireMysql(self: *StoreLease, io: std.Io, runtime_path: []const u8, socket_path: []const u8) !void {
+        self.acquireMysqlDirectory(io, runtime_path, socket_path) catch |err| switch (err) {
+            error.WouldBlock => return error.RuntimeDirectoryInUse,
+            else => return error.RuntimeDirectoryUnusable,
+        };
+    }
+
+    fn acquireMysqlDirectory(self: *StoreLease, io: std.Io, runtime_path: []const u8, socket_path: []const u8) !void {
+        var dir = try std.Io.Dir.cwd().createDirPathOpen(io, runtime_path, .{
+            .permissions = .fromMode(0o700),
+            .open_options = .{ .iterate = true },
+        });
+        errdefer dir.close(io);
+        try validatePrivateDirectory(dir, io);
+        const lock = try dir.createFile(io, "rui.lock", .{
+            .truncate = false,
+            .lock = .exclusive,
+            .lock_nonblocking = true,
+            .permissions = .fromMode(0o600),
+        });
+        errdefer lock.close(io);
+        self.* = .{ .io = io, .paths = .{}, .store_dir = dir, .lock_file = lock };
+        var canonical: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const runtime = canonical[0..try dir.realPath(io, &canonical)];
+        self.paths.scratch.len = (try std.fmt.bufPrint(&self.paths.scratch.bytes, "{s}/scratch", .{runtime})).len;
+        try self.paths.socket.set(socket_path);
+    }
+
     /// Called once at Host startup; noinline keeps its directory listing and
     /// path buffer off the caller's frame, which lives as long as the Host.
     pub noinline fn prepareForServing(self: *StoreLease, fault_cleanup: bool) !void {
@@ -109,7 +143,7 @@ pub const StoreLease = struct {
         try validatePrivateDirectory(scratch, self.io);
         try cleanupOwnedIngress(&scratch, self.io, fault_cleanup);
 
-        if (self.runtime_dir == null) {
+        if (self.runtime_dir == null and self.paths.database.len != 0) {
             var runtime_dir_path: [max_runtime_directory_bytes]u8 = undefined;
             const runtime_path = try runtimeDirectory(&runtime_dir_path);
             var runtime_dir = try std.Io.Dir.cwd().createDirPathOpen(self.io, runtime_path, .{
@@ -164,10 +198,36 @@ pub const StoreLease = struct {
 };
 
 pub fn resolveClientPaths(io: std.Io, supplied_path: []const u8) !Paths {
+    if (mysqlRuntimeDirectory(supplied_path)) |runtime| return mysqlClientPaths(io, supplied_path, runtime);
     var store_dir = try std.Io.Dir.cwd().openDir(io, supplied_path, .{});
     defer store_dir.close(io);
     try validatePrivateDirectory(store_dir, io);
     return pathsFromOpenStore(store_dir, io);
+}
+
+/// Store ids are distinct from SQLite's canonical absolute paths.
+pub fn isOpaqueStoreId(text: []const u8) bool {
+    return @import("store_id.zig").valid(text);
+}
+
+/// Without this explicit non-secret hint, a relative SQLite directory whose
+/// name happens to be 32 hex characters keeps its existing path semantics.
+pub fn mysqlRuntimeDirectory(store: []const u8) ?[]const u8 {
+    if (!isOpaqueStoreId(store)) return null;
+    return std.mem.span(std.c.getenv("RUI_RUNTIME_DIR") orelse return null);
+}
+
+/// A routing hint, not Store authority: the Host checks `store` on every call.
+pub fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const u8) !Paths {
+    if (!isOpaqueStoreId(store) or !std.fs.path.isAbsolute(runtime)) return error.InvalidStorePath;
+    var dir = try std.Io.Dir.cwd().openDir(io, runtime, .{});
+    defer dir.close(io);
+    try validatePrivateDirectory(dir, io);
+    var paths: Paths = .{};
+    try paths.store.set(store);
+    paths.socket.len = (try std.fmt.bufPrint(&paths.socket.bytes, "{s}/rui.sock", .{runtime})).len;
+    paths.scratch.len = (try std.fmt.bufPrint(&paths.scratch.bytes, "{s}/scratch", .{runtime})).len;
+    return paths;
 }
 
 /// Read-only destination check before authentication repair. Existing Stores
@@ -752,4 +812,28 @@ test "startup reclaims only a stale Unix socket" {
         std.Io.File.Kind.file,
         (try tmp.dir.statFile(std.testing.io, "stale.sock", .{ .follow_symlinks = false })).kind,
     );
+}
+
+test "MySQL runtime lease owns no host.lock and routes an opaque Store id" {
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    var socket_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const address = try tmp.address("rui.sock", &socket_buffer);
+    const runtime = tmp.root[0..tmp.root_len];
+    var lease: StoreLease = undefined;
+    try lease.acquireMysql(std.testing.io, runtime, address.path);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "host.lock", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "rui.sqlite3", .{}));
+    try std.testing.expectEqual(std.Io.File.Kind.directory, (try tmp.dir.statFile(std.testing.io, "scratch", .{})).kind);
+    var second: StoreLease = undefined;
+    try std.testing.expectError(error.RuntimeDirectoryInUse, second.acquireMysql(std.testing.io, runtime, address.path));
+    const id = "0123456789abcdef0123456789abcdef";
+    const paths = try mysqlClientPaths(std.testing.io, id, runtime);
+    try std.testing.expectEqualStrings(id, paths.store.slice());
+    try std.testing.expectEqualStrings(address.path, paths.socket.slice());
+    try std.testing.expectEqualStrings(lease.paths.scratch.slice(), paths.scratch.slice());
+    try std.testing.expect(!isOpaqueStoreId("/sqlite/store"));
+    try std.testing.expect(!isOpaqueStoreId("0123456789abcdef0123456789abcdeF"));
 }

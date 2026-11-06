@@ -1993,9 +1993,7 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8) !void {
 
 /// Whether `text` is a Store id as store_meta holds it.
 pub fn isStoreId(text: []const u8) bool {
-    if (text.len != 2 * store_id_bytes) return false;
-    for (text) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
-    return true;
+    return @import("../store_id.zig").valid(text);
 }
 
 /// Column `column` of the current row, which is not NULL, as text.

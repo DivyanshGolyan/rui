@@ -22,7 +22,12 @@ The `rui` package carries the client. The `rui` executable comes from the platfo
 Pass `binary` to `Rui.connect` to name one yourself.
 
 `Rui.connect` writes the Store, the provider key, MCP bearer tokens and a private runtime directory to the child's stdin.
-The key and tokens never reach the child's argv, environment or disk.
+`database` accepts a SQLite directory or a `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE` URL.
+For a Unix socket, use its percent-encoded absolute path in place of HOST; TCP verifies TLS.
+The MySQL database must already contain the DDL from `rui store schema --engine mysql`.
+The key, tokens and MySQL URL never reach the child's argv, environment or disk.
+Readiness discovers the MySQL Store's stable opaque id, which the client uses on requests instead of the URL.
+MySQL readiness also reports `innodb_doublewrite`, including `OFF`.
 The child gets only `PATH`, `HOME` and `TMPDIR` from your environment.
 Shell commands the agent runs execute as your user; Rui is not a sandbox.
 
