@@ -1087,7 +1087,7 @@ test "every launch Wire field parses and conforms to its component schema" {
     const wire: launch_frame.Wire = .{
         .v = launch_frame.version,
         .store = "/tmp/store",
-        .provider = .{ .kind = "openai_key", .baseUrl = "https://api.openai.com/v1", .key = "test-key" },
+        .provider = .{ .kind = "openai_key", .baseUrl = "https://api.openai.com/v1", .key = "test-key", .caFile = "/tmp/ca.pem" },
         .runtimeDir = "/tmp/rui",
         .activeCapacity = 2,
         .paused = true,
@@ -1103,6 +1103,7 @@ test "every launch Wire field parses and conforms to its component schema" {
     try std.testing.expectEqual(@typeInfo(launch_frame.Wire).@"struct".field_names.len, json.object.count());
     const schema = document.schemas.get("LaunchFrame").?;
     try std.testing.expect(conforms(document.schemas, schema, json));
+    try std.testing.expectEqualStrings("/tmp/ca.pem", frame.ca_file.slice());
     try std.testing.expectEqual(@as(usize, 1), frame.presets.len);
     try std.testing.expectEqual(@as(usize, 1), frame.mcp_server_count);
     // Defaults are omittable; nullable capacity is distinct from omission.
@@ -1117,6 +1118,8 @@ test "every launch Wire field parses and conforms to its component schema" {
     // Closed wire objects must reject renamed or missing fields, including
     // fields inside MCP entries and the reused agent-spec schema.
     const invalid = [_][]const u8{
+        \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key","caFile":false},"runtimeDir":"/tmp/rui"}
+        ,
         \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDirectory":"/tmp/rui"}
         ,
         \\{"v":1,"store":"/tmp/store","provider":{"kind":"openai_key","baseUrl":"https://api.openai.com/v1","key":"test-key"},"runtimeDir":"/tmp/rui","mcpServers":[{"name":"tools","url":"http://127.0.0.1:1234/mcp","bearerToken":"test-token","timeoutMs":1000}]}

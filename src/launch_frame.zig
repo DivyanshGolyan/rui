@@ -43,6 +43,8 @@ pub const Frame = struct {
     /// `baseUrl`, as the frame spells it; `providers.endpointUnder` checks it.
     base_url: protocol.Bounded(max_base_url_bytes) = .{},
     key: api_key.Key = .{},
+    /// Empty uses system trust; otherwise only this PEM file verifies the provider.
+    ca_file: protocol.Bounded(max_ca_file_bytes) = .{ .len = 0 },
     runtime_dir: protocol.Bounded(max_runtime_dir_bytes) = .{},
     active_capacity: ?usize = null,
     /// The Host opens with Turns paused, as if `host_pause` had just run (D196).
@@ -56,6 +58,8 @@ pub const Frame = struct {
     presets_memory: ?std.heap.ArenaAllocator = null,
 
     pub const max_base_url_bytes = 2048;
+    /// Leave room for the TLS loader's terminating NUL.
+    pub const max_ca_file_bytes = std.posix.PATH_MAX - 1;
     pub const max_mcp_servers = 8;
     pub const max_mcp_name_bytes = 64;
 
@@ -144,7 +148,7 @@ pub const default_mcp_call_timeout_ms: u32 = 600_000;
 pub const Wire = struct {
     v: i64,
     store: []const u8,
-    provider: struct { kind: []const u8, baseUrl: []const u8, key: []const u8 },
+    provider: struct { kind: []const u8, baseUrl: []const u8, key: []const u8, caFile: ?[]const u8 = null },
     runtimeDir: []const u8,
     activeCapacity: ?i64 = null,
     paused: bool = false,
@@ -190,6 +194,12 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: 
     }
     if (!std.mem.eql(u8, wire.provider.kind, "openai_key")) return refuse(refusal, "provider.kind must be openai_key");
     frame.base_url.set(wire.provider.baseUrl) catch return refuse(refusal, "provider.baseUrl is too long");
+    frame.ca_file.len = 0;
+    if (wire.provider.caFile) |path| {
+        if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null)
+            return refuse(refusal, "provider.caFile must be a nonempty path without NUL bytes");
+        frame.ca_file.set(path) catch return refuse(refusal, "provider.caFile must be UTF-8 and shorter than the platform path limit");
+    }
     if (!api_key.valid(wire.provider.key)) return refuse(refusal, "provider.key must be one line of visible characters, at most 1024 bytes");
     @memcpy(frame.key.bytes[0..wire.provider.key.len], wire.provider.key);
     frame.key.len = wire.provider.key.len;
@@ -304,6 +314,49 @@ test "a launch frame carries the Store, provider key and runtime directory" {
     try std.testing.expectEqualStrings("/tmp/r/rui.sock", frame.socketPath(&buffer));
 }
 
+test "a launch frame carries optional provider CA trust" {
+    const longest: [Frame.max_ca_file_bytes]u8 = @splat('a');
+    for ([_]?[]const u8{ null, "/tmp/root ca.pem", "relative/ca.pem", "证书.pem", &longest }) |path| {
+        const wire: Wire = .{
+            .v = 1,
+            .store = "/s",
+            .provider = .{ .kind = "openai_key", .baseUrl = "https://a.b/v1", .key = "k", .caFile = path },
+            .runtimeDir = "/r",
+        };
+        const json = try std.json.Stringify.valueAlloc(std.testing.allocator, wire, .{});
+        defer std.testing.allocator.free(json);
+        var frame: Frame = .{};
+        defer frame.deinit();
+        var refusal: Refusal = undefined;
+        try parse(std.testing.allocator, json, &frame, &refusal);
+        try std.testing.expectEqualStrings(path orelse "", frame.ca_file.slice());
+        // An omitted CA returns to system trust, including after a prior parse.
+        try parse(std.testing.allocator, valid_json, &frame, &refusal);
+        try std.testing.expectEqual(@as(usize, 0), frame.ca_file.len);
+    }
+}
+
+test "a launch frame refuses invalid provider CA paths" {
+    const too_long: [Frame.max_ca_file_bytes + 1]u8 = @splat('a');
+    for ([_][]const u8{ "", "/tmp/ca.pem\x00ignored", &too_long }) |path| {
+        const wire: Wire = .{
+            .v = 1,
+            .store = "/s",
+            .provider = .{ .kind = "openai_key", .baseUrl = "https://a.b/v1", .key = "secret-key", .caFile = path },
+            .runtimeDir = "/r",
+        };
+        const json = try std.json.Stringify.valueAlloc(std.testing.allocator, wire, .{});
+        defer std.testing.allocator.free(json);
+        var frame: Frame = .{};
+        defer frame.deinit();
+        var refusal: Refusal = undefined;
+        try std.testing.expectError(error.LaunchFrameInvalid, parse(std.testing.allocator, json, &frame, &refusal));
+        try std.testing.expectEqual(StartError.launch_frame_invalid, refusal.code);
+        try std.testing.expect(std.mem.startsWith(u8, refusal.message, "provider.caFile "));
+        try std.testing.expectEqual(@as(usize, 0), frame.key.len);
+    }
+}
+
 test "a launch frame carries MCP servers" {
     var frame: Frame = .{};
     defer frame.wipe();
@@ -378,6 +431,14 @@ test "a launch frame can open the Host paused" {
 test "a launch frame is refused with launch_frame_invalid when it is wrong" {
     const cases = [_][]const u8{
         "not json",
+        \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k","caFile":42},"runtimeDir":"/r"}
+        ,
+        \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k","caFile":false},"runtimeDir":"/r"}
+        ,
+        \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k","caFile":[]},"runtimeDir":"/r"}
+        ,
+        \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k","caFile":{}},"runtimeDir":"/r"}
+        ,
         \\{"v":2,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r"}
         ,
         \\{"v":1,"store":"","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r"}

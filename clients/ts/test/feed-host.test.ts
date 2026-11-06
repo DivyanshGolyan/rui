@@ -2,10 +2,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { createSecureServer } from "node:http2";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { test } from "node:test";
 
@@ -31,11 +31,6 @@ test("follow wakes for two local sends and makes no requests between them while 
 	const cert = join(root, "cert.pem");
 	const key = join(root, "key.pem");
 	execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1", "-days", "1"], { stdio: "pipe" });
-	// System trust uses Apple SecTrust on macOS, not SSL_CERT_FILE.
-	// Give the real Host explicit trust in only this fixture certificate on every platform.
-	const quote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
-	const wrapper = join(root, "rui-with-test-ca");
-	writeFileSync(wrapper, `#!/bin/sh\nexec ${quote(resolve(binary ?? "rui"))} "$@" --provider-ca-file ${quote(cert)}\n`, { mode: 0o700 });
 	const provider = createSecureServer({ key: readFileSync(key), cert: readFileSync(cert) });
 	const requests: string[] = [];
 	const paths: string[] = [];
@@ -69,8 +64,8 @@ test("follow wakes for two local sends and makes no requests between them while 
 	let consume: Promise<void> | undefined;
 	try {
 		rui = await Rui.connect({
-			database: join(root, "store"), binary: wrapper,
-			provider: { baseUrl: `https://127.0.0.1:${address.port}/v1`, key: "local-fixture-only" },
+			database: join(root, "store"), binary: binary ?? "rui",
+			provider: { baseUrl: `https://127.0.0.1:${address.port}/v1`, key: "local-fixture-only", caFile: cert },
 		});
 		const session = await rui.sessions.create({
 			provider: "openai", model: "model-a", effort: null, compactAt: 100000,
