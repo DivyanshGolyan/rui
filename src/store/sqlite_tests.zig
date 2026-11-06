@@ -1523,7 +1523,7 @@ test "closed value columns accept exactly their values" {
     const not_efforts = [_][]const u8{ "'minimal'", "'Medium'", "''" };
     const Column = struct { update: []const u8, accepted: []const []const u8, rejected: []const []const u8 };
     const columns = [_]Column{
-        .{ .update = "UPDATE core_command SET kind={s}", .accepted = &.{ "1", "2", "3", "4", "5" }, .rejected = &.{ "0", "6" } },
+        .{ .update = "UPDATE core_command SET kind={s}", .accepted = &.{ "1", "2", "3", "4", "5", "6" }, .rejected = &.{ "0", "7" } },
         .{ .update = "UPDATE model_output_item SET item_kind=v.k,message_content_id=CASE WHEN v.k=2 THEN extras_content_id END FROM (SELECT {s} AS k) v", .accepted = &.{ "1", "2", "3", "4", "5" }, .rejected = &.{ "0", "6" } },
         .{
             .update = "UPDATE conversation_entry SET entry_kind=v.k,source_admission_id=CASE WHEN v.k=1 THEN source_admission_id END," ++

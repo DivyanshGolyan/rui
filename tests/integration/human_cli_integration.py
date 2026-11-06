@@ -7351,7 +7351,7 @@ def main(selected="all"):
             before_choice = set(records.glob("*.json"))
             # A chord at the choice is refused and spends its freshness: the
             # Enter right behind it decides nothing.
-            for invalid in ("\x01", "\x1ba", "\x1b[1;3C"):
+            for invalid in ("\x01", "\x1bu", "\x1b[1;3C"):
                 rejected_choice = action_ready(ready_read, master, send=(invalid + "\n").encode())
                 rejected_choice += "\n" + current_screen(master)
                 # Durable effects are the oracle.

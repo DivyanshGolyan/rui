@@ -251,7 +251,7 @@ pub const migrations = [_]Migration{
             "ALTER TABLE core_command DROP CHECK core_command_chk_2, ADD CHECK(kind BETWEEN 1 AND 6)",
             "CREATE TABLE session_archive(\n session_ref VARCHAR(6) NOT NULL,\n command_key VARCHAR(128),\n PRIMARY KEY(session_ref),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(command_key) REFERENCES session_stop(command_key)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE TABLE session_archive_command(\n command_key VARCHAR(128) NOT NULL,\n archived TINYINT NOT NULL,\n PRIMARY KEY(command_key),\n FOREIGN KEY(command_key) REFERENCES core_command(command_key),\n CHECK(archived IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
-            "ALTER TABLE session_stop ADD COLUMN parent_caused TINYINT NOT NULL DEFAULT 0, ADD CHECK(parent_caused IN (0,1))",
+            "ALTER TABLE session_stop ADD COLUMN parent_caused TINYINT NOT NULL DEFAULT 0 AFTER stopped_at, ADD CHECK(parent_caused IN (0,1))",
             "UPDATE session_stop SET parent_caused=1 WHERE command_key>='rui.core/stop/' AND command_key<'rui.core/stop0'",
             "ALTER TABLE session_ending_owed ADD COLUMN suppress_message TINYINT NOT NULL DEFAULT 0, ADD CHECK(suppress_message IN (0,1))",
         },
