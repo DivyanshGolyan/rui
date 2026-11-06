@@ -145,6 +145,19 @@ __attribute__((constructor)) static void diagnostic_alias(void) {
     }
 }
 
+/* Only the submission owner can name this boundary: ClientTask and
+   std.Thread use an opaque entry/argument pair shared by readers. Scope the
+   identity to the spawning thread, and clear it even when pthread_create fails. */
+static _Thread_local int submission_start = 0;
+
+void rui_test_submission_start(int entering) {
+    if (submission_start == entering) _exit(85);
+    submission_start = entering;
+    const char *arm = getenv("RUI_TERMINAL_STARTUP_ARM");
+    if (arm && !access(arm, F_OK))
+        record(entering ? "submission-start\n" : "submission-start-end\n");
+}
+
 static int probe_pthread_create(pthread_t *thread, const pthread_attr_t *attrs,
         void *(*run)(void *), void *arg) {
 #ifdef __APPLE__
@@ -154,11 +167,14 @@ static int probe_pthread_create(pthread_t *thread, const pthread_attr_t *attrs,
 #endif
     if (!real_create || real_create == probe_pthread_create) _exit(89);
     const char *arm = getenv("RUI_TERMINAL_STARTUP_ARM");
-    if (arm && !access(arm, F_OK)) {
+    const int armed = arm && !access(arm, F_OK);
+    if (armed && submission_start) {
         record("worker-not-started\n");
         return EAGAIN;
     }
-    return real_create(thread, attrs, run, arg);
+    const int result = real_create(thread, attrs, run, arg);
+    if (armed && !result) record("non-submission-worker-started\n");
+    return result;
 }
 
 static int command_return_signal(int fd, const void *bytes, size_t count) {
@@ -696,8 +712,10 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attrs, void *(*run)(
 
 
 FORWARD_DRIVER = r"""
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -710,7 +728,43 @@ FORWARD_DRIVER = r"""
 static volatile sig_atomic_t signals = 0;
 static void interrupted(int sig) { (void)sig; ++signals; }
 
+static void *noop(void *arg) { return arg; }
+
+static int start_and_join(void) {
+    pthread_t thread;
+    int result = pthread_create(&thread, NULL, noop, NULL);
+    return result ? result : pthread_join(thread, NULL);
+}
+
+struct other_start { int gate; int result; };
+static void *start_elsewhere(void *raw) {
+    struct other_start *other = raw;
+    char byte;
+    if (read(other->gate, &byte, 1) != 1) _exit(40);
+    other->result = start_and_join();
+    return NULL;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "startup-selector")) {
+        void (*mark)(int) = dlsym(RTLD_DEFAULT, "rui_test_submission_start");
+        int gate[2];
+        pthread_t other;
+        if (!mark || pipe(gate)) return 41;
+        struct other_start context = { .gate = gate[0], .result = -1 };
+        /* Start the helper before entering the main thread's scope. Its own
+           create runs only while that scope is active, proving TLS isolation. */
+        if (pthread_create(&other, NULL, start_elsewhere, &context) || start_and_join()) return 42;
+        mark(1);
+        if (start_and_join() != EAGAIN) return 43;
+        if (write(gate[1], "x", 1) != 1 || pthread_join(other, NULL) || context.result) return 44;
+        mark(0);
+        if (start_and_join()) return 45;  /* Failed spawn did not leak scope. */
+        mark(1);
+        if (start_and_join() != EAGAIN) return 46;
+        mark(0);
+        return close(gate[0]) || close(gate[1]);
+    }
     if (argc == 3 && !strcmp(argv[1], "command-marker")) {
         const char *fault = getenv("RUI_TERMINAL_FAULT");
         int canonical = !strcmp(fault, "configure-canonical");
@@ -887,6 +941,18 @@ def check_forwarding(state, library):
             lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
             lambda: os.close(master), lambda: os.close(slave),
         )
+
+    arm, log = state / "forward-startup-arm", state / "forward-startup.log"
+    arm.touch()
+    result = subprocess.run([str(executable), "startup-selector"], env={**env,
+        "RUI_TERMINAL_STARTUP_ARM": str(arm), "RUI_TERMINAL_PROBE": str(log)},
+        capture_output=True, timeout=5)
+    assert result.returncode == 0 and result.stdout == result.stderr == b"", result
+    assert log.read_text().splitlines() == [
+        "non-submission-worker-started", "non-submission-worker-started",
+        "submission-start", "worker-not-started", "non-submission-worker-started", "submission-start-end",
+        "non-submission-worker-started", "submission-start", "worker-not-started", "submission-start-end"], log.read_text()
+    print("terminal fixture startup selector: unscoped/concurrent starts forwarded, scoped EAGAIN and reset passed", flush=True)
 
     for fault in ("configure-admitted", "configure-presentation", "configure-rejected", "configure-canonical"):
         for shape in ("coalesced", "split-writev"):
@@ -2216,7 +2282,7 @@ def detach_reporting_cases(state, library):
 
 def startup_reporting_cases(state, library):
     """Initial launch is definitely unsent; failed retry retains uncertainty."""
-    for kind in ("message", "allow_once", "deny", "message-restore", "retry"):
+    for kind in ("message", "message-reader-first", "allow_once", "deny", "message-restore", "retry"):
         root = state / f"startup-{kind}"
         root.mkdir()
         home, store = root / "home", root / "store"
@@ -2231,6 +2297,7 @@ def startup_reporting_cases(state, library):
         thread.start()
         host = caller = proxy = None
         held, release = threading.Event(), threading.Event()
+        reader_held, reader_release = threading.Event(), threading.Event()
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
         original = termios.tcgetattr(slave)
@@ -2243,7 +2310,7 @@ def startup_reporting_cases(state, library):
                 env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write),
                     os_semantics.PRELOAD: str(library),
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "startup-restore" if kind == "message-restore" else "startup",
-                    "RUI_TERMINAL_STARTUP_ARM": str(arm)},
+                    "RUI_TERMINAL_STARTUP_ARM": str(arm), "RUI_TEST_SUBMISSION_START": "1"},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
             os.write(master, b"seed accepted original\n")
@@ -2264,8 +2331,12 @@ def startup_reporting_cases(state, library):
                     os.write(master, b"retry this exact original\n")
                     human.read_terminal(master, "Not confirmed")
                 def hold(response):
-                    held.set()
-                    assert release.wait(15), "startup observation not released"
+                    if held.is_set() and kind == "message-reader-first":
+                        reader_held.set()
+                        assert reader_release.wait(15), "startup next reader not released"
+                    else:
+                        held.set()
+                        assert release.wait(15), "startup observation not released"
                     return response
                 if proxy is None:
                     proxy = canonical.ReplyProxy(host, "/v1/activity-page", hold)
@@ -2277,11 +2348,25 @@ def startup_reporting_cases(state, library):
             before = {path: path.read_bytes() for path in records.glob("*.json")}
             mutations = list(proxy.mutations)
             arm.touch()
+            if kind == "message-reader-first":
+                # Retire the held read while armed, before typing the intent.
+                # The next real frontend reader must start and reach the proxy;
+                # a process-wide pthread fault instead exits with the old
+                # accepted Message's guide, before begin can retain this intent.
+                release.set()
+                human.terminal_gate(caller, master, reader_held, "unrelated reader starts while armed")
             os.write(master, event)
             output, errors = human.terminal_exit(caller, master)
             assert caller.returncode == 1, (output, errors)
             assert b"[internal_unexpected]" in errors, errors
-            assert log.read_text().count("worker-not-started\n") == 1, log.read_text()
+            markers = log.read_text().splitlines()
+            assert markers.count("worker-not-started") == 1, markers
+            assert markers.count("submission-start") == markers.count("submission-start-end") == 1, markers
+            assert markers.index("submission-start") < markers.index("worker-not-started") < markers.index("submission-start-end"), markers
+            if kind == "message-reader-first":
+                # The child can reach the proxy before pthread_create returns
+                # and records its success. Check publication after caller exit.
+                assert markers.index("non-submission-worker-started") < markers.index("submission-start"), markers
             if kind == "retry":
                 request, = [json.loads(body) for body in before.values()
                     if json.loads(body).get("text", {}).get("value") == "retry this exact original"]
@@ -2299,6 +2384,7 @@ def startup_reporting_cases(state, library):
             else:
                 assert os_semantics.user_termios(actual) == os_semantics.user_termios(original)
             release.set()
+            reader_release.set()
             proxy.close()
             proxy = None
             if kind == "retry":
@@ -2315,7 +2401,7 @@ def startup_reporting_cases(state, library):
                     "exchanges": len(proxy.exchanges) if proxy is not None else 0,
                 })
             dispose_all(
-                release.set,
+                release.set, reader_release.set,
                 lambda: stop_process(caller, timeout=5) if caller is not None else None,
                 lambda: proxy.close() if proxy is not None else None,
                 lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
