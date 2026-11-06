@@ -638,6 +638,25 @@ fn freeConnection(self: *Engine) ?*Connection {
     return null;
 }
 
+pub fn retireConnections(self: *Engine, endpoint: h2.Endpoint) void {
+    const origin = self.endpoints[@backingInt(endpoint)].origin;
+    for (self.active()) |*connection| {
+        if (connection.origin != origin) continue;
+        switch (connection.state) {
+            .ready, .draining => {
+                if (connection.streams == 0) connection.close(.goaway) else connection.state = .draining;
+            },
+            .free => {},
+            else => {
+                // A cancelled/failed last pending GET can leave setup in
+                // flight. Do not keep its socket, lookup or TLS allocation.
+                if (self.origins[origin].pending.len == 0) connection.close(.abrupt);
+            },
+        }
+    }
+    self.trimTable();
+}
+
 fn sendAll(self: *Engine) void {
     for (self.active()) |*connection| {
         if (connection.hasSession()) connection.send();

@@ -465,6 +465,66 @@ test "a connection outlives its last stream's cancel, which only drive sends" {
     stream.deinit();
 }
 
+test "retireConnections closes idle TLS state and the endpoint reconnects" {
+    const harness = try Harness.create(.{ .peer = .{ .tls = .h2 } });
+    defer harness.destroy();
+    for (0..2) |index| {
+        var stream: h2.Stream = .idle;
+        var sink: [128]u8 = undefined;
+        try harness.launch(&stream, bytesRequest(harness.endpoint, "1", &sink));
+        try harness.runUntilFinished(1);
+        try std.testing.expectEqual(.complete, (try harness.collect(&stream)).cause);
+        stream.deinit();
+        try std.testing.expect(harness.client.hasConnections());
+        harness.client.retireConnections(harness.endpoint);
+        try std.testing.expect(!harness.client.hasConnections());
+        try std.testing.expectEqual(@as(u32, @intCast(index + 1)), harness.peer.seen.connections);
+    }
+}
+
+test "retireConnections closes abandoned setup before the peer answers" {
+    const harness = try Harness.create(.{ .peer = .{ .tls = .h2 } });
+    defer harness.destroy();
+    var stream: h2.Stream = .idle;
+    var sink: [128]u8 = undefined;
+    try harness.launch(&stream, bytesRequest(harness.endpoint, "1", &sink));
+    // Do not pump the peer: the setup cannot have completed.
+    try harness.client.drive(&harness.receiver);
+    try std.testing.expect(harness.client.hasConnections());
+    harness.client.cancel(&stream);
+    stream.deinit();
+    harness.client.retireConnections(harness.endpoint);
+    try std.testing.expect(!harness.client.hasConnections());
+}
+
+test "retireConnections drains shared siblings without cancelling them" {
+    const harness = try Harness.create(.{ .peer = .{ .on_request = hold } });
+    defer harness.destroy();
+    var first: h2.Stream = .idle;
+    var second: h2.Stream = .idle;
+    var first_sink: [8]u8 = undefined;
+    var second_sink: [8]u8 = undefined;
+    try harness.launch(&first, bytesRequest(harness.endpoint, "1", &first_sink));
+    try harness.launch(&second, bytesRequest(harness.endpoint, "2", &second_sink));
+    try harness.runUntilPeerStreams(2);
+    harness.peer.respond(harness.peer.streams.items[0], 200, "ok");
+    try harness.runUntilFinished(1);
+    try std.testing.expectEqual(.complete, (try harness.collect(&first)).cause);
+    first.deinit();
+    harness.client.retireConnections(harness.endpoint);
+    try std.testing.expect(harness.client.hasConnections());
+    harness.peer.respond(harness.peer.streams.items[1], 200, "ok");
+    try harness.runUntilFinished(1);
+    try std.testing.expectEqual(.complete, (try harness.collect(&second)).cause);
+    second.deinit();
+    try harness.runUntil({}, struct {
+        fn done(h: *Harness, _: void) bool {
+            return !h.client.hasConnections();
+        }
+    }.done);
+    try std.testing.expectEqual(@as(u32, 0), harness.peer.seen.rst_received);
+}
+
 test "small DATA frames decoded from one read reach the sink in one write" {
     const Chunked = struct {
         const body: [200]u8 = blk: {

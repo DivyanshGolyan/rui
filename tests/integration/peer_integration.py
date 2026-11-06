@@ -194,7 +194,7 @@ class PeerHandler(fixture.http.server.BaseHTTPRequestHandler):
 
 def run(installed, *args, home, expect=0, input=None):
     completed = subprocess.run([str(installed), *map(str, args)], text=True, capture_output=True, timeout=15,
-                               env={"PATH": os.environ["PATH"], "HOME": str(home)}, input=input)
+                               env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, input=input)
     assert completed.returncode == expect, (args, completed)
     return json.loads(completed.stdout)
 
@@ -237,19 +237,19 @@ def main(report_source):
                         '{"session":"x","store":"/bad\\u0000path"}'):
             refused = subprocess.run([str(installed), "session", "send", "--to", address,
                 "--record", str(refused_record), "--key", "invalid"],
-                env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
+                env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, capture_output=True, timeout=10)
             assert refused.returncode == 2 and b"six lowercase Crockford" in refused.stderr, refused
             assert refused.stdout == b"" and not refused_record.exists(), refused
         for old_flag in ("--session", "--session-hex"):
             refused = subprocess.run([str(installed), "session", "send", "--to", "k7m2qx", old_flag, "obsolete",
                 "--record", str(refused_record), "--key", "invalid"],
-                env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=10)
+                env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, capture_output=True, timeout=10)
             assert refused.returncode == 2 and refused.stderr == (b"rui session send: " + old_flag.encode() +
                 b": That option is not supported by this command. Accepted: options and values listed by rui session send --help. Next: Use an option listed by this command's help. Nothing was captured or sent. [option_unknown]\n"), refused
             assert refused.stdout == b"" and not refused_record.exists(), refused
         foreign_store = state / "foreign-store"
         foreign_host, _ = start_ready_process([installed, "host", "serve", "--store", foreign_store],
-            env={"PATH": os.environ["PATH"], "HOME": str(home)}, required_fields={"execution": "unavailable"})
+            env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, required_fields={"execution": "unavailable"})
         foreign_session = allocated(run(installed, "session", "configure", "--store", foreign_store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol", home=home))
         external_session = allocated(run(installed, "session", "configure", "--store", foreign_store,
@@ -264,7 +264,7 @@ def main(report_source):
             rejected = subprocess.run([str(installed), "session", "configure", "--store", str(foreign_store),
                 flag, invalid, "--workspace", str(workspace),
                 "--provider", "codex", "--model", "gpt-6-sol", "--record", str(refused_record), "--key", "invalid-config"],
-                env={"PATH": os.environ["PATH"], "HOME": str(home)}, capture_output=True, timeout=15)
+                env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}, capture_output=True, timeout=15)
             assert rejected.returncode == 2 and diagnostic in rejected.stderr, rejected
             assert rejected.stdout == b"" and not refused_record.exists(), rejected
             assert run(installed, "session", "list", "--store", foreign_store, "--all", home=home) == foreign_listing
@@ -282,7 +282,7 @@ def main(report_source):
         thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
         thread.start()
         url = f"http://127.0.0.1:{endpoint.server_address[1]}/responses"
-        host_env = {"PATH": os.environ["PATH"], "HOME": str(home), **SECRETS}
+        host_env = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": "", **SECRETS}
         host, _ = start_ready_process(
             [installed, "host", "serve", "--store", store, "--active-capacity", "2", "--provider-endpoint", url],
             env=host_env, required_fields={"execution": "enabled"},
@@ -295,7 +295,7 @@ def main(report_source):
         # RUI_STORE once the deliberately conflicting preference is restored.
         run(installed, "defaults", "configure", "--store", store, home=home)
         ask = subprocess.run([str(installed), "session", "send", "--to", session_a], input="Ask peer/b for 6*7.",
-                             text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
+                             text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""})
         assert ask.returncode == 0, ask
         ask_key = json.loads(ask.stdout)["context"]["key"]
         run(installed, "defaults", "configure", "--store", unrelated_store, home=home)
@@ -437,7 +437,7 @@ def main(report_source):
         assert {row["message"] for row in b_after["recent_messages"]} == {receipt["context"]["key"], *self_sends}, b_after
         for key in (receipt["context"]["key"], *self_sends):
             local = subprocess.run([str(installed), "request", "read-result", "--store", str(store), "--key", key],
-                                   text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home)})
+                                   text=True, capture_output=True, timeout=15, env={"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""})
             assert local.returncode == 0 and local.stdout == "plain reply stays local", local
         a_after = run(installed, "session", "inspect", "--store", store, "--session", session_a, home=home)
         assert [row["message"] for row in a_after["recent_messages"]] == [reply["context"]["key"], ask_key], a_after
@@ -463,7 +463,7 @@ def main(report_source):
         try:
             controls.append(subprocess.Popen(["rui", "60"], executable="/bin/sleep"))
             controls.append(subprocess.Popen(["renamed-copy", "host", "serve", "--store", str(state / "leak-store")],
-                executable=installed, env={"PATH": os.environ["PATH"], "HOME": str(state / "leak-home")},
+                executable=installed, env={"PATH": os.environ["PATH"], "HOME": str(state / "leak-home"), "RUI_TEST_MODELS_DEV_URL": ""},
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             # Darwin's census (lsof) can miss a copy spawned just now; the
             # census is right once it sees it, and never sees the decoy.
@@ -574,7 +574,7 @@ def stdin_start_contract():
         home = state / "home"
         home.mkdir()
         store = state / "store"
-        environment = {"PATH": os.environ["PATH"], "HOME": str(home)}
+        environment = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}
 
         def invoke(*args, input=b"", extra=None, **kwargs):
             return subprocess.run([str(fixture.RUI), *map(str, args)],
@@ -731,7 +731,7 @@ def concurrent_peers():
         installed = state / "bin" / "rui"
         installed.parent.mkdir()
         shutil.copy2(fixture.RUI, installed)
-        environment = {"PATH": os.environ["PATH"], "HOME": str(home)}
+        environment = {"PATH": os.environ["PATH"], "HOME": str(home), "RUI_TEST_MODELS_DEV_URL": ""}
         endpoint = CohortModel(workspace)
         threading.Thread(target=endpoint.serve_forever, daemon=True).start()
         host, _ = start_ready_process([installed, "host", "serve", "--store", store,

@@ -1,19 +1,15 @@
-"""The Store schema version moves only past a release, a released row of
-bootstrap_digests is never edited, and neither is a shipped migration step:
-one whose `from` is below the released schema_version. Every step is string
-literals only, so the source compared is the text that runs.
+"""Each format PR appends its own schema version and forward step (D226).
 
-Concurrent PRs that change the schema share main's unreleased number and
-update its row's digest in place, instead of each appending the next number:
-web search was renumbered 46 -> 48 -> 49 on 2026-11-02 as other schema PRs
-landed first.
+Main's existing digests and migration steps are immutable, unreleased ones
+included. Released formats also remain checked against their release tag.
+Every step is string literals only, so the source compared is what runs.
 """
 from pathlib import Path
 import re
 import textwrap
 import unittest
 
-from release_numbers import bump_error, digest_rows, drifted_row_fix, git, main_base, released_tag
+from release_numbers import digest_rows, drifted_row_fix, git, main_base, released_tag
 
 ROOT = Path(__file__).resolve().parents[2]
 SCHEMA = "src/store/schema.zig"
@@ -91,6 +87,15 @@ def edited_released_rows(candidate, released_rows, released):
                   if version <= released and candidate.get(version) != digest)
 
 
+def schema_bump_error(candidate, base):
+    """A format PR may preserve main's format or append exactly one (D226)."""
+    if candidate < base:
+        return f"schema_version {candidate} goes back below main's {base}"
+    if candidate > base + 1:
+        return f"schema_version {candidate} skips past {base + 1}, one past main's {base}"
+    return None
+
+
 class StoreSchemaVersionTest(unittest.TestCase):
     def test_reads_the_owner(self):
         source = (ROOT / SCHEMA).read_text()
@@ -108,7 +113,7 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertEqual(edited_released_rows({45: "0xa", 46: "0xd"}, released, 46), [46])
         self.assertEqual(edited_released_rows({46: "0xb"}, released, 46), [45])
         self.assertEqual(edited_released_rows({45: "0xa", 46: "0xd"}, released, 45), [],
-                         "an unreleased row is updated in place")
+                         "the release comparison excludes newer rows; the main-prefix check protects those")
 
     def test_shipped_steps_rule(self):
         released_source = textwrap.dedent("""\
@@ -152,20 +157,34 @@ class StoreSchemaVersionTest(unittest.TestCase):
         self.assertEqual(non_literal_steps(migration_steps(source)), [],
                          "each statement of a migration step is one string literal: write out the text that runs")
 
-    def test_schema_version_moves_once_per_release(self):
-        tag = released_tag(ROOT)
-        if tag is None or not TAG.fullmatch(tag):
-            self.skipTest("no v0.S.N release tags in this checkout; the policy job checks out with fetch-depth 0")
+    def test_a_format_pr_appends_after_main_even_before_release(self):
+        self.assertIsNone(schema_bump_error(54, 54))
+        self.assertIsNone(schema_bump_error(55, 54))
+        self.assertIsNotNone(schema_bump_error(53, 54))
+        self.assertIsNotNone(schema_bump_error(56, 54))
+        # The same prefix checks used below protect unreleased main formats,
+        # not just the rows and steps covered by the last release.
+        self.assertEqual(edited_released_rows({53: 1, 54: 3, 55: 4}, {53: 1, 54: 2}, 54), [54])
+        self.assertEqual(edited_shipped_steps({53: "changed", 54: "new"}, {53: "original"}, 54), [53])
+        self.assertEqual(edited_shipped_steps({53: "original", 54: "new"}, {53: "original"}, 54), [])
+
+    def test_schema_version_appends_without_rewriting_main_or_releases(self):
         base_commit = main_base(ROOT)
         if base_commit is None:
             self.skipTest("no origin/main in this checkout to take the merge base from")
-        released = int(TAG.fullmatch(tag)[1])
         source = (ROOT / SCHEMA).read_text()
-        base = schema_version(git(ROOT, "show", f"{base_commit}:{SCHEMA}"))
-        error = bump_error("schema_version", schema_version(source), base, released)
-        if error:
-            self.fail(f"{error} (release {tag}, main at {base_commit[:12]}); an unreleased number's row "
-                      "takes a changed digest in place")
+        base_source = git(ROOT, "show", f"{base_commit}:{SCHEMA}")
+        base = schema_version(base_source)
+        error = schema_bump_error(schema_version(source), base)
+        self.assertIsNone(error, f"{error} (main at {base_commit[:12]}); each format PR appends its own step (D226)")
+        rows = edited_released_rows(digest_rows(source), digest_rows(base_source), base)
+        self.assertEqual(rows, [], f"main's bootstrap_digests rows {rows} are immutable, even unreleased: append a new version")
+        steps = edited_shipped_steps(migration_steps(source), migration_steps(base_source), base)
+        self.assertEqual(steps, [], f"main's migration steps from {steps} are immutable, even unreleased: append a new step")
+        tag = released_tag(ROOT)
+        if tag is None or not TAG.fullmatch(tag):
+            self.skipTest("no v0.S.N release tags in this checkout; the policy job checks out with fetch-depth 0")
+        released = int(TAG.fullmatch(tag)[1])
         if git(ROOT, "ls-tree", "--name-only", tag, "--", SCHEMA):
             shipped, rows = digest_rows(git(ROOT, "show", f"{tag}:{SCHEMA}")), digest_rows(source)
             edited = edited_released_rows(rows, shipped, released)

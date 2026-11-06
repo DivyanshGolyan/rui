@@ -12,6 +12,8 @@ const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
 const content_domain = @import("domain/content.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
+const model_facts_domain = @import("domain/model_facts.zig");
+const model_catalog = @import("../model_catalog.zig");
 const tool_catalog = @import("../tools.zig");
 const historical_domain = @import("domain/historical.zig");
 const model_admission_domain = @import("domain/model_admission.zig");
@@ -103,6 +105,9 @@ pub const Store = struct {
     batch: enum(u8) { none, ready, first, open, lost } = .none,
     /// Whether the current write's savepoint is open in the batch.
     savepoint: bool = false,
+    /// Release a bulk writer's cache after the queue's outer commit, not
+    /// merely after the writer's savepoint. Fits existing Store padding.
+    release_bulk_memory: bool = false,
     // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) TestingContentWork else void = if (@import("builtin").is_test) .{} else {},
 
@@ -206,6 +211,78 @@ pub const Store = struct {
             const owned: *OutOfLine = @fieldParentPtr("ring", self.changes);
             owned.tools = .{ .catalog = &tool_catalog.built_in, .set_id = 0 };
         }
+    }
+
+    /// Atomically replaces the saved models.dev generation. Access flushes
+    /// bounded statement batches inside this one transaction: with model_id
+    /// as the key, intermediate commits would destroy the previous copy.
+    pub fn saveModelFacts(self: *Store, entries: []const model_catalog.Entry, etag: ?[]const u8) !void {
+        if (etag) |value| if (value.len > 512) return error.InvalidCatalogEtag;
+        return self.queue().write(saveModelFactsHeld, .{ self, entries, etag });
+    }
+
+    fn saveModelFactsHeld(self: *Store, entries: []const model_catalog.Entry, etag: ?[]const u8) !void {
+        const entry = try enter(self, .none);
+        defer {
+            // Access has reset its statements and committed or rolled back.
+            // Keep the maintenance hint inside this serialized queue entry.
+            if (self.batch == .none) self.engine.releaseUnusedMemory(model_facts_domain.save_statements) else self.release_bulk_memory = true;
+            entry.release();
+        }
+        var access: Access(.write, error{}) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, model_facts_domain.save(&access, entries, etag)));
+    }
+
+    pub fn readModelCatalogSource(self: *Store) !?model_facts_domain.Source {
+        return self.queue().run(readModelCatalogSourceHeld, .{self});
+    }
+
+    fn readModelCatalogSourceHeld(self: *Store) !?model_facts_domain.Source {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        var result: ?model_facts_domain.Source = null;
+        access.read(model_facts_domain.source, .{}, &result);
+        try entry.finish(Ordinary.none, access.run());
+        return result;
+    }
+
+    pub fn modelFact(self: *Store, id: []const u8) !?model_facts_domain.Fact {
+        return self.queue().run(modelFactHeld, .{ self, id });
+    }
+
+    fn modelFactHeld(self: *Store, id: []const u8) !?model_facts_domain.Fact {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        var result: ?model_facts_domain.Fact = null;
+        access.read(model_facts_domain.fact, .{ .id = id }, &result);
+        try entry.finish(Ordinary.none, access.run());
+        return result;
+    }
+
+    /// Caller owns the returned IDs and slice; free each ID and the slice.
+    pub fn readOpenAiModelIds(self: *Store, allocator: std.mem.Allocator) ![][]const u8 {
+        return self.queue().run(readOpenAiModelIdsHeld, .{ self, allocator });
+    }
+
+    fn readOpenAiModelIdsHeld(self: *Store, allocator: std.mem.Allocator) ![][]const u8 {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{}) = .open(&entry);
+        defer access.deinit();
+        var ids: ModelIds = .{ .allocator = allocator };
+        errdefer {
+            for (ids.items.items) |id| allocator.free(id);
+            ids.items.deinit(allocator);
+        }
+        access.readEach(model_facts_domain.openai_ids, .{}, std.math.maxInt(u64), &ids);
+        try entry.finish(Ordinary.none, access.run());
+        if (ids.failed) return error.OutOfMemory;
+        return ids.items.toOwnedSlice(allocator);
     }
 
     /// Opens the network engine in place. Its buffers live out of line;
@@ -1708,6 +1785,10 @@ fn finishBatch(context: *anyopaque) bool {
         self.batch = .none;
         self.identities().taken = .empty;
         self.identities().second = 0;
+        if (self.release_bulk_memory) {
+            self.release_bulk_memory = false;
+            self.engine.releaseUnusedMemory(model_facts_domain.save_statements);
+        }
     }
     commitBatch(self) catch return false;
     return true;
@@ -1991,3 +2072,22 @@ pub fn readUnixMilliseconds(io: std.Io) !i64 {
     if (value <= 0) return error.ClockReadFailed;
     return value;
 }
+
+const ModelIds = struct {
+    allocator: std.mem.Allocator,
+    items: std.ArrayList([]const u8) = .empty,
+    failed: bool = false,
+
+    pub fn visit(self: *ModelIds, row: *const model_facts_domain.openai_ids.Row) bool {
+        const id = self.allocator.dupe(u8, row.model_id.slice()) catch {
+            self.failed = true;
+            return false;
+        };
+        self.items.append(self.allocator, id) catch {
+            self.allocator.free(id);
+            self.failed = true;
+            return false;
+        };
+        return true;
+    }
+};

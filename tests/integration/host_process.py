@@ -42,16 +42,20 @@ def enter():
 
     Every fixture entry calls this first: a Python fixture in its main block,
     anything else through `host_process.py exec COMMAND...`. Root is refused.
-    The environment becomes INHERITED plus TERM=xterm-256color, since fixtures
-    drive Rui as a cursor-addressing terminal and Rui refuses TERM=dumb; a case
-    about TERM sets its own. Returns the withheld NETWORK variables.
+    The environment becomes INHERITED plus TERM=xterm-256color and an empty
+    RUI_TEST_MODELS_DEV_URL. Fixtures drive a cursor-addressing terminal and
+    must not contact models.dev; catalog cases supply their own endpoint.
+    A case about TERM sets its own. Returns the withheld NETWORK variables.
     """
     if os.geteuid() == 0:
         sys.exit(NON_ROOT_INSTRUCTION)
     network = {name: os.environ[name] for name in NETWORK if name in os.environ}
     kept = {name: os.environ[name] for name in INHERITED if name in os.environ}
     os.environ.clear()
-    os.environ.update(kept, TERM="xterm-256color")
+    # Every descendant (including shell wrappers and detached Hosts) stays
+    # offline by default. Catalog cases opt in with --test-models-dev-url;
+    # inherited RUI_TEST_* settings cannot redirect fixtures to the internet.
+    os.environ.update(kept, TERM="xterm-256color", RUI_TEST_MODELS_DEV_URL="")
     return network
 
 
@@ -469,7 +473,7 @@ WIRE_VERSION = _wire_version()
 # The Store format fixtures expect, stated independently of src/store.zig so a
 # format change must update its fixtures deliberately;
 # tests/ci/test_store_schema_fixtures.py fails until it does.
-STORE_SCHEMA = 54
+STORE_SCHEMA = 55
 
 
 # Job-wide totals: sixteen roots, each with an equal share of 128 files and
