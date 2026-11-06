@@ -2837,6 +2837,13 @@ A notice takes that row, and any further rows its text wraps to, until the next 
 The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line, and an overview narrower or shorter than six cells shows no input.
 The status sits directly above the rule; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 A draft wraps between words the same way on both screens: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
+`draft_layout` is the sole wrap, caret and anchor owner for both painters, including an exact-edge caret's empty row.
+It receives original draft bytes separately from byte-coordinate-preserving display pieces; replacing a tab for display never makes it quote syntax.
+An explicit raw quote prefix (up to three leading ASCII spaces and eight `>` markers, with a space, another marker or a real line end after each marker) stays literal on the first row; soft continuations use a shared ASCII gutter with the same indentation, depth and cell width.
+The gutter reserves its cells before wrapping; if fewer than two body cells remain, or any measured cluster on the logical line is wider than that body, the entire logical line wraps literally without generated gutters.
+A fresh `markdown_prefix.Context` traversal gives both painters the same fenced-code opacity, including literal unsupported backtick/tilde fences, exact outer quote depth, and proved-LF-only CRLF closing; neither source bytes nor submission/copy custody changes.
+The context has no persistent line cache or renderer effects: assistant output, delimiter stripping and LastCode retain their existing behavior.
+Quote-wide preflight adds a linear scan per quoted logical line to each layout traversal; it does not retain a second source or index.
 Presentation-owned ANSI foreground colours reinforce meaning: blue User/input markers, neutral assistant prose and settled outcomes, subdued transient status, yellow permission decisions, and red blocking failures or uncertainty.
 Settled outcomes stay quiet through concise wording and indentation, not a terminal palette's potentially unreadable dark grey.
 Nonempty `NO_COLOR` disables these foreground colours.

@@ -849,7 +849,7 @@ test "vaxis wraps reading text at words with hanging indentation" {
     try wide.append("abc中");
     try std.testing.expectEqual(@as(u16, 2), wide.lineRows(.{ .width = 4, .method = .unicode }, 0));
     // A draft's wide cluster moves whole to the next row.
-    const whole = draft_layout.shape(DraftPieces{ .bytes = "abcd中", .method = .unicode }, 5, 7, 0);
+    const whole = draft_layout.shape("abcd中", DraftPieces{ .bytes = "abcd中", .method = .unicode }, 5, 7, 0);
     try std.testing.expectEqual(@as(usize, 2), whole.lines);
     try std.testing.expectEqual(@as(u16, 2), whole.caret_column);
 }
