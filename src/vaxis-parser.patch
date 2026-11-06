@@ -1,33 +1,3 @@
-diff --git a/src/gwidth.zig b/src/gwidth.zig
---- a/src/gwidth.zig
-+++ b/src/gwidth.zig
-@@ -113,7 +113,7 @@ pub fn gwidth(str: []const u8, method: Method) u16 {
-                         width = @max(2, width);
-                     }
- 
--                    total += @max(0, width);
-+                    total +|= @max(0, width);
- 
-                     grapheme_start = grapheme_end;
-                 }
-@@ -134,7 +134,7 @@ pub fn gwidth(str: []const u8, method: Method) u16 {
-                         break :blk eawToWidth(cp, eaw);
-                     },
-                 };
--                total += @intCast(@max(0, w));
-+                total +|= @intCast(@max(0, w));
-             }
-             return total;
-         },
-@@ -144,7 +144,7 @@ pub fn gwidth(str: []const u8, method: Method) u16 {
-             var iter = std.mem.splitSequence(u8, str, "\u{200D}");
-             var result: u16 = 0;
-             while (iter.next()) |s| {
--                result += gwidth(s, .unicode);
-+                result +|= gwidth(s, .unicode);
-             }
-             return result;
-         },
 diff --git a/src/InternalScreen.zig b/src/InternalScreen.zig
 index 61f2c2a..0b5a6ba 100644
 --- a/src/InternalScreen.zig
@@ -93,325 +63,10 @@ index 61f2c2a..0b5a6ba 100644
      try std.testing.expect(std.mem.eql(u8, read_back.char.grapheme, "A"));
      try std.testing.expect(screen.readCell(2, 0) == null);
 diff --git a/src/Parser.zig b/src/Parser.zig
-index 823686b..1c47dcc 100644
+index 8974863..2322388 100644
 --- a/src/Parser.zig
 +++ b/src/Parser.zig
-@@ -236,6 +236,7 @@ inline fn parseApc(input: []const u8) Result {
-         .event = null,
-         .n = 0,
-     };
-+    if (end + 1 == input.len) return .{ .event = null, .n = 0 };
-     const sequence = input[0 .. end + 1 + 1];
- 
-     switch (input[2]) {
-@@ -480,6 +481,8 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
-                 var total: usize = 0;
-                 while (param_iter.next()) |cp_buf| {
-                     const cp = parseParam(u21, cp_buf, null) orelse return null_event;
-+                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
-+                    if (length > text_buf.len - total) return null_event;
-                     total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
-                 }
-                 key.text = text_buf[0..total];
-@@ -559,6 +562,8 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
-                 var total: usize = 0;
-                 while (param_iter.next()) |cp_buf| {
-                     const cp = parseParam(u21, cp_buf, null) orelse return null_event;
-+                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
-+                    if (length > text_buf.len - total) return null_event;
-                     total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
-                 }
-                 key.text = text_buf[0..total];
-@@ -693,6 +698,8 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
-                 var total: usize = 0;
-                 while (param_iter.next()) |cp_buf| {
-                     const cp = parseParam(u21, cp_buf, null) orelse return null_event;
-+                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
-+                    if (length > text_buf.len - total) return null_event;
-                     total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
-                 }
-                 key.text = text_buf[0..total];
-@@ -1691,3 +1698,50 @@ test "parse: osc 7501 reply followed by da1" {
-     const rest = try parser.parse(input[result.n..], null);
-     try testing.expectEqual(@as(?Event, .cap_da1), rest.event);
- }
-+
-+test "parse: fragmented APC terminator retains input" {
-+    var parser: Parser = .{};
-+    const input = "\x1b_Greply\x1b\\Z";
-+    for (1..10) |end| {
-+        const partial = try parser.parse(input[0..end], null);
-+        // A standalone ESC is ambiguous with the Escape key.
-+        if (end == 1) continue;
-+        try testing.expectEqual(@as(usize, 0), partial.n);
-+        try testing.expect(partial.event == null);
-+    }
-+    const complete = try parser.parse(input, null);
-+    try testing.expectEqual(@as(usize, 10), complete.n);
-+    try testing.expectEqual(@as(?Event, .cap_kitty_graphics), complete.event);
-+    const rest = try parser.parse(input[complete.n..], null);
-+    try testing.expectEqual(@as(usize, 1), rest.n);
-+    try testing.expectEqualStrings("Z", rest.event.?.key_press.text.?);
-+}
-+
-+test "parse: CSI associated text respects scratch capacity" {
-+    var parser: Parser = .{};
-+    for ([_]u8{ 'u', 'A', '~' }) |final| {
-+        for (0..3) |boundary| {
-+            var bytes: [256]u8 = undefined;
-+            var out = std.Io.Writer.fixed(&bytes);
-+            try out.writeAll("\x1b[1;1;");
-+            for (0..31) |_| try out.writeAll("128512:");
-+            // 128 bytes fits; a scalar beginning at 128 or spanning 127..129
-+            // must reject the complete event, never publish a partial key.
-+            try out.writeAll(if (boundary == 2) "97:97:97:233" else "128512");
-+            if (boundary == 1) try out.writeAll(":97");
-+            try out.writeByte(final);
-+            const input = out.buffered();
-+            const result = try parser.parse(input, null);
-+            try testing.expectEqual(input.len, result.n);
-+            if (boundary != 0) {
-+                try testing.expect(result.event == null);
-+            } else {
-+                const text = result.event.?.key_press.text.?;
-+                try testing.expectEqual(@as(usize, 128), text.len);
-+                var expected: [128]u8 = undefined;
-+                for (0..32) |i| @memcpy(expected[i * 4 ..][0..4], "😀");
-+                try testing.expectEqualSlices(u8, &expected, text);
-+            }
-+        }
-+    }
-+}
-diff --git a/src/Vaxis.zig b/src/Vaxis.zig
-index 038847a..552ffea 100644
---- a/src/Vaxis.zig
-+++ b/src/Vaxis.zig
-@@ -398,7 +398,11 @@ pub fn queueRefresh(self: *Vaxis) void {
-     self.refresh = true;
- }
- 
--/// draws the screen to the terminal
-+/// Draws the screen to the terminal.
-+/// On error, output may be partial and cached terminal state may be inaccurate.
-+/// Stop rendering with this instance; another render or queueRefresh is not a
-+/// recovery operation. Continuing requires a usable output channel and an
-+/// explicitly re-established terminal state and render origin.
- pub fn render(self: *Vaxis, tty: *std.Io.Writer) !void {
-     defer self.refresh = false;
-     assert(self.screen.buf.len == @as(usize, @intCast(self.screen.width)) * self.screen.height); // correct size
-@@ -531,7 +535,7 @@ pub fn render(self: *Vaxis, tty: *std.Io.Writer) !void {
-             link = cell.link;
-         }
-         // Set this cell in the last frame
--        self.screen_last.writeCell(col, row, cell);
-+        try self.screen_last.writeCell(col, row, cell);
- 
-         // If we support scaled text, we set the flags now
-         if (self.caps.scaled_text and cell.scale.scale > 1) {
-@@ -1685,6 +1689,32 @@ test "queryCursorPosition: failed write does not leave a pending request" {
-     try std.testing.expectEqual(@as(usize, 1), vx.cursor_position_requests.pending());
- }
- 
-+test "render: propagates cell allocation failures" {
-+    var env_map = try std.testing.environ.createMap(std.testing.allocator);
-+    defer env_map.deinit();
-+    const large = testRepeat("a", 4096);
-+    const cells = [_]Cell{
-+        .{ .char = .{ .grapheme = large, .width = 1 } },
-+        .{ .link = .{ .uri = large } },
-+        .{ .link = .{ .params = large } },
-+    };
-+    for (cells) |cell| {
-+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-+        const allocator = failing.allocator();
-+        var vx = try Vaxis.init(std.testing.io, allocator, &env_map, .{});
-+        var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
-+        defer writer.deinit();
-+        defer vx.deinit(allocator, &writer.writer);
-+        try vx.resize(allocator, &writer.writer, .{ .rows = 1, .cols = 1, .x_pixel = 0, .y_pixel = 0 });
-+        vx.screen.writeCell(0, 0, cell);
-+
-+        failing.fail_index = failing.alloc_index;
-+        failing.resize_fail_index = failing.resize_index;
-+        try std.testing.expectError(error.OutOfMemory, vx.render(&writer.writer));
-+        try std.testing.expect(failing.has_induced_failure);
-+    }
-+}
-+
- test "render: no output when no changes" {
-     const io = std.testing.io;
-     var env_map = try std.testing.environ.createMap(std.testing.allocator);
-diff --git a/src/main.zig b/src/main.zig
---- a/src/main.zig
-+++ b/src/main.zig
-@@ -24,11 +24,11 @@
- pub const Parser = @import("Parser.zig");
- pub const Window = @import("Window.zig");
- pub const widgets = @import("widgets.zig");
--pub const gwidth = @import("gwidth.zig");
-+pub const gwidth = @import("terminal_width");
- pub const ctlseqs = @import("ctlseqs.zig");
- pub const GraphemeCache = @import("GraphemeCache.zig");
- pub const Event = @import("event.zig").Event;
--pub const unicode = @import("unicode.zig");
-+pub const unicode = @import("terminal_unicode");
- 
- pub const vxfw = @import("vxfw/vxfw.zig");
- 
-diff --git a/src/Window.zig b/src/Window.zig
---- a/src/Window.zig
-+++ b/src/Window.zig
-@@ -7,2 +7,2 @@
--const unicode = @import("unicode.zig");
--const gw = @import("gwidth.zig");
-+const unicode = @import("terminal_unicode");
-+const gw = @import("terminal_width");
-diff --git a/src/Vaxis.zig b/src/Vaxis.zig
---- a/src/Vaxis.zig
-+++ b/src/Vaxis.zig
-@@ -14,1 +14,1 @@
--const unicode = @import("unicode.zig");
-+const unicode = @import("terminal_unicode");
-@@ -24,1 +24,1 @@
--const gwidth = @import("gwidth.zig");
-+const gwidth = @import("terminal_width");
-diff --git a/src/Screen.zig b/src/Screen.zig
---- a/src/Screen.zig
-+++ b/src/Screen.zig
-@@ -8,1 +8,1 @@
--const Method = @import("gwidth.zig").Method;
-+const Method = @import("terminal_width").Method;
-diff --git a/src/widgets/TextInput.zig b/src/widgets/TextInput.zig
---- a/src/widgets/TextInput.zig
-+++ b/src/widgets/TextInput.zig
-@@ -7,1 +7,1 @@
--const unicode = @import("../unicode.zig");
-+const unicode = @import("terminal_unicode");
-diff --git a/src/widgets/View.zig b/src/widgets/View.zig
---- a/src/widgets/View.zig
-+++ b/src/widgets/View.zig
-@@ -8,1 +8,1 @@
--const gw = @import("../gwidth.zig");
-+const gw = @import("terminal_width");
-@@ -12,1 +12,1 @@
--const unicode = @import("../unicode.zig");
-+const unicode = @import("terminal_unicode");
-diff --git a/src/Window.zig b/src/Window.zig
---- a/src/Window.zig
-+++ b/src/Window.zig
-@@ -308,6 +308,12 @@
-                     }
-                     const w = self.gwidth(s);
-                     if (w == 0) continue;
-+                    // A wide grapheme that would cross the edge starts the next row.
-+                    if (col != 0 and col + w > self.width) {
-+                        row += 1;
-+                        col = 0;
-+                        if (row >= self.height) break :blk true;
-+                    }
-                     if (opts.commit) self.writeCell(col, row, .{
-                         .char = .{
-                             .grapheme = s,
-@@ -334,7 +340,7 @@
-             var col: u16 = opts.col_offset;
-             var overflow: bool = false;
-             var soft_wrapped: bool = false;
--            outer: for (segments) |segment| {
-+            outer: for (segments, 0..) |segment, segment_index| {
-                 var line_iter: LineIterator = .{ .buf = segment.text };
-                 while (line_iter.next()) |line| {
-                     defer {
-@@ -370,8 +376,17 @@
-                                 }
-                             },
-                             .word => |word| {
--                                const width = self.gwidth(word);
--                                if (width + col > self.width and width < self.width) {
-+                                // A word continues into following segments
-+                                // (style changes) until whitespace.
-+                                var width = self.gwidth(word);
-+                                if (word.ptr + word.len == segment.text.ptr + segment.text.len) {
-+                                    for (segments[segment_index + 1 ..]) |next| {
-+                                        const end = std.mem.indexOfAny(u8, next.text, " \t\r\n") orelse next.text.len;
-+                                        width +|= self.gwidth(next.text[0..end]);
-+                                        if (end != next.text.len) break;
-+                                    }
-+                                }
-+                                if (width + col > self.width and width <= self.width) {
-                                     row += 1;
-                                     col = 0;
-                                 }
-@@ -385,6 +400,14 @@
-                                     }
-                                     const s = grapheme.bytes(word);
-                                     const w = self.gwidth(s);
-+                                    if (col != 0 and col + w > self.width) {
-+                                        row += 1;
-+                                        col = 0;
-+                                        if (row >= self.height) {
-+                                            overflow = true;
-+                                            break :outer;
-+                                        }
-+                                    }
-                                     if (opts.commit) self.writeCell(col, row, .{
-                                         .char = .{
-                                             .grapheme = s,
-diff --git a/src/Vaxis.zig b/src/Vaxis.zig
---- a/src/Vaxis.zig
-+++ b/src/Vaxis.zig
-@@ -419,7 +419,7 @@
-         (self.screen.cursor.row != self.state.cursor.row or
-             self.screen.cursor.col != self.state.cursor.col);
-     const cursor_secondary_changed = self.screen.cursor_vis and
--        std.meta.eql(self.screen.cursor_secondary, self.state.cursor_secondary);
-+        !std.meta.eql(self.screen.cursor_secondary, self.state.cursor_secondary);
-     const needs_render = self.refresh or
-         cursor_vis_changed or
-         cursor_shape_changed or
-diff --git a/src/Parser.zig b/src/Parser.zig
---- a/src/Parser.zig
-+++ b/src/Parser.zig
-@@ -513,6 +513,7 @@
-             var field_iter = std.mem.splitScalar(u8, sequence[2 .. sequence.len - 1], ';');
-             const number_buf = field_iter.next() orelse unreachable; // always will have one field
-             const number = parseParam(u16, number_buf, null) orelse return null_event;
-+            if (number == 27) return parseModifiedKey(&field_iter, sequence.len);
- 
-             var key: Key = .{
-                 .codepoint = switch (number) {
-@@ -773,6 +774,28 @@
-     }
- }
-
-+/// xterm modifyOtherKeys, CSI 27 ; modifier ; code ~, which some terminals
-+/// (Ghostty's legacy Enter table) send without being asked. The modifier is
-+/// 1 + (Shift 1 | Alt 2 | Ctrl 4 | Super 8), the low bits of Kitty's mask, and
-+/// the code is the key's codepoint, unchecked as in the Kitty form. It is a
-+/// press with no associated text.
-+fn parseModifiedKey(fields: *std.mem.SplitIterator(u8, .scalar), n: usize) Result {
-+    const null_event: Result = .{ .event = null, .n = n };
-+    const modifier_buf = fields.next() orelse return null_event;
-+    const code_buf = fields.next() orelse return null_event;
-+    if (fields.next() != null) return null_event;
-+    const modifier = parseParam(u8, modifier_buf, null) orelse return null_event;
-+    if (modifier < 1 or modifier > 16) return null_event;
-+    const code = parseParam(u21, code_buf, null) orelse return null_event;
-+    return .{
-+        .event = .{ .key_press = .{
-+            .codepoint = code,
-+            .mods = @bitCast(modifier - 1),
-+        } },
-+        .n = n,
-+    };
-+}
-+
- /// Parse a param buffer, returning a default value if the param was empty
- inline fn parseParam(comptime T: type, buf: []const u8, default: ?T) ?T {
-     if (buf.len == 0) return default;
-diff --git a/src/Parser.zig b/src/Parser.zig
---- a/src/Parser.zig
-+++ b/src/Parser.zig
-@@ -16,6 +16,10 @@
+@@ -16,6 +16,10 @@ const Parser = @This();
  pub const Result = struct {
      event: ?Event,
      n: usize,
@@ -422,7 +77,7 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  };
  
  /// Shared cursor query state. The count and idle deadline are updated together
-@@ -410,6 +414,7 @@
+@@ -415,6 +419,7 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
          }
      } else return .{ .event = null, .n = 0 };
      const null_event: Result = .{ .event = null, .n = sequence.len };
@@ -430,7 +85,7 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
      const final = sequence[sequence.len - 1];
      if (final == 'R') report: {
-@@ -440,8 +445,12 @@
+@@ -445,8 +450,12 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
              // Split first into fields delimited by ';'
              var field_iter = std.mem.splitScalar(u8, sequence[2 .. sequence.len - 1], ';');
  
@@ -445,7 +100,7 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              var is_release: bool = false;
              var key: Key = .{
-@@ -461,32 +470,17 @@
+@@ -466,32 +475,17 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
                  },
              };
  
@@ -474,8 +129,8 @@ diff --git a/src/Parser.zig b/src/Parser.zig
 -                var total: usize = 0;
 -                while (param_iter.next()) |cp_buf| {
 -                    const cp = parseParam(u21, cp_buf, null) orelse return null_event;
--                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
--                    if (length > text_buf.len - total) return null_event;
+-                    const len = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
+-                    if (total + len > text_buf.len) return null_event;
 -                    total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
 -                }
 -                key.text = text_buf[0..total];
@@ -485,7 +140,7 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              const event: Event = if (is_release) .{ .key_release = key } else .{ .key_press = key };
              return .{
-@@ -512,8 +506,14 @@
+@@ -517,7 +511,14 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
              // CSI number ; modifier:event_type ; text_as_codepoint ~
              var field_iter = std.mem.splitScalar(u8, sequence[2 .. sequence.len - 1], ';');
              const number_buf = field_iter.next() orelse unreachable; // always will have one field
@@ -495,13 +150,13 @@ diff --git a/src/Parser.zig b/src/Parser.zig
 +            if (privateMarker(number_buf)) return null_event;
 +            for (number_buf) |b| if (!std.ascii.isDigit(b)) return invalid_key;
 +            const number = parseDecimal(u16, number_buf) orelse return null_event;
-             if (number == 27) return parseModifiedKey(&field_iter, sequence.len);
++            if (number == 27) return parseModifiedKey(&field_iter, sequence.len);
 +            // A modifier field exists only on a supported key; malformed ones
 +            // fail closed below instead of ignoring the key the user pressed.
  
              var key: Key = .{
                  .codepoint = switch (number) {
-@@ -543,32 +543,17 @@
+@@ -547,32 +548,17 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
              };
  
              var is_release: bool = false;
@@ -530,8 +185,8 @@ diff --git a/src/Parser.zig b/src/Parser.zig
 -                var total: usize = 0;
 -                while (param_iter.next()) |cp_buf| {
 -                    const cp = parseParam(u21, cp_buf, null) orelse return null_event;
--                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
--                    if (length > text_buf.len - total) return null_event;
+-                    const len = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
+-                    if (total + len > text_buf.len) return null_event;
 -                    total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
 -                }
 -                key.text = text_buf[0..total];
@@ -541,7 +196,7 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              const event: Event = if (is_release) .{ .key_release = key } else .{ .key_press = key };
              return .{
-@@ -655,6 +640,7 @@
+@@ -659,6 +645,7 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
                  .event = .cap_kitty_keyboard,
                  .n = sequence.len,
              };
@@ -549,7 +204,7 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              var key: Key = .{
                  .codepoint = undefined,
-@@ -667,44 +653,30 @@
+@@ -671,44 +658,30 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
                  const field_buf = field_iter.next() orelse unreachable; // There will always be at least one field
                  var param_iter = std.mem.splitScalar(u8, field_buf, ':');
                  const codepoint_buf = param_iter.next() orelse unreachable;
@@ -594,8 +249,8 @@ diff --git a/src/Parser.zig b/src/Parser.zig
 -                var total: usize = 0;
 -                while (param_iter.next()) |cp_buf| {
 -                    const cp = parseParam(u21, cp_buf, null) orelse return null_event;
--                    const length = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
--                    if (length > text_buf.len - total) return null_event;
+-                    const len = std.unicode.utf8CodepointSequenceLength(cp) catch return null_event;
+-                    if (total + len > text_buf.len) return null_event;
 -                    total += std.unicode.utf8Encode(cp, text_buf[total..]) catch return null_event;
 -                }
 -                key.text = text_buf[0..total];
@@ -605,17 +260,16 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  
              {
                  // We check if we have *only* shift, no text, and a printable character. This can
-@@ -780,13 +752,15 @@
- /// the code is the key's codepoint, unchecked as in the Kitty form. It is a
- /// press with no associated text.
- fn parseModifiedKey(fields: *std.mem.SplitIterator(u8, .scalar), n: usize) Result {
--    const null_event: Result = .{ .event = null, .n = n };
--    const modifier_buf = fields.next() orelse return null_event;
--    const code_buf = fields.next() orelse return null_event;
--    if (fields.next() != null) return null_event;
--    const modifier = parseParam(u8, modifier_buf, null) orelse return null_event;
--    if (modifier < 1 or modifier > 16) return null_event;
--    const code = parseParam(u21, code_buf, null) orelse return null_event;
+@@ -778,6 +751,82 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
+     }
+ }
+ 
++/// xterm modifyOtherKeys, CSI 27 ; modifier ; code ~, which some terminals
++/// (Ghostty's legacy Enter table) send without being asked. The modifier is
++/// 1 + (Shift 1 | Alt 2 | Ctrl 4 | Super 8), the low bits of Kitty's mask, and
++/// the code is the key's codepoint, unchecked as in the Kitty form. It is a
++/// press with no associated text.
++fn parseModifiedKey(fields: *std.mem.SplitIterator(u8, .scalar), n: usize) Result {
 +    // CSI 27 ~ alone is no key this parser knows: ignore it, as other
 +    // unknown keys. With fields, every malformed value fails closed.
 +    const modifier_buf = fields.next() orelse return .{ .event = null, .n = n };
@@ -625,13 +279,15 @@ diff --git a/src/Parser.zig b/src/Parser.zig
 +    const modifier = parseDecimal(u8, modifier_buf) orelse return invalid_key;
 +    if (modifier < 1 or modifier > 16) return invalid_key;
 +    const code = parseScalar(code_buf) orelse return invalid_key;
-     return .{
-         .event = .{ .key_press = .{
-             .codepoint = code,
-@@ -796,6 +770,58 @@
-     };
- }
- 
++    return .{
++        .event = .{ .key_press = .{
++            .codepoint = code,
++            .mods = @bitCast(modifier - 1),
++        } },
++        .n = n,
++    };
++}
++
 +/// CSI parameters that begin with a private marker are some other report
 +/// (or a request a terminal never sends), never a key.
 +fn privateMarker(params: []const u8) bool {
@@ -687,3 +343,326 @@ diff --git a/src/Parser.zig b/src/Parser.zig
  /// Parse a param buffer, returning a default value if the param was empty
  inline fn parseParam(comptime T: type, buf: []const u8, default: ?T) ?T {
      if (buf.len == 0) return default;
+@@ -1737,3 +1786,50 @@ test "parse: kitty: text as codepoints longer than the text buffer" {
+     const result = try parser.parse(input, null);
+     try testing.expectEqual(input.len, result.n);
+ }
++
++test "parse: fragmented APC terminator retains input" {
++    var parser: Parser = .{};
++    const input = "\x1b_Greply\x1b\\Z";
++    for (1..10) |end| {
++        const partial = try parser.parse(input[0..end], null);
++        // A standalone ESC is ambiguous with the Escape key.
++        if (end == 1) continue;
++        try testing.expectEqual(@as(usize, 0), partial.n);
++        try testing.expect(partial.event == null);
++    }
++    const complete = try parser.parse(input, null);
++    try testing.expectEqual(@as(usize, 10), complete.n);
++    try testing.expectEqual(@as(?Event, .cap_kitty_graphics), complete.event);
++    const rest = try parser.parse(input[complete.n..], null);
++    try testing.expectEqual(@as(usize, 1), rest.n);
++    try testing.expectEqualStrings("Z", rest.event.?.key_press.text.?);
++}
++
++test "parse: CSI associated text respects scratch capacity" {
++    var parser: Parser = .{};
++    for ([_]u8{ 'u', 'A', '~' }) |final| {
++        for (0..3) |boundary| {
++            var bytes: [256]u8 = undefined;
++            var out = std.Io.Writer.fixed(&bytes);
++            try out.writeAll("\x1b[1;1;");
++            for (0..31) |_| try out.writeAll("128512:");
++            // 128 bytes fits; a scalar beginning at 128 or spanning 127..129
++            // must reject the complete event, never publish a partial key.
++            try out.writeAll(if (boundary == 2) "97:97:97:233" else "128512");
++            if (boundary == 1) try out.writeAll(":97");
++            try out.writeByte(final);
++            const input = out.buffered();
++            const result = try parser.parse(input, null);
++            try testing.expectEqual(input.len, result.n);
++            if (boundary != 0) {
++                try testing.expect(result.event == null);
++            } else {
++                const text = result.event.?.key_press.text.?;
++                try testing.expectEqual(@as(usize, 128), text.len);
++                var expected: [128]u8 = undefined;
++                for (0..32) |i| @memcpy(expected[i * 4 ..][0..4], "😀");
++                try testing.expectEqualSlices(u8, &expected, text);
++            }
++        }
++    }
++}
+diff --git a/src/Screen.zig b/src/Screen.zig
+index fc5a714..39d878e 100644
+--- a/src/Screen.zig
++++ b/src/Screen.zig
+@@ -5,7 +5,7 @@ const Cell = @import("Cell.zig");
+ const Shape = @import("Mouse.zig").Shape;
+ const Image = @import("Image.zig");
+ const Winsize = @import("main.zig").Winsize;
+-const Method = @import("gwidth.zig").Method;
++const Method = @import("terminal_width").Method;
+ 
+ const Screen = @This();
+ pub const Cursor = struct { row: u16 = 0, col: u16 = 0 };
+diff --git a/src/Vaxis.zig b/src/Vaxis.zig
+index 720face..7292989 100644
+--- a/src/Vaxis.zig
++++ b/src/Vaxis.zig
+@@ -10,7 +10,7 @@ const Key = @import("Key.zig");
+ const Mouse = @import("Mouse.zig");
+ const Screen = @import("Screen.zig");
+ const Cursor = Screen.Cursor;
+-const unicode = @import("unicode.zig");
++const unicode = @import("terminal_unicode");
+ const Window = @import("Window.zig");
+ 
+ const Hyperlink = Cell.Hyperlink;
+@@ -20,7 +20,7 @@ const Style = Cell.Style;
+ const Winsize = @import("main.zig").Winsize;
+ 
+ const ctlseqs = @import("ctlseqs.zig");
+-const gwidth = @import("gwidth.zig");
++const gwidth = @import("terminal_width");
+ 
+ const assert = std.debug.assert;
+ 
+@@ -397,7 +397,11 @@ pub fn queueRefresh(self: *Vaxis) void {
+     self.refresh = true;
+ }
+ 
+-/// draws the screen to the terminal
++/// Draws the screen to the terminal.
++/// On error, output may be partial and cached terminal state may be inaccurate.
++/// Stop rendering with this instance; another render or queueRefresh is not a
++/// recovery operation. Continuing requires a usable output channel and an
++/// explicitly re-established terminal state and render origin.
+ pub fn render(self: *Vaxis, tty: *std.Io.Writer) !void {
+     defer self.refresh = false;
+     assert(self.screen.buf.len == @as(usize, @intCast(self.screen.width)) * self.screen.height); // correct size
+@@ -414,7 +418,7 @@ pub fn render(self: *Vaxis, tty: *std.Io.Writer) !void {
+         (self.screen.cursor.row != self.state.cursor.row or
+             self.screen.cursor.col != self.state.cursor.col);
+     const cursor_secondary_changed = self.screen.cursor_vis and
+-        std.meta.eql(self.screen.cursor_secondary, self.state.cursor_secondary);
++        !std.meta.eql(self.screen.cursor_secondary, self.state.cursor_secondary);
+     const needs_render = self.refresh or
+         cursor_vis_changed or
+         cursor_shape_changed or
+@@ -530,7 +534,7 @@ pub fn render(self: *Vaxis, tty: *std.Io.Writer) !void {
+             link = cell.link;
+         }
+         // Set this cell in the last frame
+-        self.screen_last.writeCell(col, row, cell);
++        try self.screen_last.writeCell(col, row, cell);
+ 
+         // If we support scaled text, we set the flags now
+         if (self.caps.scaled_text and cell.scale.scale > 1) {
+@@ -1690,6 +1694,32 @@ test "queryCursorPosition: failed write does not leave a pending request" {
+     try std.testing.expectEqual(@as(usize, 1), vx.cursor_position_requests.pending());
+ }
+ 
++test "render: propagates cell allocation failures" {
++    var env_map = try std.testing.environ.createMap(std.testing.allocator);
++    defer env_map.deinit();
++    const large = testRepeat("a", 4096);
++    const cells = [_]Cell{
++        .{ .char = .{ .grapheme = large, .width = 1 } },
++        .{ .link = .{ .uri = large } },
++        .{ .link = .{ .params = large } },
++    };
++    for (cells) |cell| {
++        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
++        const allocator = failing.allocator();
++        var vx = try Vaxis.init(std.testing.io, allocator, &env_map, .{});
++        var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
++        defer writer.deinit();
++        defer vx.deinit(allocator, &writer.writer);
++        try vx.resize(allocator, &writer.writer, .{ .rows = 1, .cols = 1, .x_pixel = 0, .y_pixel = 0 });
++        vx.screen.writeCell(0, 0, cell);
++
++        failing.fail_index = failing.alloc_index;
++        failing.resize_fail_index = failing.resize_index;
++        try std.testing.expectError(error.OutOfMemory, vx.render(&writer.writer));
++        try std.testing.expect(failing.has_induced_failure);
++    }
++}
++
+ test "render: no output when no changes" {
+     const io = std.testing.io;
+     var env_map = try std.testing.environ.createMap(std.testing.allocator);
+diff --git a/src/Window.zig b/src/Window.zig
+index 83fb944..0ce7b5e 100644
+--- a/src/Window.zig
++++ b/src/Window.zig
+@@ -4,8 +4,8 @@ const Screen = @import("Screen.zig");
+ const Cell = @import("Cell.zig");
+ const Mouse = @import("Mouse.zig");
+ const Segment = @import("Cell.zig").Segment;
+-const unicode = @import("unicode.zig");
+-const gw = @import("gwidth.zig");
++const unicode = @import("terminal_unicode");
++const gw = @import("terminal_width");
+ 
+ const Window = @This();
+ 
+@@ -308,6 +308,12 @@ pub fn print(self: Window, segments: []const Segment, opts: PrintOptions) PrintR
+                     }
+                     const w = self.gwidth(s);
+                     if (w == 0) continue;
++                    // A wide grapheme that would cross the edge starts the next row.
++                    if (col != 0 and col + w > self.width) {
++                        row += 1;
++                        col = 0;
++                        if (row >= self.height) break :blk true;
++                    }
+                     if (opts.commit) self.writeCell(col, row, .{
+                         .char = .{
+                             .grapheme = s,
+@@ -334,7 +340,7 @@ pub fn print(self: Window, segments: []const Segment, opts: PrintOptions) PrintR
+             var col: u16 = opts.col_offset;
+             var overflow: bool = false;
+             var soft_wrapped: bool = false;
+-            outer: for (segments) |segment| {
++            outer: for (segments, 0..) |segment, segment_index| {
+                 var line_iter: LineIterator = .{ .buf = segment.text };
+                 while (line_iter.next()) |line| {
+                     defer {
+@@ -370,8 +376,17 @@ pub fn print(self: Window, segments: []const Segment, opts: PrintOptions) PrintR
+                                 }
+                             },
+                             .word => |word| {
+-                                const width = self.gwidth(word);
+-                                if (width + col > self.width and width < self.width) {
++                                // A word continues into following segments
++                                // (style changes) until whitespace.
++                                var width = self.gwidth(word);
++                                if (word.ptr + word.len == segment.text.ptr + segment.text.len) {
++                                    for (segments[segment_index + 1 ..]) |next| {
++                                        const end = std.mem.indexOfAny(u8, next.text, " \t\r\n") orelse next.text.len;
++                                        width +|= self.gwidth(next.text[0..end]);
++                                        if (end != next.text.len) break;
++                                    }
++                                }
++                                if (width + col > self.width and width <= self.width) {
+                                     row += 1;
+                                     col = 0;
+                                 }
+@@ -385,6 +400,14 @@ pub fn print(self: Window, segments: []const Segment, opts: PrintOptions) PrintR
+                                     }
+                                     const s = grapheme.bytes(word);
+                                     const w = self.gwidth(s);
++                                    if (col != 0 and col + w > self.width) {
++                                        row += 1;
++                                        col = 0;
++                                        if (row >= self.height) {
++                                            overflow = true;
++                                            break :outer;
++                                        }
++                                    }
+                                     if (opts.commit) self.writeCell(col, row, .{
+                                         .char = .{
+                                             .grapheme = s,
+diff --git a/src/gwidth.zig b/src/gwidth.zig
+index 0cb1ae6..04dc46a 100644
+--- a/src/gwidth.zig
++++ b/src/gwidth.zig
+@@ -101,7 +101,7 @@ pub fn gwidth(str: []const u8, method: Method) u16 {
+                     width = @max(2, width);
+                 }
+ 
+-                total += @max(0, width);
++                total +|= @max(0, width);
+             }
+ 
+             return total;
+@@ -118,7 +118,7 @@ pub fn gwidth(str: []const u8, method: Method) u16 {
+                         break :blk eawToWidth(cp, eaw);
+                     },
+                 };
+-                total += @intCast(@max(0, w));
++                total +|= @intCast(@max(0, w));
+             }
+             return total;
+         },
+@@ -126,7 +126,7 @@ pub fn gwidth(str: []const u8, method: Method) u16 {
+             var iter = std.mem.splitSequence(u8, str, "\u{200D}");
+             var result: u16 = 0;
+             while (iter.next()) |s| {
+-                result += gwidth(s, .unicode);
++                result +|= gwidth(s, .unicode);
+             }
+             return result;
+         },
+@@ -202,3 +202,20 @@ test "gwidth: base letter with combining mark" {
+ test {
+     std.testing.refAllDecls(@This());
+ }
++
++test "gwidth: unicode and wcwidth saturate at the width limit" {
++    const text = try testing.allocator.alloc(u8, @as(usize, std.math.maxInt(u16)) + 1);
++    defer testing.allocator.free(text);
++    @memset(text, 'a');
++    for ([_]Method{ .unicode, .wcwidth }) |method| {
++        try testing.expectEqual(std.math.maxInt(u16), gwidth(text, method));
++    }
++}
++
++test "gwidth: no_zwj saturates across separate segments" {
++    const count: usize = @as(usize, std.math.maxInt(u16)) + 1;
++    const text = try testing.allocator.alloc(u8, count * 4);
++    defer testing.allocator.free(text);
++    for (0..count) |i| @memcpy(text[i * 4 ..][0..4], "a\u{200d}");
++    try testing.expectEqual(std.math.maxInt(u16), gwidth(text, .no_zwj));
++}
+diff --git a/src/main.zig b/src/main.zig
+index 5340d24..cb99c78 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -22,11 +22,11 @@ pub const AllocatingScreen = @import("InternalScreen.zig");
+ pub const Parser = @import("Parser.zig");
+ pub const Window = @import("Window.zig");
+ pub const widgets = @import("widgets.zig");
+-pub const gwidth = @import("gwidth.zig");
++pub const gwidth = @import("terminal_width");
+ pub const ctlseqs = @import("ctlseqs.zig");
+ pub const GraphemeCache = @import("GraphemeCache.zig");
+ pub const Event = @import("event.zig").Event;
+-pub const unicode = @import("unicode.zig");
++pub const unicode = @import("terminal_unicode");
+ 
+ pub const vxfw = @import("vxfw/vxfw.zig");
+ 
+diff --git a/src/widgets/TextInput.zig b/src/widgets/TextInput.zig
+index 7371424..77e8356 100644
+--- a/src/widgets/TextInput.zig
++++ b/src/widgets/TextInput.zig
+@@ -4,7 +4,7 @@ const assert = std.debug.assert;
+ const Key = @import("../Key.zig");
+ const Cell = @import("../Cell.zig");
+ const Window = @import("../Window.zig");
+-const unicode = @import("../unicode.zig");
++const unicode = @import("terminal_unicode");
+ 
+ const TextInput = @This();
+ 
+diff --git a/src/widgets/View.zig b/src/widgets/View.zig
+index 2c6edb6..81acf55 100644
+--- a/src/widgets/View.zig
++++ b/src/widgets/View.zig
+@@ -5,11 +5,11 @@ const mem = std.mem;
+ 
+ const View = @This();
+ 
+-const gw = @import("../gwidth.zig");
++const gw = @import("terminal_width");
+ 
+ const Screen = @import("../Screen.zig");
+ const Window = @import("../Window.zig");
+-const unicode = @import("../unicode.zig");
++const unicode = @import("terminal_unicode");
+ const Cell = @import("../Cell.zig");
+ 
+ /// View Allocator
