@@ -383,3 +383,260 @@ test "layout: CRLF remains one hard delimiter during styled fit lookahead" {
     try testing.expectEqualStrings("a", cells[3].char.grapheme);
     try testing.expectEqualStrings("b", cells[8].char.grapheme);
 }
+
+// A deliberately tiny fixture oracle, NOT a terminal emulator: fixed 16x2 cells,
+// ASCII, one literal joined emoji with independently stipulated physical advance
+// TWO, and only the encoder controls exercised below. Unknown bytes fail closed.
+const joined = "👩‍💻";
+const PhysicalCell = struct {
+    glyph: u21 = ' ',
+    bg: u8 = 255,
+    bold: bool = false,
+    uri: [48]u8 = @splat(0),
+    params: [24]u8 = @splat(0),
+};
+const PhysicalRow = struct {
+    cells: [32]PhysicalCell = @splat(.{}),
+    row: usize = 0,
+    col: usize = 0,
+    pending_wrap: bool = false,
+    pen: PhysicalCell = .{},
+
+    fn put(self: *@This(), glyph: u21, width: usize) !void {
+        if (self.pending_wrap) {
+            self.row += 1;
+            self.col = 0;
+            self.pending_wrap = false;
+        }
+        try testing.expect(self.row < 2 and self.col + width <= 16);
+        for (0..width) |offset| {
+            self.cells[self.row * 16 + self.col + offset] = self.pen;
+            self.cells[self.row * 16 + self.col + offset].glyph = if (offset == 0) glyph else 0;
+        }
+        self.col += width;
+        if (self.col == 16) {
+            self.col = 15;
+            self.pending_wrap = true;
+        }
+    }
+
+    fn apply(self: *@This(), bytes: []const u8) !void {
+        var at: usize = 0;
+        while (at < bytes.len) {
+            if (std.mem.startsWith(u8, bytes[at..], joined)) {
+                try self.put(0x1f469, 2); // Independent physical fact for THIS fixture only.
+                at += joined.len;
+            } else if (std.mem.startsWith(u8, bytes[at..], "\x1b[")) {
+                const start = at + 2;
+                var end = start;
+                while (end < bytes.len and (bytes[end] < 0x40 or bytes[end] > 0x7e)) : (end += 1) {}
+                try testing.expect(end < bytes.len);
+                const args = bytes[start..end];
+                switch (bytes[end]) {
+                    'H' => {
+                        var parts = std.mem.splitScalar(u8, args, ';');
+                        const r = parts.next().?;
+                        const c = parts.next() orelse "";
+                        self.row = (if (r.len == 0) @as(usize, 1) else try std.fmt.parseInt(usize, r, 10)) - 1;
+                        self.col = (if (c.len == 0) @as(usize, 1) else try std.fmt.parseInt(usize, c, 10)) - 1;
+                        try testing.expect(self.row < 2 and self.col < 16);
+                        self.pending_wrap = false;
+                    },
+                    'm' => {
+                        var parts = std.mem.splitScalar(u8, args, ';');
+                        while (parts.next()) |part| {
+                            const n = if (part.len == 0) 0 else try std.fmt.parseInt(u16, part, 10);
+                            switch (n) {
+                                0 => {
+                                    self.pen.bg = 255;
+                                    self.pen.bold = false;
+                                },
+                                1 => self.pen.bold = true,
+                                22 => self.pen.bold = false,
+                                40...47 => self.pen.bg = @intCast(n - 40),
+                                49 => self.pen.bg = 255,
+                                else => return error.UnsupportedFixtureSgr,
+                            }
+                        }
+                    },
+                    'h', 'l' => try testing.expect(std.mem.eql(u8, args, "?2026") or std.mem.eql(u8, args, "?25")),
+                    else => return error.UnsupportedFixtureCsi,
+                }
+                at = end + 1;
+            } else if (std.mem.startsWith(u8, bytes[at..], "\x1b]8;")) {
+                const start = at + 4;
+                const end = std.mem.indexOfPos(u8, bytes, start, "\x1b\\") orelse return error.UnterminatedFixtureOsc;
+                const sep = std.mem.indexOfScalarPos(u8, bytes, start, ';') orelse return error.InvalidFixtureOsc;
+                try testing.expect(sep < end and sep - start < self.pen.params.len and end - sep - 1 < self.pen.uri.len);
+                self.pen.params = @splat(0);
+                self.pen.uri = @splat(0);
+                @memcpy(self.pen.params[0 .. sep - start], bytes[start..sep]);
+                @memcpy(self.pen.uri[0 .. end - sep - 1], bytes[sep + 1 .. end]);
+                at = end + 2;
+            } else {
+                try testing.expect(bytes[at] >= 0x20 and bytes[at] < 0x7f);
+                try self.put(bytes[at], 1);
+                at += 1;
+            }
+        }
+    }
+
+    fn expectRow(self: *const @This(), row: usize, glyphs: [16]u21) !void {
+        for (glyphs, 0..) |glyph, col| try testing.expectEqual(glyph, self.cells[row * 16 + col].glyph);
+    }
+};
+
+const RenderFixture = struct {
+    env: std.process.Environ.Map = undefined,
+    vx: vaxis.Vaxis = undefined,
+    bytes: std.Io.Writer.Allocating = undefined,
+
+    fn init(self: *@This()) !void {
+        self.env = try testing.environ.createMap(testing.allocator);
+        errdefer self.env.deinit();
+        self.bytes = .init(testing.allocator);
+        errdefer self.bytes.deinit();
+        self.vx = try vaxis.Vaxis.init(testing.io, testing.allocator, &self.env, .{});
+        errdefer self.vx.deinit(testing.allocator, &self.bytes.writer);
+        self.vx.state.alt_screen = true;
+        self.vx.caps.unicode = .wcwidth;
+        try self.vx.resize(testing.allocator, &self.bytes.writer, .{ .rows = 2, .cols = 16, .x_pixel = 0, .y_pixel = 0 });
+        self.vx.screen.width_method = .wcwidth;
+        self.bytes.clearRetainingCapacity();
+    }
+
+    fn deinit(self: *@This()) void {
+        self.vx.deinit(testing.allocator, &self.bytes.writer);
+        self.bytes.deinit();
+        self.env.deinit();
+    }
+
+    fn render(self: *@This()) ![]const u8 {
+        self.bytes.clearRetainingCapacity();
+        try self.vx.render(&self.bytes.writer);
+        return self.bytes.written();
+    }
+
+    fn paint(self: *@This(), row: u16, inferred: bool) void {
+        self.vx.window().clear();
+        const screen = &self.vx.screen;
+        screen.writeCell(0, row, .{ .char = .{ .grapheme = "L", .width = 1 } });
+        screen.writeCell(1, row, .{ .char = .{ .grapheme = ":", .width = 1 } });
+        screen.writeCell(2, row, .{ .char = .{ .grapheme = joined, .width = if (inferred) 0 else 4 }, .style = .{ .bg = .{ .index = 1 }, .bold = true }, .link = .{ .uri = "contract:cluster", .params = "id=cluster" } });
+        screen.writeCell(6, row, .{ .char = .{ .grapheme = "N", .width = 1 }, .style = .{ .bg = .{ .index = 5 } }, .link = .{ .uri = "contract:neighbor", .params = "id=neighbor" } });
+        for ("23 end", 0..) |_, i| {
+            const chars = [_][]const u8{ "2", "3", " ", "e", "n", "d" };
+            screen.writeCell(@intCast(10 + i), row, .{ .char = .{ .grapheme = chars[i], .width = 1 } });
+        }
+    }
+};
+
+const physical_golden: [16]u21 = .{ 'L', ':', 0x1f469, 0, ' ', ' ', 'N', ' ', ' ', ' ', '2', '3', ' ', 'e', 'n', 'd' };
+
+test "render contract: bounded joined fallback clears old suffix and repositions following diff" {
+    for ([_]bool{ false, true }) |inferred| {
+        var fixture: RenderFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        var terminal: PhysicalRow = .{};
+        const old = "abcdefghijklmnopqrstuvwxyzABCDEF";
+        for (old, 0..) |_, i| fixture.vx.screen.writeCell(@intCast(i % 16), @intCast(i / 16), .{ .char = .{ .grapheme = old[i..][0..1], .width = 1 }, .style = .{ .bg = .{ .index = 4 } }, .link = .{ .uri = "contract:old", .params = "id=old" } });
+        try terminal.apply(try fixture.render());
+        fixture.vx.screen.cursor_vis = true;
+        fixture.vx.screen.cursor = .{ .row = 1, .col = 14 };
+        for ([_]u16{ 0, 1 }) |row| {
+            fixture.paint(row, inferred);
+            const encoded = try fixture.render();
+            try testing.expectEqual(@as(usize, 1), std.mem.count(u8, encoded, joined));
+            try terminal.apply(encoded);
+            try terminal.expectRow(row, physical_golden);
+            try terminal.expectRow(1 - row, @splat(' '));
+            for (2..6) |col| {
+                const cell = terminal.cells[@as(usize, row) * 16 + col];
+                try testing.expectEqual(@as(u8, 1), cell.bg);
+                try testing.expect(cell.bold);
+                try testing.expectEqualStrings("contract:cluster", std.mem.sliceTo(&cell.uri, 0));
+                try testing.expectEqualStrings("id=cluster", std.mem.sliceTo(&cell.params, 0));
+            }
+            const neighbor = terminal.cells[@as(usize, row) * 16 + 6];
+            try testing.expectEqual(@as(u8, 5), neighbor.bg);
+            try testing.expect(!neighbor.bold);
+            try testing.expectEqualStrings("contract:neighbor", std.mem.sliceTo(&neighbor.uri, 0));
+            try testing.expectEqualStrings("id=neighbor", std.mem.sliceTo(&neighbor.params, 0));
+            try testing.expectEqualStrings(joined, fixture.vx.screen.readCell(2, row).?.char.grapheme);
+            try testing.expectEqual(@as(u8, if (inferred) 0 else 4), fixture.vx.screen.readCell(2, row).?.char.width);
+            try testing.expectEqual(@as(usize, 1), terminal.row);
+            try testing.expectEqual(@as(usize, 14), terminal.col);
+            try testing.expectEqual(@as(usize, 0), (try fixture.render()).len);
+        }
+    }
+}
+
+test "render contract: joined fallback at row edge never positions outside owned row" {
+    var fixture: RenderFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var terminal: PhysicalRow = .{};
+    for (0..16) |col| fixture.vx.screen.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = "x", .width = 1 } });
+    try terminal.apply(try fixture.render());
+    fixture.vx.window().clear();
+    fixture.vx.screen.writeCell(12, 0, .{ .char = .{ .grapheme = joined, .width = 4 } });
+    fixture.vx.screen.writeCell(0, 1, .{ .char = .{ .grapheme = "Z", .width = 1 } });
+    try terminal.apply(try fixture.render());
+    try terminal.expectRow(0, .{ ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', 0x1f469, 0, ' ', ' ' });
+    try terminal.expectRow(1, .{ 'Z', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' });
+    try testing.expectEqual(@as(usize, 0), (try fixture.render()).len);
+}
+
+test "render contract: excluded width lanes retain exact encoder bytes" {
+    const Case = struct {
+        text: []const u8 = joined,
+        width: u8 = 4,
+        col: u16 = 1,
+        method: @TypeOf(@as(vaxis.Vaxis, undefined).caps.unicode) = .wcwidth,
+        explicit: bool = false,
+        scaled: bool = false,
+        alt: bool = true,
+        scale: vaxis.Cell.Scale = .{},
+        image: bool = false,
+        encoded: []const u8,
+    };
+    const begin = "\x1b[?2026h\x1b[?25l\x1b[H\x1b[m\x1b[1;2H";
+    const end = "\x1b[?2026l";
+    // Hand-written complete byte goldens: excluded lanes get NO clearing or
+    // extra CUP. Their pre-existing layout/encoding contracts are unchanged.
+    const cases = [_]Case{
+        .{ .text = "A", .width = 1, .encoded = begin ++ "AN" ++ end },
+        .{ .text = "界", .width = 2, .encoded = begin ++ "界N" ++ end },
+        .{ .text = "❤️", .width = 1, .encoded = begin ++ "❤️N" ++ end },
+        .{ .text = "a\u{200d}", .width = 1, .encoded = begin ++ "a\u{200d}N" ++ end }, // ZWJ but no width gap
+        .{ .method = .no_zwj, .encoded = begin ++ joined ++ "N" ++ end },
+        .{ .width = 3, .encoded = begin ++ joined ++ "N" ++ end }, // arbitrary override
+        .{ .width = 2, .method = .unicode, .encoded = begin ++ joined ++ "N" ++ end },
+        .{ .text = "A" ++ joined, .width = 5, .encoded = begin ++ "A" ++ joined ++ "N" ++ end }, // not one cluster
+        .{ .scale = .{ .numerator = 2 }, .encoded = begin ++ joined ++ "N" ++ end },
+        .{ .scale = .{ .denominator = 2 }, .scaled = true, .encoded = begin ++ "\x1b]66;s=1:w=4:n=1:d=2:v=0;" ++ joined ++ "\x1b\\N" ++ end },
+        .{ .image = true, .encoded = begin ++ "\x1b_Ga=p,i=7,C=1\x1b\\" ++ joined ++ "N" ++ end },
+        .{ .explicit = true, .encoded = begin ++ "\x1b]66;w=4;" ++ joined ++ "\x1b\\N" ++ end },
+        .{ .alt = false, .encoded = "\x1b[?2026h\x1b[?25l\r\x1b[m\x1b[1C" ++ joined ++ "N" ++ end },
+        .{ .col = 14, .encoded = "\x1b[?2026h\x1b[?25l\x1b[H\x1b[m\x1b[1;15H" ++ joined ++ end }, // unowned row overflow
+    };
+    for (cases) |case| {
+        var fixture: RenderFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        _ = try fixture.render(); // establish a default retained frame
+        fixture.vx.state.alt_screen = case.alt;
+        fixture.vx.state.cursor = .{};
+        fixture.vx.caps.explicit_width = case.explicit;
+        fixture.vx.caps.scaled_text = case.scaled;
+        fixture.vx.caps.unicode = case.method;
+        fixture.vx.screen.writeCell(case.col, 0, .{
+            .char = .{ .grapheme = case.text, .width = case.width },
+            .scale = case.scale,
+            .image = if (case.image) .{ .img_id = 7, .options = .{} } else null,
+        });
+        if (@as(u32, case.col) + case.width < 16) fixture.vx.screen.writeCell(case.col + case.width, 0, .{ .char = .{ .grapheme = "N", .width = 1 } });
+        try testing.expectEqualStrings(case.encoded, try fixture.render());
+    }
+}

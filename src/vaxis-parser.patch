@@ -408,7 +408,6 @@ index fc5a714..39d878e 100644
  const Screen = @This();
  pub const Cursor = struct { row: u16 = 0, col: u16 = 0 };
 diff --git a/src/Vaxis.zig b/src/Vaxis.zig
-index 720face..7292989 100644
 --- a/src/Vaxis.zig
 +++ b/src/Vaxis.zig
 @@ -10,7 +10,7 @@ const Key = @import("Key.zig");
@@ -460,7 +459,58 @@ index 720face..7292989 100644
  
          // If we support scaled text, we set the flags now
          if (self.caps.scaled_text and cell.scale.scale > 1) {
-@@ -1690,6 +1694,32 @@ test "queryCursorPosition: failed write does not leave a pending request" {
+@@ -798,6 +802,18 @@
+             continue;
+         }
+ 
++        // wcwidth allocates the scalar sum for some joined emoji even when
++        // the terminal composes them more narrowly. Only for a complete ZWJ
++        // cluster in an ordinary owned alt-screen span, clear that span using
++        // the SELECTED style/link, then write the source unchanged at its start.
++        // This supports physical advance <= w, not arbitrary terminal widths
++        // (e.g. VS16 wider than allocation), inline, images, scaling or overrides.
++        const bounded_joined = self.boundedJoinedFallback(cell, col, w);
++        if (bounded_joined) {
++            try tty.splatByteAll(' ', w);
++            try tty.print(ctlseqs.cup, .{ row + 1, col + 1 });
++        }
++
+         // If we have explicit width and our width is greater than 1, let's use it
+         if (self.caps.explicit_width and w > 1) {
+             try tty.print(ctlseqs.explicit_width, .{ w, cell.char.grapheme });
+@@ -806,6 +822,9 @@
+         }
+         cursor_pos.col = col + w;
+         cursor_pos.row = row;
++        // The physical cursor may trail the allocated span. Reposition only
++        // when another cell is emitted: never CUP one past the right edge.
++        if (bounded_joined) reposition = true;
+     }
+     if (!started) return;
+     if (self.screen.cursor_vis) {
+@@ -866,6 +885,21 @@
+ 
+     try tty.writeAll(ctlseqs.sync_reset);
+     try tty.flush();
++}
++
++// No allocation, width-policy change or second layout model. Limit the
++// scalar-sum fallback to one complete joined cluster and its actual wcwidth
++// allocation; caller-supplied arbitrary widths keep their existing semantics.
++fn boundedJoinedFallback(self: *const Vaxis, cell: Cell, col: u16, w: u16) bool {
++    if (!self.state.alt_screen or self.caps.explicit_width or
++        self.caps.unicode != .wcwidth or cell.image != null or
++        !cell.scale.eql(.{}) or @as(u32, col) + w > self.screen.width or
++        std.mem.indexOf(u8, cell.char.grapheme, "\u{200d}") == null) return false;
++    var it = unicode.graphemeIterator(cell.char.grapheme);
++    const cluster = it.next() orelse return false;
++    if (cluster.len != cell.char.grapheme.len) return false;
++    return w == gwidth.gwidth(cell.char.grapheme, .wcwidth) and
++        w > gwidth.gwidth(cell.char.grapheme, .unicode);
+ }
+ 
+ fn enableKittyKeyboard(self: *Vaxis, tty: *std.Io.Writer, flags: Key.KittyFlags) !void {
+@@ -1690,6 +1724,32 @@ test "queryCursorPosition: failed write does not leave a pending request" {
      try std.testing.expectEqual(@as(usize, 1), vx.cursor_position_requests.pending());
  }
  
