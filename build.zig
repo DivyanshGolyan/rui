@@ -690,13 +690,15 @@ pub fn build(b: *std.Build) void {
     process_integrations.addArg(@tagName(check_part));
     process_integrations.addFileArg(ci.path(terminal_notice));
     process_integrations.step.dependOn(&format.step);
-    // The execution part owns native tests. The callers
-    // part runs on another machine, isolated from that child-process load.
+    // The execution partition overlaps native tests with its serial process
+    // fixtures, just as check already does. Keep the unsplit gate serial and
+    // the callers partition isolated on its own runner. Both peers must pass.
+    const native_gate = if (check_part == .execution) full_check_step else &process_integrations.step;
     if (check_part != .callers) {
-        process_integrations.step.dependOn(&run_tests.step);
-        process_integrations.step.dependOn(&run_renderer_allocation.step);
-        process_integrations.step.dependOn(h2_test_step);
-        process_integrations.step.dependOn(pg_test_step);
+        native_gate.dependOn(&run_tests.step);
+        native_gate.dependOn(&run_renderer_allocation.step);
+        native_gate.dependOn(h2_test_step);
+        native_gate.dependOn(pg_test_step);
     }
     if (!pr_ci) process_integrations.addFileInput(ci.path(release_small));
     full_check_step.dependOn(&process_integrations.step);

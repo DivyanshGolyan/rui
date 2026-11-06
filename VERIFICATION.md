@@ -158,6 +158,7 @@ Serial execution reduces unrelated load but does not establish scheduler order; 
 
 Linux Selected CI and each platform's qualification run the full gate as `-Dcheck-part=execution` and `-Dcheck-part=callers` on two isolated runners at the same revision.
 Both must pass.
+The execution partition overlaps native tests with its serial process fixtures; the unsplit gate remains serial.
 Their disjoint fixtures cover the full gate once; callers run Host-process, allocator, launch and Debug smoke cases serially after the parallel batch.
 [qualification.py](tests/ci/qualification.py) packs other Linux targets so a Selected run never exceeds ten shards.
 Only when the diff touches no strict path does a shard rerun a failed batch once and report both results; a pass after the rerun is a flake to fix.
