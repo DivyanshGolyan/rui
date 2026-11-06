@@ -28,9 +28,9 @@ class HandoffTest(unittest.TestCase):
         self.addCleanup(os.chdir, previous)
         self.enterContext(patch.dict(os.environ, dict(
             RUNNER_TEMP=str(self.root), GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='2',
-            GITHUB_REPOSITORY='owner/repo', GATE_LOG=str(self.root / 'gates'), GATE_EXIT='0',
+            GITHUB_REPOSITORY='owner/repo', GH_TOKEN='download-token', GATE_LOG=str(self.root / 'gates'), GATE_EXIT='0',
             BUILD_EXIT='0', FLAKY=str(self.root / 'flaky'), ImageOS='ubuntu24', ImageVersion='20261012.334.1',
-            GITHUB_STEP_SUMMARY=str(self.root / 'summary'),
+            GITHUB_STEP_SUMMARY=str(self.root / 'summary'), GITHUB_API_URL='https://api.github.com',
             PATH=str(self.root) + os.pathsep + os.environ['PATH'])))
         self.inputs = dict(format=5, pr_ci=False, tree='same-tree', targets=['test'], system='Linux', machine='x86_64',
                            compiler='b' * 64)
@@ -100,8 +100,8 @@ else:
         self.downloads = {'101': (self.download, self.metadata)}
 
     def download_or_run(self, command, **kwargs):
-        if command[:2] == ['gh', 'api']:
-            kwargs['stdout'].write(self.downloads[command[2].split('/')[-2]][0])
+        if command[0] == 'curl':
+            kwargs['stdout'].write(self.downloads[command[-1].split('/')[-2]][0])
             return subprocess.CompletedProcess(command, 0)
         return self.real_run(command, **kwargs)
 
@@ -119,6 +119,80 @@ else:
         self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
         self.assertEqual(self.receipt['runner'], ['ubuntu24', '20261012.334.1'])
         self.assertIn('Using verified producer artifact 101', (self.root / 'summary').read_text())
+
+    def test_stalled_download_retries_once_from_empty_then_verifies_producer(self):
+        for failure in ('curl stall', 'subprocess timeout'):
+            with self.subTest(failure=failure):
+                attempts = []
+
+                def download(command, **kwargs):
+                    if command[0] != 'curl':
+                        return self.download_or_run(command, **kwargs)
+                    attempts.append(command)
+                    self.assertEqual(kwargs['stdout'].tell(), 0)
+                    self.assertEqual(Path(kwargs['stdout'].name).stat().st_size, 0)
+                    if len(attempts) == 1:
+                        kwargs['stdout'].write(b'partial ZIP bytes to discard' * 1000)
+                        if failure == 'curl stall':
+                            raise subprocess.CalledProcessError(28, command)
+                        raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+                    return self.download_or_run(command, **kwargs)
+
+                with patch.object(build_artifact.subprocess, 'run', side_effect=download), \
+                        contextlib.redirect_stdout(io.StringIO()) as output:
+                    build_artifact.restore(['101'], ['test'])
+                self.assertEqual(len(attempts), 2)
+                self.assertEqual(attempts[0], attempts[1])
+                self.assertEqual(output.getvalue().count('::warning::'), 1)
+                self.assertIn('retrying once', output.getvalue())
+                self.assertFalse((self.root / 'compiled').exists())
+                self.assertEqual(self.gates(), ['producer'])
+
+    def test_exhausted_download_retry_rebuilds_locally_before_gates(self):
+        attempts = []
+
+        def download(command, **kwargs):
+            if command[0] != 'curl':
+                return self.download_or_run(command, **kwargs)
+            attempts.append(command)
+            kwargs['stdout'].write(b'never executable')
+            raise subprocess.CalledProcessError(28, command)
+
+        with patch.object(build_artifact.subprocess, 'run', side_effect=download), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            build_artifact.restore(['101'], ['test'])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(output.getvalue().count('::warning::'), 1)
+        self.assertIn('was rejected', output.getvalue())
+        self.assertTrue((self.root / 'compiled').exists())
+        self.assertEqual(self.gates(), ['consumer'])
+
+    def test_digest_rejection_is_not_retried(self):
+        self.metadata['digest'] = 'sha256:' + '0' * 64
+        with patch.object(build_artifact.subprocess, 'run', side_effect=self.download_or_run) as run, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            build_artifact.restore(['101'], ['test'])
+        self.assertEqual(sum(call.args[0][0] == 'curl' for call in run.call_args_list), 1)
+        self.assertNotIn('::warning::', output.getvalue())
+        self.assertIn('GitHub compiled artifact digest mismatch', output.getvalue())
+        self.assertEqual(self.gates(), ['consumer'])
+
+    def test_download_has_stall_connection_and_total_timeouts_without_exposing_token(self):
+        with patch.object(build_artifact.subprocess, 'run', side_effect=self.download_or_run) as run:
+            build_artifact.restore(['101'], ['test'])
+        self.assertEqual(run.call_count, 1)
+        command = run.call_args.args[0]
+        for option, value in (('--connect-timeout', '10'), ('--speed-time', '15'),
+                              ('--speed-limit', '1024'), ('--max-time', '90'),
+                              ('--proto', '=https'), ('--proto-redir', '=https'), ('--header', '@-')):
+            self.assertEqual(command[command.index(option) + 1], value)
+        self.assertIn('--location', command)
+        self.assertNotIn('--location-trusted', command)
+        self.assertEqual(command[-1], 'https://api.github.com/repos/owner/repo/actions/artifacts/101/zip')
+        self.assertEqual(run.call_args.kwargs['timeout'], 100)
+        self.assertEqual(run.call_args.kwargs['input'], 'Authorization: Bearer download-token\n')
+        self.assertNotIn('download-token', ' '.join(command))
+        self.assertFalse((self.root / 'compiled').exists())
 
     def test_identity_or_origin_mismatch_rebuilds_this_checkout_before_gates(self):
         original = copy.deepcopy(self.receipt)

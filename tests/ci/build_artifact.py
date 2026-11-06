@@ -192,6 +192,33 @@ def verify(receipts):
         raise ValueError("Compiled executable identity mismatch")
 
 
+def download_artifact(path, destination):
+    # Follow GitHub's short-lived redirect afresh on each attempt. curl streams
+    # the ZIP and detects stalled transfers; a wall-clock timeout alone made a
+    # stalled gh api download wait 180 s before throwing away the producer build.
+    for attempt in range(2):
+        try:
+            # Keep the token off argv; --location does not forward Authorization
+            # to the blob-storage host (unlike --location-trusted).
+            with destination.open("wb") as output:
+                subprocess.run([
+                    "curl", "--disable", "--fail", "--silent", "--show-error", "--location",
+                    "--proto", "=https", "--proto-redir", "=https",
+                    "--connect-timeout", "10", "--speed-limit", "1024", "--speed-time", "15",
+                    "--max-time", "90", "--header", "@-",
+                    "--write-out", "%{stderr}Compiled artifact download: HTTP %{http_code}, "
+                    "%{size_download} bytes in %{time_total}s\n",
+                    f"{os.environ.get('GITHUB_API_URL', 'https://api.github.com')}/{path}",
+                ], input=f"Authorization: Bearer {os.environ['GH_TOKEN']}\n", text=True,
+                    stdout=output, check=True, timeout=100)
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            if attempt:
+                raise
+            # Idempotent download only, never receipt verification or tests.
+            print(f"::warning::Compiled artifact download failed ({error}); retrying once.", flush=True)
+
+
 def fetch(artifact_id, targets):
     repository = os.environ["GITHUB_REPOSITORY"]
     artifact = api(f"repos/{repository}/actions/artifacts/{artifact_id}")
@@ -200,9 +227,7 @@ def fetch(artifact_id, targets):
     # Exact immutable ID comes from the successful producer's needs output.
     with tempfile.TemporaryDirectory() as directory:
         download = Path(directory) / "artifact.zip"
-        with download.open("wb") as output:
-            subprocess.run(["gh", "api", f"repos/{repository}/actions/artifacts/{artifact_id}/zip"],
-                           stdout=output, check=True, timeout=180)
+        download_artifact(f"repos/{repository}/actions/artifacts/{artifact_id}/zip", download)
         if artifact.get("digest") != "sha256:" + digest(download):
             raise ValueError("GitHub compiled artifact digest mismatch")
         with zipfile.ZipFile(download) as zipped:
