@@ -58,7 +58,6 @@ class Dialect:
         self.stdin_message = bool(help_text(binary, "session", "start"))
         self.pause = ("host", "pause") if help_text(binary, "host", "pause") else ("host", "stop")
 
-
     def serve(self):
         return ("host", "serve") if self.resource_first else ("serve",)
 

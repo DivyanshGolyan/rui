@@ -3774,6 +3774,8 @@ def saved_capture_cases(state, store, workspace):
         rejected_bytes = rejected_record.read_bytes()
         observed = json.loads(run(home, "request", "inspect", rejected_handle))["observation"]
         expected = {"status": "rejected", "kind": kind, "target": "", "code": "invalid_workspace"}
+        if kind == "message":
+            expected["state"] = "rejected"
         # Rejected observations retain no canonical Message content; its
         # original input remains in the unchanged local capture and receipt.
         assert observed == expected, observed

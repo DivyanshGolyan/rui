@@ -471,6 +471,30 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     writeRecord();
 }
 
+test "schema 53 migrates recovery index and wire 8 together to schema 54 wire 9 on MySQL" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer setup("USE " ++ database) catch {};
+    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (step.from < 53) try load(migrated_database, schema.mysqlMigration(step.from), false);
+    }
+    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('format','53')", false);
+    try load(migrated_database, schema.mysqlMigration(53), false);
+    var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer result.deinit();
+    try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
+    try std.testing.expectEqualStrings("\n 1:9", result.written());
+    // The complete catalog includes the recovery index and its generated lead.
+    try expectCatalog(migrated_database);
+    done.migrations += 1;
+    writeRecord();
+}
+
 /// A live Store conformance body completed successfully.
 pub fn conformancePassed() void {
     const io = std.testing.io;

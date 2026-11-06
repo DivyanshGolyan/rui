@@ -206,23 +206,20 @@ class MessageObservationTests(unittest.TestCase):
                 self.assertEqual(transport.dispatch.completed_observation("/store", "key"),
                                  observation if state == "completed" else None)
 
-    def test_upgrade_compares_bindings_in_each_builds_observation_dialect(self):
+    def test_upgrade_compares_bindings_in_each_installed_reply(self):
         from previous_release_upgrade import Dialect
         identity = {"turn": "1", "operation": "2", "attempt": "1"}
-        current = Dialect(transport.dispatch.ROOT)
-        self.assertEqual(current.observation_binding, "binding")
-        self.assertEqual(current.binding({"binding": identity}), identity)
-        self.assertTrue(current.terminal({"state": "completed"}))
-        self.assertFalse(current.terminal({"state": "processing", "result": {"status": "completed"}}))
-        with tempfile.TemporaryDirectory() as directory:
-            checkout = pathlib.Path(directory)
-            (checkout / "src").mkdir()
-            (checkout / "src/protocol.zig").write_text("pub const session_id_bytes = 6;")
-            previous = Dialect(checkout)
-            self.assertEqual(previous.observation_binding, "processing")
-            self.assertEqual(previous.binding({"processing": identity}), current.binding({"binding": identity}))
-            self.assertTrue(previous.terminal({"result": {"status": "completed"}}))
-            self.assertFalse(previous.terminal({"processing": identity}))
+        # CLI grammar is probed from installed help; observation shape comes
+        # from each reply, never a checkout's protocol source.
+        dialect = Dialect.__new__(Dialect)
+        self.assertEqual(dialect.binding({"state": "processing", "binding": identity}), identity)
+        self.assertEqual(dialect.binding({"state": "completed", "binding": identity}), identity)
+        self.assertTrue(dialect.terminal({"state": "completed"}))
+        self.assertFalse(dialect.terminal({"state": "processing", "result": {"status": "completed"}}))
+        self.assertEqual(dialect.binding({"processing": identity}), identity)
+        self.assertTrue(dialect.terminal({"result": {"status": "completed"}}))
+        self.assertFalse(dialect.terminal({"processing": identity}))
+        self.assertTrue(dialect.terminal({"state": "cancelled", "result": {"status": "cancelled"}}))
 
     def test_terminal_reader_uses_host_state_including_rejection(self):
         for state in ("queued", "processing", "waiting_for_permission", "completed", "failed", "cancelled", "rejected"):
