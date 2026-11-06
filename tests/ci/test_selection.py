@@ -66,6 +66,16 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_vaxis_changes_execute_dependency_roots_in_both_phases(self):
+        for path in ("build.zig", "build.zig.zon", "src/vaxis-parser.patch",
+                     "src/prepare_vaxis.sh", "tests/vaxis/layout.zig"):
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    result = select([path], phase, AVAILABLE)
+                    self.assertIn("test-vaxis", result["targets"])
+                    if phase == "review":
+                        self.assertIn("test-vaxis", result["native_targets"])
+
     def test_request_wait_selects_its_native_oracle_and_portable_core(self):
         for path in ("src/client.zig", "src/cli_args.zig", "src/server.zig",
                      "src/TestObservation.zig", "tests/integration/request_wait_integration.py",
