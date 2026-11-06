@@ -146,7 +146,7 @@ pub const ActivityPage = struct {
         const Fact = protocol.ActivityItem;
         const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
-        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
+        const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: ?JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
         const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
@@ -245,7 +245,7 @@ pub const ActivityPage = struct {
                 .compacted => |compacted| fact.value = .{ .compacted = .{ .operation = try id(compacted.operation, false), .dropped = try id(compacted.dropped, true) } },
                 .send_failed => |failed| {
                     if (failed.code.slice().len == 0) return error.InvalidActivityPage;
-                    fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = try failed.target.peer(), .code = failed.code.value } };
+                    fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = if (failed.target) |peer| try peer.peer() else null, .code = failed.code.value } };
                 },
                 .assistant => |assistant| fact.value = .{ .assistant = .{ .content = try content(assistant.content), .final = assistant.final } },
                 .tool_result => |result| {
@@ -755,6 +755,7 @@ pub const Current = struct {
     };
 
     settings: Settings,
+    archive_state: protocol.SessionArchiveState = .active,
     pending_messages: u64,
     work: Work,
     peers: Peers,
@@ -795,7 +796,7 @@ pub const Current = struct {
     pub fn writeJson(self: *const Current, io: std.Io, file: std.Io.File, writer: *std.Io.Writer) !void {
         try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":");
         try std.json.Stringify.value(self.settings, .{}, writer);
-        try writer.print(",\"pending_messages\":\"{d}\",\"work\":", .{self.pending_messages});
+        try writer.print(",\"archive_state\":\"{s}\",\"pending_messages\":\"{d}\",\"work\":", .{ @tagName(self.archive_state), self.pending_messages });
         try std.json.Stringify.value(self.work, .{}, writer);
         try writer.writeAll(",\"peers\":");
         try std.json.Stringify.value(self.peers, .{}, writer);
@@ -867,6 +868,7 @@ pub const Current = struct {
             delta: JsonEnum(enum { full }),
             since: ?JsonString(SessionToken.max_bytes),
             session: ?Settings,
+            archive_state: OmittableJson(JsonEnum(protocol.SessionArchiveState)) = .{},
             pending_messages: Count,
             work: OmittableJson(Work) = .{},
             peers: OmittableJson(Peers) = .{},
@@ -897,7 +899,7 @@ pub const Current = struct {
         const settings = wire.session orelse {
             if (wire.pending_messages.value != 0 or execution.status.value != .unavailable or execution.reason.value == null or
                 execution.dispatch_fenced.value != null or execution.custody_occupied.value != null or execution.scratch_used_bytes.value != null or execution.unavailable.value != null or
-                wire.work.value != null or wire.peers.value != null or wire.first_message.value != null or wire.selected_message.value != null or wire.recent_messages.value != null or wire.actions.value != null or
+                wire.archive_state.isPresent() or wire.work.value != null or wire.peers.value != null or wire.first_message.value != null or wire.selected_message.value != null or wire.recent_messages.value != null or wire.actions.value != null or
                 wire.rejected_calls.value != null or wire.actionable_permissions.value != null) return error.InvalidObservation;
             return .unconfigured;
         };
@@ -922,6 +924,7 @@ pub const Current = struct {
         if (rejected.count.value != rejected.items.count or actions.count.value < actions.unresolved.count + actions.resolved.count or actionable.count > actions.unresolved.count) return error.InvalidObservation;
         return .{ .current = .{
             .settings = settings,
+            .archive_state = (wire.archive_state.value orelse return error.InvalidObservation).value,
             .pending_messages = wire.pending_messages.value,
             .work = work,
             .peers = peers,
@@ -1134,6 +1137,7 @@ pub const SessionListPage = struct {
 
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !JsonRow {
             const Wire = struct {
+                archive_state: JsonEnum(protocol.SessionArchiveState),
                 reference: JsonString(protocol.max_session_bytes),
                 parent: ?JsonString(protocol.session_id_bytes),
                 workspace: JsonString(protocol.max_workspace_bytes),
@@ -1158,6 +1162,7 @@ pub const SessionListPage = struct {
             if (wire.parent) |parent| if (!protocol.validSessionId(parent.slice()) or parent.eql(wire.reference.slice())) return error.InvalidCharacter;
             if (wire.label) |label| if (!protocol.validLabel(label.slice())) return error.InvalidCharacter;
             var row: Row = .{
+                .archive_state = wire.archive_state.value,
                 .reference = wire.reference.value,
                 .parent = if (wire.parent) |parent| parent.value else null,
                 .workspace = wire.workspace.value,
@@ -1360,7 +1365,8 @@ pub const CommandObservation = struct {
     work: ?struct { state: protocol.WorkState, first_action: ?u64 } = null,
     recovery: ?Recovery = null,
     selection: ?struct { turn: ?u64, admission_cutoff: u64 } = null,
-    completion: ?enum { pending, completed } = null,
+    archived: ?bool = null,
+    completion: ?protocol.SessionStopCompletion = null,
     interruption_target: ?struct { session: protocol.Bounded(protocol.max_session_bytes), turn: u64, operation: u64 } = null,
     permission_target: ?struct { action: u64, decision: protocol.PermissionDecision } = null,
 
@@ -1431,6 +1437,9 @@ pub const CommandObservation = struct {
             if (selection.turn) |turn| try writer.print("\"{d}\"", .{turn}) else try writer.writeAll("null");
             try writer.print(",\"admission_cutoff\":\"{d}\"}},\"completion\":{{\"status\":\"{s}\"}}", .{ selection.admission_cutoff, @tagName(self.completion.?) });
         }
+        if (self.archived) |archived| {
+            try writer.print(",\"archived\":{s},\"completion\":{{\"status\":\"{s}\"}}", .{ if (archived) "true" else "false", @tagName(self.completion.?) });
+        }
         if (self.interruption_target) |*target| {
             try writer.writeAll(",\"interruption_target\":{\"session\":");
             try std.json.Stringify.value(target.session.slice(), .{}, writer);
@@ -1486,6 +1495,7 @@ pub const CommandObservation = struct {
             result: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "result")).optional.child, "status")), code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{}, text: OmittableJson(Ref) = .{} }) = .{},
             work: OmittableJson(struct { state: JsonWorkState, first_action: ?JsonString(20) }) = .{},
             recovery: OmittableJson(struct { unknown_outcomes: Outcomes, more: bool }) = .{},
+            archived: OmittableJson(bool) = .{},
             selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
             completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
             interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
@@ -1513,7 +1523,7 @@ pub const CommandObservation = struct {
             return .{ .not_modified = since orelse return error.InvalidObservation };
         }
         const facts = wire.observation.value orelse return error.InvalidObservation;
-        var observed: CommandObservation = .{ .key = wire.key.value, .status = facts.status.value, .kind = if (facts.kind.value) |kind| kind.value else null, .created = facts.created.value };
+        var observed: CommandObservation = .{ .key = wire.key.value, .status = facts.status.value, .kind = if (facts.kind.value) |kind| kind.value else null, .created = facts.created.value, .archived = facts.archived.value };
         inline for (.{ "target", "code" }) |name| if (@field(facts, name).value) |value| {
             @field(observed, name) = value.value;
         };
@@ -1560,7 +1570,7 @@ pub const CommandObservation = struct {
 
     fn validate(self: *const CommandObservation) !void {
         if (self.status == .absent) {
-            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "completion", "interruption_target", "permission_target" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
+            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "archived", "completion", "interruption_target", "permission_target" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
             return;
         }
         const kind = self.kind orelse return error.InvalidObservation;
@@ -1571,7 +1581,9 @@ pub const CommandObservation = struct {
         const accepted = self.status == .accepted;
         if (accepted and !protocol.validSessionId(self.target.?.slice())) return error.InvalidObservation;
         if ((self.revision != null) != (accepted and kind == .configure) or (self.created != null) != (accepted and kind == .configure)) return error.InvalidObservation;
-        if ((self.selection != null) != (accepted and kind == .session_stop) or (self.completion != null) != (accepted and kind == .session_stop)) return error.InvalidObservation;
+        if ((self.selection != null) != (accepted and kind == .session_stop) or
+            (self.archived != null) != (accepted and kind == .session_archive) or
+            (self.completion != null) != (accepted and (kind == .session_stop or kind == .session_archive))) return error.InvalidObservation;
         if ((self.interruption_target != null) != (kind == .model_interruption) or (self.permission_target != null) != (kind == .permission_decision)) return error.InvalidObservation;
         if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
         if (kind != .message) {
@@ -1611,12 +1623,13 @@ pub const CommandObservation = struct {
     }
 };
 
-/// The five durable mutations. Tag names are the captured-record and
+/// The durable mutations. Tag names are the captured-record and
 /// observation spelling; `rui request recover --kind` uses the hyphenated spelling.
 pub const MutationTarget = union(protocol.CommandKind) {
     configure,
     message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false },
     session_stop,
+    session_archive: struct { archived: bool },
     model_interruption: struct { turn: u64, operation: u64 },
     permission_decision: struct { action: u64, decision: protocol.PermissionDecision },
 };
@@ -1626,7 +1639,8 @@ pub const MutationAnswer = struct {
         accepted: union(enum) {
             configure: struct { revision: u64, created: bool },
             message: struct { admission: u64 },
-            session_stop: struct { turn: ?u64, admission_cutoff: u64, completion: enum { pending, completed } },
+            session_stop: struct { turn: ?u64, admission_cutoff: u64, completion: protocol.SessionStopCompletion },
+            session_archive: protocol.SessionArchiveObservation,
             model_interruption,
             permission_decision,
         },
@@ -2304,6 +2318,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
             admission: OmittableJson(JsonString(20)) = .{},
             action: OmittableJson(JsonString(20)) = .{},
             decision: OmittableJson(JsonString(16)) = .{},
+            archived: OmittableJson(bool) = .{},
             selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
             target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
         }) = .{},
@@ -2334,6 +2349,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         .configure => "configuration_reply",
         .message => "message_reply",
         .session_stop => "session_stop_reply",
+        .session_archive => "session_archive_reply",
         .model_interruption => "model_interruption_reply",
         .permission_decision => "permission_decision_reply",
     };
@@ -2366,7 +2382,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
         if (answer.code.value != null) return error.InvalidResponse;
     } else {
         const code = answer.code.value orelse return error.InvalidResponse;
-        if (code.slice().len == 0 or answer.revision.value != null or answer.created.value != null or answer.admission.value != null or answer.selection.value != null) return error.InvalidResponse;
+        if (code.slice().len == 0 or answer.revision.value != null or answer.created.value != null or answer.admission.value != null or answer.selection.value != null or answer.archived.value != null) return error.InvalidResponse;
         if (conflict and (!code.eql("idempotency_key_conflict") or answer.replayed)) return error.InvalidResponse;
     }
     var value: @FieldType(@FieldType(MutationAnswer, "result"), "accepted") = undefined;
@@ -2405,6 +2421,17 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
                 } };
             } else if (!completion.status.eql("unavailable")) return error.InvalidResponse;
         },
+        .session_archive => |expected| {
+            const completion = wire.completion.value orelse return error.InvalidResponse;
+            if (accepted) {
+                const archived = answer.archived.value orelse return error.InvalidResponse;
+                if (archived != expected.archived) return error.RequestBindingMismatch;
+                value = .{ .session_archive = .{
+                    .archived = archived,
+                    .completion = std.meta.stringToEnum(protocol.SessionStopCompletion, completion.status.slice()) orelse return error.InvalidResponse,
+                } };
+            } else if (!completion.status.eql("unavailable")) return error.InvalidResponse;
+        },
         .model_interruption => if (accepted) {
             value = .model_interruption;
         },
@@ -2414,7 +2441,10 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     }
     if ((target != .configure and (answer.revision.value != null or answer.created.value != null)) or
         (target != .message and (answer.admission.value != null or wire.input.value != null or wire.queue.value != null)) or
-        (target != .session_stop and (answer.selection.value != null or wire.completion.value != null))) return error.InvalidResponse;
+        (target != .configure and target != .message and wire.execution.value != null) or
+        (target != .session_stop and answer.selection.value != null) or
+        (target != .session_archive and answer.archived.value != null) or
+        (target != .session_stop and target != .session_archive and wire.completion.value != null)) return error.InvalidResponse;
     return .{
         .replayed = answer.replayed,
         .result = if (accepted) .{ .accepted = value } else if (conflict) .conflict else .{ .rejected = answer.code.value.?.value },
@@ -2700,10 +2730,11 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
 /// A full page's facts after its rows, up to `next`.
 const testing_list_facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab.42\",\"next\":";
 /// A list row's facts after its settings, for a Session no one has messaged.
-const testing_row_facts = ",\"parent\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null," ++
+const testing_row_facts = ",\"archive_state\":\"active\"" ++ testing_row_details;
+const testing_row_details = ",\"parent\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null},\"peers\":{\"from_person_at\":null}";
 /// The same for a Session a person started, now working.
-const testing_started_row_facts = ",\"parent\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
+const testing_started_row_facts = ",\"archive_state\":\"active\",\"parent\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
     "\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
@@ -2714,7 +2745,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
     const digest = @as([64]u8, @splat('a'));
-    const facts = "\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
+    const facts = "\"archive_state\":\"active\",\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
         "\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
@@ -2739,8 +2770,8 @@ test "Session list facts own complete rows and render semantic output after scra
     var output: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try page.writeJson(&writer);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
-        "\"parent\":\"p33rs1\",\"label\":\"Review PR\"" ++ facts["\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"archive_state\":\"active\",\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
+        "\"parent\":\"p33rs1\",\"label\":\"Review PR\"" ++ facts["\"archive_state\":\"active\",\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
 }
@@ -2877,6 +2908,9 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         try std.testing.expectEqual(@as(?protocol.Peer, null), page.rows[0].first_message.?.sender);
     }
     for ([_][2][]const u8{
+        .{ ",\"archive_state\":\"active\"", "" },
+        .{ "\"archive_state\":\"active\"", "\"archive_state\":null" },
+        .{ "\"archive_state\":\"active\"", "\"archive_state\":\"unknown\"" },
         .{ "\"parent\":null", "\"parent\":\"k7m2qX\"" },
         .{ "\"parent\":null", "\"parent\":\"k7m2qx\"" },
         .{ "\"parent\":null", "\"parent\":\"abcdefg\"" },
@@ -2915,8 +2949,8 @@ fn testingListPage(buffer: []u8, references: []const []const u8, facts: []const 
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     for (references, 0..) |reference, index| {
         if (index != 0) try writer.writeAll(",");
-        try writer.print("{{\"reference\":\"{s}\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
-        try writer.writeAll(testing_row_facts ++ "}");
+        try writer.print("{{\"archive_state\":\"active\",\"reference\":\"{s}\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
+        try writer.writeAll(testing_row_details ++ "}");
     }
     try writer.writeAll(facts);
     return writer.buffered();
@@ -3078,7 +3112,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     // Every row escapes every byte of its longest texts.
     const largest = std.math.maxInt(i64);
-    var maximal: protocol.SessionRow = .{ .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
+    var maximal: protocol.SessionRow = .{ .archive_state = .archiving, .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
     maximal.parent = .{};
     try maximal.parent.?.set("zzzzzz");
     try maximal.workspace.set(&workspace);
@@ -3172,12 +3206,13 @@ test "keyed observation retains Host state independently of admission and bindin
     }
 }
 
-test "keyed observation validates all five operation shapes and binding" {
+test "keyed observation validates all six operation shapes and binding" {
     const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"delta\":\"full\",\"since\":null,\"observation\":{\"target\":\"k7m2qx\",";
     inline for (.{
         .{ "configure", ",\"revision\":\"31\",\"created\":true", "" },
         .{ "message", ",\"state\":\"queued\"" ++ testing_observation_input ++ testing_observation_queue ++ testing_observation_work, ",\"state\":\"rejected\"" },
         .{ "session_stop", ",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"},\"completion\":{\"status\":\"completed\"}", "" },
+        .{ "session_archive", ",\"archived\":false,\"completion\":{\"status\":\"completed\"}", "" },
         .{ "model_interruption", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
     }) |case| {
@@ -3384,7 +3419,7 @@ test "Current settings preserve decimal token heuristics in projections" {
     const file = try tmp.dir.createFile(io, "current", .{ .read = true });
     defer file.close(io);
     const wire = "{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"1\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"100000\",\"output_reservation\":\"16384\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"}";
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":" ++ wire ++ ",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
     try file.writePositionalAll(io, report, 0);
     const reply = try CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
     try std.testing.expectEqual(@as(u64, 100000), reply.current.settings.compaction_trigger.?.value);
@@ -3397,12 +3432,34 @@ test "Current settings preserve decimal token heuristics in projections" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"compaction_trigger\":\"100000\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"output_reservation\":\"16384\"") != null);
     // A configured Session's Current always carries its parent, creation time and peers.
-    for ([_][]const u8{ ",\"parent\":null", ",\"created_at\":\"1\"", ",\"peers\":{\"from_person_at\":null}" }) |required| {
+    for ([_][]const u8{ ",\"archive_state\":\"active\"", ",\"parent\":null", ",\"created_at\":\"1\"", ",\"peers\":{\"from_person_at\":null}" }) |required| {
         const at = std.mem.indexOf(u8, report, required).?;
         var missing_buffer: [4096]u8 = undefined;
         const missing = try std.fmt.bufPrint(&missing_buffer, "{s}{s}", .{ report[0..at], report[at + required.len ..] });
         try file.writePositionalAll(io, missing, 0);
         try std.testing.expectError(error.InvalidObservation, CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = missing.len } }));
+    }
+    for ([_]struct { text: []const u8, expected: ?protocol.SessionArchiveState }{
+        .{ .text = "\"active\"", .expected = .active },
+        .{ .text = "\"archiving\"", .expected = .archiving },
+        .{ .text = "\"archived\"", .expected = .archived },
+        .{ .text = "null", .expected = null },
+        .{ .text = "\"unknown\"", .expected = null },
+    }) |case| {
+        const field = try std.fmt.allocPrint(std.testing.allocator, "\"archive_state\":{s}", .{case.text});
+        defer std.testing.allocator.free(field);
+        const changed = try std.mem.replaceOwned(u8, std.testing.allocator, report, "\"archive_state\":\"active\"", field);
+        defer std.testing.allocator.free(changed);
+        try file.writePositionalAll(io, changed, 0);
+        const decoded = CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = changed.len } });
+        if (case.expected) |expected| {
+            const current = (try decoded).current;
+            try std.testing.expectEqual(expected, current.archive_state);
+            var projected: [4096]u8 = undefined;
+            var projection = std.Io.Writer.fixed(&projected);
+            try current.writeJson(io, file, &projection);
+            try std.testing.expect(std.mem.indexOf(u8, projection.buffered(), case.text) != null);
+        } else try std.testing.expectError(error.InvalidObservation, decoded);
     }
     const parent_start = std.mem.indexOf(u8, report, ",\"parent\":null").?;
     for ([_][]const u8{ "\"k7m2qX\"", "\"k7m2qx\"", "\"abcdefg\"", "0" }) |invalid| {
@@ -3487,7 +3544,7 @@ test "Current facts retain settings selected empty key and ten recent bindings" 
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
     const reference = "{\"bytes\":\"7\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([4][16]u8, @splat("0123456789abcdef".*)))) ++ "\"}";
-    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":\"p33rs1\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":" ++ reference ++ "},\"selected_message\":\"\",\"recent_messages\":[");
+    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":\"p33rs1\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"exact\\u0001model\",\"revision\":\"17\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":" ++ reference ++ ",\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\"},\"pending_messages\":\"2\",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1792925300\"},\"turn\":\"37\",\"operation\":\"91\",\"first_action\":null,\"latest_outcome\":{\"code\":\"failed_saved\",\"content\":null}},\"peers\":{\"from_person_at\":\"1792925300\"},\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":" ++ reference ++ "},\"selected_message\":\"\",\"recent_messages\":[");
     for (0..10) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"turn\":\"{d}\",\"message\":\"key/{d}\",\"outcome\":\"completed\"}}", .{ 30 - i, i });
@@ -3540,7 +3597,7 @@ test "Current facts traverse every attention row and preserve metadata with fixe
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = file.writerStreaming(io, &buffer);
     const writer = &output.interface;
-    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
+    try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1792925300\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"31\",\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":\"k\\n\",\"recent_messages\":[],\"actions\":{\"count\":\"515\",\"unresolved\":[");
     for (0..257) |i| {
         if (i != 0) try writer.writeAll(",");
         try writer.print("{{\"action\":\"{d}\",\"parent_operation\":\"19\",\"call_ordinal\":\"{d}\",\"tool\":\"{s}\",{s}\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":", .{ i + 31, i, if (i == 0) "fetch_page" else "bash", if (i == 0) "\"server\":\"docs\"," else "" });
@@ -3775,4 +3832,26 @@ test "keyed observation requires valid delta since and shape-specific facts" {
     }) |fields| {
         try std.testing.expectError(error.InvalidObservation, ObservationReply.parse(.{ .status = 200, .body = prefix ++ fields ++ "}" }, "k", token));
     }
+}
+
+test "session archive mutation reply binds intent and completion on accepted replies" {
+    const head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_archive_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\"";
+    const accepted = head ++ ",\"archived\":false},\"completion\":{\"status\":\"completed\"}}";
+    const target: MutationTarget = .{ .session_archive = .{ .archived = false } };
+    const answer = try decodeMutationReply(.{ .status = 200, .body = accepted }, "k7m2qx", target).answer;
+    try std.testing.expect(!answer.result.accepted.session_archive.archived);
+    try std.testing.expectEqual(.completed, answer.result.accepted.session_archive.completion);
+    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(.{ .status = 200, .body = accepted }, "k7m2qx", .{ .session_archive = .{ .archived = true } }).answer);
+    inline for (.{
+        head ++ "},\"completion\":{\"status\":\"completed\"}}",
+        head ++ ",\"archived\":null},\"completion\":{\"status\":\"completed\"}}",
+        head ++ ",\"archived\":false},\"completion\":{\"status\":\"unavailable\"}}",
+        head ++ ",\"archived\":false}}",
+        head ++ ",\"archived\":false,\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"}},\"completion\":{\"status\":\"completed\"}}",
+        head ++ ",\"archived\":false},\"completion\":{\"status\":\"completed\"},\"execution\":{\"status\":\"queued\"}}",
+    }) |invalid| try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = invalid }, "k7m2qx", target).answer);
+    const rejected = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_archive_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"session\":\"k7m2qx\",\"code\":\"archive_pending\"},\"completion\":{\"status\":\"unavailable\"}}";
+    const refusal = try decodeMutationReply(.{ .status = 200, .body = rejected }, "k7m2qx", target).answer;
+    try std.testing.expect(refusal.replayed);
+    try std.testing.expectEqualStrings("archive_pending", refusal.result.rejected.slice());
 }

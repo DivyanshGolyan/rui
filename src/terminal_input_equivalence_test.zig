@@ -78,6 +78,13 @@ const cases = [_]Case{
     .{ .name = "Ctrl-N", .event = .{ .action = .ctrl_n }, .wires = .{ no_alt, bytes("\x1b[110;5u"), bytes("\x1b[27;5;110~"), bytes("\x0e") } },
     .{ .name = "Ctrl-R", .event = .{ .action = .ctrl_r }, .wires = .{ no_alt, bytes("\x1b[114;5u"), bytes("\x1b[27;5;114~"), bytes("\x12") } },
     .{ .name = "Ctrl-X", .event = .{ .action = .ctrl_x }, .wires = .{ no_alt, bytes("\x1b[120;5u"), bytes("\x1b[27;5;120~"), bytes("\x18") } },
+    .{ .name = "Alt-A archives without editing", .event = .{ .action = .alt_a }, .wires = .{ bytes("\x1ba"), bytes("\x1b[97;3u"), bytes("\x1b[27;3;97~"), no_raw } },
+    .{ .name = "Alt-Shift-A unbound", .event = .{ .refused = .unbound }, .wires = .{ bytes("\x1bA"), bytes("\x1b[97;4u"), bytes("\x1b[27;4;97~"), no_raw } },
+    .{ .name = "Alt-Ctrl-A unbound", .event = .{ .refused = .unbound }, .wires = .{ bytes("\x1b\x01"), bytes("\x1b[97;7u"), bytes("\x1b[27;7;97~"), no_raw } },
+    .{ .name = "Alt-U unbound", .event = .{ .refused = .unbound }, .wires = .{ bytes("\x1bu"), bytes("\x1b[117;3u"), bytes("\x1b[27;3;117~"), no_raw } },
+    .{ .name = "Super-A unbound", .event = .{ .refused = .unbound }, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[97;9u"), bytes("\x1b[27;9;97~"), no_raw } },
+    .{ .name = "Hyper-A unbound", .event = .{ .refused = .unbound }, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[97;17u"), .{ .unavailable = .modifier_not_in_protocol }, no_raw } },
+    .{ .name = "Meta-A unbound", .event = .{ .refused = .unbound }, .wires = .{ .{ .unavailable = .modifier_not_in_protocol }, bytes("\x1b[97;33u"), .{ .unavailable = .modifier_not_in_protocol }, no_raw } },
     .{ .name = "Ctrl-A", .event = .redraw, .cursor = 0, .wires = .{ no_alt, bytes("\x1b[97;5u"), bytes("\x1b[27;5;97~"), bytes("\x01") } },
     .{ .name = "End", .event = .redraw, .cursor = 8, .wires = .{ bytes("\x1bOF"), bytes("\x1b[F"), no_case27, no_raw } },
     .{ .name = "End on an empty draft", .before = "", .caret = 0, .after = "", .cursor = 0, .event = .{ .action = .end }, .wires = .{ bytes("\x1bOF"), bytes("\x1b[F"), no_case27, no_raw } },
@@ -540,5 +547,21 @@ fn feedAt(editor: *Editor, input: *Input, read: @import("SessionTerminal.zig").R
         const event = editor.apply(keymap.every, decoded);
         if (event != .none) outcome.event = event;
         if (event == .submit) outcome.submits += 1;
+    }
+}
+
+test "TD2 bare and pasted a stay text while pasted Alt-A never becomes an action" {
+    for ([_][]const u8{ "a", "\x1b[200~a\x1b[201~", "\x1b[200~\x1ba\x1b[201~" }, 0..) |wire, index| {
+        var storage: [32]u8 = undefined;
+        var editor: Editor = .{ .buffer = &storage };
+        var input: Input = .{};
+        for (wire) |byte| {
+            var decoded = input.feed(byte, 0);
+            while (decoded != .none) : (decoded = input.next()) {
+                try std.testing.expect(Editor.select(keymap.every, decoded) != .action);
+                try std.testing.expect(editor.apply(keymap.every, decoded) != .action);
+            }
+        }
+        if (index < 2) try std.testing.expectEqualStrings("a", storage[0..editor.length]);
     }
 }

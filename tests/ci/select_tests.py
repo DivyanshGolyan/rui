@@ -41,7 +41,7 @@ RULES = (
      "Turn completion and compaction decisions over transaction facts"),
     (("src/retry_policy.zig",), ("test-logic", "check"), ("test-logic", "test"),
      "Model retry waits and maximum; Store SQL and index text derive from them"),
-    (("src/bounded.zig", "src/built_in_tool.zig", "src/session_work.zig"), ("test-logic", "check"), ("test-logic", "test"),
+    (("src/bounded.zig", "src/built_in_tool.zig", "src/session_work.zig", "src/session_archive.zig"), ("test-logic", "check"), ("test-logic", "test"),
      "Shared values, tool names and the Session work derivation; Store readers and wire encoders follow"),
     (("src/change_ring.zig",), ("test-logic", "check"), ("test-logic", "test"),
      "The Session change hint; the Store records into it and list pages read it"),

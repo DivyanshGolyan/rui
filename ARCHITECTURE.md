@@ -201,7 +201,7 @@ Message acceptance identifies one immutable admission to the Session queue; it n
 The [processing boundary](#conversation-entries-and-pending-messages) establishes the message's result binding once.
 Distinct messages processed in one Turn share its result.
 
-Every state-changing caller command to core requires a stable core idempotency key: configuration, message submission, Session stop, Permission Decision and exact Model Interruption.
+Every state-changing caller command to core requires a stable core idempotency key: configuration, message submission, Session stop, Session archive, Permission Decision and exact Model Interruption.
 Once committed, its inputs, admission-time selection and original admission answer never change; retries recover that decision rather than select new work.
 This gives callers one lost-reply recovery rule across intervening work and crashes.
 Reads and waits observe current facts without retained command identities.
@@ -268,7 +268,7 @@ Closing the handle releases its descriptor, not its saved name; callers close be
 This is one reader per active capture/recovery, fixed content windows and bounded metadata, not a payload tree or request registry.
 Generated recovery decodes only configuration, Message and Permission Decision records; Session stop and Model Interruption keep their explicit record/retry routes.
 
-Client also owns typed decoding of these five mutation replies before callers interpret admission.
+Client also owns typed decoding of these six mutation replies before callers interpret admission.
 One fixed-storage parse validates the complete bounded envelope, consumed-field duplicates, operation/status/replay semantics, echoed Session and control target, and Message decoded length/domain-separated digest and queue admission against the pinned capture.
 Invalid or mismatched replies are unconfirmed invocations, not durable rejection or proof of noncommit; retain the original recovery key.
 A canonical invocation failure retains its independent Host-fence authority.
@@ -1345,6 +1345,8 @@ The step to 54 records the stops and ending Messages an attached child owes (D38
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
 The step to 55 adds the saved model facts and their catalog source.
 The step to 56 adds the bounded outcome-unknown Message recovery index and moves saved wire 8 metadata to wire 9.
+The step to 57 adds archive intents and requested archive values, extends the command kind set, while retaining the unreleased wire 9.
+The step to 58 moves saved wire 9 metadata to wire 10 for nullable failed-send peers; it changes no saved command or refusal rows.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -1824,6 +1826,37 @@ Callers retain key and exact inputs before sending, without managing Turn identi
 Concurrent Session use remains outside the expected usage.
 `rui session stop --all` reads the Session listing and sends one ordinary Session stop, with its own generated key, for each Session the overview's Ctrl-X could stop; it adds no cross-Session stop authority, and a Session that starts work after its listing page is read is not stopped.
 
+### Archiving a Session
+
+Archive organization is independent of the derived work state.
+`archive_state` is `active`, `archiving`, or `archived`.
+`active` means unarchived, not necessarily running.
+The archive intent points to an ordinary durable Session stop.
+An incomplete stop derives `archiving`; a completed stop derives `archived`.
+There is no separate archive worker or recovery queue.
+
+`POST /v1/control/session-archive` accepts `session`, `key`, and the `archived` boolean.
+An archive request atomically saves its intent and selects the current work for stop.
+Acknowledgment reports `pending` until that stop completes, then `completed`.
+The Session stays in the unarchived view while its stop is pending.
+Stop completion has the existing semantic guarantee, not proof of remote termination or complete local transport disposal.
+Host restart retains the intent and the selected stop.
+
+A new Message during `archiving` rejects as `session_archiving`.
+A new Message to an `archived` Session clears the archive intent in the same admission transaction.
+An explicit restore sends `archived:false`, changes organization only, and never starts work.
+Restore during `archiving` rejects as `archive_pending`.
+An original command replay reports its original answer and completion without restoring an old archive intent.
+Archive preserves settings, Conversation, results, files, and child organization.
+The underlying stop retains its ordinary child-stop semantics.
+Archive freezes suppression of undelivered child endings, and child closures retain suppression while the parent is archived.
+A stop records whether it discharged a parent-caused obligation, even when an ordinary caller chose its key.
+These durable facts keep old child results from waking a restored parent, without dropping their forwarded history.
+Genuinely fresh work after restore can still notify the parent.
+
+The CLI exposes `rui session archive --session ID` and `rui session unarchive --session ID`.
+Both use the ordinary captured-command recovery protocol.
+
 ### Interrupting one model operation
 
 An exact **Model Interruption** targets one unresolved model Operation, validates owner, parentage and applicability, and commits an `Interrupted` Resolution with exact target/provenance.
@@ -2007,10 +2040,10 @@ The receiving Host owns provider authentication and refresh; client-local creden
 
 The protected `POST /v1/list-sessions` read enumerates the Store's accepted, configured Sessions, including those with no Messages and none in local request captures.
 The public client `listSessions` streams one complete JSON page to caller-owned output, not through client SQLite.
-Request fields are `version`, `kind`, canonical `store`, `workspace` (exact canonical stored path or `null` for all), and string-valued `after`/`ceiling` (both `"0"` initially).
+Request fields are `version`, `kind`, canonical `store`, `workspace` (exact canonical stored path or `null` for all), string-valued `after`/`ceiling` (both `"0"` initially), and optional `archive` (`active`, `archived`, or `all`, default `active`).
 A first page may also carry `since`, an opaque token from an earlier reply.
 Response `session_list` has up to eight `sessions`, then `delta`, a new `since` token, and `next` as either `null` or a continuation.
-Each row has exact `reference`, `workspace`, `provider`, `model`, `tools` and `permission_mode`; nullable `parent` (the creator’s six-character Session reference for an attached agent, otherwise `null`); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
+Each row has exact `reference`, `workspace`, `provider`, `model`, `tools`, `permission_mode`, and `archive_state`; nullable `parent` (the creator’s six-character Session reference for an attached agent, otherwise `null`); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
 `work` is the same value that activity pages, Current and Message observations carry.
 With `since`, the Host answers one of three `delta` values.
 `not_modified` means no row has changed on this Host since the token; it is answered before any Store entry, lock or scratch, and never while the Store is fenced.
@@ -2018,10 +2051,18 @@ With `since`, the Host answers one of three `delta` values.
 `full` is the ordinary traversal in creation order, when `since` is absent, too old or from another Host opening (a Host opens its Store once, so an opening is one Host instance); its continuation carries `after`/`ceiling` without `since`.
 Each page's token covers its own rows, and a traversal reports its first page's token.
 A reply may include Sessions that did not change; it never omits one that did.
-Reuse the same workspace filter with `next`; a new traversal begins with zero/zero.
+Reuse the same Workspace and archive filters with `next`; a new traversal begins with zero/zero.
+Full pages apply the archive filter before pagination.
+The `active` filter includes `archiving` so unfinished work remains visible.
+Changed pages include out-of-filter archive updates so a cached view can remove rows that no longer match.
+A filter change discards the old rows, token, and continuation before a fresh full traversal.
 The first read fixes a `created_seq` high-water mark while under the Store lock; accepted later configurations may update existing summaries but newly created Sessions do not enter the traversal.
 Sessions are not deleted, so `created_seq` keeps creation order.
-The Workspace index (Workspace digest, then `created_seq`) and the `created_seq` keyset visit only the next nine matching rows, not the dormant population; no mutable last-activity order or second Session registry exists.
+The Workspace index (Workspace digest, then `created_seq`) and the global `created_seq` index bound each keyset scan.
+An `all` archive filter visits only the next nine rows.
+Selective archive filters may scan hidden candidates before finding nine eligible rows, with indexed archive and stop lookups for each candidate.
+In the worst case that scans the scope, but retained IDs and returned rows remain bounded by the page.
+No mutable last-activity order or second Session registry exists.
 The one exception is in memory: the Host keeps a fixed ring of its most recent 4,096 (Session, commit counter, Workspace key) entries, recorded where its commit counter advances, by every write path for each Session it touched.
 A Workspace's key is the `created_seq` of its first Session, stored on each of its Sessions when it is created; Workspaces are immutable and Sessions are not deleted, so the key never changes.
 A writer reads it with one seek when it first touches a Session, inside its own transaction, so a failed read fails that entry point and fences the Store like any other canonical read; nothing is read after the commit.
@@ -2037,7 +2078,7 @@ Each list page is fully captured into charged, unlinked scratch under the Store 
 The eight-row bound limits worst-case escaped workspace/reference/model/label/description/code output without truncating any identity or fact.
 The worst-case row size is derived at compile time from the fields' bounds and must fit a 32-KiB budget.
 Concurrent captures follow the live-exchange resource contract.
-`rui session list [--store PATH] [--all] [--since TOKEN]` selects the explicit/saved/HOME Store and filters by canonical cwd unless `--all`.
+`rui session list [--store PATH] [--all] [--archived|--include-archived] [--since TOKEN]` selects the explicit/saved/HOME Store and filters by canonical cwd unless `--all`.
 It collects the rows of bounded pages in unlinked scratch, not memory, and prints one complete JSON value with the traversal's `delta` and `since` once the last page is read.
 A failed page prints nothing and exits nonzero.
 A changed traversal that restarts as `full` drops the rows it collected, so each Session appears once.
@@ -2104,7 +2145,7 @@ Inspection creates neither directory nor file.
 
 #### Human entry and authentication
 
-On a terminal, bare `rui` (optionally `--store`, `--provider`, `--model`) opens the **Session overview** of every Session in the Store; each row shows its Workspace.
+On a terminal, bare `rui` (optionally `--store`, `--provider`, `--model`) opens the **Session overview** of unarchived Sessions in the Store; each row shows its Workspace.
 The overview is Rui's primary terminal surface: a client view over Session listing and host information, not a Host entity, registry or report.
 It neither creates nor resumes a Session.
 It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice offers each provider (Codex login, an OpenAI API key, or saving a ready one as the default) or deferral, without creating a Session.
@@ -2113,6 +2154,18 @@ When all three selectors are explicit, unreadable future defaults cannot block t
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
+`/sessions unarchived`, `/sessions archived`, and `/sessions all` choose the server-side archive filter.
+The header names the view; changing it clears the previous traversal.
+`/archive` or Alt-A puts away the selected Session, with a Stop and archive confirmation while it has work.
+`/unarchive` restores the selected Session.
+`/undo` restores the last Session explicitly archived from this overview.
+A row remains visible with archive progress until the server reports it archived.
+Archived rows and exact conversations show their archive state.
+Conversations also expose `/archive` and `/unarchive`; these validated commands and Alt-A forward semantic intents for the exact open Session even when it is absent from the listing.
+The overview core owns their shared confirmation, archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
+Alt-A leaves the draft, caret and retained original unchanged.
+The shared Stop and archive prompt captures its Session reference; unpasted, unmodified Enter confirms it before any draft, picker or permission choice, and Esc cancels it without clearing or sending the draft.
+Archive confirmation spends any permission offer without deciding the Action.
 While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
 Marks hold still: `●` active, `◌` queued, `○` idle or waiting on approval, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
 Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.
@@ -2152,7 +2205,8 @@ Each paint fills the current grid with the skin's ground and writes only bounded
 There is no overview Screen, Span list, frame-byte buffer, ANSI encoder or retained diff: libvaxis owns the one retained cell reference, and healthy overview/detail handoffs do not invalidate it.
 All generated labels and cleaned graphemes live in the backend's charged frame scratch through encoding; the painter returns only the composer anchor, shown-command facts and whether animation is needed.
 Waiting terminal reports precede paint in the backend prefix writer; frozen bytes, including any resize controls, are written completely before the existing report acknowledgement or captured handoff.
-Every nonempty frame ends with OSC 8 close and SGR reset; an unchanged frame emits nothing. A partial output failure poisons the invocation before any normal-leave conversion.
+Every nonempty frame ends with OSC 8 close and SGR reset; an unchanged frame emits nothing.
+A partial output failure poisons the invocation before any normal-leave conversion.
 `NO_COLOR` frames carry no colour at all: the band and the selection are reverse video.
 
 Typing in the overview's composer and pressing Enter starts a new Session with that text as its first Message, through one captured `session start` command: atomic configuration plus Message admission with the full Workspace, exact provider/model, Bash and `bypass` unless the composer's `/configure` start settings select otherwise.
@@ -2582,6 +2636,7 @@ Any other waits in the row, which shows in both latest and transcript views, whe
 It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or an inspection page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
+Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.
 Wire version 8 dropped the `proposal_page`, `proposal_field` and `person_message` requests, added the Activity page's `kinds`, `limit` and `received` rows, renamed its `outcome` rows to `turn_ended`, each naming its `ending`, and marked a done Turn's answer `final` on its assistant row, after version 7 dropped the page's `read_through` and `beyond_unseen` fields and the `mark_read` request (the "new since you looked" feature, removed 2026-11-03), version 6 added the `label` on the Session a Message row names as sender or target, version 5 added the pages' `hosted_call` items, version 4 added each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 Normal desktop widths are the design target; narrower terminals wrap the same interface, never omit an approval command or decision label.
@@ -2669,7 +2724,8 @@ The domain chooses appearance roles and day/night palettes; the backend enforces
 NO_COLOR rejects chromatic cells but preserves domain-selected noncolour attributes, including Markdown italic and underline.
 During a blocked write, the first overview open or settled detail Escape return is held in its existing semantic target until the entire frozen frame is delivered.
 Later complete interactive events are discarded, except typed urgent exit; reports still update facts, partial CSI/SS3/paste stays in the same decoder, and width changes invalidate consent immediately but mutate backend policy only when idle.
-No replay queue is kept. Bounded input/output/signal polling permits urgent cancellation under zero credit; restoration independently attempts CAN, OSC8 close, sync/SGR resets and every owned mode within its existing shared deadline.
+No replay queue is kept.
+Bounded input/output/signal polling permits urgent cancellation under zero credit; restoration independently attempts CAN, OSC8 close, sync/SGR resets and every owned mode within its existing shared deadline.
 Standalone zero-width output clusters, clusters wider than eight cells and clusters longer than 64 bytes become visible Unicode escapes in the display copy; a run of one repeated scalar is escaped once with its count.
 Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
 Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.
@@ -2789,22 +2845,15 @@ Each call receives one permanent contextual outcome, with its unchanged label wh
 Settled calls retain their observed outcome in the live region until permanent presentation succeeds.
 Full-group Tool Result publication and original call order remain unchanged, so a settled sibling can remain visible while another is unresolved.
 Reopening reconstructs presentation from saved facts; call identity, not matching description text, correlates updates.
-Redraw preserves the draft and cursor, exact Workspace and command consent, warnings, uncertainty, and `/details` access.
+Redraw preserves the draft and cursor, exact Workspace and command consent, canonical outcomes, uncertainty, and `/details` access.
 
 Consecutive successful tool outcomes occupy adjacent rows in normal conversation, including across Activity reads.
-A warning stays attached to its heading and ends the compact group.
 Other visible messages, failures and detailed inspection retain block separation.
-Failure headings keep their explicit outcome beside the marker; their summaries omit the matching repeated Bash outcome prefix while retaining exit codes, signals and other diagnostic text.
-Full `/details` and history presentation retain their existing spacing and saved text.
-
-Routine internal success diagnostics stay out of normal tool presentation, including the first occurrence and reopening.
-Bash results no longer contain a confirmed-retirement note; one saved by an earlier build is shown as ordinary metadata.
-Concise presentation suppresses only recognized complete routine lines and matching outcome prefixes, not warning prefixes or all metadata on success.
-Unknown metadata, actual signaling failures, incomplete capture and uncertain outcomes remain visible.
-
+Normal opening, live and historical Tool Results show only their saved description, canonical outcome and optional numeric failed exit in the heading.
+They show no stdout/stderr snippets, warning body lines, omission/export notices or automatic `/details` hints, including after success, timeout or failure.
+Capture and cleanup warnings remain in the unchanged saved result, available in the retained details suffix or full raw export.
 
 Live and historical content share streaming hanging indentation for multiline fields; libvaxis wraps at draw time, so resize reflows without rereading.
-A failed Tool Result shows its exit and the last three stderr lines (stdout when stderr is empty) in quiet style, escaped, adding `/details for full output.` only when shortened.
 Intentional permission denial is a neutral settled outcome, not a failed Bash execution or a reason to inspect nonexistent output.
 Explicit details label saved Tool Results independently of whether a command executed.
 
@@ -2859,31 +2908,33 @@ Bare links omit trailing sentence punctuation, including `;` and unmatched final
 Other link targets (including Markdown file targets), links inside code or emphasis, Markdown link titles and complete addresses longer than 2,048 bytes after local expansion and encoding stay literal, and `/copy` still sends the original Markdown with every address.
 The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
 A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.
-Normal tool presentation shows the canonical outcome header, omitting routine zero exit codes and stdout/stderr tails.
-It retains failure, indeterminate outcomes and capture or cleanup warnings even after a successful exit.
-The public result's tail delimiters control display only, never execution, permission or outcome classification.
-The output summary uses one fixed 256-byte line buffer.
-A longer line receives shortening and `/details` guidance; subsequent metadata lines remain visible until the first output-tail delimiter.
-The remaining stream drains without retention.
+Normal tool presentation shows only the canonical outcome heading, including an optional numeric failed exit.
+A fixed 64-byte first-line scan derives the exit from a complete matching Bash outcome line; it retains no output excerpt, warnings or hints.
+The full stream still drains and authenticates before the heading is shown.
 Tool Result streams validate even when their bytes are not displayed; label-only observation uses admission-certified metadata under the public Session activity contract.
 Fresh Action inspection authenticates all three complete proposal fields.
 Complete Action arguments remain available through fresh inspection; one-shot inspection also exposes the call ID.
-`/details` shows the latest Conversation page with full saved Tool Results through the same bounded history owner, without moving the older-navigation or live Activity cursor.
-Older results remain available through `/history`; oversized items retain exact raw export.
+`/details` shows the latest Conversation page through the same bounded history owner, without moving the older-navigation or live Activity cursor.
+Each Tool Result shows its last min(raw length, 8,192) raw bytes through terminal-safe escaping, with `Earlier output omitted` before a shortened suffix and a full canonical raw export command.
+The raw suffix boundary is not adjusted for UTF-8 or lines.
+Older outcome headings remain available through `/history`; oversized non-tool items retain their omission and exact raw export.
 Opening and live user and assistant content are never subject to the historical omission limit.
 Stream framing, expected length, domain digest and physical EOF must validate before the final content window is delivered.
 A late content, integrity or rendering failure after visible opening/live output is fatal after terminal restoration, without retry or rollback.
 Failure abandons retained renderer text and pending writer bytes; synchronous keyed-result output attempts only an ANSI reset before diagnostics, preserving the original error rather than finishing incomplete content.
 
 `/history` uses existing public Conversation reads, independently of Admission.
-It prepares one page atomically in unlinked scratch: at most 16 included items of at most 8,192 raw bytes each, with a 128-KiB raw-content ceiling.
+It prepares one page atomically in unlinked scratch: at most 16 retained spans of at most 8,192 raw bytes each, with a 128-KiB raw-content ceiling.
+Every Tool Result authenticates its entire canonical stream, including discarded prefixes, while only its certified-length suffix is staged.
+An independent hash of the received suffix authenticates its reread staged bytes; whole non-tool spans retain their canonical digest check.
 Metadata continuation, complete received bytes and reread staged bytes validate before output.
+Preparation retains explicit whole, tool-suffix, omitted non-tool or no-content authority per item; unstaged content has no readable scratch offset.
 Ordinary preparation failure exposes no page content and retains the older cursor and draft for an explicit retry.
 Rendering I/O or integrity failure is fatal.
 Local command cancellation after the first nonempty output window is also fatal, preventing replay of an incomplete prefix within this invocation.
 Only a successful joined render advances the older cursor.
-Oversized bodies are omitted with their exact position, ordinal, raw-byte count and executable `rui session read-conversation` command.
-Tool Results retain their saved description and outcome heading before that notice in both `/history` and `/details`.
+Oversized non-tool bodies are omitted with their exact position, ordinal, raw-byte count and executable `rui session read-conversation` command.
+Hidden tool output never creates a historical omission notice; normal history remains header-only regardless of tool-result size.
 Generated commands use printable hex Store selectors and bare six-character Session IDs without terminal or shell interpretation; decoded Store values retain the existing bounds and validation.
 Raw export streams the exact content without presentation.
 There is no history cache or new Host route.
@@ -2963,8 +3014,8 @@ A read that would hide or withdraw the Action waits for a sequence the choice is
 Text typed beside the Action is the draft's and outlives it: once the Action leaves it is an ordinary draft, and beside a next Action it denies that Action only once a frame showing both is offered.
 A definite stale-target rejection remains the original until explicit `/discard`; a subsequent distinct Action receives its own fresh presentation.
 The next draft and cursor survive choice and recovery.
-`/details` and `/history` return to the same choice without moving its target; saved tool output remains available there.
-Failed outcomes retain `/details for output.` guidance; successful outcomes omit routine zero exit codes and output but retain cleanup warnings.
+`/details` and `/history` return to the same choice without moving its target.
+All normal tool outcomes remain header-only; explicit `/details` retains bounded raw tool suffixes and full raw export.
 
 `/inspect-action` freshly inspects the first actionable exact Action through the existing CLI diagnostics path, shown as an inspection page.
 It sends no decision.
@@ -3115,6 +3166,11 @@ Session activity is a separate projection of eleven row kinds, not Conversation 
 `received` mirrors `sent` on the receiving side; it split from `admission` on 2026-11-03 so a page can list a person's Messages alone (design thread on Rui's core and plug-in points).
 Admission, stop, send, refusal and every terminal outcome claim the existing Session sequence in their owning transaction, and each also records its commit time there.
 No copied log or second frontier exists; this schema change follows the [Store format policy](#store-format-and-upgrades).
+A refused send's `send_failed.target` is required and nullable: it names the canonical attempted peer, including an unknown Session, or is null when the saved attempt has no valid Session reference.
+The Store derives that peer from the full saved target with the shared ID grammar, resolves a label only for a peer, and leaves the original command target, digest, refusal and replay identity unchanged.
+This read-time projection covers existing refusals as well as new ones; null does not distinguish refused creation from a malformed addressed send and never means that a Session was created or not created.
+Every non-null peer remains strictly validated; a missing target or malformed peer is not an alternative null encoding.
+The human row with no peer reads `! Message rejected — No valid target reference`; model transcript outlines use `(no valid target reference)` rather than a label or invalid attempted spelling.
 Calls retain historical rejected proposals and all three complete field references under the proposal contract above.
 Tool Results validate the complete group's accepted call/output-item and Session/Turn/attempt provenance before exposure; malformed sibling links fence even when the caller skips proposal rows.
 Outcome provenance is the terminal Turn's causing model Operation, not a later Session Operation.

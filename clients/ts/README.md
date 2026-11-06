@@ -54,7 +54,7 @@ Use `session.readContent(entry)` or `readContentBytes(entry)` for the whole text
 
 Following polls with backoff from 250 ms to 2 s only while the Session is busy.
 An empty page in `idle`, `finished`, `failed`, or `stopped` state with nothing queued puts the iterator to sleep **without a timer**.
-It wakes after a successful `send`, `update`, `decide`, `interrupt`, or `stop` through any handle for that Session ID on the same Rui instance, then starts polling again at 250 ms.
+It wakes after a successful `send`, `update`, `decide`, `interrupt`, `stop`, `archive`, or `unarchive` through any handle for that Session ID on the same Rui instance, then starts polling again at 250 ms.
 Writes from another process to the same Store are **not noticed while idle** (nor are writes through another Rui instance).
 Pass an AbortSignal as `signal` to end the iterator immediately even while it sleeps.
 
@@ -94,7 +94,7 @@ const session = await rui.sessions.create({
 await session.update({ compactAt: 200000 });
 ```
 
-`await session.status()` reads the Current report: work `state` and `since`, `turn`, `operation`, `pendingMessages`, `parent`, `label`, `model`, `effort`, `tools`, `permissionMode` and `latestOutcome`.
+`await session.status()` reads the Current report: work `state` and `since`, `turn`, `operation`, `pendingMessages`, `parent`, `label`, `model`, `effort`, `tools`, `permissionMode`, `latestOutcome` and `archiveState`.
 Counts, times and Turn/Operation IDs stay decimal strings; absent targets, parents and outcomes are `null`.
 A separate ending is not in the report, so status does not invent one.
 `interrupt()` uses this status snapshot to select its exact model target.
@@ -113,3 +113,25 @@ const rui = await Rui.connect({
 const review = await rui.sessions.create({ preset: "review", instructions: "Review this patch" }, { idempotencyKey: "review:1" });
 await rui.close();
 ```
+
+## Archive and restore
+
+Archive metadata is independent of work state. `archiveState` is `active`, `archiving` or `archived` in Session summaries and status.
+
+```ts
+const result = await session.archive({ idempotencyKey: "archive:1" });
+// result: { archived: true, completion: "pending" | "completed" }
+await session.unarchive({ idempotencyKey: "restore:1" });
+
+await rui.sessions.list();                       // active, including archiving
+await rui.sessions.list({ archive: "archived" }); // archived only
+await rui.sessions.list({ archive: "all" });      // all Sessions
+```
+
+`archive()` submits one durable intent that stops running and queued work, then archives after real settlement.
+An accepted intent can return `completion: "pending"`; acceptance does not mean stopped processes have retired.
+New Messages are rejected with `session_archiving` during settlement, and `unarchive()` is rejected with `archive_pending`.
+A later Message to an archived Session restores it transactionally before admitting new work.
+`unarchive()` restores only organization and never resumes stopped work.
+Replaying an archive request with its original key does not archive again after a later restore.
+Both methods notify local activity followers without submitting a Message or starting work.

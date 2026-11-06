@@ -1452,7 +1452,7 @@ test "a command list of one row shows a command, not only how many match" {
         errdefer std.debug.print("rows={d}\n", .{rows});
         _ = try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "/", 1, footer, &calls);
         try std.testing.expectEqual(.drawn, screen.commands.?.seen);
-        try std.testing.expect(screenHas(screen, slash_commands.conversation.usage.get(.configure), &buffer));
+        try std.testing.expect(screenHas(screen, slash_commands.conversation.usage.get(.archive), &buffer));
     }
 }
 

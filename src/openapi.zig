@@ -134,6 +134,14 @@ pub const routes = [_]Route{
         .conflict = jsonReply(.{protocol.session_stop_reply.conflict}),
     },
     .{
+        .path = protocol.CommandKind.session_archive.route(),
+        .kind = .session_archive,
+        .summary = "Archives or restores a Session. Archiving stops current and queued work. Retried by its key.",
+        .variants = &.{variant(protocol.session_archive_request, .{})},
+        .reply = jsonReply(.{ protocol.session_archive_reply.accepted, protocol.session_archive_reply.rejected }),
+        .conflict = jsonReply(.{protocol.session_archive_reply.conflict}),
+    },
+    .{
         .path = protocol.CommandKind.model_interruption.route(),
         .kind = .model_interruption,
         .summary = "Interrupts one model Operation. Retried by its key.",
@@ -196,8 +204,8 @@ pub const routes = [_]Route{
         .variants = &.{
             variant(protocol.list_sessions_request, .{}),
             // A token continues from the start of the list.
-            variant(protocol.list_sessions_since_request, .{ .{ 2, "0" }, .{ 3, "0" }, .{ 4, since_example } }),
-            variant(protocol.list_sessions_changed_request, .{ .{ 2, "0" }, .{ 3, "0" }, .{ 4, since_example }, .{ 6, "\"aaaaaa\"" } }),
+            variant(protocol.list_sessions_since_request, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example } }),
+            variant(protocol.list_sessions_changed_request, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example }, .{ 7, "\"aaaaaa\"" } }),
         },
         .reply = jsonReply(.{
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.full_tail,
@@ -414,6 +422,7 @@ fn observationSchema(d: *Document) anyerror!Value {
             .configure => .{ .{}, o.revision },
             .message => o.message_variants,
             .session_stop => .{ .{}, o.session_stop },
+            .session_archive => .{ .{}, o.session_archive },
             .model_interruption => .{ .{}, o.model_interruption },
             .permission_decision => .{ .{}, o.permission_decision },
         };
@@ -1343,7 +1352,7 @@ test "statuses, media types and required headers match what the Host sends" {
     var document: Document = .init(arena.allocator());
     const built = try document.build();
     const paths = built.object.get("paths").?.object;
-    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .model_interruption, .permission_decision };
+    const mutations = [_]protocol.CommandKind{ .configure, .message, .session_stop, .session_archive, .model_interruption, .permission_decision };
     for (mutations) |kind| {
         const responses = paths.get(kind.route()).?.object.get("post").?.object.get("responses").?.object;
         try std.testing.expect(responses.contains("409"));
@@ -1410,6 +1419,34 @@ test "Activity schema distinguishes full pages and token-only repeats" {
         .{ prefix ++ ",\"delta\":\"not_modified\",\"since\":null}", false },
         .{ prefix ++ ",\"delta\":\"not_modified\"}", false },
         .{ prefix ++ ",\"delta\":\"full\",\"since\":null}", false },
+    };
+    inline for (cases) |case| {
+        const value = try std.json.parseFromSliceLeaky(Value, allocator, case[0], .{});
+        try std.testing.expectEqual(case[1], conforms(schemas, schema, value));
+    }
+}
+
+test "Activity schema requires a nullable failed-send target without weakening other peers" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var document: Document = .init(allocator);
+    const built = try document.build();
+    const schemas = built.object.get("components").?.object.get("schemas").?.object;
+    const schema = schemas.get("ActivityItem").?;
+    const prefix = "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused\",\"code\":\"invalid_session_reference\"";
+    const cases = .{
+        .{ prefix ++ ",\"target\":null}}}", true },
+        .{ prefix ++ ",\"target\":{\"session\":\"absent\",\"label\":null}}}}", true },
+        // NamedPeer's generated schema describes bounded wire strings, not
+        // canonical ID semantics. Native JsonNamedPeer still rejects this.
+        .{ prefix ++ ",\"target\":{\"session\":\"\",\"label\":null}}}}", true },
+        .{ prefix ++ "}}}", false },
+        .{ prefix ++ ",\"target\":{}}}}", false },
+        .{ prefix ++ ",\"target\":\"\"}}}", false },
+        .{ prefix ++ ",\"target\":{\"session\":\"absent\"}}}}", false },
+        .{ prefix ++ ",\"target\":{\"session\":null,\"label\":null}}}}", false },
+        .{ "{\"position\":\"7\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"sent\":{\"admission\":\"1\",\"admitted_at\":\"1\",\"target\":null,\"content\":{\"bytes\":\"0\",\"sha256\":\"" ++ "abababababababababababababababababababababababababababababababab" ++ "\"}}}}", false },
     };
     inline for (cases) |case| {
         const value = try std.json.parseFromSliceLeaky(Value, allocator, case[0], .{});

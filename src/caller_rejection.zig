@@ -9,9 +9,10 @@ const names = caller_error.names;
 /// same reply enums; it has no separate rejection spelling. Proposal tags are
 /// saved conversation facts, not re-rendered CLI errors, but share coverage.
 const rejection_enums = .{
-    protocol.ConfigurationRejection,      protocol.MessageRejection,
-    protocol.SessionStopRejection,        protocol.ModelInterruptionRejection,
-    protocol.PermissionDecisionRejection, protocol.ProposalRejection,
+    protocol.ConfigurationRejection,     protocol.MessageRejection,
+    protocol.SessionStopRejection,       protocol.SessionArchiveRejection,
+    protocol.ModelInterruptionRejection, protocol.PermissionDecisionRejection,
+    protocol.ProposalRejection,
 };
 
 pub fn fromProtocol(rejection: anytype) Code {

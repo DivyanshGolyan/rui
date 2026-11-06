@@ -11,7 +11,7 @@ Enter these at the `›` prompt.
 | --- | --- |
 | `/help` | Lists available commands. |
 | `/history` | Shows older conversation. |
-| `/details` | Shows recent conversation with full saved tool output. |
+| `/details` | Shows recent conversation with each tool result's last 8,192 raw bytes and a full raw export command. |
 | `/status` | Shows settings, including the Bash permission mode, and current work. |
 | `/requests` | Lists saved requests for recovery. |
 | `/configure` | Changes settings for the current Session only. |
@@ -19,7 +19,14 @@ Enter these at the `›` prompt.
 | `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
-Drafts keep typed `>` quote markers literal. When a quoted line wraps, an ASCII quote gutter continues its indentation and depth; very narrow lines wrap literally instead. Fenced code does not acquire quote gutters from `>` in its code. These display-only continuations never change the text you send.
+Drafts keep typed `>` quote markers literal.
+When a quoted line wraps, an ASCII quote gutter continues its indentation and depth; very narrow lines wrap literally instead.
+Fenced code does not acquire quote gutters from `>` in its code.
+These display-only continuations never change the text you send.
+
+Tool outcomes in normal conversation show only their description and outcome, with a numeric failed exit when available.
+`/details` escapes the retained tool bytes safely and marks shortened results with `Earlier output omitted`.
+Its raw export command reads the full unchanged saved result.
 
 ## Approve Bash commands
 
@@ -70,7 +77,7 @@ If that happens, run your terminal's reset command.
 ## Sessions
 
 Rui calls a saved conversation a **Session**.
-Bare `rui` opens the overview of every Session in this Store; each row shows its project.
+Bare `rui` opens the overview of unarchived Sessions in this Store; each row shows its project.
 Type in its composer to start a new Session; Enter on a row opens one, and Esc returns.
 Ctrl-X stops the selected Session, and Ctrl-D leaves.
 `rui session resume` still opens one Session directly, inside the overview.
@@ -114,6 +121,34 @@ rui session list --all             # Sessions from every project
 ```
 
 Existing Sessions keep their saved settings, including approval mode and model.
+
+### Archive Sessions
+
+Select a Session in the overview and press **Alt+A** or enter `/archive`.
+If it has work, confirm **Stop and archive**.
+The Session stays visible until the stop completes.
+You can also press **Alt+A** or enter `/archive` inside its conversation.
+Alt+A keeps your draft intact.
+For **Stop and archive**, press Enter to confirm or Esc to cancel; neither sends or clears your draft.
+
+Use `/sessions archived` to show archived Sessions, `/sessions all` to show both views, or `/sessions unarchived` to return.
+Enter `/unarchive` to restore the selected Session without starting work.
+After an archive hides a row, `/undo` restores that last archived Session.
+
+Archive keeps history, saved results, settings, and files.
+Opening an archived Session does not restore it.
+Sending a new Message restores it, but a Message sent while it is still archiving is rejected.
+
+From a script, use these commands.
+
+```sh
+rui session archive --session SESSION_REF
+rui session list --archived
+rui session list --include-archived
+rui session unarchive --session SESSION_REF
+```
+
+`--all` still means every Workspace, not archived Sessions.
 
 ## Models
 

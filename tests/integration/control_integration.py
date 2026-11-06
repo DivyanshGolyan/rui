@@ -678,7 +678,7 @@ def check_schema(database_path):
     try:
         assert database.execute("PRAGMA user_version").fetchone()[0] == STORE_SCHEMA
         stop_columns = [
-            row[1] for row in database.execute("PRAGMA table_info(session_stop)")
+            row[1:] for row in database.execute("PRAGMA table_info(session_stop)")
         ]
         interruption_columns = [
             row[1]
@@ -688,12 +688,13 @@ def check_schema(database_path):
             row[1] for row in database.execute("PRAGMA table_info(model_operation)")
         ]
         assert stop_columns == [
-            "command_key",
-            "session_ref",
-            "selected_turn_id",
-            "position",
-            "admission_cutoff",
-            "stopped_at",
+            ("command_key", "TEXT", 1, None, 1),
+            ("session_ref", "TEXT", 1, None, 0),
+            ("selected_turn_id", "INTEGER", 0, None, 0),
+            ("position", "INTEGER", 0, None, 0),
+            ("admission_cutoff", "INTEGER", 1, None, 0),
+            ("stopped_at", "INTEGER", 1, None, 0),
+            ("parent_caused", "INTEGER", 1, "0", 0),
         ]
         assert interruption_columns == [
             "command_key",

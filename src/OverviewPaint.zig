@@ -55,6 +55,7 @@ const shownKind = view.shownKind;
 const spinner = view.spinner;
 const step = view.step;
 const stop_prompt = view.stop_prompt;
+const archive_prompt = view.archive_prompt;
 const stoppable = view.stoppable;
 const title = view.title;
 const topRows = view.topRows;
@@ -395,7 +396,11 @@ fn header(painter: *RowPaint, state: *const State) error{OutOfMemory}!void {
     column += try painter.put(column, "rui", 3, bar) + 2;
     const path = shortPath(state.home, state.workspaces.items[state.cwd]);
     const joined = try std.mem.concat(painter.arena, u8, &.{ path.prefix, path.rest });
-    _ = try painter.putTail(column, joined, painter.width -| column -| 1, .{ .background = .bar });
+    const view_name = try std.fmt.allocPrint(painter.arena, "{s} {s} /sessions", .{ view.archiveViewName(state.archive), painter.glyphs.dot });
+    const view_cells = painter.measure(view_name);
+    _ = try painter.putTail(column, joined, painter.width -| column -| view_cells -| 3, .{ .background = .bar });
+    try painter.pad(@max(painter.column, painter.width -| 1 -| view_cells), .{ .background = .bar });
+    try painter.putRight(painter.width -| 1, view_name, .{ .background = .bar, .colour = .ink });
     try painter.pad(painter.width, .{ .background = .bar });
     return painter.finish();
 }
@@ -409,7 +414,7 @@ fn headline(painter: *RowPaint, state: *const State) error{OutOfMemory}!void {
         return painter.finish();
     }
     if (state.rows.items.len == 0) {
-        _ = try painter.put(1, "No Sessions yet. Type a task below.", painter.width -| 2, .{ .colour = .quiet });
+        _ = try painter.put(1, if (state.archive == .archived) "No archived Sessions. /sessions changes the view." else if (state.archive == .all) "No Sessions yet. Type a task below." else "No unarchived Sessions. /sessions archived shows the archive.", painter.width -| 2, .{ .colour = .quiet });
         return painter.finish();
     }
     var span: [16]u8 = undefined;
@@ -589,7 +594,10 @@ fn hints(painter: *RowPaint, state: *const State, draft: Draft, listed: bool) er
     // before the draft and the held settings clear.
     const esc_does: ?[]const u8 = if (listed or state.panel != null) "esc close" else if (draft.bytes.len != 0 or !state.settings.empty()) "esc clear" else null;
     if (state.prompt) |prompt| {
-        const text = try std.fmt.allocPrint(painter.arena, stop_prompt, .{ &prompt.stop, dot });
+        const text = if (prompt.action == .archive)
+            try std.fmt.allocPrint(painter.arena, archive_prompt, .{ &prompt.stop, dot })
+        else
+            try std.fmt.allocPrint(painter.arena, stop_prompt, .{ &prompt.stop, dot });
         _ = try painter.put(1, text, room, .{ .colour = .attention });
     } else if (state.shownPicker()) |picker| {
         // A notice shares the row, so the picker's keys stay in view.
@@ -854,6 +862,11 @@ fn rowLine(painter: *RowPaint, state: *const State, at: usize, columns: Columns)
     const yours = row.group() == .yours;
     const ended = rule.group == .finished or rule.group == .ended;
     const named = title(state, row);
+    const row_title = switch (row.archive_state) {
+        .active => named.text,
+        .archiving => try std.fmt.allocPrint(painter.arena, "[Archiving] {s}", .{named.text}),
+        .archived => try std.fmt.allocPrint(painter.arena, "[Archived] {s}", .{named.text}),
+    };
     const title_colour: Colour = if (faded) .quiet else if (yours) .strong else if (named.hint or ended) .quiet else .ink;
     // Only a row outside the working directory names its Workspace, at the
     // end of its title's room.
@@ -870,7 +883,7 @@ fn rowLine(painter: *RowPaint, state: *const State, at: usize, columns: Columns)
     const word_column = @max(columns.word -| overflow, @min(columns.word, Columns.title + Columns.min_title + 2));
     const workspace_cells = if (word_column < columns.word) 0 else @min(painter.measure(workspace), columns.workspace);
     const title_end = (word_column -| 2) -| (if (workspace_cells == 0) 0 else workspace_cells + 2);
-    _ = try painter.put(Columns.title, named.text, title_end -| Columns.title, .{ .colour = title_colour, .bold = yours and !faded });
+    _ = try painter.put(Columns.title, row_title, title_end -| Columns.title, .{ .colour = title_colour, .bold = yours and !faded });
     _ = try painter.putTail(title_end + 2, workspace, workspace_cells, .{ .colour = if (faded) .quiet else .normal });
 
     if (columns.word != columns.end) {
@@ -909,6 +922,7 @@ const max_word_bytes = max: {
 /// the conversation's words, or the Session that started a failed or
 /// stopped one. Otherwise nothing.
 fn word(buffer: *[max_word_bytes]u8, state: *const State, row: *const Row, rule: Rule, line: ?work_line.Line, script: work_line.Script) []const u8 {
+    if (row.archive_state == .archiving) return "Stopping and archiving";
     if (line) |shown| {
         if (!rule.says) return "";
         var clock: [work_line.max_clock_bytes]u8 = undefined;
@@ -1391,15 +1405,15 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     var state = try testState();
     defer state.deinit();
     const ref = "k7m2qx".*;
-    const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .stop = true };
+    const ctrl_x: Conversed = .{ .reference = ref, .work = .working, .input = .stop };
     var buffer: [max_prompt_bytes]u8 = undefined;
     try expectSaid(null, false, true, conversation(&state, ref, .working, &buffer));
     try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
     try expectSaid("Stop k7m2qx? ctrl+x yes · esc no", true, true, conversation(&state, ref, .working, &buffer));
     // Another Session's conversation does not show the prompt.
-    try std.testing.expect(!conversation(&state, "b4n8wd".*, .working, &buffer).asking);
+    try std.testing.expect(conversation(&state, "b4n8wd".*, .working, &buffer).asking == null);
     // Any other input there cancels, and the next ctrl-x asks afresh.
-    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .stop = false } }));
+    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .other } }));
     try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working, &buffer).text);
     try expectEffects(&.{}, try step(&state, .{ .conversed = ctrl_x }));
     try expectEffects(&.{.{ .stop = ref }}, try step(&state, .{ .conversed = ctrl_x }));
@@ -1412,7 +1426,7 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     try expectNoticeWithData(&state, "! k7m2qx not stopped: session_not_found");
     // Ended work takes no stop.
     try std.testing.expect(conversation(&state, ref, .working, &buffer).stoppable and !conversation(&state, ref, .finished, &buffer).stoppable);
-    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .stop = true } }));
+    try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .input = .stop } }));
     try expectNotice(&state, "k7m2qx is already finished.");
 }
 
@@ -1557,13 +1571,14 @@ test "typing / lists the overview's commands between the rule and the draft, as 
     defer state.deinit();
     const all = try draftLines(&state, try typeText(&state, "/"), 80, 24);
     defer std.testing.allocator.free(all);
-    try expectLines(all, 16, &.{
+    try expectLines(all, 15, &.{
+        " /archive              archive the selected Session; stop active work first",
         " /configure [OPTIONS]  hold settings for the next Session",
         " /exit                 leave; Host work continues",
         " /help                 keys and commands",
         " /model                choose the model new Sessions use",
         " /rename NAME          name the selected Session",
-        " /setup [OPTIONS]      future defaults",
+        " +4 more · type to narrow",
         " › /",
         " esc close",
     });
@@ -1591,8 +1606,8 @@ test "a short screen lists the commands it has rows for and counts the rest" {
     // the second counting the rest.
     const text = try draftLines(&state, try typeText(&state, "/"), 80, 11);
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, " /configure [OPTIONS]  hold settings for the next Session") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, " +5 more · type to narrow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " /archive              archive the selected Session; stop active work first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " +9 more · type to narrow") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "/exit ") == null);
 }
 
@@ -2050,7 +2065,7 @@ test "a quota reset far in the future still draws its band" {
 test "render draws each band" {
     const done = session("ffffff", .{ .finished = ago(600) }, .{ .label = "Summarize the CI failures" });
     try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_sign_in_refresh_token_expired", null) },
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
         \\ Sign-in expired. Run rui auth login codex.
         \\
         \\
@@ -2076,7 +2091,7 @@ test "render draws each band" {
         \\ ↑↓ select · enter open
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\
         \\
@@ -2102,7 +2117,7 @@ test "render draws each band" {
         \\.qqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
         \\ Sign-in expired. Run rui auth login codex.
         \\
         \\
@@ -2165,7 +2180,7 @@ test "render draws each band" {
         \\
     );
     try expectBand(&.{ done, failedRow("aaaaaa", 60, "provider_quota", test_now_s + 20 * 60) },
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
         \\ Quota used up. Resets in 20m.
         \\
         \\
@@ -2191,7 +2206,7 @@ test "render draws each band" {
         \\ ↑↓ select · enter open
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\
         \\
@@ -2217,7 +2232,7 @@ test "render draws each band" {
         \\.qqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
         \\ Quota used up. Resets in 20m.
         \\
         \\
@@ -2280,7 +2295,7 @@ test "render draws each band" {
         \\
     );
     try expectBand(&.{ retryRow("aaaaaa", "provider_temporary_http_429", 10), retryRow("bbbbbb", "provider_temporary_http_429", 20) },
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
         \\ Rate limited. 2 Sessions will retry.
         \\
         \\
@@ -2306,7 +2321,7 @@ test "render draws each band" {
         \\ ↑↓ select · enter open · ctrl+x stop
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
         \\BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
         \\
         \\
@@ -2332,7 +2347,7 @@ test "render draws each band" {
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
         \\ Rate limited. 2 Sessions will retry.
         \\
         \\
@@ -2400,8 +2415,8 @@ test "render draws an empty Store" {
     var state = try opened(&.{});
     defer state.deinit();
     try expectScreens(&state, .{},
-        \\ रुई rui  ~/code/rui
-        \\ No Sessions yet. Type a task below.
+        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
+        \\ No unarchived Sessions. /sessions archived shows the archive.
         \\
         \\
         \\
@@ -2426,8 +2441,8 @@ test "render draws an empty Store" {
         \\
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
-        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
+        \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
         \\
         \\
@@ -2452,8 +2467,8 @@ test "render draws an empty Store" {
         \\
         \\
     ,
-        \\ रुई rui  ~/code/rui
-        \\ No Sessions yet. Type a task below.
+        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
+        \\ No unarchived Sessions. /sessions archived shows the archive.
         \\
         \\
         \\
@@ -2520,7 +2535,7 @@ test "render draws twenty mixed rows" {
     var state = try opened(&mixed);
     defer state.deinit();
     try expectScreens(&state, .{},
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                      Unarchived · /sessions
         \\ Running. 20 Sessions. 2 failed.
         \\
         \\
@@ -2546,7 +2561,7 @@ test "render draws twenty mixed rows" {
         \\ ↑↓ select · enter open · ctrl+x stop
         \\
     ,
-        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\SSSSSSSnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnniiiiiiiiiiiiiiiiiiiiiin
         \\.SSSSSSSS.nnnnnnnnnnnnnnnnnnnnnn
         \\
         \\
@@ -2572,7 +2587,7 @@ test "render draws twenty mixed rows" {
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
-        \\ रुई rui  ~/code/rui
+        \\ रुई rui  ~/code/rui                                                                                                                                                              Unarchived · /sessions
         \\ Running. 20 Sessions. 2 failed.
         \\
         \\
@@ -2642,7 +2657,7 @@ test "render draws ASCII without colour" {
     _ = try step(&state, .{ .first_line = .{ .reference = "h8q2mz".*, .admission = 4, .line = "résumé the naïve café ☕ notes" } });
     const caps: Caps = .{ .unicode = false, .depth = .none };
     try expectScreens(&state, caps,
-        \\ rui  ~/code/rui
+        \\ rui  ~/code/rui                                         Unarchived - /sessions
         \\ Running. 20 Sessions. 2 failed.
         \\
         \\
@@ -2668,7 +2683,7 @@ test "render draws ASCII without colour" {
         \\ ^v select - enter open - ctrl+x stop
         \\
     ,
-        \\.NNN..nnnnnnnnnn
+        \\.NNN..nnnnnnnnnn.........................................nnnnnnnnnnnnnnnnnnnnnn
         \\.NNNNNNNN.nnnnnnnnnnnnnnnnnnnnnn
         \\
         \\
@@ -2694,7 +2709,7 @@ test "render draws ASCII without colour" {
         \\.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\
     ,
-        \\ rui  ~/code/rui
+        \\ rui  ~/code/rui                                                                                                                                                                 Unarchived - /sessions
         \\ Running. 20 Sessions. 2 failed.
         \\
         \\
@@ -2959,7 +2974,7 @@ test "the top reads as the mock: wordmark, headline, health, then the counted gr
     var state = try opened(&mixed);
     defer state.deinit();
     _ = try step(&state, .{ .host = .{ .started_at = test_now_s - 7500, .slots = 100, .slots_in_use = 3 } });
-    try expectScreenLine(&state, 0, " रुई rui  ~/code/rui");
+    try expectScreenLine(&state, 0, " रुई rui  ~/code/rui                                      Unarchived · /sessions");
     try expectScreenLine(&state, 1, " Running. 20 Sessions. 2 failed.");
     try expectScreenLine(&state, 2, " Host up 2h05m   slots 3/100");
     // The headings count the rows, so no line above them does.
@@ -2974,7 +2989,7 @@ test "the top reads as the mock: wordmark, headline, health, then the counted gr
     // ASCII has rui alone.
     const text = try screenText(&state, 80, 24, .{ .unicode = false });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.startsWith(u8, text, " rui  ~/code/rui\n Running. 20 Sessions. 2 failed.\n Host up 2h05m   slots 3/100\n\n Yours - 3\n"));
+    try std.testing.expect(std.mem.startsWith(u8, text, " rui  ~/code/rui                                         Unarchived - /sessions\n Running. 20 Sessions. 2 failed.\n Host up 2h05m   slots 3/100\n\n Yours - 3\n"));
 }
 
 test "the headline says whether anything works, and counts failures" {
@@ -2992,7 +3007,7 @@ test "the headline says whether anything works, and counts failures" {
         .{ .rows = &.{yours_done}, .line = " Quiet for 5m. Your conversation has answered." },
         .{ .rows = &.{ yours_done, failed }, .line = " Quiet for 1m. 1 failed." },
         .{ .rows = &.{session("g7h8j9", .{ .idle = ago(7200) }, .{ .label = "Wait" })}, .line = " Quiet for 2h00m. Nothing is working or waiting." },
-        .{ .rows = &.{}, .line = " No Sessions yet. Type a task below." },
+        .{ .rows = &.{}, .line = " No unarchived Sessions. /sessions archived shows the archive." },
     }) |case| {
         var state = try opened(case.rows);
         defer state.deinit();
@@ -3008,7 +3023,7 @@ test "overview top stays compact through completion failure Host changes and inp
             const text = try screenText(state, 80, 24, .{});
             defer std.testing.allocator.free(text);
             var lines = std.mem.splitScalar(u8, text, '\n');
-            for ([_][]const u8{ " रुई rui  ~/code/rui", headline_text, health, "", group }) |expected| {
+            for ([_][]const u8{ " रुई rui  ~/code/rui                                      Unarchived · /sessions", headline_text, health, "", group }) |expected| {
                 try std.testing.expectEqualStrings(expected, lines.next().?);
             }
             try std.testing.expect(std.mem.indexOf(u8, text, "Since you looked") == null);
@@ -3060,7 +3075,7 @@ test "overview compact top leaves a failed row visible in a narrow viewport" {
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     for ([_][]const u8{
-        " रुई rui  ~/code/rui",
+        " रुई rui  …e/rui  Unarchived · /sessions",
         " Quiet for 0s. 1 failed.",
         "",
         "",
@@ -3083,7 +3098,7 @@ test "overview compact top preserves both alarm bands before health and the list
     defer std.testing.allocator.free(text);
     var lines = std.mem.splitScalar(u8, text, '\n');
     for ([_][]const u8{
-        " रुई rui  ~/code/rui",
+        " रुई rui  ~/code/rui                                      Unarchived · /sessions",
         " Host stopped 1m ago. Run rui host start.",
         " Sign-in expired. Run rui auth login codex.",
         " Host not responding. Last update 1m ago.",
@@ -3432,20 +3447,21 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
     try std.testing.expect(std.mem.endsWith(u8, top, "Esc returns"));
     try std.testing.expectEqual(@as(usize, 79), top.len);
     for ([_][]const u8{
-        " Up/Down select a Session past the draft's lines · Shift-Up/Down always",
-        " Home/End select the first or last Session while the draft is empty",
-        " Enter on an empty draft opens the selected Session · Ctrl-X twice stops it",
-        " A message and Enter starts a new Session with it",
-        " / lists the commands · Up/Down move the highlight · Tab or Enter takes it",
-        " Esc or Ctrl-G closes the list, this panel, the draft, then held settings",
-        " Ctrl-C, or Ctrl-D on an empty draft, leaves; Host work continues",
+        " Up/Down select · Shift-Up/Down always · Home/End first/last on empty draft",
+        " Enter opens · Alt-A archives · Ctrl-X twice stops · Type a task to start",
+        " / lists commands · Up/Down choose · Tab or Enter takes it",
+        " Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves",
         "",
+        " /archive              archive the selected Session; stop active work first",
         " /configure [OPTIONS]  hold settings for the next Session",
         " /exit                 leave; Host work continues",
         " /help                 keys and commands",
         " /model                choose the model new Sessions use",
         " /rename NAME          name the selected Session",
+        " /sessions [VIEW]      view Unarchived, Archived or All Sessions",
         " /setup [OPTIONS]      future defaults",
+        " /unarchive            restore the selected Session without restarting work",
+        " /undo                 restore the last Session archived here",
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
     try std.testing.expect(std.mem.indexOf(u8, shown, label) == null);
     // The line under the input says Esc closes it, over held settings or a
@@ -3668,4 +3684,24 @@ test "quote draft overview fence opacity does not promote code markers" {
         try std.testing.expectEqualStrings(if (method == .wcwidth) "" else "   >>", rows.next().?);
         try std.testing.expectEqual(@as(?Rendered.Cursor, .{ .row = 22, .column = if (method == .wcwidth) 3 else 7 }), shaped.cursor);
     }
+}
+
+test "archive state and confirmation paint through the actual shared backend" {
+    var state = try opened(&.{session("bbbbbb", .{ .finished = ago(1) }, .{ .label = "second" })});
+    defer state.deinit();
+    state.archive = .archived;
+    state.rows.items[0].archive_state = .archived;
+    const archived = try screenText(&state, 100, 24, .{ .depth = .none });
+    defer std.testing.allocator.free(archived);
+    try std.testing.expect(std.mem.indexOf(u8, archived, "Archived · /sessions") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archived, "[Archived] second") != null);
+    state.archive = .active;
+    state.rows.items[0].archive_state = .archiving;
+    state.rows.items[0].state = .{ .stopping = ago(0) };
+    state.prompt = .{ .stop = "bbbbbb".*, .action = .archive };
+    const pending = try screenText(&state, 100, 24, .{ .depth = .none });
+    defer std.testing.allocator.free(pending);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "[Archiving] second") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "Stopping and archiving") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending, "Stop and archive bbbbbb?") != null);
 }

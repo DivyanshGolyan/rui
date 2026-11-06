@@ -18,6 +18,7 @@ pub const Key = enum {
     ctrl_p,
     ctrl_r,
     ctrl_x,
+    alt_a,
     up,
     down,
     shift_up,

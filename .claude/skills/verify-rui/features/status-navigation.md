@@ -6,7 +6,7 @@
 
 - `status-page`: `/status` shows ` Status · NAME · ID`, the `Permissions` row (bypass is described only here), the `Work` section and the compaction rows, under `Browsing · Esc returns`.
 - `status-refresh`: a second `/status` during or after work shows the current `Work` state, not stale text.
-- `details`: `/details` shows full saved tool output.
+- `details`: `/details` shows each saved tool result's last 8,192 raw bytes, marks shortened results with `Earlier output omitted`, and retains full canonical raw export.
 - `scroll-page`: PgUp/PgDn move by pages without a Browsing header; the footer says Looking back. All-fitting/no-older Up/PgUp changes no cells; `/history` can reveal Start of conversation. Appends preserve the first content; downward motion joins retained newer output before following at the actual end. View-capacity limits and real retention gaps have distinct footer labels.
 - `scroll-wheel`: the physical wheel scrolls. Rui enables alternate scroll (`?1007h`) when the terminal reports it reset, so the terminal sends arrow keys. Rui does not enable mouse tracking.
 - `return-live`: Esc, End (empty draft) and Ctrl-G return to the latest messages with the draft unchanged.
