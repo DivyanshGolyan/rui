@@ -278,9 +278,9 @@ fn prepareInto(allocator: Allocator, io: std.Io, prepared: *PreparedBuild, candi
     defer allocator.free(archive);
     const fixture = std.mem.startsWith(u8, candidate.archive_url, "http://");
     const output = try process.output(allocator, io, &.{
-        "curl",         "--fail",                  "--silent",            "--show-error",                     "--location",    "--connect-timeout", "10",             "--max-time", "300",
-        "--max-redirs", if (fixture) "0" else "5", "--proto",             if (fixture) "=http" else "=https", "--proto-redir", "=https",            "--max-filesize", "268435456",  "--output",
-        archive,        "--",                      candidate.archive_url,
+        "curl",         "--disable",               "--fail",  "--silent",                         "--show-error",  "--location", "--connect-timeout", "10",        "--max-time", "300",
+        "--max-redirs", if (fixture) "0" else "5", "--proto", if (fixture) "=http" else "=https", "--proto-redir", "=https",     "--max-filesize",    "268435456", "--output",   archive,
+        "--",           candidate.archive_url,
     }, cancellation, 1024);
     allocator.free(output);
     try verifyArchive(allocator, io, prepared, candidate, cancellation, archive);
@@ -420,6 +420,10 @@ fn openLock(io: std.Io, prefix: Dir) !std.Io.File {
 }
 
 pub fn publishExisting(allocator: Allocator, io: std.Io, home: []const u8, build: []const u8, intent: Intent, cancellation: ?*const client.Cancellation) !InstallationOutcome {
+    return publishExistingWithReporter(allocator, io, home, build, intent, cancellation, .{});
+}
+
+pub fn publishExistingWithReporter(allocator: Allocator, io: std.Io, home: []const u8, build: []const u8, intent: Intent, cancellation: ?*const client.Cancellation, reporter: CleanupReporter) !InstallationOutcome {
     var kind = try inspectBuild(allocator, io, home, build, cancellation);
     defer kind.deinit(allocator);
     const physical = try managedPath(kind);
@@ -432,7 +436,7 @@ pub fn publishExisting(allocator: Allocator, io: std.Io, home: []const u8, build
     }
     if (intent != .intentional_source and version == null) return error.InvalidReleaseExecutable;
     var prepared: PreparedBuild = .{ .path = physical, .version = version };
-    return publish(allocator, io, home, &prepared, intent, cancellation);
+    return publishWithReporter(allocator, io, home, &prepared, intent, cancellation, reporter);
 }
 
 pub fn publish(allocator: Allocator, io: std.Io, home: []const u8, prepared: *PreparedBuild, intent: Intent, cancellation: ?*const client.Cancellation) !InstallationOutcome {

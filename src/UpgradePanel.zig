@@ -27,6 +27,7 @@ phase: std.atomic.Value(upgrade.Phase) = .init(.checking),
 operation: Operation = .check,
 checked: ?upgrade.Check = null,
 result: ?upgrade.Result = null,
+cleanup: upgrade.CleanupReceipts = .{},
 failure: ?anyerror = null,
 outcome: Outcome = .unchanged,
 cancelling: bool = false,
@@ -91,11 +92,12 @@ fn writeExitReport(self: *const Self, restored: anyerror!void, joined: anyerror!
         try writer.writeAll("\n");
         try upgrade.writeResult(writer, result);
     }
+    try self.cleanup.write(writer);
     restored catch |err| try writer.print("\nrui: Upgrade terminal restoration failed ({s}).\n", .{@errorName(err)});
     const worker_error: ?anyerror = if (joined) |_| self.failure else |err| err;
     if (worker_error) |err| {
         try writer.print("\nrui: Upgrade worker ended with {s}.\n", .{@errorName(err)});
-        if (self.result == null and self.operation == .install) try writer.writeAll("No completed installation receipt is available; inspect the selected installation and Host.\n");
+        if (self.result == null and self.operation == .install) try writer.writeAll("Installation failed before publication; selected command and Host unchanged.\n");
     }
 }
 
@@ -111,7 +113,7 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (self.operation) {
         .check => self.checked = try upgrade.check(self.init, self.allocator, self.store, &task.cancellation),
-        .install => self.result = try upgrade.install(self.init, self.allocator, &self.checked.?, &task.cancellation, .{ .context = self, .report = progress }),
+        .install => self.result = try upgrade.install(self.init, self.allocator, &self.checked.?, &task.cancellation, .{ .context = self, .report = progress }, &self.cleanup),
     }
 }
 
@@ -128,7 +130,7 @@ fn drive(self: *Self) !void {
                 self.failure = err;
             };
             if (self.operation == .install) {
-                self.outcome = if (self.result) |*result| if (upgrade.compatible(result)) .compatible else .incompatible else .incompatible;
+                self.outcome = self.installationOutcome();
                 self.phase.store(.finished, .release);
             }
             self.dirty = true;
@@ -152,7 +154,13 @@ fn drive(self: *Self) !void {
     }
 }
 
+fn installationOutcome(self: *const Self) Outcome {
+    std.debug.assert(self.task.thread == null);
+    return if (self.result) |*result| if (upgrade.compatible(result)) .compatible else .incompatible else .unchanged;
+}
+
 fn document(self: *Self) !void {
+    std.debug.assert(self.task.thread == null);
     var raw: std.Io.Writer.Allocating = .init(self.allocator);
     defer raw.deinit();
     try raw.writer.writeAll("Upgrade Rui\n\n");
@@ -161,8 +169,9 @@ fn document(self: *Self) !void {
     if (self.result) |*result| try upgrade.writeResult(&raw.writer, result);
     if (self.failure) |err| {
         try raw.writer.print("\nUpgrade {s}: {s}\n", .{ if (self.operation == .check) "check failed" else "operation failed", @errorName(err) });
-        if (self.operation == .install) try raw.writer.writeAll("Installation or activation may be incomplete. No rollback or retry was attempted.\nKeep this client open; check /upgrade again or use the selected command from a new terminal.\n");
+        if (self.operation == .install) try raw.writer.writeAll("Installation failed before publication; selected command and Host unchanged. Retained files, if any, below.\n");
     }
+    try self.cleanup.write(&raw.writer);
     if (self.outcome == .incompatible) try raw.writer.writeAll("\nThis running client cannot safely resume Host requests.\nDraft and recovery handles remain held. Use the selected Rui in a new terminal\nto resume this Session and inspect saved requests; do not resend indeterminate work.\n");
     var safe: std.Io.Writer.Allocating = .init(self.allocator);
     defer safe.deinit();
@@ -478,4 +487,67 @@ test "upgrade panel receipt rendering failure never replaces the primary termina
     try std.testing.expectError(error.TerminalCleanupFailed, finalized.outcome);
     try std.testing.expectEqual(error.WriteFailed, finalized.report_failure.?);
     try std.testing.expect(self.result != null);
+}
+
+test "upgrade panel retains copied cleanup facts in its joined document and restored exit report" {
+    const screen = try std.testing.allocator.create(SessionScreen);
+    defer std.testing.allocator.destroy(screen);
+    inline for (.{ .preparation, .publication, .disposal }) |phase| {
+        screen.* = .{ .colour = false };
+        const primary: ?anyerror = if (phase == .disposal) null else error.ReleaseChecksumMismatch;
+        var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = screen, .operation = .install, .result = if (phase == .disposal) test_installed_result else null, .failure = primary };
+        var source_path = "/synthetic/retained-stage".*;
+        const reporter = self.cleanup.reporter(phase);
+        reporter.report(reporter.context, .{ .primary = primary, .secondary = error.AccessDenied, .retained_path = &source_path });
+        @memset(&source_path, 'x');
+        try self.document();
+        const document_text = screen.browsing.text();
+        try std.testing.expect(std.mem.indexOf(u8, document_text, "AccessDenied") != null);
+        try std.testing.expect(std.mem.indexOf(u8, document_text, "$'/synthetic/retained-stage'") != null);
+        if (primary != null) try std.testing.expect(std.mem.indexOf(u8, document_text, "ReleaseChecksumMismatch") != null);
+        var bytes: [4096]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        const finalized = self.finalize({}, error.InteractiveInterrupted, {}, &writer);
+        try std.testing.expectError(error.InteractiveInterrupted, finalized.outcome);
+        try std.testing.expect(finalized.report_failure == null);
+        const report_text = writer.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, report_text, "AccessDenied") != null);
+        const retained_at = std.mem.indexOf(u8, report_text, "$'/synthetic/retained-stage'").?;
+        if (primary != null) {
+            try std.testing.expect(std.mem.indexOf(u8, report_text, "ReleaseChecksumMismatch") != null);
+        } else {
+            const installed_at = std.mem.indexOf(u8, report_text, "Installed Rui. Complete build: /synthetic/installed").?;
+            try std.testing.expect(installed_at < retained_at);
+        }
+        try std.testing.expect(std.mem.indexOf(u8, report_text, "No completed installation receipt") == null);
+        try std.testing.expect(self.cleanup.any());
+    }
+}
+
+test "upgrade panel prepublication errors retain unchanged Host access while actual activation outcomes govern compatibility" {
+    for ([_]anyerror{ error.ReleaseChecksumMismatch, error.Cancelled, error.AccessDenied }) |failure| {
+        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .failure = failure };
+        try std.testing.expectEqual(Outcome.unchanged, self.installationOutcome());
+        var bytes: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        const finalized = self.finalize({}, error.InteractiveInterrupted, failure, &writer);
+        try std.testing.expectError(error.InteractiveInterrupted, finalized.outcome);
+        try std.testing.expect(finalized.report_failure == null);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Installation failed before publication; selected command and Host unchanged.") != null);
+        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "incomplete") == null);
+    }
+    const Activation = @FieldType(upgrade.Result, "activation");
+    const Case = struct { activation: Activation, outcome: Outcome };
+    for ([_]Case{
+        .{ .activation = .cancelled, .outcome = .compatible },
+        .{ .activation = .not_needed, .outcome = .compatible },
+        .{ .activation = .{ .failed = .starting }, .outcome = .incompatible },
+        .{ .activation = .{ .unconfirmed = .verifying }, .outcome = .incompatible },
+        .{ .activation = .replacement_observed, .outcome = .incompatible },
+    }) |case| {
+        var result = test_installed_result;
+        result.activation = case.activation;
+        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = result };
+        try std.testing.expectEqual(case.outcome, self.installationOutcome());
+    }
 }

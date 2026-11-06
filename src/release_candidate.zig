@@ -76,8 +76,8 @@ pub fn fetch(allocator: std.mem.Allocator, io: std.Io, url: []const u8, cancella
     const fixture = std.mem.startsWith(u8, url, "http://");
     if (fixture) _ = try fixtureOrigin(url) else if (!std.mem.startsWith(u8, url, "https://")) return error.InvalidReleaseEndpoint;
     return process.output(allocator, io, &.{
-        "curl",         "--fail",                  "--silent", "--show-error",                     "--location",    "--connect-timeout", "10", "--max-time", "300",
-        "--max-redirs", if (fixture) "0" else "5", "--proto",  if (fixture) "=http" else "=https", "--proto-redir", "=https",            "--", url,
+        "curl",         "--disable",               "--fail",  "--silent",                         "--show-error",  "--location", "--connect-timeout", "10", "--max-time", "300",
+        "--max-redirs", if (fixture) "0" else "5", "--proto", if (fixture) "=http" else "=https", "--proto-redir", "=https",     "--",                url,
     }, cancellation, limit);
 }
 

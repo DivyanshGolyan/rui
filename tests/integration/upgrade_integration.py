@@ -18,6 +18,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -298,6 +299,16 @@ def discovery_cases(root, binary, releases):
                                     capture_output=True, text=True, timeout=10)
             assert failed.returncode != 0, (args, failed)
             c.assert_no_host()
+
+    with case(root, binary, releases, "check-ignores-curlrc") as c:
+        c.old_selection()
+        unexpected = c.root / "unexpected-cookie-write"
+        (c.home / ".curlrc").write_text(f'cookie-jar = "{unexpected}"\n')
+        output = c.upgrade("--check")
+        assert f"Latest published stable: {releases.version}" in output, output
+        assert not unexpected.exists(), "read-only Upgrade check loaded .curlrc and wrote a cookie jar"
+        c.assert_unchanged()
+        c.assert_no_host()
 
     with case(root, binary, releases, "unmanaged-destination") as c:
         custom = c.build("custom", managed=False) / "bin/rui"
@@ -743,6 +754,71 @@ def signal_after_publication(root, binary, releases, artifacts):
 
 
 
+def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
+    with case(root, binary, releases, "terminal-dual-failure") as c:
+        c.old_selection()
+        host, previous = c.start_host()
+        session, credential = terminal_setup(c)
+        parent = c.home / ".local/lib/rui"
+        original_mode = stat.S_IMODE(parent.stat().st_mode)
+        original_digest = releases.digest
+        releases.digest = "0" * 64
+        gate = releases.gate_archive()
+        args = [str(binary), "session", "resume", "--store", str(c.store), "--", session]
+        try:
+            with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
+                screen = TerminalScreen(master, process)
+                screen.contains("›")
+                screen.send("/upgrade\r")
+                screen.contains("enter Install")
+                screen.send("\r")
+                screen.until(gate.entered.is_set, "real archive request after stage creation")
+                stages = list(parent.glob("install.*"))
+                assert len(stages) == 1 and stages[0].is_dir(), stages
+                retained = stages[0]
+                # The stage remains writable for curl, but its parent cannot
+                # remove that directory after checksum validation rejects it.
+                parent.chmod(0o500)
+                gate.release.set()
+                screen.contains("Upgrade result")
+                # Check details can occupy the initial viewport; the retained
+                # receipt must remain reachable through the panel's real scroll.
+                screen.send("\x1b[6~")
+                panel = screen.contains("cleanup also failed (AccessDenied)")
+                assert shown("installation failed (ReleaseChecksumMismatch)", panel), panel
+                assert shown(str(retained), panel), ("panel lost retained cleanup custody", panel)
+                assert retained.is_dir(), "cleanup receipt did not identify an existing retained stage"
+                assert c.link.resolve() == c.original
+                assert host.poll() is None and c.status()["instance"] == previous["instance"]
+                screen.save(artifacts, "dual-failure-panel")
+                process.send_signal(signal.SIGINT)
+
+                def exited():
+                    screen.read_output()
+                    return process.poll() is not None
+
+                wait_for(exited, "restored primary and retained cleanup receipt after SIGINT")
+                output = bytes(screen.tail)
+                restored = output.rfind(b"\x1b[?1049l")
+                assert restored >= 0, "dual-failure SIGINT did not restore the terminal"
+                receipt = output[restored:]
+                assert b"installation failed (ReleaseChecksumMismatch)" in receipt, receipt.decode()
+                assert b"cleanup also failed (AccessDenied)" in receipt, receipt.decode()
+                assert os.fsencode(retained) in receipt, ("restored output lost retained cleanup custody", receipt.decode())
+                assert retained.is_dir() and c.link.resolve() == c.original
+                assert host.poll() is None and c.status()["instance"] == previous["instance"]
+                assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+                if artifacts is not None:
+                    (artifacts / "dual-failure-restored.txt").write_text(screen.capture.plain)
+        finally:
+            # Restore the real permission cut even when the body fails; neither
+            # cleanup nor the next fixture may inherit the intended denial.
+            dispose_all(lambda: parent.chmod(original_mode),
+                        gate.release.set,
+                        lambda: setattr(releases, "digest", original_digest))
+
+
+
 def stop_tmux(base, env, server_pid):
     """Retire this fixture's observed server; unsuccessful kills are not success."""
     result = subprocess.run([*base, "kill-server"], env=env, capture_output=True,
@@ -855,6 +931,8 @@ def main():
         print("upgrade native: both terminal /upgrade entry points passed", flush=True)
         cancel_after_publication(root, binary, releases, artifacts)
         print("upgrade native: cancellation after publication preserved installation and Host", flush=True)
+        terminal_cleanup_dual_failure(root, binary, releases, artifacts)
+        print("upgrade native: real checksum/cleanup dual failure retained panel and restored custody", flush=True)
         signal_after_publication(root, binary, releases, artifacts)
         print("upgrade native: SIGINT after publication preserved and reported the installed receipt", flush=True)
         signal_during_check(root, binary, releases, artifacts)

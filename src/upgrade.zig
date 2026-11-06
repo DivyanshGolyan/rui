@@ -17,6 +17,51 @@ pub const Progress = struct {
     }
 };
 
+pub const CleanupReceipts = struct {
+    pub const Phase = enum { preparation, publication, disposal };
+    const Receipt = struct {
+        causes: ?struct { primary: ?anyerror, secondary: anyerror } = null,
+        path: [std.fs.max_path_bytes]u8 = undefined,
+        length: usize = 0,
+
+        fn capture(raw: ?*anyopaque, failure: Installation.CleanupFailure) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            std.debug.assert(self.causes == null and failure.retained_path.len <= self.path.len);
+            @memcpy(self.path[0..failure.retained_path.len], failure.retained_path);
+            self.length = failure.retained_path.len;
+            self.causes = .{ .primary = failure.primary, .secondary = failure.secondary };
+        }
+
+        fn write(self: *const @This(), writer: *std.Io.Writer) !void {
+            const causes = self.causes orelse return;
+            try Installation.writeCleanupFailure(writer, .{ .primary = causes.primary, .secondary = causes.secondary, .retained_path = self.path[0..self.length] });
+        }
+    };
+
+    preparation: Receipt = .{},
+    publication: Receipt = .{},
+    disposal: Receipt = .{},
+
+    pub fn reporter(self: *CleanupReceipts, phase: CleanupReceipts.Phase) Installation.CleanupReporter {
+        const receipt = switch (phase) {
+            .preparation => &self.preparation,
+            .publication => &self.publication,
+            .disposal => &self.disposal,
+        };
+        return .{ .context = receipt, .report = Receipt.capture };
+    }
+
+    pub fn any(self: *const CleanupReceipts) bool {
+        return self.preparation.causes != null or self.publication.causes != null or self.disposal.causes != null;
+    }
+
+    pub fn write(self: *const CleanupReceipts, writer: *std.Io.Writer) !void {
+        try self.preparation.write(writer);
+        try self.publication.write(writer);
+        try self.disposal.write(writer);
+    }
+};
+
 pub const Check = struct {
     candidate: release.ReleaseCandidate,
     selected: Installation.Selection,
@@ -85,7 +130,7 @@ const ActivationProgress = struct {
     }
 };
 
-pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *const Check, cancellation: ?*client.Cancellation, progress: ?Progress) !Result {
+pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *const Check, cancellation: ?*client.Cancellation, progress: ?Progress, cleanup: *CleanupReceipts) !Result {
     try process.check(cancellation);
     if (!canInstall(checked)) return error.UpgradeIneligible;
     const store = try allocator.dupe(u8, checked.store);
@@ -93,13 +138,13 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
     var installation: Installation.InstallationOutcome = undefined;
     const selected = checked.selected.released;
     if (selected.version.order(checked.candidate.version) != .lt) {
-        installation = try Installation.publishExisting(allocator, init.io, checked.home, selected.build, .released_upgrade, cancellation);
+        installation = try Installation.publishExistingWithReporter(allocator, init.io, checked.home, selected.build, .released_upgrade, cancellation, cleanup.reporter(.publication));
     } else {
         Progress.send(progress, .preparing);
-        var prepared = try Installation.prepare(allocator, init.io, checked.home, &checked.candidate, cancellation);
-        defer prepared.dispose(allocator, init.io) catch {};
+        var prepared = try Installation.prepareWithReporter(allocator, init.io, checked.home, &checked.candidate, cancellation, cleanup.reporter(.preparation));
+        defer prepared.disposeWithReporter(allocator, init.io, cleanup.reporter(.disposal)) catch {};
         Progress.send(progress, .publishing);
-        installation = try Installation.publish(allocator, init.io, checked.home, &prepared, .released_upgrade, cancellation);
+        installation = try Installation.publishWithReporter(allocator, init.io, checked.home, &prepared, .released_upgrade, cancellation, cleanup.reporter(.publication));
     }
     errdefer installation.deinit(allocator);
     var activation_progress: ActivationProgress = .{ .progress = progress };
@@ -217,4 +262,23 @@ test "upgrade activation and publication are independent result facts" {
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Installation unchanged") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "unconfirmed at verifying") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Do not restore/reset") != null);
+}
+
+test "upgrade owns cleanup facts by phase after native borrowed paths are reclaimed" {
+    for (std.enums.values(CleanupReceipts.Phase)) |phase| {
+        var cleanup: CleanupReceipts = .{};
+        const reporter = cleanup.reporter(phase);
+        var path: [std.fs.max_path_bytes]u8 = @splat('p');
+        path[0] = '/';
+        reporter.report(reporter.context, .{ .primary = error.ReleaseChecksumMismatch, .secondary = error.AccessDenied, .retained_path = &path });
+        @memset(&path, 'x');
+        try std.testing.expect(cleanup.any());
+        var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer writer.deinit();
+        try cleanup.write(&writer.writer);
+        try std.testing.expect(std.mem.indexOf(u8, writer.written(), "ReleaseChecksumMismatch") != null);
+        try std.testing.expect(std.mem.indexOf(u8, writer.written(), "AccessDenied") != null);
+        try std.testing.expect(std.mem.indexOf(u8, writer.written(), "/pppppp") != null);
+        try std.testing.expect(std.mem.indexOf(u8, writer.written(), "xxxxxxx") == null);
+    }
 }

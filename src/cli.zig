@@ -546,7 +546,7 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
 // report what needed it before any capture or transmission.
 const upgrade_usage = "Usage: rui upgrade [--check] [--store PATH]\nInstall the latest published stable release in the managed user installation.\nRestart the selected Store's Host only if already running; affects ALL Sessions there.\n--check only observes, without installation, Host startup, restart or Store migration.\n";
 
-fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
+noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     failure_held.resource = "upgrade";
     failure_held.operation = "install";
     var checking = false;
@@ -593,7 +593,17 @@ fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
         recordExit(.environment);
         return error.Reported;
     }
-    var result = upgrade.install(init, allocator, &checked, null, null) catch |err| {
+    var cleanup: upgrade.CleanupReceipts = .{};
+    defer {
+        var cleanup_buffer: [512]u8 = undefined;
+        var output = std.Io.File.stdout().writerStreaming(init.io, &cleanup_buffer);
+        const written: anyerror!void = emitted: {
+            cleanup.write(&output.interface) catch |err| break :emitted err;
+            break :emitted output.flush();
+        };
+        written catch |err| stderr.diagnostic("rui: could not write the retained installation cleanup receipt ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
+    }
+    var result = upgrade.install(init, allocator, &checked, null, null, &cleanup) catch |err| {
         stderr.diagnostic("rui: upgrade failed before publication; the selected build and Host were not changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
         recordExit(.environment);
         return error.Reported;
