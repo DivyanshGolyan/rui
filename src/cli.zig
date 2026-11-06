@@ -2628,7 +2628,7 @@ pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store
         };
         if (!saved.store.eql(canonical.store.slice())) continue;
         if ((saved.kind == .configure or saved.kind == .message) and saved.session.len == 0) {
-            var reply: client.ReplyBuffer = .{};
+            var reply: client.ObservationBuffer = .{};
             const observed = try checkedObservation(init.io, requester.observeCommand(store, saved.key.slice(), &reply) catch |err| return readTransportFailure(init.io, store, err), saved.key.slice());
             if (observed.status != .accepted or saved.kind != observed.kind.? or !observed.target.?.eql(session_ref)) continue;
         } else if (!saved.session.eql(session_ref)) continue;
@@ -2783,14 +2783,15 @@ fn observe(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
     const identity = try requestIdentity(init, parsed);
     const target = identity.key.slice();
-    var reply_buffer: client.ReplyBuffer = .{};
+    var reply_buffer: client.ObservationBuffer = .{};
     const reply = client.observeCommand(io, identity.store.slice(), target, &reply_buffer) catch |err| return readTransportFailure(io, identity.store.slice(), err);
     const observation = try checkedObservation(io, reply, target);
     var output: JsonOutput = undefined;
     const writer = output.init(io, .stdout);
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":");
     try std.json.Stringify.value(observation.key.slice(), .{}, writer);
-    try writer.writeAll(",\"observation\":");
+    const as_of = @divFloor(std.Io.Clock.Timestamp.now(io, .real).raw.nanoseconds, std.time.ns_per_s);
+    try writer.print(",\"as_of\":\"{d}\",\"observation\":", .{as_of});
     try observation.writeJson(writer);
     try writer.writeAll("}\n");
     try output.finish();
@@ -3599,7 +3600,7 @@ test "recover accepts only the hyphenated spelling of each command kind" {
 
 fn showResult(init: std.process.Init, requester: client.Requests, saved: *const protocol_reply.MessageAddress) !void {
     const observed = try checkedObservation(init.io, requester.observeMessage(saved) catch |err| return readTransportFailure(init.io, saved.store.slice(), err), saved.key.slice());
-    const state = observed.state();
+    const state = observed.state.?;
     var line: [256]u8 = undefined;
     try std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "admitted: {s}\nresult: {s}\n", .{ @tagName(observed.status), @tagName(state) }));
     if (observed.failureCode()) |code| try writeSafeField(init.io, "code: ", code);

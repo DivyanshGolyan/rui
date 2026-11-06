@@ -24,7 +24,7 @@ const ContentReference = content_domain.ContentReference;
 const Faults = store_core.Faults;
 const MessageCommitted = Store.MessageCommitted;
 const MessageObservation = reads_domain.MessageObservation;
-const MessageProgress = reads_domain.MessageProgress;
+const session_work = @import("../../session_work.zig");
 const TurnOutcome = turn_domain.TurnOutcome;
 
 pub const session_stop_cutoff_sql =
@@ -61,16 +61,33 @@ pub const StoredAnswer = struct {
 
 pub const CommandObservation = struct {
     status: protocol.CommandObservationStatus,
-    kind: protocol.CommandKind = .configure,
     target: protocol.Bounded(protocol.max_session_bytes) = .{},
     code: protocol.Bounded(protocol.max_code_bytes) = .{},
-    revision: u64 = 0,
-    created: bool = false,
-    message: ?MessageObservation = null,
-    session_stop: ?SessionStopObservation = null,
-    model_interruption: ?ModelInterruptionTarget = null,
-    permission_action_id: ?u64 = null,
-    permission_decision: ?protocol.PermissionDecision = null,
+    kind: union(protocol.CommandKind) {
+        configure: struct { revision: u64 = 0, created: bool = false },
+        message: ?MessageObservation,
+        session_stop: ?SessionStopObservation,
+        model_interruption: ModelInterruptionTarget,
+        permission_decision: struct { action_id: u64, decision: protocol.PermissionDecision },
+    } = .{ .configure = .{} },
+
+    /// The Host's one ordered Message-state rule. Clients consume this value.
+    pub fn requestState(self: *const CommandObservation) ?protocol.MessageRequestState {
+        if (self.kind != .message or self.status == .absent) return null;
+        if (self.status == .rejected) return .rejected;
+        const message = if (self.kind.message) |*value| value else return null;
+        const queue = if (message.queue) |*value| value else return null;
+        switch (queue.state) {
+            .completed => return .completed,
+            .failed => return .failed,
+            .cancelled, .excluded => return .cancelled,
+            else => {},
+        }
+        if (message.work) |*work| {
+            if (work.state.progress() == .waiting_for_permission) return .waiting_for_permission;
+        }
+        return if (queue.state == .processing) .processing else .queued;
+    }
 };
 
 pub const SessionStopSelection = struct {
@@ -1498,6 +1515,15 @@ pub fn queueCommand(
     });
 }
 
+// The Session's Operations are admitted in Turn order. The bound Turn's
+// first/current Operation range excludes both older and later Turns. The
+// existing turn-history index makes its lower bound a single bounded seek.
+const recovery_range_sql =
+    "a.session_ref=m.session_ref AND a.resolution_code='indeterminate' " ++
+    "AND a.parent_operation_id BETWEEN (SELECT first_operation.operation_id " ++
+    "FROM model_operation first_operation @index(model_operation_turn_history) " ++
+    "WHERE first_operation.turn_id=m.turn_id ORDER BY first_operation.operation_id LIMIT 1) AND t.operation_id";
+
 /// An accepted Message's admission, the Turn that applied it, the stop
 /// that excluded it while no Turn did, and the metadata of its text and
 /// of its answer, with its Session's creation time for its progress.
@@ -1508,7 +1534,7 @@ const message_observation = rsql.Read(.{
         "ON stop_command.command_key=stopped.command_key WHERE stopped.session_ref=m.session_ref " ++
         "AND m.admission_id<=stopped.admission_cutoff ORDER BY stop_command.command_seq LIMIT 1) END AS excluding_stop," ++
         "input.byte_length AS input_length,input.digest AS input_digest,answer.byte_length AS answer_length,answer.digest AS answer_digest," ++
-        "s.created_at " ++
+        "s.created_at,m.admitted_at,EXISTS(SELECT 1 FROM action_operation a @index(action_operation_indeterminate) WHERE " ++ recovery_range_sql ++ ") AS has_recovery " ++
         "FROM message_admission m JOIN content input ON input.content_id=m.content_id JOIN session s ON s.session_ref=m.session_ref " ++
         "LEFT JOIN turn t ON t.turn_id=m.turn_id " ++
         "LEFT JOIN model_operation o ON o.operation_id=t.operation_id " ++
@@ -1531,6 +1557,8 @@ const message_observation = rsql.Read(.{
         answer_length: ?u64,
         answer_digest: ?[32]u8,
         created_at: rsql.Positive,
+        admitted_at: rsql.Positive,
+        has_recovery: bool,
     },
     .cardinality = .one,
 });
@@ -1547,56 +1575,62 @@ const permission_target = rsql.Read(.{
 /// keyed on the command alone: a dependent round, one more network round
 /// trip, run only for a kind that saved more than its answer. A queued or
 /// processing Message's progress is its Session's work, read in the rounds
-/// after (`readMessageProgress`).
-pub fn observeCommand(a: anytype, key: []const u8) !CommandObservation {
+/// after (`readMessageWork`).
+pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservation) !void {
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
     try a.run();
-    const command = try savedAnswer(&saved) orelse return .{ .status = .absent };
-    var observation: CommandObservation = .{
+    const command = try savedAnswer(&saved) orelse {
+        observation.* = .{ .status = .absent };
+        return;
+    };
+    observation.* = .{
         .status = if (command.accepted) .accepted else .rejected,
-        .kind = command.kind,
         .target = command.target,
         .code = command.code,
-        .revision = command.revision,
-        .created = command.created,
     };
     switch (command.kind) {
-        .configure => {},
-        .message => if (command.accepted) {
+        .configure => observation.kind = .{ .configure = .{ .revision = command.revision, .created = command.created } },
+        .message => {
+            observation.kind = .{ .message = null };
+            if (!command.accepted) return;
             var row: message_observation.Row = undefined;
             a.read(message_observation, .{ .key = key }, &row);
             try a.run();
             const content_id = command.primary_content_id orelse return error.CorruptStore;
             if (!row.session_ref.eql(command.target.slice()) or row.content_id.get() != content_id) return error.CorruptStore;
             const queue = try messageQueue(&row);
-            observation.message = .{ .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue };
+            observation.kind.message = .{ .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue, .admitted_at = row.admitted_at.get() };
+            if (row.has_recovery) try readRecovery(a, key, &observation.kind.message.?.recovery);
             switch (queue.state) {
-                .queued, .processing => observation.message.?.progress = try readMessageProgress(a, command.target.slice(), row.created_at.get(), queue.state),
+                .queued, .processing => observation.kind.message.?.work = try readMessageWork(a, command.target.slice(), row.created_at.get(), queue.state),
                 else => {},
             }
         },
-        .session_stop => if (command.accepted) {
+        .session_stop => {
+            observation.kind = .{ .session_stop = null };
+            if (!command.accepted) return;
             var row: stop_selection.Row = undefined;
             a.read(stop_selection, .{ .key = key }, &row);
             try a.run();
-            observation.session_stop = stopObservation(&row);
+            observation.kind.session_stop = stopObservation(&row);
         },
         .model_interruption => {
             var row: interruption_target.Row = undefined;
             a.read(interruption_target, .{ .key = key }, &row);
             try a.run();
-            observation.model_interruption = try modelInterruptionTarget(&row);
+            observation.kind = .{ .model_interruption = try modelInterruptionTarget(&row) };
         },
         .permission_decision => {
             var row: permission_target.Row = undefined;
             a.read(permission_target, .{ .key = key }, &row);
             try a.run();
-            observation.permission_action_id = std.fmt.parseInt(u64, row.action_id.slice(), 10) catch return error.CorruptStore;
-            observation.permission_decision = row.decision;
+            observation.kind = .{ .permission_decision = .{
+                .action_id = std.fmt.parseInt(u64, row.action_id.slice(), 10) catch return error.CorruptStore,
+                .decision = row.decision,
+            } };
         },
     }
-    return observation;
 }
 
 /// Where an accepted Message stands in its Session's queue.
@@ -1630,12 +1664,45 @@ fn messageQueue(row: *const message_observation.Row) !AcceptedMessageQueue {
 /// A pending Message's progress is its Session's work: its own active
 /// Turn, or the work ahead of it in the queue. Its rounds follow the
 /// observation's, whose row says whether the Message is pending.
-fn readMessageProgress(a: *report_domain.ReadAccess, session_ref: []const u8, created_at: u64, state: AcceptedMessageQueue.State) !MessageProgress {
+fn readMessageWork(a: *report_domain.ReadAccess, session_ref: []const u8, created_at: u64, state: AcceptedMessageQueue.State) !session_work.Work {
     var read: report_domain.WorkRead = .{ .session = session_ref };
     try report_domain.readWorks(a, (&read)[0..1]);
     const work = try read.work(created_at, std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange);
     if (state == .processing and work.turn != state.processing.turn_id) return error.CorruptStore;
-    return .{ .status = work.state.progress() orelse return error.CorruptStore, .action_id = work.first_action };
+    return work;
+}
+
+/// Newest Actions first (Operation, then call), not recovery wall-clock
+/// order: sibling Actions can resolve out of order. Only five indexed rows
+/// are visited; the fifth proves `more`.
+const recovery_actions = rsql.Read(.{
+    .sql = "SELECT a.action_id,a.parent_operation_id,a.call_ordinal,a.resolved_at,c.description " ++
+        "FROM message_admission m JOIN turn t ON t.turn_id=m.turn_id " ++
+        "JOIN action_operation a @index(action_operation_indeterminate) ON a.session_ref=m.session_ref " ++
+        "JOIN model_tool_call c ON c.operation_id=a.parent_operation_id AND c.call_ordinal=a.call_ordinal " ++
+        "WHERE m.command_key=?1 AND " ++ recovery_range_sql ++ " " ++
+        "ORDER BY a.parent_operation_id DESC,a.call_ordinal DESC LIMIT 5",
+    .Args = struct { key: []const u8 },
+    .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, call_ordinal: u64, resolved_at: rsql.Positive, description: ?protocol.Bounded(protocol.max_tool_description_bytes) },
+    .cardinality = .{ .at_most = 5 },
+});
+
+fn readRecovery(a: anytype, key: []const u8, out: *reads_domain.Recovery) !void {
+    var actions: recovery_actions.Result = undefined;
+    a.read(recovery_actions, .{ .key = key }, &actions);
+    try a.run();
+    if (actions.len == 0) return error.CorruptStore;
+    out.count = @intCast(@min(actions.len, reads_domain.Recovery.capacity));
+    out.more = actions.len > reads_domain.Recovery.capacity;
+    for (actions.items[0..out.count], 0..) |row, i| {
+        out.calls[i] = .{
+            .action_id = row.action_id.get(),
+            .operation_id = row.parent_operation_id.get(),
+            .call = row.call_ordinal,
+            .description = row.description,
+            .at = row.resolved_at.get(),
+        };
+    }
 }
 
 /// An accepted Message's outcome, whether a stop excluded it, and its

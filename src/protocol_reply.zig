@@ -1322,10 +1322,12 @@ pub const CommandObservation = struct {
     revision: ?u64 = null,
     created: ?bool = null,
     input: ?ContentReference = null,
-    queue: ?struct { status: enum { queued, processing, excluded, completed, failed, cancelled }, admission: u64 } = null,
-    processing: ?struct { turn: u64, operation: u64, attempt: u64 } = null,
+    state: ?protocol.MessageRequestState = null,
+    queue: ?struct { admission: u64, admitted_at: u64 } = null,
+    binding: ?struct { turn: u64, operation: u64, attempt: u64 } = null,
     result: ?struct { status: enum { completed, failed, cancelled }, code: ?protocol.Bounded(protocol.max_code_bytes), text: ?ContentReference } = null,
-    progress: ?Progress = null,
+    work: ?struct { state: protocol.WorkState, first_action: ?u64 } = null,
+    recovery: ?Recovery = null,
     selection: ?struct { turn: ?u64, admission_cutoff: u64 } = null,
     completion: ?enum { pending, completed } = null,
     interruption_target: ?struct { session: protocol.Bounded(protocol.max_session_bytes), turn: u64, operation: u64 } = null,
@@ -1333,39 +1335,11 @@ pub const CommandObservation = struct {
 
     pub const ContentReference = struct { bytes: u64, digest: [32]u8 };
 
-    pub const State = enum {
-        queued,
-        processing,
-        rejected,
-        completed,
-        failed,
-        cancelled,
-
-        pub fn terminal(self: State) bool {
-            return switch (self) {
-                .rejected, .completed, .failed, .cancelled => true,
-                else => false,
-            };
-        }
+    pub const Recovery = struct {
+        unknown_outcomes: [protocol.message_recovery_limit]protocol.MessageUnknownOutcome = undefined,
+        count: usize = 0,
+        more: bool,
     };
-
-    pub const Progress = struct {
-        status: enum { runnable, in_flight, waiting_for_permission },
-        action: ?u64,
-    };
-
-    pub fn state(self: *const CommandObservation) State {
-        std.debug.assert(self.kind == .message and self.status != .absent);
-        if (self.status == .rejected) return .rejected;
-        // A terminal result wins over coarser queue/progress hints. Admission
-        // remains accepted; a later failure is not a submission rejection.
-        if (self.result) |result| return switch (result.status) {
-            .completed => .completed,
-            .failed => .failed,
-            .cancelled => .cancelled,
-        };
-        return if (self.queue.?.status == .queued) .queued else .processing;
-    }
 
     /// Borrowed from this owned value, not from the receive buffer.
     pub fn failureCode(self: *const CommandObservation) ?[]const u8 {
@@ -1390,13 +1364,14 @@ pub const CommandObservation = struct {
             try writer.writeAll(",\"code\":");
             try std.json.Stringify.value(code.slice(), .{}, writer);
         }
+        if (self.state) |state| try writer.print(",\"state\":\"{s}\"", .{@tagName(state)});
         if (self.revision) |revision| try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ revision, self.created.? });
         if (self.input) |input| {
             try writer.writeAll(",\"input\":");
             try writeContentReference(writer, input);
         }
-        if (self.queue) |queue| try writer.print(",\"queue\":{{\"status\":\"{s}\",\"admission\":\"{d}\"}}", .{ @tagName(queue.status), queue.admission });
-        if (self.processing) |binding| try writer.print(",\"processing\":{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{ binding.turn, binding.operation, binding.attempt });
+        if (self.queue) |queue| try writer.print(",\"queue\":{{\"admission\":\"{d}\",\"admitted_at\":\"{d}\"}}", .{ queue.admission, queue.admitted_at });
+        if (self.binding) |binding| try writer.print(",\"binding\":{{\"turn\":\"{d}\",\"operation\":\"{d}\",\"attempt\":\"{d}\"}}", .{ binding.turn, binding.operation, binding.attempt });
         if (self.result) |result| {
             try writer.print(",\"result\":{{\"status\":\"{s}\"", .{@tagName(result.status)});
             if (result.code) |*code| {
@@ -1409,10 +1384,16 @@ pub const CommandObservation = struct {
             }
             try writer.writeByte('}');
         }
-        if (self.progress) |progress| {
-            try writer.print(",\"progress\":{{\"status\":\"{s}\",\"action\":", .{@tagName(progress.status)});
-            if (progress.action) |action| try writer.print("\"{d}\"", .{action}) else try writer.writeAll("null");
+        if (self.work) |work| {
+            try writer.writeAll(",\"work\":{\"state\":");
+            try (protocol.WorkStateJson{ .state = work.state }).writeJson(writer);
+            try writer.writeAll(",\"first_action\":");
+            if (work.first_action) |action| try writer.print("\"{d}\"", .{action}) else try writer.writeAll("null");
             try writer.writeByte('}');
+        }
+        if (self.recovery) |*recovery| {
+            try writer.writeAll(",\"recovery\":");
+            try (protocol.MessageRecoveryJson{ .calls = recovery.unknown_outcomes[0..recovery.count], .more = recovery.more }).writeJson(writer);
         }
         if (self.selection) |selection| {
             try writer.writeAll(",\"selection\":{\"turn\":");
@@ -1435,8 +1416,24 @@ pub const CommandObservation = struct {
     pub fn parse(reply: CommandReply, key: []const u8) !CommandObservation {
         try checkCanonicalFailure(reply);
         if (reply.status != 200) return error.ObservationFailed;
-        if (reply.body.len > protocol.max_response_bytes) return error.ResponseTooLarge;
+        if (reply.body.len > protocol.command_observation_reply.max_bytes) return error.ResponseTooLarge;
         const Ref = struct { type: JsonEnum(enum { text }), bytes: JsonString(20), sha256: JsonString(64) };
+        const Outcomes = struct {
+            const Row = struct { action: JsonString(20), operation: JsonString(20), call: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), at: JsonString(20) };
+            rows: [protocol.message_recovery_limit]Row = undefined,
+            count: usize = 0,
+            pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+                if (try source.next() != .array_begin) return error.UnexpectedToken;
+                var result: @This() = .{};
+                while (try source.peekNextTokenType() != .array_end) {
+                    if (result.count == result.rows.len) return error.LengthMismatch;
+                    result.rows[result.count] = try std.json.innerParse(Row, allocator, source, options);
+                    result.count += 1;
+                }
+                _ = try source.next();
+                return result;
+            }
+        };
         const Facts = struct {
             status: JsonEnum(@FieldType(CommandObservation, "status")),
             kind: OmittableJson(JsonEnum(protocol.CommandKind)) = .{},
@@ -1445,22 +1442,24 @@ pub const CommandObservation = struct {
             revision: OmittableJson(JsonString(20)) = .{},
             created: OmittableJson(bool) = .{},
             input: OmittableJson(Ref) = .{},
-            queue: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "queue")).optional.child, "status")), admission: JsonString(20) }) = .{},
-            processing: OmittableJson(struct { turn: JsonString(20), operation: JsonString(20), attempt: JsonString(20) }) = .{},
+            state: OmittableJson(JsonEnum(protocol.MessageRequestState)) = .{},
+            queue: OmittableJson(struct { admission: JsonString(20), admitted_at: JsonString(20) }) = .{},
+            binding: OmittableJson(struct { turn: JsonString(20), operation: JsonString(20), attempt: JsonString(20) }) = .{},
             result: OmittableJson(struct { status: JsonEnum(@FieldType(@typeInfo(@FieldType(CommandObservation, "result")).optional.child, "status")), code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{}, text: OmittableJson(Ref) = .{} }) = .{},
-            progress: OmittableJson(struct { status: JsonEnum(@FieldType(Progress, "status")), action: ?JsonString(20) }) = .{},
+            work: OmittableJson(struct { state: JsonWorkState, first_action: ?JsonString(20) }) = .{},
+            recovery: OmittableJson(struct { unknown_outcomes: Outcomes, more: bool }) = .{},
             selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
             completion: OmittableJson(struct { status: JsonEnum(@typeInfo(@FieldType(CommandObservation, "completion")).optional.child) }) = .{},
             interruption_target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
             permission_target: OmittableJson(struct { action: JsonString(20), decision: JsonEnum(protocol.PermissionDecision) }) = .{},
         };
         const Wire = struct { version: JsonString(8), type: JsonString(32), key: JsonString(protocol.max_key_bytes), observation: Facts, code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{}, answer: OmittableJson(struct {}) = .{} };
-        const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes);
+        const capacity = comptime std.ArrayList(u8).growCapacity((protocol.command_observation_reply.max_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.command_observation_reply.max_bytes);
         var storage: [capacity]u8 = undefined;
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), reply.body);
         defer scanner.deinit();
-        scanner.ensureTotalStackCapacity(protocol.max_response_bytes) catch unreachable;
+        scanner.ensureTotalStackCapacity(protocol.command_observation_reply.max_bytes) catch unreachable;
         const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &scanner, .{ .ignore_unknown_fields = true }) catch return error.InvalidObservation;
         if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("command_observation") or wire.code.value != null or wire.answer.value != null) return error.InvalidObservation;
         if (!wire.key.eql(key)) return error.RequestBindingMismatch;
@@ -1471,10 +1470,26 @@ pub const CommandObservation = struct {
         };
         if (facts.revision.value) |value| observed.revision = try mutationId(value, false);
         if (facts.input.value) |value| observed.input = try decodeReference(value);
-        if (facts.queue.value) |value| observed.queue = .{ .status = value.status.value, .admission = try mutationId(value.admission, false) };
-        if (facts.processing.value) |value| observed.processing = .{ .turn = try mutationId(value.turn, false), .operation = try mutationId(value.operation, false), .attempt = try mutationId(value.attempt, true) };
+        if (facts.state.value) |value| observed.state = value.value;
+        if (facts.queue.value) |value| observed.queue = .{ .admission = try mutationId(value.admission, false), .admitted_at = try mutationId(value.admitted_at, false) };
+        if (facts.binding.value) |value| observed.binding = .{ .turn = try mutationId(value.turn, false), .operation = try mutationId(value.operation, false), .attempt = try mutationId(value.attempt, true) };
         if (facts.result.value) |value| observed.result = .{ .status = value.status.value, .code = if (value.code.value) |code| code.value else null, .text = if (value.text.value) |text| try decodeReference(text) else null };
-        if (facts.progress.value) |value| observed.progress = .{ .status = value.status.value, .action = if (value.action) |action| try mutationId(action, false) else null };
+        if (facts.work.value) |value| observed.work = .{ .state = value.state.value, .first_action = if (value.first_action) |action| try mutationId(action, false) else null };
+        if (facts.recovery.value) |value| {
+            var recovery: Recovery = .{ .more = value.more };
+            for (value.unknown_outcomes.rows[0..value.unknown_outcomes.count]) |row| {
+                if (row.description) |description| if (!protocol.ToolPresentation.validDescription(description.slice())) return error.InvalidObservation;
+                recovery.unknown_outcomes[recovery.count] = .{
+                    .action_id = try mutationId(row.action, false),
+                    .operation_id = try mutationId(row.operation, false),
+                    .call = try mutationId(row.call, true),
+                    .description = if (row.description) |description| description.value else null,
+                    .at = try mutationId(row.at, false),
+                };
+                recovery.count += 1;
+            }
+            observed.recovery = recovery;
+        }
         if (facts.selection.value) |value| observed.selection = .{ .turn = if (value.turn) |turn| try mutationId(turn, false) else null, .admission_cutoff = try mutationId(value.admission_cutoff, true) };
         if (facts.completion.value) |value| observed.completion = value.status.value;
         if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try mutationId(value.turn, true), .operation = try mutationId(value.operation, true) };
@@ -1492,7 +1507,7 @@ pub const CommandObservation = struct {
 
     fn validate(self: *const CommandObservation) !void {
         if (self.status == .absent) {
-            inline for (.{ "kind", "target", "code", "revision", "created", "input", "queue", "processing", "result", "progress", "selection", "completion", "interruption_target", "permission_target" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
+            inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "completion", "interruption_target", "permission_target" }) |name| if (@field(self, name) != null) return error.InvalidObservation;
             return;
         }
         const kind = self.kind orelse return error.InvalidObservation;
@@ -1506,27 +1521,40 @@ pub const CommandObservation = struct {
         if ((self.selection != null) != (accepted and kind == .session_stop) or (self.completion != null) != (accepted and kind == .session_stop)) return error.InvalidObservation;
         if ((self.interruption_target != null) != (kind == .model_interruption) or (self.permission_target != null) != (kind == .permission_decision)) return error.InvalidObservation;
         if (self.interruption_target) |target| if (!target.session.eql(self.target.?.slice())) return error.RequestBindingMismatch;
-        if (kind != .message or !accepted) {
-            if (self.queue != null or self.processing != null or self.result != null or self.progress != null or (kind != .message and self.input != null)) return error.InvalidObservation;
+        if (kind != .message) {
+            if (self.state != null or self.input != null or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
             return;
         }
-        if (self.input == null or self.queue == null) return error.InvalidObservation;
-        const queue = self.queue.?;
-        if (queue.status != .queued and queue.status != .excluded and self.processing == null) return error.InvalidObservation;
-        if ((queue.status == .excluded or queue.status == .completed or queue.status == .failed or queue.status == .cancelled) and self.result == null) return error.InvalidObservation;
-        if (queue.status == .excluded and self.processing != null) return error.InvalidObservation;
-        if (self.result) |result| {
-            if (queue.status == .excluded) {
-                if (result.status != .cancelled) return error.InvalidObservation;
-            } else if (self.processing == null) return error.InvalidObservation;
-            if ((queue.status == .completed and result.status != .completed) or
-                (queue.status == .failed and result.status != .failed) or
-                (queue.status == .cancelled and result.status != .cancelled)) return error.InvalidObservation;
-            if (result.status == .completed) {
-                if (result.text == null or result.code != null or self.processing == null) return error.InvalidObservation;
-            } else if (result.text != null or result.code == null or result.code.?.len == 0) return error.InvalidObservation;
+        const state = self.state orelse return error.InvalidObservation;
+        if (!accepted) {
+            if (state != .rejected or self.queue != null or self.binding != null or self.result != null or self.work != null or self.recovery != null) return error.InvalidObservation;
+            return;
         }
-        if (self.progress) |progress| if (progress.status == .waiting_for_permission and progress.action == null) return error.InvalidObservation;
+        if (self.input == null or self.queue == null or state == .rejected) return error.InvalidObservation;
+        if (self.result) |result| {
+            if (self.work != null or !std.mem.eql(u8, @tagName(state), @tagName(result.status))) return error.InvalidObservation;
+            if (result.status != .cancelled and self.binding == null) return error.InvalidObservation;
+            if (result.status == .completed) {
+                if (result.text == null or result.code != null) return error.InvalidObservation;
+            } else if (result.text != null or result.code == null or result.code.?.len == 0) return error.InvalidObservation;
+        } else {
+            if (self.work == null) return error.InvalidObservation;
+            // Permission readiness owns the approval work variant. The Host's
+            // state remains authoritative; this only checks wire applicability.
+            if ((state == .waiting_for_permission) != (self.work.?.state == .approval)) return error.InvalidObservation;
+            switch (state) {
+                .queued => if (self.binding != null) return error.InvalidObservation,
+                .processing => if (self.binding == null) return error.InvalidObservation,
+                .waiting_for_permission => if (self.work.?.first_action == null) return error.InvalidObservation,
+                .completed, .failed, .cancelled, .rejected => return error.InvalidObservation,
+            }
+        }
+        if (self.recovery) |recovery| {
+            if (self.binding == null or recovery.count == 0 or (recovery.more and recovery.count != recovery.unknown_outcomes.len)) return error.InvalidObservation;
+            for (recovery.unknown_outcomes[0..recovery.count], 0..) |outcome, index| {
+                for (recovery.unknown_outcomes[0..index]) |prior| if (prior.action_id == outcome.action_id) return error.InvalidObservation;
+            }
+        }
     }
 };
 
@@ -3008,46 +3036,49 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try (SessionListCursor{ .after = 23, .ceiling = 23 }).validate();
 }
 
-test "keyed observation retains request acceptance independently of later work" {
+const testing_observation_input = ",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
+const testing_observation_queue = ",\"queue\":{\"admission\":\"23\",\"admitted_at\":\"1762329000\"}";
+const testing_observation_work = ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":null}";
+const testing_observation_binding = ",\"binding\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
+const testing_observation_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":";
+const testing_observation_message = "{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"k7m2qx\"";
+
+test "keyed observation retains Host state independently of admission and binding" {
     const address = try MessageAddress.init("/store", "k7m2qx", "k");
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"k7m2qx\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"processing\",\"admission\":\"23\"},\"processing\":{\"turn\":\"37\",\"operation\":\"41\",\"attempt\":\"0\"}";
     inline for (.{
-        .{ "}}", CommandObservation.State.processing },
-        .{ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"19\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("cd".*)))) ++ "\"}},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"91\"}}}", CommandObservation.State.completed },
-        .{ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}}}", CommandObservation.State.failed },
-        .{ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}", CommandObservation.State.cancelled },
+        .{ "queued", "", ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"1762329000\"},\"first_action\":null}" },
+        .{ "processing", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"0\"},\"first_action\":null}" },
+        .{ "waiting_for_permission", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        // A queued Message observes the permission wait of the Turn ahead of it.
+        .{ "waiting_for_permission", "", ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ "completed", testing_observation_binding, ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}" },
+        .{ "failed", testing_observation_binding, ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}" },
+        .{ "cancelled", testing_observation_binding, ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
+        .{ "cancelled", "", ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" },
     }) |case| {
-        const observed = try (try CommandObservation.parse(.{ .status = 200, .body = prefix ++ case[0] }, "k")).forMessage(&address);
+        const facts = testing_observation_message ++ ",\"state\":\"" ++ case[0] ++ "\"" ++ testing_observation_input ++ testing_observation_queue ++ case[1] ++ case[2] ++ "}";
+        const observed = try (try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ facts ++ "}" }, "k")).forMessage(&address);
         try std.testing.expectEqual(.accepted, observed.status);
-        try std.testing.expectEqual(case[1], observed.state());
-        try std.testing.expectEqual(@as(u64, 37), observed.processing.?.turn);
-        try std.testing.expectEqual(@as(u64, 41), observed.processing.?.operation);
-        try std.testing.expectEqual(@as(u64, 0), observed.processing.?.attempt);
+        try std.testing.expectEqualStrings(case[0], @tagName(observed.state.?));
         try std.testing.expectEqual(@as(u64, 23), observed.queue.?.admission);
-        if (observed.state() == .completed) try std.testing.expectEqual(@as(u64, 19), observed.result.?.text.?.bytes);
-        var output: [protocol.max_response_bytes]u8 = undefined;
+        try std.testing.expectEqual(@as(u64, 1762329000), observed.queue.?.admitted_at);
+        if (observed.binding) |binding| {
+            try std.testing.expectEqual(@as(u64, 37), binding.turn);
+            try std.testing.expectEqual(@as(u64, 41), binding.operation);
+            try std.testing.expectEqual(@as(u64, 0), binding.attempt);
+        }
+        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&output);
         try observed.writeJson(&writer);
-        const json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
-        defer json.deinit();
-        try std.testing.expectEqualStrings("accepted", json.value.object.get("status").?.string);
+        try std.testing.expectEqualStrings(facts, writer.buffered());
     }
-}
-
-test "keyed observation distinguishes named statuses and omitted fields from numeric tags and null" {
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"k7m2qx\",\"code\":\"unknown_session\",";
-    inline for (.{ "\"status\":2,\"kind\":\"message\"}}", "\"status\":\"2\",\"kind\":\"message\"}}", "\"status\":\"rejected\",\"kind\":1}}" }) |fields|
-        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ fields }, "k"));
-    const absent = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"";
-    inline for (.{ "kind", "target", "code", "revision", "created", "input", "queue", "processing", "result", "progress", "selection", "completion", "interruption_target", "permission_target" }) |field|
-        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = absent ++ ",\"" ++ field ++ "\":null}}" }, "k"));
 }
 
 test "keyed observation validates all five operation shapes and binding" {
     const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"target\":\"k7m2qx\",";
     inline for (.{
         .{ "configure", ",\"revision\":\"31\",\"created\":true", "" },
-        .{ "message", ",\"input\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"13\"}", "" },
+        .{ "message", ",\"state\":\"queued\"" ++ testing_observation_input ++ testing_observation_queue ++ testing_observation_work, ",\"state\":\"rejected\"" },
         .{ "session_stop", ",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"},\"completion\":{\"status\":\"completed\"}", "" },
         .{ "model_interruption", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"7\"}", ",\"interruption_target\":{\"session\":\"k7m2qx\",\"turn\":\"0\",\"operation\":\"0\"}" },
         .{ "permission_decision", ",\"permission_target\":{\"action\":\"29\",\"decision\":\"allow_once\"}", ",\"permission_target\":{\"action\":\"0\",\"decision\":\"deny\"}" },
@@ -3056,7 +3087,7 @@ test "keyed observation validates all five operation shapes and binding" {
         const observed = try CommandObservation.parse(.{ .status = 200, .body = accepted }, "k");
         try std.testing.expectEqualStrings(case[0], @tagName(observed.kind.?));
         try std.testing.expectEqual(.accepted, observed.status);
-        var output: [protocol.max_response_bytes]u8 = undefined;
+        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
         var writer = std.Io.Writer.fixed(&output);
         try observed.writeJson(&writer);
         try std.testing.expectEqualStrings("{\"status\":\"accepted\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"k7m2qx\"" ++ case[1] ++ "}", writer.buffered());
@@ -3067,54 +3098,118 @@ test "keyed observation validates all five operation shapes and binding" {
         writer = std.Io.Writer.fixed(&output);
         try rejected.writeJson(&writer);
         try std.testing.expectEqualStrings("{\"status\":\"rejected\",\"kind\":\"" ++ case[0] ++ "\",\"target\":\"k7m2qx\",\"code\":\"unknown_session\"" ++ case[2] ++ "}", writer.buffered());
-        // Missing operation-specific metadata must not turn into confirmation.
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"" ++ case[0] ++ "\",\"status\":\"accepted\"}}" }, "k"));
-        const empty = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"" ++ case[0] ++ "\",\"target\":\"\",\"status\":\"";
-        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = empty ++ "accepted\"" ++ case[1] ++ "}}" }, "k"));
-        if (!std.mem.eql(u8, case[0], "configure") and !std.mem.eql(u8, case[0], "message"))
-            try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = empty ++ "rejected\",\"code\":\"invalid_session_reference\"" ++ case[2] ++ "}}" }, "k"));
-    }
-    inline for (.{ "configure", "message" }) |kind| {
-        const creation = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"" ++ kind ++ "\",\"status\":\"rejected\",\"code\":\"";
-        inline for (.{ "invalid_workspace", "model_capability_unavailable" }) |code| {
-            const body = creation ++ code ++ "\",\"target\":\"\"}}";
-            const rejected = try CommandObservation.parse(.{ .status = 200, .body = body }, "k");
-            try std.testing.expectEqual(.rejected, rejected.status);
-            try std.testing.expectEqualStrings("", rejected.target.?.slice());
-            try std.testing.expectEqualStrings(code, rejected.failureCode().?);
-            inline for (.{ "", ",\"target\":null", ",\"target\":17" }) |target|
-                try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = creation ++ code ++ "\"" ++ target ++ "}}" }, "k"));
+        if (!std.mem.eql(u8, case[0], "message")) {
+            try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = accepted[0 .. accepted.len - 2] ++ ",\"state\":\"queued\"}}" }, "k"));
         }
     }
-    const absent = try CommandObservation.parse(.{ .status = 200, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"absent\"}}" }, "k");
+    inline for (.{ "configure", "message" }) |kind| {
+        const state = comptime if (std.mem.eql(u8, kind, "message")) ",\"state\":\"rejected\"" else "";
+        const creation = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"" ++ kind ++ "\",\"status\":\"rejected\"" ++ state ++ ",\"code\":\"invalid_workspace\"";
+        const rejected = try CommandObservation.parse(.{ .status = 200, .body = creation ++ ",\"target\":\"\"}}" }, "k");
+        try std.testing.expectEqualStrings("", rejected.target.?.slice());
+        inline for (.{ "", ",\"target\":null", ",\"target\":17" }) |target|
+            try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = creation ++ target ++ "}}" }, "k"));
+    }
+    const absent = try CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ "{\"status\":\"absent\"}}" }, "k");
     const address = try MessageAddress.init("/store", "k7m2qx", "k");
     try std.testing.expectError(error.RequestNotAdmitted, absent.forMessage(&address));
-    const rejection = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"message\",\"status\":\"rejected\",\"code\":\"unknown_session\"}}" }, "k");
+    const rejection = try CommandObservation.parse(.{ .status = 200, .body = prefix ++ "\"kind\":\"message\",\"status\":\"rejected\",\"state\":\"rejected\",\"code\":\"unknown_session\"}}" }, "k");
     const other = try MessageAddress.init("/store", "09azvw", "k");
     try std.testing.expectError(error.RequestBindingMismatch, rejection.forMessage(&other));
 }
 
+test "keyed observation distinguishes named statuses and omitted fields from numeric tags and null" {
+    const prefix = testing_observation_prefix ++ "{\"target\":\"k7m2qx\",\"code\":\"unknown_session\",";
+    inline for (.{ "\"status\":2,\"kind\":\"message\"}}", "\"status\":\"2\",\"kind\":\"message\"}}", "\"status\":\"rejected\",\"kind\":1}}" }) |fields|
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ fields }, "k"));
+    const absent = testing_observation_prefix ++ "{\"status\":\"absent\"";
+    inline for (.{ "kind", "target", "code", "revision", "created", "input", "state", "queue", "binding", "result", "work", "recovery", "selection", "completion", "interruption_target", "permission_target" }) |field|
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = absent ++ ",\"" ++ field ++ "\":null}}" }, "k"));
+}
+
 test "keyed observation rejects malformed consequential fields before outcome interpretation" {
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"kind\":\"message\",\"target\":\"k7m2qx\",\"status\":\"accepted\",\"input\":{\"type\":\"text\",\"bytes\":\"1\",\"sha256\":\"" ++ @as([64]u8, @bitCast(@as([32][2]u8, @splat("ab".*)))) ++ "\"},\"queue\":{\"status\":\"queued\",\"admission\":\"7\"}";
+    const prefix = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"queued\"" ++ testing_observation_input ++ testing_observation_queue;
     inline for (.{
-        ",\"processing\":null}}",                              ",\"processing\":{}}}",                                      ",\"processing\":{\"turn\":7}}}",
-        ",\"result\":{\"status\":\"processing\"}}}",           ",\"result\":{\"status\":\"completed\"}}}",                  ",\"result\":{\"status\":\"failed\",\"code\":17}}}",
-        ",\"result\":{\"status\":\"failed\",\"code\":null}}}", ",\"progress\":{\"status\":\"invented\",\"action\":null}}}", ",\"progress\":{\"status\":\"waiting_for_permission\",\"action\":null}}}",
-        ",\"progress\":{\"status\":\"in_flight\"}}}",          ",\"progress\":{\"status\":\"in_flight\",\"action\":17}}}",  ",\"result\":{\"status\":\"failed\",\"code\":\"saved_failure\"},\"progress\":false}}",
-        ",\"revision\":\"1\"}}",                               ",\"code\":null}}",                                          ",\"target\":null}}",
-    }) |suffix| try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ suffix }, "k"));
+        ",\"binding\":null}}",                                                                         ",\"binding\":{}}}",                                                     ",\"binding\":{\"turn\":7}}}",
+        ",\"result\":{\"status\":\"processing\"}}}",                                                   ",\"result\":{\"status\":\"completed\"}}}",                              ",\"result\":{\"status\":\"failed\",\"code\":17}}}",
+        ",\"result\":{\"status\":\"failed\",\"code\":null}}}",                                         ",\"work\":{\"state\":{\"kind\":\"invented\"},\"first_action\":null}}}", ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329000\"}}}}",
+        ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329000\"},\"first_action\":17}}}", ",\"revision\":\"1\"}}",                                                 ",\"code\":null}}",
+        ",\"target\":null}}",                                                                          ",\"state\":\"queued\"}}",                                               ",\"state\":null}}",
+        ",\"queue\":{\"admission\":\"9\",\"admitted_at\":\"1762329000\"}}}",                           ",\"recovery\":{\"unknown_outcomes\":[],\"more\":false}}}",
+    }) |suffix| {
+        const work = comptime if (std.mem.startsWith(u8, suffix, ",\"work\":")) "" else testing_observation_work;
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ work ++ suffix }, "k"));
+    }
     inline for (.{ "0", "+7", "07", "18446744073709551616" }) |id|
-        try std.testing.expectError(error.InvalidResponse, CommandObservation.parse(.{ .status = 200, .body = prefix ++ ",\"progress\":{\"status\":\"in_flight\",\"action\":\"" ++ id ++ "\"}}}" }, "k"));
+        try std.testing.expectError(error.InvalidResponse, CommandObservation.parse(.{ .status = 200, .body = prefix ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329000\"},\"first_action\":\"" ++ id ++ "\"}}}" }, "k"));
+    inline for (.{ "", ",\"state\":\"queued\"", ",\"state\":\"waiting_for_permission\"", ",\"state\":null", ",\"state\":1", ",\"state\":\"invented\"", ",\"state\":\"processing\"", ",\"state\":\"completed\"", ",\"state\":\"rejected\"" }) |state|
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = testing_observation_prefix ++ testing_observation_message ++ state ++ testing_observation_input ++ testing_observation_queue ++ "}}" }, "k"));
     inline for (.{ "{}", "[]", "{\"version\":\"" ++ protocol.next_wire_version ++ "\"}", "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"wrong\"}" }) |body|
         try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
-    try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"9\"}}}" }, "k"));
-    var oversized: [protocol.max_response_bytes + 1]u8 = undefined;
+    var oversized: [protocol.command_observation_reply.max_bytes + 1]u8 = undefined;
     try std.testing.expectError(error.ResponseTooLarge, CommandObservation.parse(.{ .status = 200, .body = &oversized }, "k"));
 }
 
+test "keyed observation rejects contradictory permission work variants" {
+    inline for (.{
+        .{ "waiting_for_permission", "", ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ "waiting_for_permission", "", ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":null}" },
+        .{ "queued", "", ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+        .{ "processing", testing_observation_binding, ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1762329010\"},\"first_action\":\"57\"}" },
+    }) |case| {
+        const body = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"" ++ case[0] ++ "\"" ++ testing_observation_input ++ testing_observation_queue ++ case[1] ++ case[2] ++ "}}";
+        try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = body }, "k"));
+    }
+    // A running sibling can coexist with an actionable permission request;
+    // its Session work remains bash, not approval, until only approvals remain.
+    const body = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"processing\"" ++ testing_observation_input ++ testing_observation_queue ++ testing_observation_binding ++
+        ",\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1762329010\",\"call\":\"0\",\"description\":\"Run tests\",\"running\":\"1\",\"approvals\":\"1\"},\"first_action\":\"57\"}}}";
+    const observed = try CommandObservation.parse(.{ .status = 200, .body = body }, "k");
+    try std.testing.expectEqual(.processing, observed.state.?);
+    try std.testing.expectEqual(@as(?u64, 57), observed.work.?.first_action);
+}
+
+test "keyed observation owns bounded recovery while running and after completion" {
+    const recovery = ",\"recovery\":{\"unknown_outcomes\":[{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"Run \\\"tests\\\"\",\"at\":\"1762329020\"},{\"action\":\"55\",\"operation\":\"39\",\"call\":\"1\",\"description\":null,\"at\":\"1762329020\"}],\"more\":false}";
+    inline for (.{
+        .{ "processing", testing_observation_work },
+        .{ "completed", ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"11\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}" },
+    }) |case| {
+        const facts = testing_observation_message ++ ",\"state\":\"" ++ case[0] ++ "\"" ++ testing_observation_input ++ testing_observation_queue ++ testing_observation_binding ++ case[1] ++ recovery ++ "}";
+        var storage = (testing_observation_prefix ++ facts ++ "}").*;
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = &storage }, "k");
+        @memset(&storage, 'x');
+        try std.testing.expectEqual(@as(usize, 2), observed.recovery.?.count);
+        try std.testing.expectEqual(@as(u64, 57), observed.recovery.?.unknown_outcomes[0].action_id);
+        try std.testing.expectEqualStrings("Run \"tests\"", observed.recovery.?.unknown_outcomes[0].description.?.slice());
+        try std.testing.expectEqual(@as(u64, 1762329020), observed.recovery.?.unknown_outcomes[0].at);
+        var output: [protocol.command_observation_reply.max_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&output);
+        try observed.writeJson(&writer);
+        try std.testing.expectEqualStrings(facts, writer.buffered());
+    }
+    const bounded_prefix = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"processing\"" ++ testing_observation_input ++ testing_observation_queue ++ testing_observation_binding ++ testing_observation_work ++ ",\"recovery\":{\"unknown_outcomes\":[";
+    const four = "{\"action\":\"57\",\"operation\":\"39\",\"call\":\"3\",\"description\":null,\"at\":\"1762329020\"}," ++
+        "{\"action\":\"56\",\"operation\":\"39\",\"call\":\"2\",\"description\":null,\"at\":\"1762329020\"}," ++
+        "{\"action\":\"55\",\"operation\":\"39\",\"call\":\"1\",\"description\":null,\"at\":\"1762329020\"}," ++
+        "{\"action\":\"54\",\"operation\":\"39\",\"call\":\"0\",\"description\":null,\"at\":\"1762329020\"}";
+    inline for (.{ "false", "true" }) |more| {
+        const observed = try CommandObservation.parse(.{ .status = 200, .body = bounded_prefix ++ four ++ "],\"more\":" ++ more ++ "}}}" }, "k");
+        try std.testing.expectEqual(@as(usize, protocol.message_recovery_limit), observed.recovery.?.count);
+        try std.testing.expectEqual(std.mem.eql(u8, more, "true"), observed.recovery.?.more);
+    }
+    const row = "{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":null,\"at\":\"1762329020\"}";
+    const prefix = testing_observation_prefix ++ testing_observation_message ++ ",\"state\":\"processing\"" ++ testing_observation_input ++ testing_observation_queue ++ testing_observation_binding ++ testing_observation_work ++ ",\"recovery\":{\"unknown_outcomes\":[";
+    inline for (.{
+        "] ,\"more\":false}}}",                                                              row ++ "],\"more\":true}}}",                                                                                                       row ++ "," ++ row ++ "],\"more\":false}}}",
+        row ++ "," ++ row ++ "," ++ row ++ "," ++ row ++ "," ++ row ++ "],\"more\":true}}}", "{\"action\":\"57\",\"operation\":\"39\",\"call\":\"0\",\"description\":\"bad\\nline\",\"at\":\"1762329020\"}],\"more\":false}}}",
+    }) |suffix| try std.testing.expectError(error.InvalidObservation, CommandObservation.parse(.{ .status = 200, .body = prefix ++ suffix }, "k"));
+}
+
 test "keyed observation owns supported strings without retaining unknown DOM across polls" {
-    const observation = "{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s/µ\",\"code\":\"line\\ncode\"}";
-    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\\u002fµ\",\"code\":\"line\\ncode\",\"unknown\":{\"precise\":123456789012345678901234567890,\"items\":[true,null,\"discard\"]}}}";
+    const observation = "{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s/µ\",\"code\":\"line\\ncode\",\"state\":\"rejected\"}";
+    const body = testing_observation_prefix ++ "{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\\u002fµ\",\"code\":\"line\\ncode\",\"state\":\"rejected\",\"unknown\":{\"precise\":123456789012345678901234567890,\"items\":[true,null,\"discard\"]}}}";
     for (0..100) |_| {
         var storage = body.*;
         const observed = try CommandObservation.parse(.{ .status = 200, .body = &storage }, "k");
@@ -3147,7 +3242,7 @@ test "keyed observation read diagnostics are owned without claiming admission" {
     inline for (.{ "null", "{}" }) |value|
         try std.testing.expectError(error.InvalidResponse, decodeReadFailure(.{ .status = 500, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\",\"observation\":" ++ value ++ "}" }, false));
     std.debug.print("keyed facts bytes={d}; reply bytes={d}; fixed parser scratch={d}; no retained allocator/DOM\n", .{
-        @sizeOf(CommandObservation), @sizeOf(protocol.ResponseBuffer), std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes),
+        @sizeOf(CommandObservation), @sizeOf(protocol.CommandObservationBuffer), std.ArrayList(u8).growCapacity((protocol.command_observation_reply.max_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.command_observation_reply.max_bytes),
     });
 }
 

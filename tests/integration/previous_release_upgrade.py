@@ -100,6 +100,14 @@ class Dialect:
         return fixture.command(*(("request", "inspect") if self.resource_first else ("observe-command",)),
                                "--store", store, "--key", key, timeout=timeout)["observation"]
 
+    def terminal(self, observation):
+        # The previous installed binary keeps its own observation contract.
+        return (observation.get("state") in fixture.TERMINAL_MESSAGE_STATES
+                if "state" in observation else bool(observation.get("result")))
+
+    def binding(self, observation):
+        return observation["binding" if "state" in observation else "processing"]
+
     def read_result(self, store, key, timeout=15):
         command = ("request", "read-result") if self.resource_first else ("read-result",)
         completed = subprocess.run([str(fixture.RUI), *command, "--store", str(store), "--key", key],
@@ -117,7 +125,7 @@ class Dialect:
             assert left > 0, f"{key} exhausted its original deadline"
             return left
         observation = fixture.wait_for(
-            lambda: (value if (value := self.observe(store, key, remaining())).get("result") else None),
+            lambda: (value if self.terminal(value := self.observe(store, key, remaining())) else None),
             f"{key} terminal result", deadline=deadline)
         answer = (self.read_result(store, key, remaining())
                   if observation["result"]["status"] == "completed" else None)
@@ -187,6 +195,7 @@ def main():
             observation, answer, _ = dialect.wait_for_result_release(
                 store, "upgrade-message", session, time.monotonic() + 15)
             assert observation["result"]["status"] == "completed" and answer == expected, observation
+            original_binding = dialect.binding(observation)
             assert len(endpoint.requests) == 1, "seed work did not use the provider exactly once"
             configuration = {
                 "workspace": str(workspace), "provider": "codex", "model": "gpt-6-sol",
@@ -258,7 +267,7 @@ def main():
                 )
             recovered = dialect.observe(store, "upgrade-message")
             assert recovered["result"]["status"] == "completed", recovered
-            assert recovered["processing"] == observation["processing"], "upgrade replayed completed work"
+            assert dialect.binding(recovered) == original_binding, "upgrade replayed completed work"
             assert dialect.read_result(store, "upgrade-message") == expected, "saved answer changed"
             after = dialect.inspect_session(store, session)["session"]
             for field, value in configuration.items():

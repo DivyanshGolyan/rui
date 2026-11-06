@@ -181,6 +181,74 @@ class ShapedWorkTests(unittest.TestCase):
         self.assertEqual(rows[1]["host_physical_peaks_by_round"], [123456])
 
 
+class MessageObservationTests(unittest.TestCase):
+    def test_inspect_as_of_is_canonical_and_within_the_call(self):
+        observation = {
+            "kind": "message", "state": "queued",
+            "queue": {"admission": "1", "admitted_at": "90"},
+            "work": {"state": {"kind": "pending", "since": "90"}, "first_action": None},
+        }
+        for as_of in ("100", "101", "0100", "99", "102", 100, "１００"):
+            with self.subTest(as_of=as_of), \
+                    patch.object(transport.dispatch, "command", return_value={"as_of": as_of, "observation": observation}), \
+                    patch.object(transport.dispatch.time, "time", side_effect=(100.9, 101.1)):
+                if as_of in ("100", "101"):
+                    self.assertIs(transport.dispatch.observe("/store", "key"), observation)
+                else:
+                    with self.assertRaises(AssertionError):
+                        transport.dispatch.observe("/store", "key")
+
+    def test_completed_reader_uses_host_state_not_binding_or_result(self):
+        for state in ("queued", "processing", "waiting_for_permission", "completed", "failed", "cancelled", "rejected"):
+            observation = {"state": state, "binding": {"turn": "1", "operation": "2", "attempt": "1"},
+                           "result": {"status": "completed"}}
+            with self.subTest(state=state), patch.object(transport.dispatch, "observe", return_value=observation):
+                self.assertEqual(transport.dispatch.completed_observation("/store", "key"),
+                                 observation if state == "completed" else None)
+
+    def test_upgrade_compares_bindings_in_each_installed_reply(self):
+        from previous_release_upgrade import Dialect
+        identity = {"turn": "1", "operation": "2", "attempt": "1"}
+        # CLI grammar is probed from installed help; observation shape comes
+        # from each reply, never a checkout's protocol source.
+        dialect = Dialect.__new__(Dialect)
+        self.assertEqual(dialect.binding({"state": "processing", "binding": identity}), identity)
+        self.assertEqual(dialect.binding({"state": "completed", "binding": identity}), identity)
+        self.assertTrue(dialect.terminal({"state": "completed"}))
+        self.assertFalse(dialect.terminal({"state": "processing", "result": {"status": "completed"}}))
+        self.assertEqual(dialect.binding({"processing": identity}), identity)
+        self.assertTrue(dialect.terminal({"result": {"status": "completed"}}))
+        self.assertFalse(dialect.terminal({"processing": identity}))
+        self.assertTrue(dialect.terminal({"state": "cancelled", "result": {"status": "cancelled"}}))
+
+    def test_terminal_reader_uses_host_state_including_rejection(self):
+        for state in ("queued", "processing", "waiting_for_permission", "completed", "failed", "cancelled", "rejected"):
+            observation = {"state": state, "binding": {"turn": "1", "operation": "2", "attempt": "1"}}
+            terminal = state in ("completed", "failed", "cancelled", "rejected")
+
+            def wait(predicate, *args, **kwargs):
+                self.assertEqual(predicate(), observation if terminal else None)
+                if not terminal:
+                    raise TimeoutError("still pending")
+                return observation
+
+            with self.subTest(state=state), contextlib.ExitStack() as patches:
+                patches.enter_context(patch.object(transport.dispatch, "observe", return_value=observation))
+                patches.enter_context(patch.object(transport.dispatch, "wait_for", side_effect=wait))
+                read = patches.enter_context(patch.object(transport.dispatch, "read_result", return_value=b"answer"))
+                patches.enter_context(patch.object(transport.dispatch, "wait_for_execution_release", return_value={"released": True}))
+                if terminal:
+                    value, answer, execution = transport.dispatch.wait_for_result_release("/store", "key", "abc123", 100)
+                    self.assertIs(value, observation)
+                    self.assertEqual(answer, b"answer" if state == "completed" else None)
+                    self.assertEqual(execution, {"released": True})
+                    self.assertEqual(read.call_count, int(state == "completed"))
+                else:
+                    with self.assertRaisesRegex(TimeoutError, "still pending"):
+                        transport.dispatch.wait_for_result_release("/store", "key", "abc123", 100)
+                    read.assert_not_called()
+
+
 class ManagedDescriptorTests(unittest.TestCase):
     def test_managed_transfer_cannot_renew_result_read_or_release_budget(self):
         cases = ((platform, inherited, observed, intake)
@@ -234,7 +302,8 @@ class ManagedDescriptorTests(unittest.TestCase):
                             clock[0] += 14.9
                             identity = identities[observation_index[0]]
                             observation_index[0] += 1
-                            return {"observation": {"result": {"status": "completed"}, "processing": identity}}
+                            return {"as_of": str(int(transport.dispatch.time.time())),
+                                    "observation": {"state": "completed", "result": {"status": "completed"}, "binding": identity}}
                         clock[0] += 0.2 if late == "release" else 0.01
                         return {"execution": {"custody_occupied": "0", "scratch_used_bytes": "0", "dispatch_fenced": False}}
 
@@ -432,8 +501,8 @@ class HeldPopulationCleanupTests(unittest.TestCase):
 
         def observe(store, key, **kwargs):
             if not kwargs:
-                return {"processing": {"attempt": "1"}}
-            return {"result": {"status": "completed"}}
+                return {"binding": {"attempt": "1"}}
+            return {"state": "completed", "result": {"status": "completed"}}
 
         def drain(*args):
             endpoint.active = 0
@@ -705,7 +774,7 @@ class ObservationDeadlineTests(unittest.TestCase):
 
                         def observe(store, key, *, deadline=None):
                             if deadline is None:
-                                return {"processing": {"turn": "1", "operation": "1", "attempt": "1"}}
+                                return {"binding": {"turn": "1", "operation": "1", "attempt": "1"}}
                             observations[0] += 1
                             if observations[0] == 1:
                                 clock[0] += budget * 0.6
@@ -721,7 +790,7 @@ class ObservationDeadlineTests(unittest.TestCase):
                             if name == "isolated_terminal_stream" and observations[0] == 1:
                                 status, code = "failed", "response_scratch_exhausted"
                             assert clock[0] < deadline, "observation exceeded original deadline"
-                            return {"result": {"status": status, "code": code}}
+                            return {"state": status, "result": {"status": status, "code": code}}
 
                         def read(store, key, *, deadline):
                             if late == "read" and observations[0] == population:
@@ -801,12 +870,12 @@ class ObservationDeadlineTests(unittest.TestCase):
                 ("completed", (0.4, 0.3, 0.3), False)):
             with self.subTest(status=status, durations=durations):
                 clock = [0.0]
-                observation = {"result": {"status": status}}
+                observation = {"state": status, "result": {"status": status}}
 
                 def command(resource, operation, *args, timeout, **kwargs):
                     observing = (resource, operation) == ("request", "inspect")
                     clock[0] += durations[0] if observing else durations[2]
-                    return {"observation": observation} if observing else {"execution": clean}
+                    return {"as_of": str(int(transport.dispatch.time.time())), "observation": observation} if observing else {"execution": clean}
 
                 def read(*args, timeout, **kwargs):
                     self.assertEqual(status, "completed", "terminal failure must not request answer bytes")
@@ -852,7 +921,8 @@ class ObservationDeadlineTests(unittest.TestCase):
                     def exchange(*args, timeout, **kwargs):
                         budgets.append(timeout)
                         clock[0] += elapsed
-                        return ({"observation": {"result": {"status": "completed"}}} if kind == "observe"
+                        return ({"as_of": str(int(transport.dispatch.time.time())),
+                                 "observation": {"state": "completed", "result": {"status": "completed"}}} if kind == "observe"
                                 else SimpleNamespace(returncode=0, stdout=b"exact answer", stderr=b""))
 
                     with patch.object(transport.time, "monotonic", side_effect=lambda: clock[0]), \
@@ -864,7 +934,7 @@ class ObservationDeadlineTests(unittest.TestCase):
                                 operation(pathlib.Path("/fixture"), "key", deadline=10 + remaining)
                         else:
                             result = operation(pathlib.Path("/fixture"), "key", deadline=None if remaining is None else 10 + remaining)
-                            self.assertEqual(result, {"result": {"status": "completed"}} if kind == "observe" else b"exact answer")
+                            self.assertEqual(result, {"state": "completed", "result": {"status": "completed"}} if kind == "observe" else b"exact answer")
                     self.assertEqual(budgets, [] if remaining == 0 else [15 if remaining is None else min(15, remaining)])
 
     def test_fragmented_result_and_eof_share_one_exchange_budget(self):

@@ -915,7 +915,7 @@ def prove_sealed_interruption_and_cleanup(state):
         message(state, store, "sealed-message", session, "sealed race")
         wait_for(lambda: endpoint.count() == 1, "sealed provider request")
         processing = wait_for(
-            lambda: observe(store, "sealed-message").get("processing"),
+            lambda: observe(store, "sealed-message").get("binding"),
             "sealed processing identity",
         )
         endpoint.release.set()
@@ -984,7 +984,7 @@ def prove_sealed_interruption_and_cleanup(state):
             "settlement gate with no writer does not strand its reader",
             deadline=successor_deadline,
         )
-        milestones.wait_model_cleanup(released["processing"], successor_deadline)
+        milestones.wait_model_cleanup(released["binding"], successor_deadline)
         wait_execution_release(milestones, store, session, successor_deadline)
     finally:
         stop_control_case(
@@ -993,7 +993,7 @@ def prove_sealed_interruption_and_cleanup(state):
             lambda: settlement_gate.path.unlink(missing_ok=True),
         )
         if milestones is not None and sys.exc_info()[1] is None:
-            milestones.assert_model_cleanup_census(processing, released["processing"])
+            milestones.assert_model_cleanup_census(processing, released["binding"])
 
 
 def prove_delivery_and_settlement_contention(state, *, sample_host=None):
@@ -1043,7 +1043,7 @@ def prove_delivery_and_settlement_contention(state, *, sample_host=None):
             processings.append(wait_for(
                 lambda index=index: peers.call("observe", lambda: observe(
                     store, f"contention-message-{index}", deadline=deadline
-                ), deadline=deadline).get("processing"),
+                ), deadline=deadline).get("binding"),
                 f"contention processing identity {index}", deadline=deadline,
             ))
 
@@ -1233,7 +1233,7 @@ def prove_real_settlement_contention(
         deadline = time.monotonic() + 8
         processing = wait_for(
             lambda: peers.call("observe", lambda: observe(store, "real-settlement-message", deadline=deadline),
-                               deadline=deadline).get("processing"),
+                               deadline=deadline).get("binding"),
             "large-output processing identity", deadline=deadline,
         )
         inspections = fill_complete_inspections(
@@ -1508,7 +1508,7 @@ def prove_idle_stop_wire_recovery(state):
             "must remain excluded",
         )
         queued = observe(store, "queued-stop-excluded-message")
-        assert queued["queue"]["status"] == "queued", queued
+        assert queued["state"] == "queued", queued
 
         record = state / "queued-stop-original.json"
         dropped = subprocess.run(
@@ -1532,12 +1532,12 @@ def prove_idle_stop_wire_recovery(state):
         )
         assert dropped.returncode != 0, dropped
         excluded = observe(store, "queued-stop-excluded-message")
-        assert excluded["queue"]["status"] == "excluded", excluded
+        assert excluded["state"] == "cancelled", excluded
         assert excluded["result"] == {
             "status": "cancelled",
             "code": "session_stopped",
         }, excluded
-        assert "processing" not in excluded, excluded
+        assert "binding" not in excluded, excluded
 
         replayed = command(
             "request", "recover",
@@ -1606,7 +1606,7 @@ def prove_retry_wait_control(state, kind):
                 "session", "inspect", "--store", store, "--session", session
             )["execution"]
             if (
-                observation.get("processing", {}).get("attempt") == "1"
+                observation.get("binding", {}).get("attempt") == "1"
                 and "result" not in observation
                 and execution["custody_occupied"] == "0"
                 and execution["dispatch_fenced"] is False
@@ -1617,7 +1617,7 @@ def prove_retry_wait_control(state, kind):
         waiting, observed_at = wait_for(
             retry_wait_observation, f"{kind} committed retry wait"
         )
-        processing = waiting["processing"]
+        processing = waiting["binding"]
         control_key = f"retry-wait-{kind}-control"
         record = state / f"{control_key}.json"
         args = [
@@ -1774,7 +1774,7 @@ def main():
         message(state, store, "exact-message", exact_session, "first")
         wait_for(lambda: endpoint.counts()[0] >= 1, "first provider request")
         processing = wait_for(
-            lambda: observe(store, "exact-message").get("processing"),
+            lambda: observe(store, "exact-message").get("binding"),
             "exact target",
         )
         exact_record = state / "exact-interrupt.json"
@@ -1827,12 +1827,12 @@ def main():
         message(state, store, "stop-message", stop_target, "second")
         wait_for(lambda: endpoint.counts()[0] >= 2, "second provider request")
         stop_processing = wait_for(
-            lambda: observe(store, "stop-message").get("processing"),
+            lambda: observe(store, "stop-message").get("binding"),
             "stop target",
         )
         message(state, store, "stop-later-message", stop_target, "later queued input")
         later_queued = observe(store, "stop-later-message")
-        assert later_queued["queue"]["status"] == "queued", later_queued
+        assert later_queued["state"] == "queued", later_queued
         active_stop = stop_session(state, store, "active-stop", stop_target)
         assert active_stop["answer"]["status"] == "accepted", active_stop
         assert active_stop["answer"]["selection"]["turn"] == stop_processing["turn"]
@@ -1840,7 +1840,7 @@ def main():
         stopped_message = observe(store, "stop-message")
         assert stopped_message["result"]["status"] == "cancelled", stopped_message
         excluded_later = observe(store, "stop-later-message")
-        assert excluded_later["queue"]["status"] == "excluded", excluded_later
+        assert excluded_later["state"] == "cancelled", excluded_later
         assert excluded_later["result"] == {
             "status": "cancelled",
             "code": "session_stopped",

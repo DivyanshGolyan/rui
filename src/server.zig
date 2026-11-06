@@ -1619,11 +1619,12 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             fd.timing = timing;
         },
         .observe_command => |*command| {
-            const observation = host.store.observeCommand(command.key.slice()) catch |err| {
+            var observation: store_module.CommandObservation = undefined;
+            host.store.observeCommand(command.key.slice(), &observation) catch |err| {
                 fenceDispatch(host, "command observation", err);
                 return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
             };
-            try fd.json(200, protocol.max_response_bytes, renderCommandObservation, .{ command.key.slice(), observation });
+            try fd.jsonGrowing(200, protocol.command_observation_reply.max_bytes, renderCommandObservation, .{ command.key.slice(), &observation });
         },
         .read_result => |*command| {
             const reference = host.store.commandResult(command.key.slice()) catch |err| switch (err) {
@@ -2228,40 +2229,48 @@ fn renderPermissionDecisionReply(
 fn renderCommandObservation(
     response: protocol.JsonOut,
     key: []const u8,
-    observation: store_module.CommandObservation,
+    observation: *const store_module.CommandObservation,
 ) !void {
     const shapes = protocol.command_observation_reply;
     if (observation.status == .absent) return response.appendShape(shapes.absent, .{key});
     switch (observation.kind) {
-        inline else => |kind| try response.appendShape(shapes.head(kind), .{ key, observation.status, observation.target.slice() }),
+        inline else => |_, kind| try response.appendShape(shapes.head(kind), .{ key, observation.status, observation.target.slice() }),
     }
     if (observation.code.len != 0) try response.appendShape(shapes.code, .{observation.code.slice()});
+    if (observation.kind == .message) try response.appendShape(shapes.state, .{observation.requestState() orelse return error.InvalidCommandObservation});
     switch (observation.kind) {
-        .configure => if (observation.status == .accepted) try response.appendShape(shapes.revision, .{ observation.revision, observation.created }),
-        .message => if (observation.message) |message| {
+        .configure => |configured| if (observation.status == .accepted) try response.appendShape(shapes.revision, .{ configured.revision, configured.created }),
+        .message => |*maybe_message| if (maybe_message.*) |*message| {
             try response.appendShape(shapes.input, .{ message.content.length, message.content.digest });
             if (message.queue) |accepted| {
-                const admission = accepted.admission_id;
-                try switch (accepted.state) {
-                    .queued => response.appendShape(shapes.queued, .{admission}),
-                    .excluded => |excluded| response.appendShape(shapes.excluded, .{ admission, excluded.code.slice() }),
-                    .processing => |binding| response.appendShape(shapes.processing, .{ admission, binding.turn_id, binding.operation_id, binding.attempt_ordinal }),
-                    .completed => |completed| response.appendShape(shapes.completed, .{
-                        admission,                         completed.binding.turn_id, completed.binding.operation_id,
-                        completed.binding.attempt_ordinal, completed.answer.length,   completed.answer.digest,
-                    }),
-                    .cancelled => |cancelled| response.appendShape(shapes.cancelled, .{ admission, cancelled.binding.turn_id, cancelled.binding.operation_id, cancelled.binding.attempt_ordinal, cancelled.code.slice() }),
-                    .failed => |failed| response.appendShape(shapes.failed, .{ admission, failed.binding.turn_id, failed.binding.operation_id, failed.binding.attempt_ordinal, failed.code.slice() }),
+                try response.appendShape(shapes.queue, .{ accepted.admission_id, message.admitted_at });
+                const binding: ?store_module.AttemptBinding = switch (accepted.state) {
+                    .processing => |value| value,
+                    .completed => |value| value.binding,
+                    .cancelled => |value| value.binding,
+                    .failed => |value| value.binding,
+                    .queued, .excluded => null,
                 };
-                if (message.progress) |progress| try response.appendShape(shapes.progress, .{ progress.status, progress.action_id });
+                if (binding) |bound| try response.appendShape(shapes.binding, .{ bound.turn_id, bound.operation_id, bound.attempt_ordinal });
+                switch (accepted.state) {
+                    .completed => |value| try response.appendShape(shapes.completed, .{ value.answer.length, value.answer.digest }),
+                    .cancelled => |value| try response.appendShape(shapes.cancelled, .{value.code.slice()}),
+                    .excluded => |value| try response.appendShape(shapes.cancelled, .{value.code.slice()}),
+                    .failed => |value| try response.appendShape(shapes.failed, .{value.code.slice()}),
+                    .queued, .processing => {
+                        const work = message.work orelse return error.InvalidCommandObservation;
+                        try response.appendShape(shapes.work, .{ protocol.WorkStateJson{ .state = work.state }, work.first_action });
+                    },
+                }
+                if (message.recovery.count != 0) try response.appendShape(shapes.recovery, .{protocol.MessageRecoveryJson{
+                    .calls = message.recovery.calls[0..message.recovery.count],
+                    .more = message.recovery.more,
+                }});
             }
         },
-        .session_stop => if (observation.session_stop) |stop| try response.appendShape(shapes.session_stop, .{ stop.selection.selected_turn_id, stop.selection.admission_cutoff, stop.completion }),
-        .model_interruption => if (observation.model_interruption) |target| try response.appendShape(shapes.model_interruption, .{ target.session.slice(), target.turn_id, target.operation_id }),
-        .permission_decision => if (observation.permission_action_id) |action_id| try response.appendShape(shapes.permission_decision, .{
-            action_id,
-            observation.permission_decision orelse return error.InvalidCommandObservation,
-        }),
+        .session_stop => |maybe_stop| if (maybe_stop) |stop| try response.appendShape(shapes.session_stop, .{ stop.selection.selected_turn_id, stop.selection.admission_cutoff, stop.completion }),
+        .model_interruption => |target| try response.appendShape(shapes.model_interruption, .{ target.session.slice(), target.turn_id, target.operation_id }),
+        .permission_decision => |permission| try response.appendShape(shapes.permission_decision, .{ permission.action_id, permission.decision }),
     }
     try response.appendShape(shapes.tail, .{});
 }
@@ -2926,94 +2935,81 @@ test "delayed control replies retain command identity after request storage reus
     }
 }
 
-test "message observation renders every closed queue state without fabricated rejection state" {
+test "message observation renders Host state binding live work and persistent recovery byte exactly" {
     const zero_digest = "0000000000000000000000000000000000000000000000000000000000000000";
     const full_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    const head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{";
+    const accepted = head ++ "\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\",\"state\":\"";
     const input = ",\"input\":{\"type\":\"text\",\"bytes\":\"3\",\"sha256\":\"" ++ zero_digest ++ "\"}";
-    const accepted_prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"accepted\",\"kind\":\"message\",\"target\":\"s\"" ++ input;
-    const binding = ",\"processing\":{\"turn\":\"2\",\"operation\":\"3\",\"attempt\":\"4\"}";
+    const queue = ",\"queue\":{\"admission\":\"1\",\"admitted_at\":\"11\"}";
+    const binding = ",\"binding\":{\"turn\":\"2\",\"operation\":\"3\",\"attempt\":\"4\"}";
+    const recovery = ",\"recovery\":{\"unknown_outcomes\":[{\"action\":\"8\",\"operation\":\"3\",\"call\":\"1\",\"description\":null,\"at\":\"12\"}],\"more\":false}";
     const Expect = struct {
-        fn rendered(observation: store_module.CommandObservation, expected: []const u8) !void {
-            var response: protocol.ResponseBuffer = .{};
+        fn rendered(observation: *const store_module.CommandObservation, expected: []const u8) !void {
+            var response: protocol.CommandObservationBuffer = .{};
             try response.render(renderCommandObservation, .{ "k", observation });
             try std.testing.expectEqualStrings(expected, response.slice());
         }
     };
-
-    const content = store_module.ContentReference{ .length = 3, .digest = @splat(0) };
-    const processing = store_module.AttemptBinding{
-        .turn_id = 2,
-        .operation_id = 3,
-        .attempt_ordinal = 4,
-    };
-    var rejected = store_module.CommandObservation{
-        .status = .rejected,
-        .kind = .message,
-        .message = .{ .content = content },
-    };
+    var rejected = store_module.CommandObservation{ .status = .rejected, .kind = .{ .message = null } };
     try rejected.target.set("s");
     try rejected.code.set("unknown_session");
-    try Expect.rendered(
-        rejected,
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"command_observation\",\"key\":\"k\",\"observation\":{\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\",\"code\":\"unknown_session\"" ++ input ++ "}}",
-    );
+    try Expect.rendered(&rejected, head ++ "\"status\":\"rejected\",\"kind\":\"message\",\"target\":\"s\",\"code\":\"unknown_session\",\"state\":\"rejected\"}}");
 
-    var observation = rejected;
-    observation.status = .accepted;
-    observation.code.len = 0;
-    observation.message.?.queue = .{ .admission_id = 1, .state = .queued };
-    observation.message.?.progress = .{ .status = .waiting_for_permission, .action_id = 7 };
-    try Expect.rendered(
-        observation,
-        accepted_prefix ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"1\"},\"progress\":{\"status\":\"waiting_for_permission\",\"action\":\"7\"}}}",
-    );
-
-    observation.message.?.queue.?.state = .{ .processing = processing };
-    observation.message.?.progress = .{ .status = .in_flight };
-    try Expect.rendered(
-        observation,
-        accepted_prefix ++ ",\"queue\":{\"status\":\"processing\",\"admission\":\"1\"}" ++ binding ++ ",\"progress\":{\"status\":\"in_flight\",\"action\":null}}}",
-    );
-
-    observation.message.?.queue.?.state = .{ .completed = .{
-        .binding = processing,
-        .answer = .{ .length = 6, .digest = @splat(0xff) },
-    } };
-    observation.message.?.progress = null;
-    try Expect.rendered(
-        observation,
-        accepted_prefix ++ ",\"queue\":{\"status\":\"completed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"6\",\"sha256\":\"" ++ full_digest ++ "\"}}}}",
-    );
-
+    const content = store_module.ContentReference{ .length = 3, .digest = @splat(0) };
+    const bound = store_module.AttemptBinding{ .turn_id = 2, .operation_id = 3, .attempt_ordinal = 4 };
+    var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
+        .content = content,
+        .queue = .{ .admission_id = 1, .state = .queued },
+        .admitted_at = 11,
+        .work = .{ .state = .{ .pending = .{ .since = 10 } } },
+    } } };
+    try observation.target.set("s");
+    const message = &observation.kind.message.?;
+    try Expect.rendered(&observation, accepted ++ "queued\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"pending\",\"since\":\"10\"},\"first_action\":null}}}");
+    message.work = .{ .state = .{ .approval = .{ .since = 10 } }, .first_action = 7 };
+    try Expect.rendered(&observation, accepted ++ "waiting_for_permission\"" ++ input ++ queue ++ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"10\"},\"first_action\":\"7\"}}}");
+    message.queue.?.state = .{ .processing = bound };
+    message.work = .{ .state = .{ .working = .{ .since = 10 } } };
+    message.recovery.count = 1;
+    message.recovery.calls[0] = .{ .action_id = 8, .operation_id = 3, .call = 1, .at = 12 };
+    try Expect.rendered(&observation, accepted ++ "processing\"" ++ input ++ queue ++ binding ++ ",\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"10\"},\"first_action\":null}" ++ recovery ++ "}}");
+    message.queue.?.state = .{ .completed = .{ .binding = bound, .answer = .{ .length = 6, .digest = @splat(0xff) } } };
+    // Even inconsistent synthetic live work must never leak after a result.
+    try Expect.rendered(&observation, accepted ++ "completed\"" ++ input ++ queue ++ binding ++ ",\"result\":{\"status\":\"completed\",\"text\":{\"type\":\"text\",\"bytes\":\"6\",\"sha256\":\"" ++ full_digest ++ "\"}}" ++ recovery ++ "}}");
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
     try code.set("provider_http_422");
-    observation.message.?.queue.?.state = .{ .failed = .{ .binding = processing, .code = code } };
-    try Expect.rendered(
-        observation,
-        accepted_prefix ++ ",\"queue\":{\"status\":\"failed\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}}}",
-    );
-
+    message.queue.?.state = .{ .failed = .{ .binding = bound, .code = code } };
+    try Expect.rendered(&observation, accepted ++ "failed\"" ++ input ++ queue ++ binding ++ ",\"result\":{\"status\":\"failed\",\"code\":\"provider_http_422\"}" ++ recovery ++ "}}");
     try code.set("cancelled");
-    observation.message.?.queue.?.state = .{ .cancelled = .{ .binding = processing, .code = code } };
-    try Expect.rendered(
-        observation,
-        accepted_prefix ++ ",\"queue\":{\"status\":\"cancelled\",\"admission\":\"1\"}" ++ binding ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}",
-    );
+    message.queue.?.state = .{ .cancelled = .{ .binding = bound, .code = code } };
+    try Expect.rendered(&observation, accepted ++ "cancelled\"" ++ input ++ queue ++ binding ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}" ++ recovery ++ "}}");
+    message.queue.?.state = .{ .excluded = .{ .code = code } };
+    message.recovery.count = 0;
+    try Expect.rendered(&observation, accepted ++ "cancelled\"" ++ input ++ queue ++ ",\"result\":{\"status\":\"cancelled\",\"code\":\"cancelled\"}}}");
 }
 
-test "Message observation progress fits the resident response bound with escaped identities" {
+test "Message observation work and recovery fit the unchanged resident response bound" {
+    const max = std.math.maxInt(u64);
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
-    var observation = store_module.CommandObservation{ .status = .accepted, .kind = .message };
+    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try description.set(&@as([protocol.max_tool_description_bytes]u8, @splat(1)));
+    var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
+        .content = .{ .length = max, .digest = @splat(0xff) },
+        .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
+        .admitted_at = max,
+        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = description, .running = max, .approvals = max } }, .first_action = max },
+    } } };
     try observation.target.set(&escaped_session);
-    observation.message = .{
-        .content = .{ .length = std.math.maxInt(u64), .digest = @splat(0xff) },
-        .queue = .{ .admission_id = std.math.maxInt(u64), .state = .queued },
-        .progress = .{ .status = .waiting_for_permission, .action_id = std.math.maxInt(u64) },
-    };
-    var response: protocol.ResponseBuffer = .{};
-    try response.render(renderCommandObservation, .{ &escaped_key, observation });
-    try std.testing.expect(response.len <= protocol.command_observation_reply.maxBytes(.message));
+    observation.kind.message.?.recovery.count = protocol.message_recovery_limit;
+    for (&observation.kind.message.?.recovery.calls) |*call| call.* = .{ .action_id = max, .operation_id = max, .call = max, .description = description, .at = max };
+    var response: protocol.CommandObservationBuffer = .{};
+    try response.render(renderCommandObservation, .{ &escaped_key, &observation });
+    try std.testing.expectEqual(protocol.command_observation_reply.maxBytes(.message) - protocol.shapeBytes(protocol.command_observation_reply.code), response.len);
+    // The existing response owner is sized by host-info's escaped Store path,
+    // not these added per-observation facts; no resident pool grows.
+    try std.testing.expectEqual(protocol.max_host_info_response_bytes, protocol.max_response_bytes);
 }
 
 test "control response variants fit exact worst-case JSON bounds" {
@@ -3062,8 +3058,8 @@ test "control response variants fit exact worst-case JSON bounds" {
             observation: store_module.CommandObservation,
             expected: usize,
         ) !void {
-            var response: protocol.ResponseBuffer = .{};
-            try response.render(renderCommandObservation, .{ key, observation });
+            var response: protocol.CommandObservationBuffer = .{};
+            try response.render(renderCommandObservation, .{ key, &observation });
             try std.testing.expectEqual(expected, response.len);
         }
     };
@@ -3125,19 +3121,18 @@ test "control response variants fit exact worst-case JSON bounds" {
 
     var stop_accepted = store_module.CommandObservation{
         .status = .accepted,
-        .kind = .session_stop,
-        .session_stop = .{
+        .kind = .{ .session_stop = .{
             .selection = .{
                 .selected_turn_id = std.math.maxInt(u64),
                 .admission_cutoff = std.math.maxInt(u64),
             },
             .completion = .completed,
-        },
+        } },
     };
     try stop_accepted.target.set(&escaped_session);
     try Cases.expectObservation(&escaped_key, stop_accepted, observationBytes(.session_stop, .{observation_shapes.session_stop}));
 
-    var stop_rejected = store_module.CommandObservation{ .status = .rejected, .kind = .session_stop };
+    var stop_rejected = store_module.CommandObservation{ .status = .rejected, .kind = .{ .session_stop = null } };
     try stop_rejected.target.set(&escaped_session);
     try stop_rejected.code.set(&escaped_code);
     try Cases.expectObservation(&escaped_key, stop_rejected, observationBytes(.session_stop, .{observation_shapes.code}));
@@ -3150,8 +3145,7 @@ test "control response variants fit exact worst-case JSON bounds" {
     try target.session.set(&escaped_session);
     var interruption_accepted = store_module.CommandObservation{
         .status = .accepted,
-        .kind = .model_interruption,
-        .model_interruption = target,
+        .kind = .{ .model_interruption = target },
     };
     try interruption_accepted.target.set(&escaped_session);
     try Cases.expectObservation(
@@ -3162,8 +3156,7 @@ test "control response variants fit exact worst-case JSON bounds" {
 
     var interruption_rejected = store_module.CommandObservation{
         .status = .rejected,
-        .kind = .model_interruption,
-        .model_interruption = target,
+        .kind = .{ .model_interruption = target },
     };
     try interruption_rejected.target.set(&escaped_session);
     try interruption_rejected.code.set(&escaped_code);
@@ -3201,7 +3194,6 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     const escaped_code = @as([protocol.max_code_bytes]u8, @splat(1));
     const escaped_store = @as([protocol.max_store_bytes]u8, @splat(1));
     const content: store_module.ContentReference = .{ .length = max, .digest = @splat(0xff) };
-    const binding: store_module.AttemptBinding = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max };
     var session: protocol.Bounded(protocol.max_session_bytes) = .{};
     try session.set(&escaped_session);
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -3227,8 +3219,8 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         }
 
         fn observation(key: []const u8, value: store_module.CommandObservation) !usize {
-            var response: protocol.ResponseBuffer = .{};
-            try response.render(renderCommandObservation, .{ key, value });
+            var response: protocol.CommandObservationBuffer = .{};
+            try response.render(renderCommandObservation, .{ key, &value });
             return response.len;
         }
     };
@@ -3285,46 +3277,28 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_mysql_reply), host_info.len);
 
     const observations = protocol.command_observation_reply;
-    var configured = store_module.CommandObservation{ .status = .accepted, .kind = .configure, .code = code, .revision = max, .created = false };
+    var configured = store_module.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .configure = .{ .revision = max, .created = false } } };
     try configured.target.set(&escaped_session);
     try std.testing.expectEqual(observations.maxBytes(.configure), try Worst.observation(&escaped_key, configured));
 
-    const states = [_]store_module.AcceptedMessageQueue.State{
-        .queued,
-        .{ .excluded = .{ .code = code } },
-        .{ .processing = binding },
-        .{ .completed = .{ .binding = binding, .answer = content } },
-        .{ .cancelled = .{ .binding = binding, .code = code } },
-        .{ .failed = .{ .binding = binding, .code = code } },
-    };
-    var longest_message: usize = 0;
-    for (states) |state| {
-        var queued = store_module.CommandObservation{ .status = .accepted, .kind = .message, .code = code, .message = .{
-            .content = content,
-            .queue = .{ .admission_id = max, .state = state },
-            .progress = .{ .status = Worst.tag(protocol.MessageProgressStatus), .action_id = max },
-        } };
-        try queued.target.set(&escaped_session);
-        longest_message = @max(longest_message, try Worst.observation(&escaped_key, queued));
-    }
-    try std.testing.expectEqual(observations.maxBytes(.message), longest_message);
-
-    var stopped = store_module.CommandObservation{ .status = .accepted, .kind = .session_stop, .code = code, .session_stop = .{
+    // Message's full live work plus four recovery descriptions is exercised
+    // separately above; each closed result shape is checked byte-exactly.
+    var stopped = store_module.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .session_stop = .{
         .selection = .{ .selected_turn_id = max, .admission_cutoff = max },
         .completion = Worst.tag(protocol.SessionStopCompletion),
-    } };
+    } } };
     try stopped.target.set(&escaped_session);
     try std.testing.expectEqual(observations.maxBytes(.session_stop), try Worst.observation(&escaped_key, stopped));
 
-    var interrupted = store_module.CommandObservation{ .status = .accepted, .kind = .model_interruption, .code = code, .model_interruption = .{
+    var interrupted = store_module.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .model_interruption = .{
         .session = session,
         .turn_id = max,
         .operation_id = max,
-    } };
+    } } };
     try interrupted.target.set(&escaped_session);
     try std.testing.expectEqual(observations.maxBytes(.model_interruption), try Worst.observation(&escaped_key, interrupted));
 
-    var decided = store_module.CommandObservation{ .status = .accepted, .kind = .permission_decision, .code = code, .permission_action_id = max, .permission_decision = Worst.tag(protocol.PermissionDecision) };
+    var decided = store_module.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .permission_decision = .{ .action_id = max, .decision = Worst.tag(protocol.PermissionDecision) } } };
     try decided.target.set(&escaped_session);
     try std.testing.expectEqual(observations.maxBytes(.permission_decision), try Worst.observation(&escaped_key, decided));
     try std.testing.expect(try Worst.observation(&escaped_key, .{ .status = .absent }) <= protocol.command_observation_reply.max_bytes);
@@ -4072,8 +4046,9 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
             defer std.testing.allocator.free(body);
             try Probe.send(peer.socket.handle, control.route, body, false);
             try Probe.response(peer.socket.handle);
-            const saved = try storage.observeCommand(control.key);
-            try std.testing.expectEqual(control.kind, saved.kind);
+            var saved: store_module.CommandObservation = undefined;
+            try storage.observeCommand(control.key, &saved);
+            try std.testing.expectEqual(control.kind, std.meta.activeTag(saved.kind));
             try std.testing.expectEqual(control.status, saved.status);
             try std.testing.expect(!Probe.released.load(.acquire));
         }

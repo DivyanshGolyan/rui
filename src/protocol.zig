@@ -8,7 +8,13 @@ const named_scratch = @import("named_scratch.zig");
 const store_id = @import("store_id.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
-pub const wire_version = "8";
+pub const wire_version = "9";
+
+/// Host-owned lifecycle state of a Message request.
+pub const MessageRequestState = enum { queued, processing, waiting_for_permission, completed, failed, cancelled, rejected };
+
+/// Maximum recovery Actions retained in one Message observation.
+pub const message_recovery_limit = 4;
 /// Versions a newer and an older Host speak, for tests that refuse them.
 pub const next_wire_version = std.fmt.comptimePrint("{d}", .{wire_number + 1});
 pub const previous_wire_version = std.fmt.comptimePrint("{d}", .{wire_number - 1});
@@ -3000,6 +3006,36 @@ pub const permission_decision_reply = struct {
     pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
 };
 
+/// One saved indeterminate Action, newest first within its bound Turn.
+pub const MessageUnknownOutcome = struct {
+    action_id: u64,
+    operation_id: u64,
+    call: u64,
+    description: ?Bounded(max_tool_description_bytes) = null,
+    at: u64,
+};
+
+/// Borrowed recovery metadata; no history-sized response storage.
+pub const MessageRecoveryJson = struct {
+    calls: []const MessageUnknownOutcome,
+    more: bool,
+
+    pub const head = .{"{\"unknown_outcomes\":["};
+    pub const item = .{ "{\"action\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"call\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"at\":\"", Hole.decimal, "\"}" };
+    pub const tail = .{ "],\"more\":", Hole.boolean, "}" };
+    pub const max_json_bytes = shapeBytes(head) + message_recovery_limit * shapeBytes(item) + message_recovery_limit - 1 + shapeBytes(tail);
+
+    pub fn writeJson(self: *const MessageRecoveryJson, out: *std.Io.Writer) !void {
+        std.debug.assert(self.calls.len <= message_recovery_limit);
+        try writeShape(out, head, .{});
+        for (self.calls, 0..) |call, index| {
+            if (index != 0) try out.writeAll(",");
+            try writeShape(out, item, .{ call.action_id, call.operation_id, call.call, if (call.description) |text| text.slice() else null, call.at });
+        }
+        try writeShape(out, tail, .{self.more});
+    }
+};
+
 /// One command's observation. A reply is `absent`, or `head`, then `code`
 /// when the command has one, then its kind's parts, then `tail`.
 pub const command_observation_reply = struct {
@@ -3016,20 +3052,48 @@ pub const command_observation_reply = struct {
     pub const revision = .{ ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean };
     /// A Message's input reference. Holes: its length and digest.
     pub const input = .{",\"input\":"} ++ content_reference_shape;
-    // Holes: the Attempt binding's Turn, Operation and Attempt.
-    const binding = .{ ",\"processing\":{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
-    /// Queue states. Holes: admission, then the binding's, then the result's.
-    pub const queued = .{ ",\"queue\":{\"status\":\"queued\",\"admission\":\"", Hole.decimal, "\"}" };
-    pub const excluded = .{ ",\"queue\":{\"status\":\"excluded\",\"admission\":\"", Hole.decimal, "\"},\"result\":{\"status\":\"cancelled\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
-    pub const processing = .{ ",\"queue\":{\"status\":\"processing\",\"admission\":\"", Hole.decimal, "\"}" } ++ binding;
-    pub const completed = .{ ",\"queue\":{\"status\":\"completed\",\"admission\":\"", Hole.decimal, "\"}" } ++ binding ++
-        .{",\"result\":{\"status\":\"completed\",\"text\":"} ++ content_reference_shape ++ .{"}"};
-    pub const cancelled = .{ ",\"queue\":{\"status\":\"cancelled\",\"admission\":\"", Hole.decimal, "\"}" } ++ binding ++
-        .{ ",\"result\":{\"status\":\"cancelled\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
-    pub const failed = .{ ",\"queue\":{\"status\":\"failed\",\"admission\":\"", Hole.decimal, "\"}" } ++ binding ++
-        .{ ",\"result\":{\"status\":\"failed\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
-    /// A queued Message's progress. Holes: status, Action.
-    pub const progress = .{ ",\"progress\":{\"status\":\"", Hole{ .tag = MessageProgressStatus }, "\",\"action\":", Hole.optional_id, "}" };
+    /// The Host's Message request lifecycle state.
+    pub const state = .{ ",\"state\":\"", Hole{ .tag = MessageRequestState }, "\"" };
+    /// Holes: admission, admitted at.
+    pub const queue = .{ ",\"queue\":{\"admission\":\"", Hole.decimal, "\",\"admitted_at\":\"", Hole.decimal, "\"}" };
+    /// Holes: Turn, Operation, Attempt. Kept on terminal bound Messages.
+    pub const binding = .{ ",\"binding\":{\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
+    pub const completed = .{",\"result\":{\"status\":\"completed\",\"text\":"} ++ content_reference_shape ++ .{"}"};
+    pub const cancelled = .{ ",\"result\":{\"status\":\"cancelled\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
+    pub const failed = .{ ",\"result\":{\"status\":\"failed\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
+    /// Holes: Session work state, earliest Action awaiting permission.
+    pub const work = .{ ",\"work\":{\"state\":", Hole{ .json = WorkStateJson }, ",\"first_action\":", Hole.optional_id, "}" };
+    pub const recovery = .{ ",\"recovery\":", Hole{ .json = MessageRecoveryJson } };
+
+    /// Every Message body the Host writes. OpenAPI and byte bounds consume
+    /// this same list; recovery belongs to a bound Turn and survives its end.
+    const queued_state = .{",\"state\":\"queued\""};
+    const processing_state = .{",\"state\":\"processing\""};
+    const permission_state = .{",\"state\":\"waiting_for_permission\""};
+    const rejected_state = .{",\"state\":\"rejected\""};
+    const completed_state = .{",\"state\":\"completed\""};
+    const failed_state = .{",\"state\":\"failed\""};
+    const cancelled_state = .{",\"state\":\"cancelled\""};
+    // The permission case refines the shared writer's state shape. Only the
+    // Session's approval state has waiting_for_permission progress.
+    const permission_work = .{ ",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"", Hole.decimal, "\"},\"first_action\":", Hole.optional_id, "}" };
+    pub const message_variants = .{
+        rejected_state,
+        rejected_state ++ input,
+        queued_state ++ input ++ queue ++ work,
+        processing_state ++ input ++ queue ++ binding ++ work,
+        processing_state ++ input ++ queue ++ binding ++ work ++ recovery,
+        permission_state ++ input ++ queue ++ permission_work,
+        permission_state ++ input ++ queue ++ binding ++ permission_work,
+        permission_state ++ input ++ queue ++ binding ++ permission_work ++ recovery,
+        cancelled_state ++ input ++ queue ++ cancelled,
+        completed_state ++ input ++ queue ++ binding ++ completed,
+        completed_state ++ input ++ queue ++ binding ++ completed ++ recovery,
+        cancelled_state ++ input ++ queue ++ binding ++ cancelled,
+        cancelled_state ++ input ++ queue ++ binding ++ cancelled ++ recovery,
+        failed_state ++ input ++ queue ++ binding ++ failed,
+        failed_state ++ input ++ queue ++ binding ++ failed ++ recovery,
+    };
     /// Holes: selected Turn, admission cutoff, completion.
     pub const session_stop = .{ ",\"selection\":{\"turn\":", Hole.optional_id, ",\"admission_cutoff\":\"", Hole.decimal, "\"},\"completion\":{\"status\":\"", Hole{ .tag = SessionStopCompletion }, "\"}" };
     /// Holes: the interruption target's.
@@ -3040,9 +3104,10 @@ pub const command_observation_reply = struct {
 
     /// The largest observation of this kind.
     pub fn maxBytes(comptime kind: CommandKind) usize {
+        @setEvalBranchQuota(30_000);
         const body = switch (kind) {
             .configure => shapeBytes(revision),
-            .message => shapeBytes(input) + maxShapeBytes(.{ queued, excluded, processing, completed, cancelled, failed }) + shapeBytes(progress),
+            .message => maxShapeBytes(message_variants),
             .session_stop => shapeBytes(session_stop),
             .model_interruption => shapeBytes(model_interruption),
             .permission_decision => shapeBytes(permission_decision),
@@ -3063,10 +3128,13 @@ pub const ErrorType = enum { invocation_error, observation_error, busy, unsuppor
 pub const error_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"", Hole{ .tag = ErrorType }, "\",\"code\":", Hole{ .string = max_code_bytes }, "}" };
 pub const max_control_error_response_bytes = shapeBytes(error_reply);
 
-pub const max_control_response_bytes = @max(
+pub const max_mutation_response_bytes = @max(
     @max(@max(configuration_reply.max_bytes, message_reply.max_bytes), @max(session_stop_reply.max_bytes, model_interruption_reply.max_bytes)),
-    @max(@max(permission_decision_reply.max_bytes, command_observation_reply.max_bytes), max_control_error_response_bytes),
+    @max(permission_decision_reply.max_bytes, max_control_error_response_bytes),
 );
+/// Maximum wire payload across mutation and observation control routes; not
+/// a resident Host buffer capacity. Observations use their exchange writer.
+pub const max_control_response_bytes = @max(max_mutation_response_bytes, command_observation_reply.max_bytes);
 
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
 /// (decimal or `unlimited`), start time, slots in use, whether new Turns
@@ -3092,7 +3160,9 @@ pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"ho
 pub const host_pause_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_pause_reply\",\"paused\":", Hole.boolean, "}" };
 // Only bounded replies and errors use this resident buffer. Complete reports
 // and result content use their independent streamed delivery paths.
-pub const max_response_bytes = @max(@max(max_control_response_bytes, max_host_info_response_bytes), @max(host_stop_ack.len, shapeBytes(host_pause_reply)));
+/// The fixed small reply/Host trace buffer. Message recovery is rendered into
+/// its exchange-owned writer instead of growing every Host trace stack.
+pub const max_response_bytes = @max(@max(max_mutation_response_bytes, max_host_info_response_bytes), @max(host_stop_ack.len, shapeBytes(host_pause_reply)));
 
 pub const conversation_page_reply = struct {
     /// Hole: the page end.
@@ -3192,6 +3262,7 @@ pub fn FixedJsonBuffer(comptime capacity: usize) type {
 
 pub const RequestBuffer = FixedJsonBuffer(max_client_request_bytes);
 pub const ResponseBuffer = FixedJsonBuffer(max_response_bytes);
+pub const CommandObservationBuffer = FixedJsonBuffer(command_observation_reply.max_bytes);
 
 fn parseForTest(parser: *Parser) !Request {
     var request: Request = undefined;

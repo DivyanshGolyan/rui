@@ -239,7 +239,7 @@ Observation by core idempotency key returns one of these results:
 | --- | --- |
 | Absent | No authoritative answer is recorded. |
 | Original rejection | The committed rejection, even if current conditions now permit the command. |
-| Original acceptance | The committed acceptance plus current progress for that command. Messages expose queue status, their processing binding/result or exclusion; stops follow their saved selection. |
+| Original acceptance | The committed acceptance plus current progress for that command. Messages expose Host-derived `state`, admission time, their `binding`/result or exclusion, pending work and optional recovery; stops follow their saved selection. |
 
 Progress never rewrites the admission answer.
 Scalar observations suffice; batching is optional, and reads or waits cannot require every notification.
@@ -284,19 +284,21 @@ Listing/following local handles uses a metadata-only identity projection that ca
 Client owns keyed observation and result decoding for checking **one submitted request**, independently of local capture availability.
 Its owned facts validate the queried key and expose the original operation kind and Session; selected Message callers additionally check these against their saved address.
 The original admission remains `accepted` even when later work fails or is cancelled.
-A terminal Message result takes precedence over coarser queue/progress hints; failed/completed processing must carry its Turn/Operation/Attempt binding, while stop-excluded input has a cancelled result without an invented Turn.
+The Host derives the Message's required `state`; clients retain it rather than derive another lifecycle from metadata.
+A terminal Message result takes precedence over Session work; failed/completed work must carry its Turn/Operation/Attempt `binding`, while stop-excluded input has `state:"cancelled"` and a cancelled result without an invented Turn.
+The binding remains present after bound work ends; its presence is not a running-state signal.
 Supported metadata for CLI consumers is:
 
 | Observation | Supported facts |
 | --- | --- |
-| Common | Key; absent, accepted or rejected admission; kind, original Session and rejection code when present |
+| Common | Key; absent, accepted or rejected admission; kind, original Session and rejection code when present; CLI `request inspect` adds top-level `as_of`, its Unix seconds at render as a canonical decimal string |
 | Configure | Accepted revision and created flag |
-| Message | Input text length/digest reference; queue status/admission; scalar Turn/Operation/Attempt; terminal status/code or answer text reference; progress status and nullable actionable Action |
+| Message | Required Host-derived `state`; input text length/digest reference; `queue` admission and `admitted_at`; optional `binding` Turn/Operation/Attempt; nonterminal `work` with Session work `state` and nullable `first_action`; optional retained `recovery`; terminal result status/code or answer text reference |
 | Session stop | Original selected nullable Turn, admission cutoff and pending/completed semantic completion |
 | Model Interruption / Permission Decision | Original Session/Turn/Operation or Action/decision, including retained rejected targets |
 
 One bounded parse validates the entire keyed envelope, consumed duplicates, string-only named statuses/kinds, canonical decimal IDs, content-reference syntax and operation applicability.
-An omitted field is distinct from invalid present null; only required nullable selection/progress fields accept null.
+An omitted field is distinct from invalid present null; only fields declared nullable, such as selection Turn and `work.first_action`, accept null.
 Unknown extensions are syntax-validated and discarded, not retained as a DOM or emitted through ordinary output.
 Strings belong to fixed-storage facts; returned string slices borrow that value until it leaves scope, independently of receive-buffer reuse.
 Human and semantic JSON render these same facts.
@@ -1321,6 +1323,7 @@ The step to 53 records a Session's parent (D27).
 The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
 The step to 55 adds the saved model facts and their catalog source.
+The step to 56 adds the bounded outcome-unknown Message recovery index and moves saved wire 8 metadata to wire 9.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -1986,7 +1989,7 @@ Request fields are `version`, `kind`, canonical `store`, `workspace` (exact cano
 A first page may also carry `since`, an opaque token from an earlier reply.
 Response `session_list` has up to eight `sessions`, then `delta`, a new `since` token, and `next` as either `null` or a continuation.
 Each row has exact `reference`, `workspace`, `provider`, `model`, `tools` and `permission_mode`; nullable `parent` (the creator’s six-character Session reference for an attached agent, otherwise `null`); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
-`work` is the same value that activity pages, Current and Message progress carry.
+`work` is the same value that activity pages, Current and Message observations carry.
 With `since`, the Host answers one of three `delta` values.
 `not_modified` means no row has changed on this Host since the token; it is answered before any Store entry, lock or scratch, and never while the Store is fenced.
 `changed` returns only the Sessions in the request's scope whose rows may have changed since the token, read fresh, in reference order, eight per page; its continuation carries the same `since`, the first page's `through` and the last `after_reference`, and a continuation the hint no longer covers restarts as a `full` first page.
@@ -2392,12 +2395,12 @@ Result, inspection and Session-list streaming use existing 4-KiB windows; a sync
 Partial delivery is not a complete response.
 Host discovery keeps its separate absolute deadline.
 
-The direct client owns selected-Message interpretation: a Store/Session/key address needs no local capture, and observation validates the wire envelope, exact key, command kind and Session binding before returning typed admission/outcome, failure code and optional progress/Action facts.
-The selected terminal outcome takes precedence over queue and progress hints; missing progress stays absent, never fabricated runnable work.
+The direct client owns selected-Message interpretation: a Store/Session/key address needs no local capture, and observation validates the wire envelope, exact key, command kind and Session binding before returning typed admission, Host-derived Message state/outcome, failure code and optional work/Action facts.
+The selected terminal outcome takes precedence over Session work; terminal observations omit `work`, never fabricate runnable work.
 Non-200, absent, malformed or mismatched observations remain read errors, not saved work failures.
 Observation uses [Client's supported fixed-storage facts](#recovering-a-submission-after-a-lost-reply); returned code slices borrow the observation value until it leaves scope, independently of reply-buffer reuse.
 Output renders those facts, not unknown extensions; completed answer bytes keep their streamed read path.
-The human frontend owns live observation and transient status based on queue, progress status and Action presence.
+The human frontend owns live observation and transient status based on Message `state`, Session work and Action presence.
 The exact Action ID remains the attention target without periodic reminders.
 Current inspection and keyed observations are separate coherent snapshots, not a combined transaction or re-selection rule.
 No reader substitutes a successor's result for the originally selected Message.
@@ -3171,17 +3174,31 @@ These reads alone do not complete opening.
 
 ### Work state and wait conditions
 
-Message work follows its own processing binding or exclusion.
+A Message observation follows its own `binding` or exclusion.
 Unbound queued input may depend on a predecessor's active Turn; bound input depends on its own Turn.
 Neither inherits an unrelated Turn's failure.
-Summaries use this precedence:
+One Host function derives the required Message `state` with this precedence; readers switch on it instead of deriving it from `queue` or `work`:
 
-| Condition, checked in order | Work status |
+| Condition, checked in order | Message `state` |
 | --- | --- |
-| The message has a terminal outcome | `completed`, `failed` or `cancelled`. |
-| Execution is admitted or a retry is eligible in the future | `in_flight`. |
-| Permission is actionable and no work can progress | `waiting_for_permission`. |
-| Otherwise | `runnable`. |
+| The admission was rejected | `rejected`. |
+| The Message has a terminal result | Its result status: `completed`, `failed` or `cancelled`. |
+| A stop excluded the input | `cancelled`, without an invented binding. |
+| The Session work's coarse progress is `waiting_for_permission` | `waiting_for_permission`, including unbound input queued behind that permission dependency. |
+| The Message is bound to a Turn | `processing`. |
+| Otherwise | `queued`. |
+
+`queue` carries its admission ID and `admitted_at`, the admission's Host Unix second, as decimal strings; it has no status member.
+`binding` carries the bound Turn, its current Operation and Attempt, including after a terminal result; it replaces the former `processing` object and says nothing by itself about completion.
+Only nonterminal accepted Messages carry `work`, with the same Session `state` value as Current and list rows and nullable `first_action`, the earliest actionable Permission Request's Action ID.
+There is no separate coarse work status or duplicate Turn/Operation binding in `work`.
+CLI `request inspect` adds `as_of` beside `key`, its Unix seconds at render, so a caller can compare that decimal string with `work.state.since` without knowing the time.
+
+Optional `recovery` reports the bound Turn's Actions saved with `resolution_code='indeterminate'`, not an inferred Host restart or model retry.
+It carries at most four `unknown_outcomes`, newest Actions first by descending Operation and then call ordinal, not by `resolved_at` chronology, each with decimal-string `action`, `operation`, call ordinal `call` and resolution Unix second `at`, plus nullable saved tool-call `description`.
+`action` can be inspected with `rui action inspect`; `more` says whether older unknown outcomes were omitted.
+Once present, recovery remains visible after the Message ends.
+An indexed `EXISTS` in the Message observation gates the bounded recovery read through `action_operation_indeterminate`, so a Message without recovery pays no extra read and history never makes this read grow.
 
 **Session work** is one derived value for the Session as a whole.
 One pure core, `src/session_work.zig`, owns its precedence, and no phase is stored.
@@ -3216,12 +3233,13 @@ Each state carries `since`, the Host Unix second the Session entered it, read fr
 - **`resets_at`** comes from the failed Operation's saved diagnostic.
   A missing or unreadable diagnostic reads `null` and fences nothing.
 - **Inputs that contradict** the table's preconditions are canonical corruption, and the Store fences, as other readers do.
-- **Message progress** for a pending Message reports the coarse status of this value, following the Message work table: `working`, `retrying`, `bash` and `stopping` are `in_flight`, `approval` is `waiting_for_permission`, and `pending` is `runnable`.
+- **Message work** retains this full value as `work.state` while pending.
+  Its coarse permission dependency informs the Host-derived Message `state` above, and `first_action` may still name an actionable sibling while Bash is running.
 
 History supports recent entries, kind filters and after-position reads; unapplied input and reasons remain separately readable.
 
-The Host reads a Message's admission, binding/exclusion, outcome and, while pending, Session progress and earliest actionable Permission Request in one Store-owned observation.
-Progress is a client-neutral fact, not a prompt or authorization instruction.
+The Host reads a Message's admission, binding/exclusion, outcome and, while pending, Session work and earliest actionable Permission Request in one Store-owned observation, with the gated recovery read under the same ownership.
+Work and recovery are client-neutral facts, not prompts or authorization instructions.
 This is not a global cross-owner snapshot.
 Current supplies a Session's summary and one-time work selection.
 Repeated observation by the human frontend or caller-owned polling retains no connection between reads.

@@ -2238,11 +2238,12 @@ fn proveScratchNamespaceIsolation(provider_first: bool) !void {
     if (!provider_first) try Overlap.admit(body[split..]);
     try std.testing.expect(Overlap.admitted);
 
-    const observed = try setup.storage.observeCommand("scratch-report");
+    var observed: store.CommandObservation = undefined;
+    try setup.storage.observeCommand("scratch-report", &observed);
     try std.testing.expectEqual(.accepted, observed.status);
-    try std.testing.expectEqual(.queued, observed.message.?.queue.?.state);
+    try std.testing.expectEqual(.queued, observed.kind.message.?.queue.?.state);
     var reader: store.ContentReader = undefined;
-    reader.open(try setup.storage.openContent(observed.message.?.content));
+    reader.open(try setup.storage.openContent(observed.kind.message.?.content));
     defer reader.close();
     var actual: [text.len + 1]u8 = undefined;
     const count = try reader.read(0, &actual);

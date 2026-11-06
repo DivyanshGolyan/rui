@@ -1481,7 +1481,8 @@ def prove_terminal_stop_budget():
 
             def observe(store, key, **kwargs):
                 clock[0] += 2
-                return {"processing": {"turn": "1", "operation": "1", "attempt": "1"},
+                return {"state": "completed" if key == "capture-message" else "cancelled",
+                        "binding": {"turn": "1", "operation": "1", "attempt": "1"},
                         "result": {"status": "completed" if key == "capture-message" else "cancelled"}}
 
             def read(*args, **kwargs):

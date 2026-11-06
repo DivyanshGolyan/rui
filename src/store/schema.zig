@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 55;
+pub const schema_version: u32 = 56;
 /// `digest()` of each schema_version, oldest first. Each format PR appends
 /// its own version and forward step (D226); main's digests and steps are
 /// immutable even before release. tests/ci/test_store_schema_version.py
@@ -33,6 +33,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 53, .digest = 0x80e0a8d969288327 },
     .{ .schema_version = 54, .digest = 0xae916e0373329df9 },
     .{ .schema_version = 55, .digest = 0x4acf921dca365b6e },
+    .{ .schema_version = 56, .digest = 0xbdf9ac7b6016b1da },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -80,7 +81,7 @@ pub const Migration = struct {
 
 /// Every step from `migration_baseline` to `schema_version`, oldest first.
 /// The baseline snapshots (migration_baseline.*.sql) never change; the
-/// chain grows. Only a step past the released schema_version may change.
+/// chain grows; steps already on main or released never change (D226).
 pub const migrations = [_]Migration{
     // 52 (T1e): MCP tool records name their server, host_catalog names the
     // Host's catalog set, and a catalog set holds up to
@@ -205,6 +206,18 @@ pub const migrations = [_]Migration{
         .mysql = &.{
             "CREATE TABLE model_fact(\n model_id VARCHAR(256) NOT NULL,\n context_window BIGINT,\n efforts BIGINT NOT NULL,\n openai_listed TINYINT NOT NULL,\n generation BIGINT NOT NULL,\n PRIMARY KEY(model_id),\n CHECK(OCTET_LENGTH(model_id) BETWEEN 1 AND 256),\n CHECK(efforts BETWEEN 0 AND 63),\n CHECK(openai_listed IN (0,1))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "CREATE TABLE model_catalog_source(\n slot BIGINT NOT NULL,\n etag TEXT,\n generation BIGINT NOT NULL,\n fetched_at BIGINT NOT NULL,\n PRIMARY KEY(slot),\n CHECK(slot=1),\n CHECK(etag IS NULL OR OCTET_LENGTH(etag)<=512)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+        },
+    },
+    // Schema 56: bounded outcome-unknown Message recovery and wire 9.
+    .{
+        .from = 55,
+        .sqlite = &.{
+            "CREATE INDEX action_operation_indeterminate ON action_operation(session_ref,parent_operation_id,call_ordinal) WHERE resolution_code='indeterminate'",
+            "UPDATE store_meta SET meta_value='9' WHERE meta_key='wire_version' AND meta_value='8'",
+        },
+        .mysql = &.{
+            "ALTER TABLE action_operation ADD COLUMN action_operation_indeterminate_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN resolution_code='indeterminate' THEN session_ref END) STORED, ADD INDEX action_operation_indeterminate(action_operation_indeterminate_lead,parent_operation_id,call_ordinal)",
+            "UPDATE store_meta SET meta_value='9' WHERE meta_key='wire_version' AND meta_value='8'",
         },
     },
 };
@@ -1103,6 +1116,7 @@ pub const indexes = [_]Index{
     .{ .name = "action_operation_approval", .table = "action_operation", .columns = &.{ "session_ref", "approval_position" }, .where = "approval_position IS NOT NULL" },
     .{ .name = "action_operation_executable", .table = "action_operation", .columns = &.{"action_id"}, .where = "authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0" },
     .{ .name = "action_operation_unresolved_attempt", .table = "action_operation", .columns = &.{"action_id"}, .where = "resolution_code IS NULL AND attempt_ordinal=1" },
+    .{ .name = "action_operation_indeterminate", .table = "action_operation", .columns = &.{ "session_ref", "parent_operation_id", "call_ordinal" }, .where = "resolution_code='indeterminate'" },
     // Calls walk it (`report.full_calls`).
     .{ .name = "model_tool_call_session_order", .table = "model_tool_call", .columns = &.{ "session_ref", "operation_id", "call_ordinal" } },
     // Results walk it: the predicate holds exactly for a rejected call
@@ -2122,6 +2136,9 @@ test "a leading index's MySQL table computes its first column" {
     const mysql_ddl = comptime ddl(.mysql);
     try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, " session_stop_unpositioned_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN position IS NULL THEN session_ref END) STORED,") != null);
     try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, "CREATE INDEX session_stop_unpositioned ON session_stop(session_stop_unpositioned_lead);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, " action_operation_indeterminate_lead VARCHAR(6) GENERATED ALWAYS AS (CASE WHEN resolution_code='indeterminate' THEN session_ref END) STORED,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mysql_ddl, "CREATE INDEX action_operation_indeterminate ON action_operation(action_operation_indeterminate_lead,parent_operation_id,call_ordinal);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, comptime ddl(.sqlite), "CREATE INDEX action_operation_indeterminate ON action_operation(session_ref,parent_operation_id,call_ordinal) WHERE resolution_code='indeterminate';") != null);
     // SQLite keeps its partial index.
     try std.testing.expect(std.mem.indexOf(u8, comptime ddl(.sqlite), "CREATE INDEX session_stop_unpositioned ON session_stop(session_ref) WHERE position IS NULL;") != null);
 }

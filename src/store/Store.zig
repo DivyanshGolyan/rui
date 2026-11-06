@@ -711,16 +711,16 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.decidePermission(&access, command, faults))) catch .infrastructure_failure;
     }
 
-    pub fn observeCommand(self: *Store, key: []const u8) !CommandObservation {
-        return self.queue().run(observeCommandHeld, .{ self, key });
+    pub fn observeCommand(self: *Store, key: []const u8, out: *CommandObservation) !void {
+        return self.queue().run(observeCommandHeld, .{ self, key, out });
     }
 
-    fn observeCommandHeld(self: *Store, key: []const u8) !CommandObservation {
+    fn observeCommandHeld(self: *Store, key: []const u8, out: *CommandObservation) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, command_domain.observeCommand(&access, key));
+        return entry.finish(Ordinary.none, command_domain.observeCommand(&access, key, out));
     }
 
     pub fn commandResult(self: *Store, key: []const u8) !ContentReference {

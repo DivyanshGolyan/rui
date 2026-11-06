@@ -8,6 +8,7 @@ const std = @import("std");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const protocol = @import("../../protocol.zig");
+const session_work = @import("../../session_work.zig");
 const codec_abi = @import("../../codec_abi.zig");
 const output_format = @import("../../output_format.zig");
 const model_capability = @import("../../model_capability.zig");
@@ -352,15 +353,20 @@ pub const PublicConversationPage = struct {
 pub const MessageObservation = struct {
     content: ContentReference,
     queue: ?AcceptedMessageQueue = null,
-    // Present only while this admission can still advance. This is a fact
-    // about its active dependency, not an instruction to a particular caller.
-    progress: ?MessageProgress = null,
+    admitted_at: u64 = 0,
+    /// The Session's complete work, only while this admission can advance.
+    work: ?session_work.Work = null,
+    recovery: Recovery = .{},
 };
 
-pub const MessageProgress = struct {
-    status: protocol.MessageProgressStatus,
-    action_id: ?u64 = null,
+pub const Recovery = struct {
+    pub const capacity = protocol.message_recovery_limit;
+    calls: [capacity]UnknownOutcome = undefined,
+    count: u8 = 0,
+    more: bool = false,
 };
+
+pub const UnknownOutcome = protocol.MessageUnknownOutcome;
 
 pub const AcceptedMessageQueue = struct {
     admission_id: u64,

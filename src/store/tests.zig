@@ -339,7 +339,7 @@ pub fn configureTestSessionAsk(
     return configureTestSessionWithMode(storage, key, "ask");
 }
 
-fn configureTestSessionWithMode(
+pub fn configureTestSessionWithMode(
     storage: *Store,
     key: []const u8,
     mode: []const u8,
@@ -1584,7 +1584,7 @@ test "Current preserves empty Message identity across queue, active Turn and his
             defer storage.close() catch unreachable;
             const session = try configureTestSession(&storage, "empty-key-config");
             try submitTestMessage(&storage, &tmp, "empty-key-file", "", session.slice(), "input");
-            try std.testing.expectEqual(protocol.MessageProgressStatus.runnable, (try storage.observeCommand("")).message.?.progress.?.status);
+            try std.testing.expectEqual(protocol.MessageProgressStatus.runnable, (try store_testing.observeCommandForTesting(&storage, "")).kind.message.?.work.?.state.progress().?);
             {
                 const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
                 defer std.testing.allocator.free(bytes);
@@ -1593,7 +1593,7 @@ test "Current preserves empty Message identity across queue, active Turn and his
                 try std.testing.expectEqualStrings("", report.value.object.get("selected_message").?.string);
             }
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, (try storage.observeCommand("")).message.?.progress.?.status);
+            try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, (try store_testing.observeCommandForTesting(&storage, "")).kind.message.?.work.?.state.progress().?);
             {
                 const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
                 defer std.testing.allocator.free(bytes);
@@ -1602,7 +1602,7 @@ test "Current preserves empty Message identity across queue, active Turn and his
                 try std.testing.expectEqualStrings("", report.value.object.get("selected_message").?.string);
             }
             try storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "provider_http_422" }, .ordinary, .{});
-            try std.testing.expect((try storage.observeCommand("")).message.?.progress == null);
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "")).kind.message.?.work == null);
             try submitTestMessage(&storage, &tmp, "after-empty-file", "after-empty", session.slice(), "next");
             {
                 const bytes = try testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024);
@@ -1849,8 +1849,8 @@ test "Full attributes unbound Messages to the earliest covering stop" {
             try std.testing.expectEqual(@as(usize, 2), messages.len);
             try std.testing.expectEqualStrings("z-first-stop", messages[0].object.get("exclusion").?.object.get("command_key").?.string);
             try std.testing.expectEqualStrings("m-third-stop", messages[1].object.get("exclusion").?.object.get("command_key").?.string);
-            const first_observation = (try storage.observeCommand("stop-merge-message-1")).message.?.queue.?.state.excluded;
-            const second_observation = (try storage.observeCommand("stop-merge-message-2")).message.?.queue.?.state.excluded;
+            const first_observation = (try store_testing.observeCommandForTesting(&storage, "stop-merge-message-1")).kind.message.?.queue.?.state.excluded;
+            const second_observation = (try store_testing.observeCommandForTesting(&storage, "stop-merge-message-2")).kind.message.?.queue.?.state.excluded;
             try std.testing.expectEqualStrings("session_stopped", first_observation.code.slice());
             try std.testing.expectEqualStrings("session_stopped", second_observation.code.slice());
         }
@@ -1943,7 +1943,12 @@ test "Current, activity pages and Message progress report one work through an ap
             const action_id = try std.fmt.parseInt(u64, first.object.get("action").?.string, 10);
             try std.testing.expectEqualStrings("approval", parsed.value.object.get("work").?.object.get("state").?.object.get("kind").?.string);
             try pageWorkAgrees(&storage, parsed.value, action_id);
-            try std.testing.expectEqual(protocol.MessageProgressStatus.waiting_for_permission, (try storage.observeCommand("mixed-message")).message.?.progress.?.status);
+            try std.testing.expectEqual(protocol.MessageProgressStatus.waiting_for_permission, (try store_testing.observeCommandForTesting(&storage, "mixed-message")).kind.message.?.work.?.state.progress().?);
+            try submitTestMessage(&storage, &tmp, "mixed-queued-file", "mixed-queued", session.slice(), "wait behind approval");
+            const queued = try store_testing.observeCommandForTesting(&storage, "mixed-queued");
+            try std.testing.expect(queued.kind.message.?.queue.?.state == .queued);
+            try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, queued.requestState().?);
+            try std.testing.expectEqual(action_id, queued.kind.message.?.work.?.first_action.?);
             var allow: protocol.PermissionDecisionCommand = .{ .action_id = action_id, .decision = .allow_once };
             try allow.key.set("mixed-allow");
             try allow.session.set(session.slice());
@@ -1957,10 +1962,10 @@ test "Current, activity pages and Message progress report one work through an ap
             defer mixed.deinit();
             try std.testing.expectEqualStrings("pending", mixed.value.object.get("work").?.object.get("state").?.object.get("kind").?.string);
             try std.testing.expectEqual(@as(usize, 1), mixed.value.object.get("actionable_permissions").?.array.items.len);
-            var message = (try storage.observeCommand("mixed-message")).message.?;
+            var message = (try store_testing.observeCommandForTesting(&storage, "mixed-message")).kind.message.?;
             try std.testing.expectEqualStrings("processing", @tagName(message.queue.?.state));
-            try std.testing.expectEqual(protocol.MessageProgressStatus.runnable, message.progress.?.status);
-            try std.testing.expectEqual(action_id + 1, message.progress.?.action_id.?);
+            try std.testing.expectEqual(protocol.MessageProgressStatus.runnable, message.work.?.state.progress().?);
+            try std.testing.expectEqual(action_id + 1, message.work.?.first_action.?);
             try pageWorkAgrees(&storage, mixed.value, action_id + 1);
 
             // Once it runs, the Session is in Bash with one approval outstanding.
@@ -1973,8 +1978,8 @@ test "Current, activity pages and Message progress report one work through an ap
             try std.testing.expectEqualStrings("bash", state.get("kind").?.string);
             try std.testing.expectEqualStrings("1", state.get("running").?.string);
             try std.testing.expectEqualStrings("1", state.get("approvals").?.string);
-            message = (try storage.observeCommand("mixed-message")).message.?;
-            try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, message.progress.?.status);
+            message = (try store_testing.observeCommandForTesting(&storage, "mixed-message")).kind.message.?;
+            try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, message.work.?.state.progress().?);
             try pageWorkAgrees(&storage, bash.value, action_id + 1);
         }
     }.run);
@@ -2032,8 +2037,8 @@ pub fn expectOneWork(storage: *Store, tmp: *std.testing.TmpDir, session: []const
 }
 
 fn expectProgress(storage: *Store, key: []const u8, status: protocol.MessageProgressStatus) !void {
-    const message = (try storage.observeCommand(key)).message.?;
-    try std.testing.expectEqual(status, message.progress.?.status);
+    const message = (try store_testing.observeCommandForTesting(storage, key)).kind.message.?;
+    try std.testing.expectEqual(status, message.work.?.state.progress().?);
 }
 
 test "Current, activity pages and Message progress report one work in each state" {
@@ -2267,7 +2272,7 @@ test "earlier Action settlement remains authoritative after Session stop" {
             try std.testing.expect(stop_replay.accepted.replayed);
             try std.testing.expectEqual(accepted.accepted.selection, stop_replay.accepted.selection);
             try std.testing.expect(
-                (try storage.observeCommand("settlement-first-later")).message.?.queue.?.state == .queued,
+                (try store_testing.observeCommandForTesting(&storage, "settlement-first-later")).kind.message.?.queue.?.state == .queued,
             );
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE session_ref=?1 AND outcome_code='cancelled'", .{allocated_session_0.slice()}));
         }
@@ -2873,7 +2878,7 @@ test "production turn preserves skipped continuation preference through actual S
             // A circular cursor reset by the Bash winner, or the old combined
             // fresh-input-first Store selector, admits fresh work here instead.
             try std.testing.expectEqual(peer.turn_id, context.model.?.turn_id);
-            try std.testing.expect((try storage.observeCommand("fresh-message")).message.?.queue.?.state == .queued);
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "fresh-message")).kind.message.?.queue.?.state == .queued);
 
             // Keep fresh Messages available while actual retries, Bash and tool-only
             // continuations repeatedly commit. The fixture makes retry clocks due;
@@ -3553,7 +3558,7 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
             var view: HistoricalView = undefined;
             try std.testing.expectError(error.SupersededByControl, storage.openHistoricalView(binding, &view));
 
-            const cancelled = (try storage.observeCommand("message-a")).message.?.queue.?;
+            const cancelled = (try store_testing.observeCommandForTesting(&storage, "message-a")).kind.message.?.queue.?;
             const cancellation = switch (cancelled.state) {
                 .cancelled => |value| value,
                 else => return error.ExpectedCancelledObservation,
@@ -3582,7 +3587,7 @@ test "Session stop freezes its selection and excludes only the admitted prefix" 
             try std.testing.expect(replay.accepted.replayed);
             try std.testing.expectEqual(protocol.SessionStopCompletion.completed, replay.accepted.completion);
             try std.testing.expectEqual(@as(u64, 1), replay.accepted.selection.admission_cutoff);
-            try std.testing.expect((try storage.observeCommand("message-b")).message.?.queue.?.state == .queued);
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "message-b")).kind.message.?.queue.?.state == .queued);
             const later = (try storage.admitNextModelAttempt(.{})).?;
             try std.testing.expect(later.permit.binding.turn_id != binding.turn_id);
         }
@@ -3610,7 +3615,7 @@ test "later idle stop does not reclassify a completed Message" {
             try std.testing.expect(accepted == .accepted);
             try std.testing.expect(accepted.accepted.selection.selected_turn_id == null);
             try std.testing.expectEqual(protocol.SessionStopCompletion.completed, accepted.accepted.completion);
-            try std.testing.expect((try storage.observeCommand("completed-stop-message")).message.?.queue.?.state == .completed);
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "completed-stop-message")).kind.message.?.queue.?.state == .completed);
 
             const report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
             defer std.testing.allocator.free(report);
@@ -3644,7 +3649,7 @@ test "idle Session stop excludes queued work but not later admissions" {
             try std.testing.expectEqual(@as(u64, 1), accepted.accepted.selection.admission_cutoff);
             try std.testing.expectEqual(protocol.SessionStopCompletion.completed, accepted.accepted.completion);
             try std.testing.expectEqual(@as(?u64, null), accepted.accepted.interrupted_operation_id);
-            const excluded = (try storage.observeCommand("idle-message-a")).message.?.queue.?;
+            const excluded = (try store_testing.observeCommandForTesting(&storage, "idle-message-a")).kind.message.?.queue.?;
             try std.testing.expect(excluded.state == .excluded);
             try std.testing.expectEqualStrings("session_stopped", excluded.state.excluded.code.slice());
             const excluded_report = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
@@ -3673,10 +3678,10 @@ test "idle Session stop excludes queued work but not later admissions" {
                 try std.testing.expectEqual(accepted.accepted.selection, replay.accepted.selection);
                 try std.testing.expectEqual(protocol.SessionStopCompletion.completed, replay.accepted.completion);
                 try std.testing.expectEqual(@as(?u64, null), replay.accepted.interrupted_operation_id);
-                const newer = (try storage.observeCommand("idle-message-b")).message.?.queue.?.state;
+                const newer = (try store_testing.observeCommandForTesting(&storage, "idle-message-b")).kind.message.?.queue.?.state;
                 try std.testing.expect(newer == .processing);
                 try std.testing.expectEqual(later.permit.binding, newer.processing);
-                const original = (try storage.observeCommand("idle-message-a")).message.?.queue.?.state;
+                const original = (try store_testing.observeCommandForTesting(&storage, "idle-message-a")).kind.message.?.queue.?.state;
                 try std.testing.expect(original == .excluded);
                 try std.testing.expectEqualStrings("session_stopped", original.excluded.code.slice());
             }
@@ -3686,7 +3691,7 @@ test "idle Session stop excludes queued work but not later admissions" {
             try std.testing.expectEqual(later.permit.binding.turn_id, stopped.accepted.selection.selected_turn_id.?);
             try std.testing.expectEqual(@as(u64, 2), stopped.accepted.selection.admission_cutoff);
             try std.testing.expectEqual(later.permit.binding.operation_id, stopped.accepted.interrupted_operation_id.?);
-            try std.testing.expect((try storage.observeCommand("idle-message-b")).message.?.queue.?.state == .cancelled);
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "idle-message-b")).kind.message.?.queue.?.state == .cancelled);
         }
     }.run);
 }
@@ -3715,15 +3720,15 @@ test "exact model interruption continues only with applicable pending input" {
             try std.testing.expectEqual(binding.turn_id, successor.permit.binding.turn_id);
             try std.testing.expect(successor.permit.binding.operation_id != binding.operation_id);
 
-            const observation = try storage.observeCommand("interrupt");
-            try std.testing.expectEqual(binding.turn_id, observation.model_interruption.?.turn_id);
-            try std.testing.expectEqual(binding.operation_id, observation.model_interruption.?.operation_id);
+            const observation = try store_testing.observeCommandForTesting(&storage, "interrupt");
+            try std.testing.expectEqual(binding.turn_id, observation.kind.model_interruption.turn_id);
+            try std.testing.expectEqual(binding.operation_id, observation.kind.model_interruption.operation_id);
 
             try std.testing.expectError(
                 error.SupersededByControl,
                 storage.settleModelAttemptFailure(binding, .{ .uncorrelated = "late_old_failure" }, .ordinary, .{}),
             );
-            const successor_observation = (try storage.observeCommand("interrupt-message-b")).message.?.queue.?;
+            const successor_observation = (try store_testing.observeCommandForTesting(&storage, "interrupt-message-b")).kind.message.?.queue.?;
             const observed_successor = switch (successor_observation.state) {
                 .processing => |value| value,
                 else => return error.ExpectedProcessingObservation,
@@ -3773,7 +3778,7 @@ test "exact model interruption rejects stale targets and replays before applicab
             var exact = try completeModelInterruption("exact-interrupt", session.slice(), admitted.permit.binding);
             try std.testing.expect(storage.interruptModel(&exact, .{}) == .accepted);
             try std.testing.expect(
-                (try storage.observeCommand("rejected-interrupt-message")).message.?.queue.?.state == .cancelled,
+                (try store_testing.observeCommandForTesting(&storage, "rejected-interrupt-message")).kind.message.?.queue.?.state == .cancelled,
             );
             try std.testing.expectError(
                 error.SupersededByControl,
@@ -3849,15 +3854,15 @@ test "controls remove scheduled retries and replay without cancelling newer work
                     } else {
                         const replay = storage.interruptModel(&interrupt, .{});
                         try std.testing.expect(replay == .accepted and replay.accepted.replayed);
-                        const target = (try storage.observeCommand("retry-control")).model_interruption.?;
+                        const target = (try store_testing.observeCommandForTesting(&storage, "retry-control")).kind.model_interruption;
                         try std.testing.expectEqualStrings(session.slice(), target.session.slice());
                         try std.testing.expectEqual(binding.turn_id, target.turn_id);
                         try std.testing.expectEqual(binding.operation_id, target.operation_id);
                     }
-                    const original = (try storage.observeCommand("retry-message")).message.?.queue.?.state;
+                    const original = (try store_testing.observeCommandForTesting(&storage, "retry-message")).kind.message.?.queue.?.state;
                     try std.testing.expect(original == .cancelled);
                     try std.testing.expectEqual(binding, original.cancelled.binding);
-                    const newer = (try storage.observeCommand("retry-newer-message")).message.?.queue.?.state;
+                    const newer = (try store_testing.observeCommandForTesting(&storage, "retry-newer-message")).kind.message.?.queue.?.state;
                     try std.testing.expect(newer == .processing);
                     try std.testing.expectEqual(newer_binding, newer.processing);
                 }
@@ -4573,7 +4578,7 @@ test "configuration answers replay without reverting newer settings" {
             var content_window: [1]u8 = undefined;
             try std.testing.expectEqual(@as(usize, 0), try reader.read(0, &content_window));
             try std.testing.expectError(error.RangeOutOfBounds, reader.read(1, &content_window));
-            try std.testing.expect((try storage.observeCommand("first")).status == .accepted);
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "first")).status == .accepted);
 
             first.configuration.tools.state = .value;
             first.configuration.tools.count = 0;
@@ -4608,7 +4613,7 @@ test "content reader owns the bounded result-delivery window" {
                 session.slice(),
                 &text,
             );
-            const reference = (try storage.observeCommand("window-message")).message.?.content;
+            const reference = (try store_testing.observeCommandForTesting(&storage, "window-message")).kind.message.?.content;
             var reader: ContentReader = undefined;
             reader.open(try storage.openContent(reference));
             defer reader.close();
@@ -4650,7 +4655,7 @@ test "core preserves empty and NUL keys while Session references stay canonical"
             const observation = try storage.inspectSessionForTesting(session.slice());
             try std.testing.expect(observation.found);
             try std.testing.expectEqualStrings(session.slice(), observation.session.slice());
-            try std.testing.expect((try storage.observeCommand("")).status == .accepted);
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "")).status == .accepted);
 
             var update: protocol.ConfigureCommand = .{};
             try update.key.set("exact\x00key");
@@ -4658,7 +4663,7 @@ test "core preserves empty and NUL keys while Session references stay canonical"
             const updated = storage.configure(&update, .{});
             try std.testing.expect(updated == .accepted and !updated.accepted.created);
             try std.testing.expectEqual(@as(u64, 2), updated.accepted.revision);
-            try std.testing.expect((try storage.observeCommand("exact\x00key")).status == .accepted);
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "exact\x00key")).status == .accepted);
             try std.testing.expect(storage.configure(&update, .{}).accepted.replayed);
 
             var invalid = try completeConfiguration("invalid-nul-session", "exact\x00reference", workspace, "model-a");
@@ -4764,7 +4769,7 @@ test "failed commit saves neither answer nor partial Session" {
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
-                try std.testing.expect((try storage.observeCommand("commit-fault")).status == .absent);
+                try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "commit-fault")).status == .absent);
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
                 try std.testing.expect(storage.configure(&command, .{}) == .accepted);
             }
@@ -4933,9 +4938,9 @@ test "initial Message atomically allocates its Session and replays its original 
                 try std.testing.expect(reply == .accepted);
                 first = reply.accepted;
                 try std.testing.expect(protocol.validSessionId(first.session.slice()));
-                const observed = try storage.observeCommand("start");
+                const observed = try store_testing.observeCommandForTesting(&storage, "start");
                 try std.testing.expect(observed.target.eql(first.session.slice()));
-                try std.testing.expectEqual(first.admission_id, observed.message.?.queue.?.admission_id);
+                try std.testing.expectEqual(first.admission_id, observed.kind.message.?.queue.?.admission_id);
                 try std.testing.expectError(error.ResultNotReady, storage.commandResult("start"));
                 try std.testing.expectEqual(@as(u64, 1), (try storage.inspectSessionForTesting(first.session.slice())).pending_messages);
                 var changed = message;
@@ -4969,7 +4974,7 @@ test "initial Message atomically allocates its Session and replays its original 
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
-                try std.testing.expectEqual(.absent, (try storage.observeCommand("failed-start-commit")).status);
+                try std.testing.expectEqual(.absent, (try store_testing.observeCommandForTesting(&storage, "failed-start-commit")).status);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
             }
@@ -5020,9 +5025,9 @@ test "message rejections replay before current Session checks without retained i
             try std.testing.expectEqualSlices(u8, &protocol.contentDigest(text), &replay.rejected.content.digest);
             try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(configured.accepted.session.slice())).pending_messages);
 
-            const observed = try storage.observeCommand("rejected-message");
+            const observed = try store_testing.observeCommandForTesting(&storage, "rejected-message");
             try std.testing.expect(observed.status == .rejected);
-            try std.testing.expect(observed.message == null);
+            try std.testing.expect(observed.kind.message == null);
         }
     }.run);
 }
@@ -5272,7 +5277,7 @@ test "message observation validates accepted admission references independently"
                 }
                 try std.testing.expectError(
                     error.CorruptStore,
-                    storage.observeCommand("reference-primary-message"),
+                    store_testing.observeCommandForTesting(&storage, "reference-primary-message"),
                 );
                 try std.testing.expect(storage.isFenced());
             }
@@ -5317,7 +5322,7 @@ test "message observation rejects an answer attached to processing durable facts
 
             try std.testing.expectError(
                 error.CorruptStore,
-                storage.observeCommand("corrupt-observation-message"),
+                store_testing.observeCommandForTesting(&storage, "corrupt-observation-message"),
             );
             try std.testing.expect(storage.isFenced());
         }
@@ -5352,7 +5357,7 @@ test "message conflicts and failed commits cannot create another admission" {
             try storage.close();
 
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            try std.testing.expect((try storage.observeCommand("message")).status == .absent);
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "message")).status == .absent);
             try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(created_session_0.slice())).pending_messages);
             const accepted = storage.submitMessageWithModel(&message, null, .{});
             try std.testing.expect(accepted == .accepted);
@@ -5398,7 +5403,7 @@ test "failed message import rolls back content command and admission" {
 
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            try std.testing.expect((try storage.observeCommand("message-import")).status == .absent);
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "message-import")).status == .absent);
             try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(created_session_0.slice())).pending_messages);
             try std.testing.expect(storage.submitMessageWithModel(&message, null, .{}) == .accepted);
         }
@@ -5474,7 +5479,7 @@ test "external content identity is verified before canonical commit" {
             defer command.removeTemporaryContent(std.testing.io) catch unreachable;
 
             try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
-            try std.testing.expectError(error.StoreFenced, storage.observeCommand("changed"));
+            try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "changed"));
         }
     }.run);
 }
@@ -5524,7 +5529,7 @@ test "content verification failure rolls back new imports and deduplicated input
                         },
                     }
                     try std.testing.expect(storage.configure(&command, .{ .content_read = case == .read_failure }) == .infrastructure_failure);
-                    try std.testing.expectError(error.StoreFenced, storage.observeCommand("invalid"));
+                    try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "invalid"));
                     try std.testing.expectEqual(content_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
                     try std.testing.expectEqual(command_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{}));
                     try std.testing.expectEqual(revision_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
@@ -5584,7 +5589,7 @@ test "content import reads once and rolls back sources that change during readin
                     try std.testing.expectEqual(length, Probe.bytes_read);
                 } else {
                     try std.testing.expect(storage.configure(&command, .{}) == .infrastructure_failure);
-                    try std.testing.expectError(error.StoreFenced, storage.observeCommand("read-probe"));
+                    try std.testing.expectError(error.StoreFenced, store_testing.observeCommandForTesting(&storage, "read-probe"));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE content_id NOT IN (SELECT description_content_id FROM tool_record) AND content_id NOT IN (SELECT input_schema_content_id FROM tool_record)", .{}));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{}));
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
@@ -6990,8 +6995,8 @@ test "compaction success retains host inputs and ordered anchor suffix across re
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
             // Recovery eligibility changes the Turn outcome, never the failure fact.
             try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='context_overflow'", .{}));
-            const observation = try storage.observeCommand("input");
-            try std.testing.expectEqualStrings("ResourceExceeded", observation.message.?.queue.?.state.failed.code.slice());
+            const observation = try store_testing.observeCommandForTesting(&storage, "input");
+            try std.testing.expectEqualStrings("ResourceExceeded", observation.kind.message.?.queue.?.state.failed.code.slice());
         }
     }.run);
 }
@@ -7481,8 +7486,8 @@ test "compaction repeated overflow consumes fixed pending prefix without a proac
                 try storage.settleModelAttemptFailure(recovery, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
                 try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
                 try std.testing.expectEqual(@as(u64, 0), (try storage.inspectSessionForTesting(session.slice())).pending_messages);
-                const observation = try storage.observeCommand("pending");
-                try std.testing.expectEqualStrings("ResourceExceeded", observation.message.?.queue.?.state.failed.code.slice());
+                const observation = try store_testing.observeCommandForTesting(&storage, "pending");
+                try std.testing.expectEqualStrings("ResourceExceeded", observation.kind.message.?.queue.?.state.failed.code.slice());
                 try std.testing.expect(!storage.isFenced());
             }
         }
@@ -8303,7 +8308,7 @@ pub const TestingAttempt = struct {
         try submitTestMessage(storage, tmp, "attempt-input", "attempt-message", session.slice(), "work");
         return .{
             .binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding,
-            .content = (try storage.observeCommand("attempt-message")).message.?.content,
+            .content = (try store_testing.observeCommandForTesting(storage, "attempt-message")).kind.message.?.content,
         };
     }
 
@@ -8557,7 +8562,7 @@ test "failed control commit saves no answer after reopening" {
 
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            try std.testing.expect((try storage.observeCommand("rollback-stop")).status == .absent);
+            try std.testing.expect((try store_testing.observeCommandForTesting(&storage, "rollback-stop")).status == .absent);
         }
     }.run);
 }
@@ -9096,7 +9101,7 @@ test "each Store entry point takes its round budget on its common path" {
             meter.stop(.searchActivity);
             try std.testing.expectEqual(@as(usize, 1), search.count);
             meter.start();
-            _ = try storage.observeCommand("budget-plain-key");
+            _ = try store_testing.observeCommandForTesting(storage, "budget-plain-key");
             meter.stop(.observeCommand);
             meter.start();
             const binding = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
@@ -10977,7 +10982,7 @@ test "preset unknown rejection survives reopen and later resolution" {
                 const refused = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
                 try std.testing.expect(refused == .rejected and !refused.rejected.replayed);
                 try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_preset, refused.rejected.code);
-                const saved = try storage.observeCommand(request.key.slice());
+                const saved = try store_testing.observeCommandForTesting(&storage, request.key.slice());
                 try std.testing.expectEqual(protocol.CommandObservationStatus.rejected, saved.status);
                 try std.testing.expectEqualStrings("unknown_preset", saved.code.slice());
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
@@ -11028,7 +11033,7 @@ test "preset refusal cannot replace an accepted configure key" {
             try request.preset.?.set("missing");
             const result = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .unknown_preset }, .{});
             try std.testing.expect(result == .conflict);
-            const saved = try storage.observeCommand(create.key.slice());
+            const saved = try store_testing.observeCommandForTesting(&storage, create.key.slice());
             try std.testing.expectEqual(protocol.CommandObservationStatus.accepted, saved.status);
             try std.testing.expectEqualStrings(first.accepted.session.slice(), saved.target.slice());
             const replay = storage.configure(&create, .{});
@@ -11062,7 +11067,7 @@ test "preset on update rejection is durable and replayed before applying fields"
                 const refused = storage.configureWithPreset(&request, &.{ .request_digest = request.presetRequestDigest(), .rejection = .preset_on_update }, .{});
                 try std.testing.expect(refused == .rejected and !refused.rejected.replayed);
                 try std.testing.expectEqual(protocol.ConfigurationRejection.preset_on_update, refused.rejected.code);
-                const saved = try storage.observeCommand(request.key.slice());
+                const saved = try store_testing.observeCommandForTesting(&storage, request.key.slice());
                 try std.testing.expectEqual(protocol.CommandObservationStatus.rejected, saved.status);
                 try std.testing.expectEqualStrings("preset_on_update", saved.code.slice());
                 try std.testing.expectEqualStrings(request.session.slice(), saved.target.slice());
@@ -11082,6 +11087,110 @@ test "preset on update rejection is durable and replayed before applying fields"
                 try std.testing.expectEqual(@as(u64, 1), (try reopened.inspectSessionForTesting(request.session.slice())).revision);
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&reopened, "SELECT count(*) FROM session WHERE label IS NULL", .{}));
             }
+        }
+    }.run);
+}
+
+test "Message request state has one Host precedence rule" {
+    var observed: command_domain.CommandObservation = .{ .status = .rejected, .kind = .{ .message = null } };
+    try std.testing.expectEqual(protocol.MessageRequestState.rejected, observed.requestState().?);
+    observed.status = .accepted;
+    observed.kind.message = .{
+        .content = .{ .length = 0, .digest = @splat(0) },
+        .queue = .{ .admission_id = 1, .state = .queued },
+        .work = .{ .state = .{ .idle = .{ .since = 1 } } },
+    };
+    try std.testing.expectEqual(protocol.MessageRequestState.queued, observed.requestState().?);
+    observed.kind.message.?.work.?.state = .{ .approval = .{ .since = 2 } };
+    // A queued admission behind another Turn needing approval also waits.
+    try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observed.requestState().?);
+    const binding: AttemptBinding = .{ .turn_id = 3, .operation_id = 4, .attempt_ordinal = 1 };
+    observed.kind.message.?.queue.?.state = .{ .processing = binding };
+    try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, observed.requestState().?);
+    observed.kind.message.?.work.?.state = .{ .working = .{ .since = 3 } };
+    try std.testing.expectEqual(protocol.MessageRequestState.processing, observed.requestState().?);
+    observed.kind.message.?.work.?.state = .{ .approval = .{ .since = 2 } };
+    observed.kind.message.?.queue.?.state = .{ .completed = .{ .binding = binding, .answer = .{ .length = 0, .digest = @splat(0) } } };
+    try std.testing.expectEqual(protocol.MessageRequestState.completed, observed.requestState().?);
+    observed.kind.message.?.queue.?.state = .{ .failed = .{ .binding = binding, .code = .{} } };
+    try std.testing.expectEqual(protocol.MessageRequestState.failed, observed.requestState().?);
+    observed.kind.message.?.queue.?.state = .{ .cancelled = .{ .binding = binding, .code = .{} } };
+    try std.testing.expectEqual(protocol.MessageRequestState.cancelled, observed.requestState().?);
+    observed.kind.message.?.queue.?.state = .{ .excluded = .{ .code = .{} } };
+    try std.testing.expectEqual(protocol.MessageRequestState.cancelled, observed.requestState().?);
+    observed.kind = .{ .configure = .{} };
+    try std.testing.expect(observed.requestState() == null);
+    observed.status = .absent;
+    try std.testing.expect(observed.requestState() == null);
+}
+
+/// Two real attempted Actions whose unknown outcomes are saved by recovery.
+pub fn recoverPairForTesting(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, prefix: []const u8) ![2]u64 {
+    try settleTwoActionsForTesting(storage, tmp, binding, prefix);
+    var ids: [2]u64 = undefined;
+    for (&ids) |*id| id.* = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding.action_id;
+    for (ids) |_| try std.testing.expect(try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
+    return ids;
+}
+
+test "Message observation keeps bounded newest Action recovery across continuation and completion" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSessionWithMode(&storage, "recovery-config", "bypass");
+            try submitTestMessage(&storage, &tmp, "recovery-input", "recovery-message", session.slice(), "run commands");
+            var observation = try store_testing.observeCommandForTesting(&storage, "recovery-message");
+            try std.testing.expectEqual(protocol.MessageRequestState.queued, observation.requestState().?);
+            try std.testing.expect(observation.kind.message.?.admitted_at > 0);
+            try std.testing.expect(observation.kind.message.?.work != null);
+            try std.testing.expectEqual(@as(u8, 0), observation.kind.message.?.recovery.count);
+            var ids: [6]u64 = undefined;
+            var operations: [3]u64 = undefined;
+            var turn: u64 = 0;
+            for (0..3) |i| {
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                if (i == 0) turn = binding.turn_id;
+                try std.testing.expectEqual(turn, binding.turn_id);
+                operations[i] = binding.operation_id;
+                var prefix: [32]u8 = undefined;
+                const pair = try recoverPairForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "recovery-{d}", .{i}));
+                @memcpy(ids[i * 2 ..][0..2], &pair);
+                observation = try store_testing.observeCommandForTesting(&storage, "recovery-message");
+                const recovery = &observation.kind.message.?.recovery;
+                try std.testing.expectEqual(@as(u8, @intCast(@min((i + 1) * 2, 4))), recovery.count);
+                try std.testing.expectEqual(i == 2, recovery.more);
+                try std.testing.expectEqual(pair[1], recovery.calls[0].action_id);
+                try std.testing.expectEqual(binding.operation_id, recovery.calls[0].operation_id);
+                try std.testing.expectEqual(@as(u64, 1), recovery.calls[0].call);
+                try std.testing.expectEqualStrings("Run second command", recovery.calls[0].description.?.slice());
+                try std.testing.expect(recovery.calls[0].at > 0);
+            }
+            const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleMessagesForTesting(&storage, &tmp, continuation, 1, false, null);
+            observation = try store_testing.observeCommandForTesting(&storage, "recovery-message");
+            try std.testing.expectEqual(protocol.MessageRequestState.completed, observation.requestState().?);
+            try std.testing.expect(observation.kind.message.?.work == null);
+            try std.testing.expectEqual(continuation.operation_id, observation.kind.message.?.queue.?.state.completed.binding.operation_id);
+            const recovery = &observation.kind.message.?.recovery;
+            for (recovery.calls[0..recovery.count], 0..) |call, i| {
+                try std.testing.expectEqual(ids[5 - i], call.action_id);
+                try std.testing.expectEqual(operations[(5 - i) / 2], call.operation_id);
+            }
+            // A later Turn does not inherit old recovery, and its own recovery
+            // cannot backfill this completed request's bounded Operation range.
+            try submitTestMessage(&storage, &tmp, "recovery-next-input", "recovery-next", session.slice(), "next");
+            const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var newer = try store_testing.observeCommandForTesting(&storage, "recovery-next");
+            try std.testing.expectEqual(@as(u8, 0), newer.kind.message.?.recovery.count);
+            _ = try recoverPairForTesting(&storage, &tmp, next, "recovery-next-calls");
+            newer = try store_testing.observeCommandForTesting(&storage, "recovery-next");
+            try std.testing.expectEqual(@as(u8, 2), newer.kind.message.?.recovery.count);
+            observation = try store_testing.observeCommandForTesting(&storage, "recovery-message");
+            try std.testing.expectEqual(ids[5], observation.kind.message.?.recovery.calls[0].action_id);
         }
     }.run);
 }

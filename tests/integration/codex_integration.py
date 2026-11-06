@@ -621,7 +621,7 @@ def forced_refresh_journey():
         # One stale-token 401: one forced refresh, one replacement Attempt.
         fixture.message(state, store, "stale", session, "refresh a stale token")
         answered = fixture.wait_for(lambda: fixture.completed_observation(store, "stale"), "answer after forced refresh")
-        assert answered["processing"]["attempt"] == "2", answered
+        assert answered["binding"]["attempt"] == "2", answered
         assert fixture.read_result(store, "stale") == b"refreshed answer"
         assert len(endpoint.requests) == 2
         assert endpoint.requests[0] == endpoint.requests[1], "replacement changed the model request"
