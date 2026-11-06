@@ -725,7 +725,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
     const Run = struct {
         fn execute(phase: *Phase, active_mode: *?Mode) !void {
             const io = std.testing.io;
-            var tmp = std.testing.tmpDir(.{});
+            var tmp = std.testing.tmpDir(.{ .iterate = true });
             defer tmp.cleanup();
             phase.* = .store_permissions;
             try tmp.dir.setPermissions(io, .fromMode(0o700));
