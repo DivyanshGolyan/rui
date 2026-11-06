@@ -494,10 +494,9 @@ index 720face..7292989 100644
      const io = std.testing.io;
      var env_map = try std.testing.environ.createMap(std.testing.allocator);
 diff --git a/src/Window.zig b/src/Window.zig
-index 83fb944..0ce7b5e 100644
 --- a/src/Window.zig
 +++ b/src/Window.zig
-@@ -4,8 +4,8 @@ const Screen = @import("Screen.zig");
+@@ -4,8 +4,8 @@
  const Cell = @import("Cell.zig");
  const Mouse = @import("Mouse.zig");
  const Segment = @import("Cell.zig").Segment;
@@ -508,12 +507,52 @@ index 83fb944..0ce7b5e 100644
  
  const Window = @This();
  
-@@ -308,6 +308,12 @@ pub fn print(self: Window, segments: []const Segment, opts: PrintOptions) PrintR
+@@ -288,11 +288,38 @@
+ /// prints segments to the window. returns true if the text overflowed with the
+ /// given wrap strategy and size.
+ pub fn print(self: Window, segments: []const Segment, opts: PrintOptions) PrintResult {
++    return self.printIterator(SegmentIterator{ .segments = segments }, opts);
++}
++
++const SegmentIterator = struct {
++    segments: []const Segment,
++    index: usize = 0,
++
++    pub fn next(self: *SegmentIterator) ?Segment {
++        if (self.index == self.segments.len) return null;
++        const segment = self.segments[self.index];
++        self.index += 1;
++        return segment;
++    }
++};
++
++/// Print one logical flow from an allocation-free replayable source passed by
++/// value, with `pub fn next(self: *Source) ?Segment`. Copies MUST have independent
++/// cursors; next must have no effects or shared mutable cursor/scratch storage.
++/// Borrowed text/link slices stay valid and unchanged through all cloned
++/// lookahead and until this call returns. Segment boundaries preserve complete
++/// graphemes (including CRLF). No reset method or retained continuation state.
++/// Existing print(slice) uses this same layout owner. Passing only row/column
++/// offsets to separate print calls does not continue a word or whitespace run.
++/// Lookahead occurs only at a new word, stopping at its delimiter or as soon as
++/// its width exceeds the window; no input-sized segment/cell storage is made.
++pub fn printIterator(self: Window, source: anytype, opts: PrintOptions) PrintResult {
++    var segments = source;
+     var row = opts.row_offset;
+     switch (opts.wrap) {
+         .grapheme => {
+             var col: u16 = opts.col_offset;
+-            const overflow: bool = blk: for (segments) |segment| {
++            const overflow: bool = blk: while (segments.next()) |segment| {
+                 var iter = unicode.graphemeIterator(segment.text);
+                 while (iter.next()) |grapheme| {
+                     if (col >= self.width) {
+@@ -308,6 +335,12 @@
                      }
                      const w = self.gwidth(s);
                      if (w == 0) continue;
 +                    // A wide grapheme that would cross the edge starts the next row.
-+                    if (col != 0 and col + w > self.width) {
++                    if (col != 0 and @as(u32, col) + w > self.width) {
 +                        row += 1;
 +                        col = 0;
 +                        if (row >= self.height) break :blk true;
@@ -521,40 +560,77 @@ index 83fb944..0ce7b5e 100644
                      if (opts.commit) self.writeCell(col, row, .{
                          .char = .{
                              .grapheme = s,
-@@ -334,7 +340,7 @@ pub fn print(self: Window, segments: []const Segment, opts: PrintOptions) PrintR
+@@ -334,13 +367,18 @@
              var col: u16 = opts.col_offset;
              var overflow: bool = false;
              var soft_wrapped: bool = false;
 -            outer: for (segments) |segment| {
-+            outer: for (segments, 0..) |segment, segment_index| {
++            // Style segments do not start words. Decide whole-word movement
++            // once, then keep consuming that word even if its suffix now fits.
++            var in_word = false;
++            outer: while (segments.next()) |segment| {
                  var line_iter: LineIterator = .{ .buf = segment.text };
                  while (line_iter.next()) |line| {
                      defer {
-@@ -370,8 +376,17 @@ pub fn print(self: Window, segments: []const Segment, opts: PrintOptions) PrintR
+-                        // We only set soft_wrapped to false if a segment actually contains a linebreak
+-                        if (line_iter.has_break) {
++                        // Consume a hard break only after its line was consumed,
++                        // never when clipping interrupted that line's word.
++                        if (line_iter.has_break and !overflow) {
+                             soft_wrapped = false;
++                            in_word = false;
+                             row += 1;
+                             col = 0;
+                         }
+@@ -349,11 +387,15 @@
+                     while (iter.next()) |token| {
+                         switch (token) {
+                             .whitespace => |len| {
++                                in_word = false;
+                                 if (soft_wrapped) continue;
+                                 for (0..len) |_| {
+                                     if (col >= self.width) {
+                                         col = 0;
+                                         row += 1;
++                                        // Suppress the rest of this whitespace
++                                        // run even across a style boundary.
++                                        soft_wrapped = true;
+                                         break;
+                                     }
+                                     if (opts.commit) {
+@@ -370,11 +412,23 @@
                                  }
                              },
                              .word => |word| {
 -                                const width = self.gwidth(word);
 -                                if (width + col > self.width and width < self.width) {
-+                                // A word continues into following segments
-+                                // (style changes) until whitespace.
-+                                var width = self.gwidth(word);
-+                                if (word.ptr + word.len == segment.text.ptr + segment.text.len) {
-+                                    for (segments[segment_index + 1 ..]) |next| {
-+                                        const end = std.mem.indexOfAny(u8, next.text, " \t\r\n") orelse next.text.len;
-+                                        width +|= self.gwidth(next.text[0..end]);
-+                                        if (end != next.text.len) break;
+-                                    row += 1;
+-                                    col = 0;
++                                if (!in_word) {
++                                    // Look across style changes only at the word's
++                                    // start. No flattening or input-sized storage.
++                                    var width: u32 = 0;
++                                    const continues = self.measureWordPrefix(word, &width);
++                                    if (continues and word.ptr + word.len == segment.text.ptr + segment.text.len) {
++                                        var lookahead = segments;
++                                        while (lookahead.next()) |next| {
++                                            if (!self.measureWordPrefix(next.text, &width)) break;
++                                        }
 +                                    }
-+                                }
-+                                if (width + col > self.width and width <= self.width) {
-                                     row += 1;
-                                     col = 0;
++                                    if (width + col > self.width and width <= self.width) {
++                                        row += 1;
++                                        col = 0;
++                                    }
                                  }
-@@ -385,6 +400,14 @@ pub fn print(self: Window, segments: []const Segment, opts: PrintOptions) PrintR
++                                in_word = true;
+ 
+                                 var grapheme_iterator = unicode.graphemeIterator(word);
+                                 while (grapheme_iterator.next()) |grapheme| {
+@@ -385,6 +439,14 @@
                                      }
                                      const s = grapheme.bytes(word);
                                      const w = self.gwidth(s);
-+                                    if (col != 0 and col + w > self.width) {
++                                    if (col != 0 and @as(u32, col) + w > self.width) {
 +                                        row += 1;
 +                                        col = 0;
 +                                        if (row >= self.height) {
@@ -565,6 +641,44 @@ index 83fb944..0ce7b5e 100644
                                      if (opts.commit) self.writeCell(col, row, .{
                                          .char = .{
                                              .grapheme = s,
+@@ -414,7 +476,7 @@
+         },
+         .none => {
+             var col: u16 = opts.col_offset;
+-            const overflow: bool = blk: for (segments) |segment| {
++            const overflow: bool = blk: while (segments.next()) |segment| {
+                 var iter = unicode.graphemeIterator(segment.text);
+                 while (iter.next()) |grapheme| {
+                     if (col >= self.width) break :blk true;
+@@ -443,6 +505,19 @@
+     return false;
+ }
+ 
++// Exact fit classification, not a saturated whole-string width: the sum is
++// at most window width + one grapheme (both u16), so u32 cannot overflow.
++fn measureWordPrefix(self: Window, text: []const u8, width: *u32) bool {
++    var iterator = unicode.graphemeIterator(text);
++    while (iterator.next()) |grapheme| {
++        const bytes = grapheme.bytes(text);
++        if (std.mem.indexOfScalar(u8, " \t\r\n", bytes[0]) != null) return false;
++        width.* += self.gwidth(bytes);
++        if (width.* > self.width) return false;
++    }
++    return true;
++}
++
+ /// print a single segment. This is just a shortcut for print(&.{segment}, opts)
+ pub fn printSegment(self: Window, segment: Segment, opts: PrintOptions) PrintResult {
+     return self.print(&.{segment}, opts);
+@@ -815,7 +890,7 @@
+ 
+         const start = self.index;
+         const end = std.mem.indexOfAnyPos(u8, self.buf, self.index, "\r\n") orelse {
+-            if (start == 0) self.has_break = false;
++            self.has_break = false;
+             self.index = self.buf.len;
+             return self.buf[start..];
+         };
 diff --git a/src/gwidth.zig b/src/gwidth.zig
 index 0cb1ae6..04dc46a 100644
 --- a/src/gwidth.zig

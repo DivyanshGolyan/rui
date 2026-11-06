@@ -146,9 +146,21 @@ pub fn build(b: *std.Build) void {
 
     // Imports do not discover dependency tests. Use the very same patched
     // modules configureVaxis gives Rui, as explicit test roots instead.
-    const vaxis_owner = b.createModule(.{ .target = target, .optimize = .ReleaseSafe });
+    const vaxis_owner = b.createModule(.{
+        .root_source_file = b.path("tests/vaxis/layout.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
     configureVaxis(b, vaxis_owner);
     const vaxis_test_step = b.step("test-vaxis", "Run patched parser, Unicode, width, Window and render regressions");
+    const layout_tests = b.addTest(.{
+        .name = "test-vaxis-layout",
+        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
+        .root_module = vaxis_owner,
+    });
+    const run_layout_tests = ci.run(layout_tests);
+    run_layout_tests.has_side_effects = true;
+    vaxis_test_step.dependOn(&run_layout_tests.step);
     for ([_][]const u8{ "vaxis", "terminal_width", "terminal_unicode" }) |name| {
         const dependency_tests = b.addTest(.{
             .name = b.fmt("test-{s}", .{name}),
