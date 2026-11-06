@@ -17,6 +17,11 @@ const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
 pub const schema_version: u32 = 58;
+
+pub const IdentityMismatch = struct {
+    saved_selector: protocol.Bounded(protocol.max_store_bytes) = .{},
+};
+
 /// `digest()` of each schema_version, oldest first. Each format PR appends
 /// its own version and forward step (D226); main's digests and steps are
 /// immutable even before release. tests/ci/test_store_schema_version.py
@@ -1921,12 +1926,12 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
 
 /// Opens a Store of this application at schema_version, or moves one at a
 /// format from migration_baseline on to it first (`migrate`).
-pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8) !void {
+pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch) !void {
     if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
     const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
-    if (found == schema_version) return validateCurrent(database, selector);
+    if (found == schema_version) return validateCurrent(database, selector, identity_mismatch);
     if (found < migration_baseline or found > schema_version) return error.WrongStoreVersion;
-    return migrate(io, database, selector, found, migrations[found - migration_baseline ..]);
+    return migrate(io, database, selector, found, migrations[found - migration_baseline ..], identity_mismatch);
 }
 
 /// First writes `migrationBackup`; a Store whose backup fails is refused
@@ -1936,7 +1941,7 @@ pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8) !voi
 /// (`validateCurrent`) and every foreign key holds. A Store whose
 /// store_meta format is not `from` is a WrongStoreVersion, and any failure
 /// leaves the Store as it was.
-pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
+pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration, identity_mismatch: ?*IdentityMismatch) !void {
     try migrationBackup(io, database);
     // Both outside the transaction, where PRAGMA foreign_keys takes effect.
     try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
@@ -1957,7 +1962,7 @@ pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, 
     }
     try sqlite.exec(database, version_sql);
     try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format'");
-    try validateCurrent(database, selector);
+    try validateCurrent(database, selector, identity_mismatch);
     try sqlite.exec(database, "COMMIT");
 }
 
@@ -2027,7 +2032,7 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
 /// network engine keeps no such text: MySQL's open compares its catalog's
 /// structure instead (`catalogDigest`), which sees a CHECK only by count.
 /// Its caller has read user_version as schema_version, or set it.
-fn validateCurrent(database: *c.sqlite3, selector: []const u8) !void {
+fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch) !void {
     {
         const expected = comptime objects(.sqlite);
         const statement = try sqlite.prepare(database, "SELECT type,name,tbl_name,sql FROM sqlite_schema");
@@ -2069,18 +2074,21 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8) !void {
         if (!version.eql(protocol.wire_version)) return error.WrongStoreVersion;
     }
     {
+        const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
+        defer _ = c.sqlite3_finalize(statement);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
+        if (!isStoreId(try columnText(statement, 0))) return error.WrongStoreIdentity;
+    }
+    {
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
         var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
         try sqlite.readText(statement, 0, &stored_selector);
-        if (!stored_selector.eql(selector)) return error.WrongStoreIdentity;
-    }
-    {
-        const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
-        defer _ = c.sqlite3_finalize(statement);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
-        if (!isStoreId(try columnText(statement, 0))) return error.WrongStoreIdentity;
+        if (!stored_selector.eql(selector)) {
+            if (identity_mismatch) |out| out.saved_selector = stored_selector;
+            return error.StoreIdentityMismatch;
+        }
     }
 }
 
@@ -2365,7 +2373,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try sqlite.exec(database, "INSERT INTO session_ending_owed(turn_id,delivered) VALUES(1,0),(2,1)");
     try sqlite.exec(database, "CREATE TEMP TABLE original_endings AS SELECT * FROM session_ending_owed");
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE core_command SET kind=6 WHERE command_key='fixture-stop'"));
-    try openExisting(std.testing.io, database, root);
+    try openExisting(std.testing.io, database, root, null);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expect(try metaEquals(database, "wire_version", protocol.wire_version));
@@ -2424,6 +2432,6 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive WHERE session_ref='rhvzwc' AND command_key IS NULL"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='archive-request'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='restore-request'"));
-    try openExisting(std.testing.io, database, root);
+    try openExisting(std.testing.io, database, root, null);
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_ending_owed WHERE turn_id=1"));
 }

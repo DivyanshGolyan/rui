@@ -114,6 +114,7 @@ pub const Code = enum {
     host_unreachable,
     sign_in_required,
     store_locked,
+    store_identity_mismatch,
     reply_unconfirmed,
     wait_timed_out,
     request_absent,
@@ -304,6 +305,7 @@ fn mapped(err: anyerror) ?Code {
         error.ApiKeyMissing => .sign_in_required,
         error.HostStopped => .host_stopped,
         error.StoreAlreadyOwned => .store_locked,
+        error.StoreIdentityMismatch => .store_identity_mismatch,
         error.HostBusy => .host_busy,
         error.ResultNotReady => .result_not_ready,
         error.EnvironmentTooLarge => .environment_too_large,
@@ -511,6 +513,7 @@ pub fn facts(code: Code) Facts {
         .host_stopped => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host is stopped.", .next = "Start this Store's Host with rui host start, then retry unchanged." },
         .host_unreachable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host cannot be reached.", .next = "Start or repair this Store's Host, then retry the same saved request unchanged." },
         .sign_in_required => .{ .act = .operate, .input = null, .accepted = .none, .says = "Provider sign-in is required.", .next = "Run rui auth login for the selected provider, then retry unchanged." },
+        .store_identity_mismatch => .{ .act = .operate, .input = null, .accepted = .none, .says = "This SQLite Store belongs to a different canonical folder.", .next = "Stop Hosts and preserve the complete Store; restore its saved original canonical folder, or back up this Store and choose a fresh --store." },
         .store_locked => .{ .act = .operate, .input = null, .accepted = .none, .says = "Another Host owns this Store.", .next = "Use that Host, or pause it with rui host pause before starting again." },
         .wait_timed_out => .{ .act = .wait, .input = null, .accepted = .none, .says = "The wait ended while the request was still pending.", .next = "Run rui request wait with the same HANDLE again; never resubmit with a new key." },
         .request_absent => .{ .act = .recover, .input = null, .accepted = .none, .says = "The Store has no such request; admission is not confirmed.", .next = "Run rui request recover with the original HANDLE or record; never resubmit with a new key." },
@@ -666,6 +669,16 @@ fn renderLine(out: *std.Io.Writer, code: Code, held: Held, saved: bool) error{Wr
     try out.writeAll(if (saved) " This rejection was saved and replays as saved; a resend needs a new key." else if (held.not_sent) " Nothing was captured or sent." else "");
     if (held.unchanged) |unchanged| try writeHeld(out, unchanged);
     try out.print(" [{s}]\n", .{@tagName(code)});
+}
+
+test "Store selector mismatch has a pathless operating remedy" {
+    try std.testing.expectEqual(Code.store_identity_mismatch, of(error.StoreIdentityMismatch));
+    try std.testing.expectEqual(Act.operate, facts(.store_identity_mismatch).act);
+    var bytes: [1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&bytes);
+    try writeLine(&output, .store_identity_mismatch, .{ .resource = "host", .operation = "serve" });
+    try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "preserve the complete Store") != null);
+    try std.testing.expect(std.mem.endsWith(u8, output.buffered(), "[store_identity_mismatch]\n"));
 }
 
 test "caller error goldens describe choice handle conflict and malformed ID" {
