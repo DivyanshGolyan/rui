@@ -460,9 +460,9 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                         },
                         .history => {
                             if (selected == .transcript and generation == request_generation) {
-                                try std.testing.expect(std.mem.indexOf(u8, fixture.screen.browsing.text(), "EARLIER PAGE\n") != null);
+                                try std.testing.expect(std.mem.indexOf(u8, fixture.screen.browsing.text.text(), "EARLIER PAGE\n") != null);
                                 older = next_cursor;
-                            } else try std.testing.expect(std.mem.indexOf(u8, fixture.screen.browsing.text(), "EARLIER PAGE") == null);
+                            } else try std.testing.expect(std.mem.indexOf(u8, fixture.screen.browsing.text.text(), "EARLIER PAGE") == null);
                         },
                     }
                     request = null;
@@ -550,13 +550,13 @@ fn acknowledgement(comptime Frontend: type, comptime ops: anytype) !void {
                         try fixture.screen.append(&block);
                         try fixture.screen.append("\n");
                     }
-                    try std.testing.expect(fixture.screen.live.origin > 0);
+                    try std.testing.expect(fixture.screen.live.text.origin > 0);
                 },
                 .redraw => try ops.draw(front),
             }
             try std.testing.expectEqual(delivered, front.admission.delivered);
             try std.testing.expectEqual(echo, front.admission.echo);
-            try std.testing.expect(fixture.screen.live.length <= Viewport.capacity);
+            try std.testing.expect(fixture.screen.live.text.length <= Viewport.capacity);
         }
     }
 }
@@ -601,11 +601,11 @@ fn retention(comptime Frontend: type, comptime ops: anytype) !void {
         try ops.scan(&front.job, &task);
         try ops.showStaged(front);
         try ops.applyReader(front, .complete);
-        try std.testing.expect(fixture.screen.live.length <= Viewport.capacity);
+        try std.testing.expect(fixture.screen.live.text.length <= Viewport.capacity);
         try historyReachability(front, ops, prefix + 1);
         if (front.live.cursor.end == null) break;
     } else return error.ActivityDidNotDrain;
-    try std.testing.expect(fixture.screen.live.origin > 0);
+    try std.testing.expect(fixture.screen.live.text.origin > 0);
 }
 
 fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !void {
@@ -619,7 +619,7 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
         // A suffix is not a reachable Message: every byte remains in the
         // frozen transcript, a collapsed block there names its exact identity,
         // or its exact canonical User identity is older.
-        reachable[index] = std.mem.indexOf(u8, front.terminal.screen.browsing.text(), text) != null;
+        reachable[index] = std.mem.indexOf(u8, front.terminal.screen.browsing.text.text(), text) != null;
         // Independently encode the public content identity domain, not raw
         // SHA-256 and not the production contentDigest implementation.
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
@@ -660,7 +660,7 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
     };
     var all_reachable = true;
     for (reachable, 0..) |found, index| {
-        if (!found) std.debug.print("TD1 retention counterexample: admit M behind held answer; scan Admission; release answer; scan settled work; evict; browse. prefix={d}, message={s}, origin={d}, cursor={any}; complete Message absent retained view and excluded from canonical history\n", .{ prefix, if (index == 0) "driver" else "queued", front.terminal.screen.live.origin, front.transcript.older });
+        if (!found) std.debug.print("TD1 retention counterexample: admit M behind held answer; scan Admission; release answer; scan settled work; evict; browse. prefix={d}, message={s}, origin={d}, cursor={any}; complete Message absent retained view and excluded from canonical history\n", .{ prefix, if (index == 0) "driver" else "queued", front.terminal.screen.live.text.origin, front.transcript.older });
         all_reachable = all_reachable and found;
     }
     try std.testing.expect(all_reachable);
@@ -733,12 +733,12 @@ fn publication(comptime Frontend: type, comptime ops: anytype) !void {
         var empty: [0]u8 = .{};
         if (mode == 0) {
             var output = std.Io.Writer.fixed(&empty);
-            try std.testing.expectError(error.WriteFailed, fixture.Screen.Test.render(screen, &output, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
+            try std.testing.expectError(error.WriteFailed, Screen.Test.render(fixture.screen, &output, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
         } else {
             // Every frame byte is accepted before flush fails. Publishing
             // between writeAll and flush must fail this independent control.
             var output: FlushFailure = .{ .writer = .{ .buffer = &empty, .vtable = &.{ .drain = FlushFailure.drain, .flush = FlushFailure.flush } } };
-            try std.testing.expectError(error.WriteFailed, fixture.Screen.Test.render(screen, &output.writer, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
+            try std.testing.expectError(error.WriteFailed, Screen.Test.render(fixture.screen, &output.writer, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
             try std.testing.expect(output.accepted > 0 and output.flushed);
         }
         try std.testing.expectEqual(before, fixture.screen.action_seen);

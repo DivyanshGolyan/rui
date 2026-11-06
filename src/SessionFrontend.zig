@@ -914,7 +914,7 @@ fn driveActive(self: *Self) !void {
         if (self.terminal.notificationWaiting()) self.dirty = true;
         if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
         if (self.expansion.pending) try self.expand();
-        _ = try self.step(0);
+        _ = try self.step(self.inputWait());
     }
 }
 
@@ -924,6 +924,9 @@ fn driveActive(self: *Self) !void {
 fn draw(self: *Self) !bool {
     const screen = self.terminal.screen;
     try self.drawFrame();
+    // A benign return captured by the output pump belongs to the next owner
+    // as soon as delivery finishes, before expansion or any freshness read.
+    if (self.leaving != null) return true;
     if (screen.awaitsOffer()) {
         // Every prompt byte was accepted by stdout. Discard input through
         // its decoder, not tcflush: a paste prefix or Ctrl-C arriving
@@ -1130,9 +1133,15 @@ test "a paged Action keeps what it is for beside the choice" {
     try std.testing.expectEqualStrings("? Record\\x1b[2J steps", out.buffered());
 }
 
+/// The existing output owner distinguishes a nonblocking reentrant pump from
+/// ordinary input service. No second mode flag or scheduler timing oracle.
+fn inputWait(self: *const Self) i32 {
+    return if (self.terminal.writing) 0 else 16;
+}
+
 fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    _ = try self.step(0);
+    _ = try self.step(self.inputWait());
     // Returning to the overview is benign: finish this frozen frame first.
     // Detach/exit/signals retire the invocation and may abort promptly.
     if ((self.leaving != null and self.leaving != .returned) or self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
@@ -2488,6 +2497,79 @@ fn stepKeys(held: *HeldFrontend, bytes: []const u8) !void {
         }
     };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &held.self, Drained.done);
+}
+
+test "ordinary input service waits boundedly while the output pump never waits for input" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    // Independent expected budgets, not elapsed wall time or CPU thresholds.
+    held.terminal.writing = false;
+    try std.testing.expectEqual(@as(i32, 16), held.self.inputWait());
+    held.terminal.writing = true;
+    try std.testing.expectEqual(@as(i32, 0), held.self.inputWait());
+    held.terminal.writing = false;
+}
+
+test "completed detail return hands queued input to the next owner before any old-owner read" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    held.self.poll_at = std.math.maxInt(i96); // No Host scan in this input/output fixture.
+    const backend = held.screen.backend;
+    const stream = &held.terminal.stream;
+    const tail = "z\x03\x1b[";
+    const Credit = struct {
+        held: *HeldFrontend,
+        injected: bool = false,
+        credited: bool = false,
+        fn step(raw: *anyopaque) !void {
+            const credit: *@This() = @ptrCast(@alignCast(raw));
+            if (!credit.injected) {
+                const escape = "\x1b[27u";
+                try std.testing.expect(std.c.write(credit.held.pipes[0][1], escape, escape.len) == escape.len);
+                credit.injected = true;
+            }
+            try pump(&credit.held.self);
+            if (credit.held.self.leaving != .returned or credit.credited) return;
+            try std.testing.expect(!credit.held.screen.ticket.?.delivered);
+            // Credit returns NOW, not after tail input is pumped/discarded.
+            // These bytes belong to the next owner once this write completes.
+            try std.testing.expect(std.c.write(credit.held.pipes[0][1], tail, tail.len) == tail.len);
+            credit.credited = true;
+            var sink: [65536]u8 = undefined;
+            while (std.c.read(credit.held.pipes[1][0], &sink, sink.len) > 0) {}
+        }
+    };
+    var credit: Credit = .{ .held = held };
+    held.terminal.pump = .{ .context = &credit, .step = Credit.step };
+    try held.hold("");
+    try held.self.driveActive();
+    try std.testing.expect(credit.injected and credit.credited);
+    try std.testing.expectEqual(@as(?Outcome, .returned), held.self.leaving);
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+    try std.testing.expect(backend.idle() and held.screen.backend == backend and &held.terminal.stream == stream);
+    var remaining: [16]u8 = undefined;
+    const count = std.c.read(held.pipes[0][0], &remaining, remaining.len);
+    try std.testing.expectEqual(@as(isize, tail.len), count);
+    try std.testing.expectEqualStrings(tail, remaining[0..@intCast(count)]);
+    try std.testing.expectEqual(TerminalInput.Pending.none, stream.pending());
+    // The new owner sees the printable byte, its own urgent exit, then the
+    // exact partial CSI; no raw byte was replayed, discarded or reclassified.
+    var buffer: [64]u8 = undefined;
+    var next: Editor = .{ .buffer = &buffer };
+    var saw_exit = false;
+    for (remaining[0..@intCast(count)]) |byte| {
+        var decoded = stream.feed(byte, std.Io.Clock.awake.now(std.testing.io).nanoseconds);
+        while (decoded != .none) : (decoded = stream.next()) {
+            const result = next.apply(@import("overview_view.zig").keys, decoded);
+            if (result == .action) saw_exit = result.action == .exit;
+        }
+    }
+    try std.testing.expect(saw_exit);
+    try std.testing.expectEqualStrings("z", next.buffer[0..next.length]);
+    try std.testing.expectEqual(TerminalInput.Pending.incomplete, stream.pending());
+    const up = stream.feed('A', std.Io.Clock.awake.now(std.testing.io).nanoseconds);
+    try std.testing.expect(up == .event and up.event.event.key_press.matchExact(vaxis.Key.up, .{}));
+    try std.testing.expect(stream.next() == .none and stream.pending() == .none);
 }
 
 test "a frozen detail return gates complete events but preserves reports and a split prefix through handoff" {
