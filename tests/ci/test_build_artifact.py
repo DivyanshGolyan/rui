@@ -77,7 +77,10 @@ else:
     if flaky.exists():
         flaky.unlink()
         sys.exit(9)
-    sys.exit(subprocess.run(['.zig-cache/o/ci-compiled/test-tests']).returncode)
+    binary = Path('.zig-cache/o/ci-compiled/unit-native-tests')
+    if not binary.exists():
+        binary = Path('.zig-cache/o/ci-compiled/test-tests')
+    sys.exit(subprocess.run([str(binary)]).returncode)
 ''')
         zig.chmod(0o755)
         self.real_run = subprocess.run
@@ -163,11 +166,17 @@ else:
                 self.assertEqual(self.gates(), ['consumer'])
 
     def split_downloads(self):
-        # Two producers: the unit binary alone, and everything else with packages.
+        # Two producers: both unit roots, and everything else with packages.
         downloads = {}
         unit_root = self.root / 'unit-bin'
         unit_root.mkdir()
-        (build_artifact.roots()['binaries'] / 'test-tests').rename(unit_root / 'test-tests')
+        native = unit_root / 'unit-native-tests'
+        native.write_bytes((build_artifact.roots()['binaries'] / 'test-tests').read_bytes())
+        native.chmod(0o751)
+        for name in ('unit-store-tests',):
+            binary = unit_root / name
+            binary.write_text('#!/bin/sh\n# ' + name + '\nexit 0\n')
+            binary.chmod(0o751)
         rest = build_artifact.roots()['binaries'] / 'ci-cpu.json'
         rest.write_text('{}')
         (build_artifact.roots()['binaries'] / 'test-logic_tests').write_text('#!/bin/sh\n')
@@ -185,8 +194,53 @@ else:
         build_artifact.restore(['202', '201'], ['test'])
         self.assertEqual(self.gates(), ['producer'])
         self.assertFalse((self.root / 'compiled').exists())
+        for name in ('unit-native-tests', 'unit-store-tests'):
+            restored = build_artifact.roots()['binaries'] / name
+            original = self.root / 'unit-bin' / name
+            self.assertEqual(restored.read_bytes(), original.read_bytes())
+            self.assertEqual(restored.stat().st_mode & 0o777, 0o751)
         self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
         self.assertTrue((build_artifact.roots()['binaries'] / 'test-logic_tests').exists())
+
+    def test_split_rejects_tampered_or_missing_additional_unit_roots(self):
+        self.split_downloads()
+        original_downloads = dict(self.downloads)
+        with zipfile.ZipFile(io.BytesIO(original_downloads['201'][0])) as unit:
+            original_receipt = json.loads(unit.read('compiled.json'))
+            original_archive = unit.read('compiled.tar.gz')
+        self.assertEqual(set(original_receipt['executables']), {
+            'binaries/unit-native-tests', 'binaries/unit-store-tests'})
+        for name in ('unit-store-tests',):
+            for damage in ('tampered', 'missing'):
+                with self.subTest(root=name, damage=damage):
+                    archive = io.BytesIO()
+                    with tarfile.open(fileobj=io.BytesIO(original_archive), mode='r:gz') as source, \
+                            tarfile.open(fileobj=archive, mode='w:gz') as output:
+                        for member in source:
+                            data = source.extractfile(member).read() if member.isfile() else None
+                            if member.name == 'binaries/' + name:
+                                if damage == 'missing':
+                                    continue
+                                data += b'# tampered\n'
+                                member.size = len(data)
+                            output.addfile(member, io.BytesIO(data) if data is not None else None)
+                    self.archive = archive.getvalue()
+                    self.receipt = copy.deepcopy(original_receipt)
+                    # Keep outer archive/GitHub digests valid, exercising each
+                    # executable's receipt rather than generic ZIP corruption.
+                    self.receipt['archive'] = hashlib.sha256(self.archive).hexdigest()
+                    self.refresh_download()
+                    self.downloads = dict(original_downloads, **{'201': (self.download, self.metadata)})
+                    (self.root / 'compiled').unlink(missing_ok=True)
+                    (self.root / 'summary').unlink(missing_ok=True)
+                    build_artifact.restore(['202', '201'], ['test'])
+                    self.assertIn('-Dci-part=all', (self.root / 'compiled').read_text())
+                    self.assertEqual(self.gates(), ['consumer'])
+                    summary = (self.root / 'summary').read_text()
+                    self.assertIn('was rejected', summary)
+                    self.assertNotIn('Using verified producer artifact', summary)
+                    for extra in ('unit-native-tests', 'unit-store-tests'):
+                        self.assertFalse((build_artifact.roots()['binaries'] / extra).exists())
 
     def test_macos_split_uses_the_same_restore_cli_and_executes_the_producer(self):
         self.inputs.update(system='Darwin', machine='arm64', targets=['check', 'admission-debug-integration'])

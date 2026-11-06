@@ -24,6 +24,7 @@ if [ "${3:-}" = parallel ]; then
     activity_client=$7
     preference_policy_actor=$8
     terminal_notice=$9
+    shift 9 # Remaining arguments are additional native unit roots, in run order.
 else
     host_status_actor=$3
     session_list_client=$4
@@ -81,16 +82,31 @@ with_deadline() {
     python3 - "$@" <<'PY'
 import subprocess
 import sys
+import time
 
 seconds, command = float(sys.argv[1]), sys.argv[2:]
-process = subprocess.Popen(command)
-try:
-    sys.exit(process.wait(timeout=seconds))
-except subprocess.TimeoutExpired:
-    process.kill()
-    process.wait()
-    print(f"\nKilled after {seconds:.0f} s: the last test named above stalled.", flush=True)
-    sys.exit(124)
+# All unit roots share the original native case's 1200 s budget. The fixture
+# boundary execs each root, so killing the active child still kills the binary.
+if "--unit-roots" in command:
+    split = command.index("--unit-roots")
+    if split + 1 == len(command):
+        sys.exit("No unit roots supplied")
+    commands = [command[:split] + [binary] for binary in command[split + 1:]]
+else:
+    commands = [command]
+deadline = time.monotonic() + seconds
+for command in commands:
+    process = subprocess.Popen(command)
+    try:
+        status = process.wait(timeout=max(0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        print(f"\nKilled after {seconds:.0f} s: the last test named above stalled.", flush=True)
+        sys.exit(124)
+    if status:
+        sys.exit(status)
+
 PY
 }
 
@@ -161,7 +177,7 @@ if [ "$part" = parallel ] || [ "$part" = callers ]; then
         # unit runner prints each test's name as it starts, so a run killed
         # at its deadline names the stalled test in this case's log, which a
         # job timeout would discard (#755 stalled 34 minutes as "cancelled").
-        run_case execution native with_deadline 1200 python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 "$test_binary"
+        run_case execution native with_deadline 1200 python3 "$directory/host_process.py" exec env RUI_TEST_EXACT_INACTIVITY=0 --unit-roots "$test_binary" "$@"
     fi
     cases
     set -- $pids

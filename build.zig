@@ -1,5 +1,6 @@
 const std = @import("std");
 const Translator = @import("translate_c").Translator;
+const unit_partition = @import("src/unit_test_partition.zig");
 
 pub fn build(b: *std.Build) void {
     // PR fixtures need ReleaseSafe checks, not shipped LLVM code generation.
@@ -40,33 +41,69 @@ pub fn build(b: *std.Build) void {
     const test_filters = b.option([]const []const u8, "test-filter", "Run tests whose names contain this text (repeatable)") orelse &.{};
     if (ci.directory != null and test_filters.len != 0) @panic("CI artifacts contain unfiltered tests");
     const model_queue_output = b.option([]const u8, "model-queue-output", "Write model-queue qualification JSON to this path");
-    const tests = b.addTest(.{
-        // The self-hosted backend cuts this CI-critical compile on x86_64.
-        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/tests.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-        }),
-        .filters = test_filters,
-    });
-    configureSqlite(b, tests);
-    configureBashPlatform(b, tests);
-    configureHostLaunch(b, tests);
-    configureTerminalEditor(b, tests);
-    configureTransport(b, tests, target, pinned_transport);
-    configureOpenApi(b, tests);
-    const run_tests = ci.run(tests);
-    // Reuse compiled artifacts, never a prior test outcome (even with a fixed seed).
-    run_tests.has_side_effects = true;
-    run_tests.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
+    // Filtered developer/mutation runs retain the single aggregate binary and
+    // its filter/global conventions. Unfiltered CI compiles independent roots.
+    const tests = b.allocator.alloc(*std.Build.Step.Compile, if (test_filters.len == 0) unit_partition.roots.len else 1) catch @panic("OOM");
+    const unit_filters = if (test_filters.len == 0) unitFilters(b) else undefined;
+    const unit_runner: ?std.Build.LazyPath = if (test_filters.len == 0) runner: {
+        const generate = b.addSystemCommand(&.{ "python3", "-B" });
+        generate.addFileArg(b.path("tests/ci/unit_test_runner.py"));
+        generate.addFileArg(std.Build.LazyPath.zig_lib.path(b, "compiler/test_runner.zig"));
+        break :runner generate.addOutputFileArg("unit_test_runner.zig");
+    } else null;
+    var run_tests: *std.Build.Step.Run = undefined;
+    for (tests, 0..) |*entry, index| {
+        const root = unit_partition.roots[index];
+        const compile = b.addTest(.{
+            .name = if (test_filters.len != 0) "test" else b.fmt("unit-{s}", .{@tagName(root)}),
+            // Leave headroom for the OS on the 7 GiB Mac unit producer.
+            .max_rss = if (test_filters.len == 0 and target.result.os.tag == .macos) 3 * 1024 * 1024 * 1024 else 0,
+            .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/tests.zig"),
+                .target = target,
+                .optimize = .ReleaseSafe,
+                // LLVM DWARF dominates memory. Only Mac unit roots omit it;
+                // checks/optimization stay unchanged, and filtered reproductions
+                // keep full debug info. Never strip the stack-trace probes.
+                .strip = if (test_filters.len == 0 and target.result.os.tag == .macos) true else null,
+            }),
+            .filters = if (test_filters.len != 0) test_filters else unit_filters[index],
+            .test_runner = if (unit_runner) |path| .{ .path = path, .mode = .server } else null,
+        });
+        entry.* = compile;
+        if (unit_runner != null) {
+            const options = b.addOptions();
+            options.addOption(usize, "root", index);
+            compile.root_module.addOptions("unit_test_options", options);
+            compile.root_module.addImport("unit_test_partition", b.createModule(.{
+                .root_source_file = b.path("src/unit_test_partition.zig"),
+                .target = target,
+                .optimize = .ReleaseSafe,
+            }));
+        }
+        configureSqlite(b, compile);
+        configureBashPlatform(b, compile);
+        configureHostLaunch(b, compile);
+        configureTerminalEditor(b, compile);
+        configureTransport(b, compile, target, pinned_transport);
+        configureOpenApi(b, compile);
+        const run = ci.run(compile);
+        run.has_side_effects = true;
+        run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0");
+        // Compile in parallel, execute serially: the MySQL dialect fixture owns
+        // fixed database names. Store runs last and owns the acceptance record
+        // (including migrations/conformance); never mask an earlier failure.
+        if (index != 0) run.step.dependOn(&run_tests.step);
+        run_tests = run;
+    }
 
     const test_step = b.step("test", "Run unit, Store, and protocol tests");
     test_step.dependOn(&run_tests.step);
     // Selection pairs test-full with check or check-full, which already run every
     // other native test, so this binary contains only the real-time witness.
-    // Like the unit binary, these test-only roots keep safety checks but avoid
-    // LLVM optimization. Their measured runtimes remain well inside the deadlines.
+    // Like normal units, the x86_64 witness uses the self-hosted backend;
+    // other targets retain LLVM. ReleaseSafe checks stay enabled.
     const deadline_witness = b.addTest(.{
         .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
         .name = "deadline-witness",
@@ -607,12 +644,13 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addFileArg(ci.path(release_safe));
     fast_integrations.addFileArg(ci.path(debug));
     fast_integrations.addArg("parallel");
-    fast_integrations.addFileArg(ci.path(tests));
+    fast_integrations.addFileArg(ci.path(tests[0]));
     fast_integrations.addFileArg(ci.path(host_status_actor));
     fast_integrations.addFileArg(ci.path(session_list_client));
     fast_integrations.addFileArg(ci.path(activity_client));
     fast_integrations.addFileArg(ci.path(preference_policy_actor));
     fast_integrations.addFileArg(ci.path(terminal_notice));
+    for (tests[1..]) |compile| fast_integrations.addFileArg(ci.path(compile));
     fast_integrations.step.dependOn(&format.step);
     // Release compilation coverage stays in qualification, not PR fixture startup.
     if (!pr_ci) fast_integrations.addFileInput(ci.path(release_small));
@@ -863,15 +901,92 @@ pub fn build(b: *std.Build) void {
     }
 }
 
-/// The unit test binary compiles single-threaded for minutes, so a separate
-/// producer builds it beside everything else.
+// Compiler filters are a superset of exact runner ownership. Module-only
+// substrings are too broad: "tests." also matches "store.tests." and recompiles
+// most of the suite. Tokenize declarations so new tests need no second manifest.
+// Compiler filters avoid analyzing/code-generating other roots' named tests.
+// Use module.test. rather than module.: "tests." also matches Store's tests!
+// Anonymous tests bypass Zig filters; the generated runner partitions those.
+// Keep discovery imports in tests.zig eager (not hidden inside a named test).
+fn unitFilters(b: *std.Build) [unit_partition.roots.len][]const []const u8 {
+    const io = b.graph.io;
+    var lists: [unit_partition.roots.len]std.ArrayList([]const u8) = @splat(.empty);
+    var directory = b.root.openDir(io, "src", .{ .iterate = true }) catch @panic("Cannot open unit sources");
+    defer directory.close(io);
+    b.dependOnDirectoryContents(b.path("src"));
+    var walker = directory.walk(b.allocator) catch @panic("OOM");
+    defer walker.deinit();
+    while (walker.next(io) catch @panic("Cannot enumerate unit sources")) |entry| {
+        if (entry.kind == .directory) b.dependOnDirectoryContents(b.path(b.fmt("src/{s}", .{entry.path})));
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+        const prefix = b.fmt("{s}.", .{entry.path[0 .. entry.path.len - 4]});
+        std.mem.replaceScalar(u8, prefix, std.fs.path.sep, '.');
+        const index = @backingInt(unit_partition.owner(prefix));
+        b.dependOnFileContents(b.path(b.fmt("src/{s}", .{entry.path})));
+        const source = entry.dir.readFileAllocOptions(io, entry.basename, b.allocator, .limited(16 * 1024 * 1024), .of(u8), 0) catch @panic("Cannot read unit source");
+        var tokenizer = std.zig.Tokenizer.init(source);
+        var depth: usize = 0;
+        var top_level_added = false;
+        while (true) {
+            const token = tokenizer.next();
+            switch (token.tag) {
+                .eof => break,
+                .l_brace => depth += 1,
+                .r_brace => depth -= 1,
+                .keyword_test => {
+                    const name = tokenizer.next();
+                    if (name.tag == .l_brace) {
+                        depth += 1; // Anonymous discovery tests bypass compiler filters.
+                        continue;
+                    }
+                    if (depth == 0 and !std.mem.eql(u8, entry.path, "tests.zig")) {
+                        if (!top_level_added) lists[index].append(b.allocator, b.fmt("{s}test.", .{prefix})) catch @panic("OOM");
+                        top_level_added = true;
+                        continue;
+                    }
+                    const spelling = source[name.loc.start..name.loc.end];
+                    const text = switch (name.tag) {
+                        .string_literal => std.zig.string_literal.parseAlloc(b.allocator, spelling) catch @panic("Invalid test name"),
+                        .identifier => if (std.mem.startsWith(u8, spelling, "@\""))
+                            std.zig.string_literal.parseAlloc(b.allocator, spelling[1..]) catch @panic("Invalid test name")
+                        else
+                            spelling,
+                        else => @panic("Invalid test declaration"),
+                    };
+                    // Nested container names are compiler-owned. Use a literal
+                    // fragment for these rare cases; runner ownership resolves
+                    // overlap. Avoid quotes/backslashes in Zig response files.
+                    var fragments = std.mem.tokenizeAny(u8, text, "'\"\\\n\r\t");
+                    var fragment: []const u8 = "";
+                    while (fragments.next()) |part| if (part.len > fragment.len) {
+                        fragment = part;
+                    };
+                    lists[index].append(b.allocator, if (fragment.len != 0) fragment else ".test.") catch @panic("OOM");
+                },
+                else => {},
+            }
+        }
+    }
+    var filters: [unit_partition.roots.len][]const []const u8 = undefined;
+    for (&lists, &filters) |*list, *result| {
+        std.mem.sort([]const u8, list.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, c: []const u8) bool {
+                return std.mem.lessThan(u8, a, c);
+            }
+        }.lessThan);
+        result.* = list.toOwnedSlice(b.allocator) catch @panic("OOM");
+    }
+    return filters;
+}
+
+/// Unit roots compile independently on their own producer, beside the other gates.
 const CiPart = enum { all, unit, rest };
 
 const CiCollection = struct {
     b: *std.Build,
     destination: *std.Build.Step,
     part: CiPart,
-    unit: *std.Build.Step.Compile,
+    unit: []const *std.Build.Step.Compile,
     visited: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty,
     reached_unit: bool = false,
 
@@ -880,7 +995,7 @@ const CiCollection = struct {
         const entry = collection.visited.getOrPut(b.allocator, source) catch @panic("OOM");
         if (entry.found_existing) return;
         if (source.cast(std.Build.Step.Compile)) |compile| {
-            const unit = compile == collection.unit;
+            const unit = std.mem.indexOfScalar(*std.Build.Step.Compile, collection.unit, compile) != null;
             collection.reached_unit = collection.reached_unit or unit;
             const emit = switch (collection.part) {
                 .all => true,
@@ -895,7 +1010,7 @@ const CiCollection = struct {
 };
 
 fn ciName(b: *std.Build, compile: *std.Build.Step.Compile) []const u8 {
-    // Both test roots use Zig's default executable name; distinguish their
+    // Test roots can use Zig's default executable name; distinguish their
     // source-owned roots without changing normal compilation or cache keys.
     return if (compile.kind == .@"test")
         b.fmt("{s}-{s}", .{ compile.name, std.fs.path.stem(compile.root_module.root_source_file.?.src_path.sub_path) })
