@@ -2634,6 +2634,8 @@ A Message page never shows or decides an Action.
 Display eviction does not delete saved work.
 Wheel motion arrives as arrow keys through alternate scroll mode 1007, which Rui enables only when the terminal reports it present and reset, and restores on exit; opening never waits for that report. libvaxis `Window.print` lays out and wraps all text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
 Rui's pinned vaxis patch keeps wide clusters, window-wide words and words crossing a style change off the row edge.
+One library `printIterator` call consumes replayable borrowed style runs for each logical range, so word lookahead crosses every style boundary without a fixed segment batch or caller continuation offset.
+The iterator keeps complete visible graphemes together with their first presentation style; hidden link addresses and sidenotes are separate display channels, so orphan combining marks escape without changing link metadata.
 `ConversationViewport` keeps retained bytes, styles and parser state separately from each Pane's libvaxis `ScrollView`, the sole stored row offset and extent-clamp owner.
 An immutable laid-out row projection converts byte Positions for source joins and consent, and paints intersecting logical lines through `ScrollView.bounds` and translated `Window.print` windows, without cell copies or input-sized surfaces.
 One scalar row census per Pane is cached by text generation and the complete layout key; no row table, second navigation anchor or cell cache is kept.
