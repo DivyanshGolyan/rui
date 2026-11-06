@@ -37,16 +37,26 @@ def supported_format(checkout):
     return int(re.search(r"pub const schema_version: u32 = (\d+);", source)[1])
 
 
+def help_text(binary, *command):
+    """Probe without a Host or Store; older CLIs refuse unknown help with 1/2."""
+    result = subprocess.run([binary, *command, "--help"], input="",
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode in (0, 1, 2), result
+    return result.stdout if result.returncode == 0 else ""
+
+
 class Dialect:
     """One installed build's command grammar; the previous build keeps its own."""
 
-    def __init__(self, checkout):
-        arguments = checkout / "src/cli_args.zig"
-        self.resource_first = arguments.exists() and ".request_inspect" in arguments.read_text()
-        self.address_send = arguments.exists() and 'value("to", "ADDRESS")' in arguments.read_text()
-        self.short_ids = "pub const session_id_bytes = 6;" in (checkout / "src/protocol.zig").read_text()
-        self.stdin_message = arguments.exists() and ".session_start" in arguments.read_text()
-        self.pause = ("host", "pause") if arguments.exists() and ".host_pause" in arguments.read_text() else ("host", "stop")
+    def __init__(self, binary):
+        self.resource_first = bool(help_text(binary, "request", "inspect"))
+        send_help = (help_text(binary, "session", "send") if self.resource_first
+                     else help_text(binary))
+        assert send_help, f"No command help from {binary}"
+        self.address_send = "--to ADDRESS" in send_help
+        self.short_ids = "--to ID" in send_help
+        self.stdin_message = bool(help_text(binary, "session", "start"))
+        self.pause = ("host", "pause") if help_text(binary, "host", "pause") else ("host", "stop")
 
     def serve(self):
         return ("host", "serve") if self.resource_first else ("serve",)
@@ -141,7 +151,6 @@ def stop_detached(dialect, binary, store):
 def main():
     previous, candidate = (pathlib.Path(value).resolve() for value in sys.argv[1:])
     previous_format, candidate_format = supported_format(previous), supported_format(candidate)
-    previous_cli, candidate_cli = Dialect(previous), Dialect(candidate)
     # Do not use the runner's HOME, default Store or credentials. Keep the
     # compiler cache outside HOME so both normal installs can reuse compilation.
     os.environ.setdefault("ZIG_GLOBAL_CACHE_DIR", str(pathlib.Path.home() / ".cache/zig"))
@@ -158,7 +167,7 @@ def main():
         previous_artifact = binary.resolve()
         previous_hash = hashlib.sha256(previous_artifact.read_bytes()).digest()
         fixture.RUI = binary
-        dialect = previous_cli
+        dialect = previous_cli = Dialect(binary)
         expected = "Saved before reinstall: café\nsecond line remains intact".encode()
         endpoint = fixture.SuccessEndpoint([
             fixture.sse_answer("upgrade-response", "upgrade-reasoning", "upgrade-message",
@@ -204,7 +213,7 @@ def main():
             assert binary.resolve() != previous_artifact, "installation did not publish a new build"
             assert hashlib.sha256(previous_artifact.read_bytes()).digest() == previous_hash, "old build changed"
             fixture.RUI = binary
-            dialect = candidate_cli
+            dialect = candidate_cli = Dialect(binary)
             commands = ((("host", "start"),) if previous_format == candidate_format
                         else (("host", "start"), candidate_cli.serve()))
             for command in commands:

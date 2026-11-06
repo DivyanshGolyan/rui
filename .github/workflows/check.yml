@@ -39,6 +39,7 @@ jobs:
       linux_matrix: ${{ steps.select.outputs.linux_matrix }}
       linux_split: ${{ steps.select.outputs.linux_split }}
       macos_matrix: ${{ steps.select.outputs.macos_matrix }}
+      macos_split: ${{ steps.select.outputs.macos_split }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,7 +60,7 @@ jobs:
           python3 - <<'PY'
           import json, os, sys
           sys.path.insert(0, 'tests/ci')
-          from qualification import shards, split_linux
+          from qualification import shards, split_build
           from select_tests import CHECK_COVERS
           p = json.load(open('selection.json'))
           if os.environ['STABLE'] == 'true':
@@ -79,7 +80,8 @@ jobs:
               print('targets=' + json.dumps(p['targets']), file=f)
               print('native_targets=' + json.dumps(p['native_targets']), file=f)
               print('linux_matrix=' + json.dumps(shards(p['targets'])), file=f)
-              print('linux_split=' + str(split_linux(p['targets'])).lower(), file=f)
+              print('linux_split=' + str(split_build(p['targets'])).lower(), file=f)
+              print('macos_split=' + str(split_build(p['native_targets'])).lower(), file=f)
               print('macos_matrix=' + json.dumps(shards(p['native_targets'], 'macos')), file=f)
               print('native=' + str(p['native_required']).lower(), file=f)
               print('retry=' + str(p['retry']).lower(), file=f)
@@ -243,11 +245,38 @@ jobs:
       - name: Compile selected gates once, never test acceptance
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
-        run: python3 -B tests/ci/build_artifact.py build "$TARGETS"
+          PART: ${{ needs.plan.outputs.macos_split == 'true' && 'rest' || 'all' }}
+        run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part "$PART"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: publish
         with:
           name: compiled-macos-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rui-compiled
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 1
+  macos_build_unit:
+    # Keep the slow unit compile off the three cores building the other gates.
+    # One extra Mac briefly; suites still use at most three of the five Macs.
+    needs: plan
+    if: ${{ needs.plan.outputs.macos_split == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 15
+    outputs:
+      artifact: ${{ steps.publish.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          check-part: compiled-unit
+      - name: Compile the unit test binary once, never test acceptance
+        env:
+          TARGETS: ${{ needs.plan.outputs.native_targets }}
+        run: python3 -B tests/ci/build_artifact.py build "$TARGETS" --part unit
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: publish
+        with:
+          name: compiled-macos-unit-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rui-compiled
           compression-level: 0
           if-no-files-found: error
@@ -423,8 +452,9 @@ jobs:
           fi
   macos_suites:
     name: macos suites (${{ matrix.name }})
-    needs: [plan, macos_build]
-    if: ${{ needs.plan.outputs.native == 'true' }}
+    needs: [plan, macos_build, macos_build_unit]
+    # A skipped unit producer is expected only for an unsplit selection.
+    if: ${{ !cancelled() && needs.plan.outputs.native == 'true' && needs.macos_build.result == 'success' && needs.macos_build_unit.result == (needs.plan.outputs.macos_split == 'true' && 'success' || 'skipped') }}
     runs-on: macos-15
     timeout-minutes: 35
     strategy:
@@ -442,8 +472,9 @@ jobs:
         env:
           TARGETS: ${{ needs.plan.outputs.native_targets }}
           ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}
+          UNIT_ARTIFACT_ID: ${{ needs.macos_build_unit.outputs.artifact }}
           GH_TOKEN: ${{ github.token }}
-        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID"
+        run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"
       - name: Run required native targets
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
@@ -466,7 +497,7 @@ jobs:
   macos:
     # Keep the existing required status. A failed/cancelled matrix member must
     # fail this aggregate, even when its sibling completes successfully.
-    needs: [plan, macos_build, macos_suites]
+    needs: [plan, macos_build, macos_build_unit, macos_suites]
     if: ${{ always() && (needs.plan.outputs.native == 'true' || needs.plan.result == 'failure') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -475,9 +506,12 @@ jobs:
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
           BUILD_RESULT: ${{ needs.macos_build.result }}
+          UNIT_RESULT: ${{ needs.macos_build_unit.result }}
+          SPLIT: ${{ needs.plan.outputs.macos_split }}
           NATIVE_RESULT: ${{ needs.macos_suites.result }}
         run: |
           test "$PLAN_RESULT" = success
+          if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
           test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success
   report:

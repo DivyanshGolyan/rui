@@ -742,7 +742,7 @@ test "$n" -gt "$FAILS"
         for aggregate in ('linux', 'macos'):
             job = re.search(rf'(?ms)^  {aggregate}:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
             self.assertNotIn('cache_execution', job, 'cache proof is not gating')
-        for build in ('linux_build', 'macos_build'):
+        for build in ('linux_build', 'linux_build_unit', 'macos_build', 'macos_build_unit'):
             job = re.search(rf'(?ms)^  {build}:\n(.*?)(?=^  [a-z_]+:|\Z)', text)[1]
             self.assertNotIn('cache_execution.py', job)
 

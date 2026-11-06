@@ -212,7 +212,7 @@ Build-cache keys separate native tools, Apple SDK, architecture, dependency pins
 PR caches never feed a privileged workflow.
 
 Each platform builds its target closure once with `ci-build -Dci-targets=...`.
-On Linux, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
+On Linux and macOS, when the selection compiles the single-threaded unit test binary alongside other gates, one producer builds only that binary (`-Dci-part=unit`) and another builds the rest (`-Dci-part=rest`); build.zig refuses a split whose selection never reaches the unit compile.
 [build_artifact.py](tests/ci/build_artifact.py) transfers the executables and pinned package sources through immutable same-run artifacts that expire after one day.
 Workers accept either one whole part or exactly the unit and rest parts, with disjoint executable inventories that together match the extracted tree, and verify each exact artifact ID, archive digest, run and attempt, source and tree, platform selection, OS, architecture, compiler digest and executable hashes before use; runner image versions are logged, not compared.
 Extraction rejects traversal, special files, hardlinks and symlinks.
