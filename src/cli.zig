@@ -824,6 +824,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                     stderr.diagnostic("Startup output exceeded 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
                     return error.HostReadinessUnconfirmed;
                 }
+                if (std.mem.endsWith(u8, startup, "[store_identity_mismatch]\n")) return error.StoreIdentityMismatch;
                 return error.HostStartupFailed;
             }
         }

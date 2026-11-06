@@ -735,6 +735,7 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | Limit and schema refusal under 5 s | `host-launch-integration` | 256/256 and minimum-1 refuse; exact minimum serves ten clients. Linux and Apple Silicon macOS |
+| Moved SQLite Store refuses foreground, detached and interactive startup with both escaped canonical folders, `store_identity_mismatch` and exit 6; old-path symlink still refuses, identity stays unchanged, restoration serves | `host_launch_integration.py store-identity` in `host-launch-integration` | Private stopped fixture Store only |
 | [Installed upgrade](ARCHITECTURE.md#store-format-and-upgrades) | `previous-release-upgrade.yml`, `previous_release_upgrade.py` | Refusal until migrations exist |
 
 ### Canonical reads, retained output and SQLite

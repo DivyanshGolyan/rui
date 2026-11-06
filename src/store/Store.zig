@@ -3,6 +3,7 @@
 //! identities and traces. The facade re-exports only the Store type and its value types.
 
 const std = @import("std");
+const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
 const retry_policy = @import("../retry_policy.zig");
@@ -1530,6 +1531,8 @@ pub const OpenOptions = struct {
     cache_spill: bool = true,
     cache_kib: u32 = 1024,
     found_schema_version: ?*u32 = null,
+    /// Caller-owned evidence retained after a failed open destroys the Store.
+    identity_mismatch: ?*store_schema.IdentityMismatch = null,
     /// The tools the Host offers, which it keeps for the Store's life.
     /// Null saves none: the Host reads the last one back (`readCatalog`)
     /// and saves its own (`saveCatalog`) before it serves.

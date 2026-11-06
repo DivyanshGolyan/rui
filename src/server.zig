@@ -997,13 +997,17 @@ pub fn serve(
     defer if (diagnostics) |*writer| writer.close();
     if (diagnostics) |*writer| writer.record("begin", "lease_acquired");
     if (diagnostics) |*writer| try recordCapacity(writer, intake_capacity, descriptor_requirement.total, descriptor_limit_text);
-    errdefer if (diagnostics) |*writer| writer.record("failed", "startup_error");
+    var startup_failure: []const u8 = "startup_error";
+    errdefer if (diagnostics) |*writer| writer.record("failed", startup_failure);
     // The catalog's records point into this arena, and the Store keeps the
     // catalog for its life, so it outlives the Store.
     var catalog_memory = std.heap.ArenaAllocator.init(allocator);
     defer catalog_memory.deinit();
     var storage: store_module.Store = undefined;
-    try openStoreForHost(io, &storage, &lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null);
+    openStoreForHost(io, &storage, &lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
+        if (err == error.StoreIdentityMismatch) startup_failure = "store_identity_mismatch";
+        return err;
+    };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
     return finishServing(io, &storage, launch != null, serveOpened(
         io,
@@ -1214,11 +1218,13 @@ noinline fn openStoreForHost(
     diagnostics: ?*HostDiagnostics,
 ) !void {
     var found_schema_version: u32 = store_module.schema_version;
+    var identity_mismatch: store_module.IdentityMismatch = .{};
     const store_options: store_module.OpenOptions = .{
         .served = served.routes(),
         .cache_spill = limits.sqlite_cache_spill,
         .cache_kib = limits.sqlite_cache_kib,
         .found_schema_version = &found_schema_version,
+        .identity_mismatch = &identity_mismatch,
         // With MCP servers the catalog is saved below, once they are listed.
         .catalog = if (!has_mcp) &tools.built_in else null,
     };
@@ -1233,9 +1239,43 @@ noinline fn openStoreForHost(
         if (err == error.WrongStoreVersion) {
             try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
             if (diagnostics) |writer| writer.record("failed", "unsupported_store_version");
+        } else if (err == error.StoreIdentityMismatch) {
+            try reportStoreIdentityMismatch(identity_mismatch.saved_selector.slice(), lease.paths.store.slice());
         }
         return err;
     };
+}
+
+noinline fn reportStoreIdentityMismatch(saved_selector: []const u8, actual_selector: []const u8) !void {
+    var message: [2 * TerminalText.max_bytes_per_byte * protocol.max_store_bytes + 512]u8 = undefined;
+    var output = std.Io.Writer.fixed(&message);
+    try writeStoreIdentityMismatch(&output, saved_selector, actual_selector);
+    const text = output.buffered();
+    _ = rui_write_readiness(2, text.ptr, text.len);
+}
+
+fn writeStoreIdentityMismatch(output: *std.Io.Writer, saved_selector: []const u8, actual_selector: []const u8) !void {
+    try output.writeAll("rui: SQLite Store identity mismatch.\nSaved original canonical folder: ");
+    var saved_text: TerminalText = .{ .mode = .line };
+    try saved_text.feed(output, saved_selector);
+    try saved_text.finish(output);
+    try output.writeAll("\nActual canonical folder: ");
+    var actual_text: TerminalText = .{ .mode = .line };
+    try actual_text.feed(output, actual_selector);
+    try actual_text.finish(output);
+    try output.writeAll("\nStop Hosts and preserve the complete Store. Restore the directory to its saved original canonical folder, or back up this Store and choose a fresh --store. A symlink at the old path does not restore canonical identity. No Store identity was changed.\n");
+}
+
+test "Store identity diagnostic fits startup forwarding at maximum escaped paths" {
+    const path = @as([protocol.max_store_bytes]u8, @splat(1));
+    var bytes: [2 * TerminalText.max_bytes_per_byte * protocol.max_store_bytes + 512]u8 = undefined;
+    var output = std.Io.Writer.fixed(&bytes);
+    try writeStoreIdentityMismatch(&output, &path, &path);
+    const text = output.buffered();
+    try std.testing.expect(text.len < 8192);
+    try std.testing.expectEqual(@as(usize, 2 * protocol.max_store_bytes), std.mem.count(u8, text, "\\x01"));
+    try std.testing.expect(std.mem.indexOfScalar(u8, text, 1) == null);
+    try std.testing.expect(std.mem.endsWith(u8, text, "No Store identity was changed.\n"));
 }
 
 noinline fn reportWrongStoreVersion(store_path: []const u8, found_schema_version: u32) !void {
