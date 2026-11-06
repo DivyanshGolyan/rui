@@ -110,6 +110,17 @@ class BuildWiringTest(unittest.TestCase):
         self.assertIn("run.has_side_effects = true", build)
         self.assertIn('run.setEnvironmentVariable("RUI_TEST_EXACT_INACTIVITY", "0")', build)
 
+    def test_full_execution_overlaps_native_but_unsplit_stays_serial(self):
+        build = (ROOT / "build.zig").read_text()
+        gate = build.split("    const native_gate =", 1)[1].split("    if (!pr_ci)", 1)[0]
+        self.assertTrue(gate.startswith(" if (check_part == .execution) full_check_step else &process_integrations.step;"))
+        self.assertIn("if (check_part != .callers)", gate)
+        self.assertEqual(re.findall(r"native_gate\.dependOn\(([^;]+)\);", gate), [
+            "&run_tests.step", "&run_renderer_allocation.step", "h2_test_step", "pg_test_step",
+        ])
+        self.assertNotIn("process_integrations.step.dependOn", gate)
+        self.assertIn("full_check_step.dependOn(&process_integrations.step)", build)
+
     def test_filtered_runs_keep_single_stock_aggregate(self):
         build = (ROOT / "build.zig").read_text()
         self.assertIn("if (test_filters.len == 0) unit_partition.roots.len else 1", build)
