@@ -82,6 +82,23 @@ class SelectionTest(unittest.TestCase):
                     if phase == "review":
                         self.assertIn("upgrade-integration", result["native_targets"])
 
+    def test_installer_owners_select_standalone_fixture_in_both_phases(self):
+        paths = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
+                 "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py", "tests/ci/release.py",
+                 "tests/ci/release_numbers.py", "tests/ci/qualification.py", "src/Installation.zig", "src/installation_path.zig",
+                 "src/release_candidate.zig", "src/cli.zig", "src/cli_args.zig", "src/store/schema.zig",
+                 "src/fetch_dependencies.sh", "release/publish.sh", "release/install.sh",
+                 "install.sh", "build.zig", "build.zig.zon")
+        for path in paths:
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    result = select([path], phase, AVAILABLE)
+                    self.assertIn("installer-integration", result["targets"])
+                    if phase == "review":
+                        self.assertIn("installer-integration", result["native_targets"])
+                    else:
+                        self.assertEqual(result["native_targets"], [])
+
     def test_request_wait_selects_its_native_oracle_and_portable_core(self):
         for path in ("src/client.zig", "src/cli_args.zig", "src/server.zig",
                      "src/TestObservation.zig", "tests/integration/request_wait_integration.py",
@@ -715,8 +732,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_installer_report_runs_the_fixture_that_pins_its_json_reader(self):
         result = select(["release/publish.sh"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["host-status-integration", "upgrade-integration"])
-        self.assertEqual(result["native_targets"], ["host-status-integration", "upgrade-integration"])
+        self.assertEqual(result["targets"], ["host-status-integration", "installer-integration", "upgrade-integration"])
+        self.assertEqual(result["native_targets"], ["host-status-integration", "installer-integration", "upgrade-integration"])
         self.assertTrue(result["mac_required"])
 
     def test_existing_fixture_target_and_new_fixture_fallback(self):
@@ -806,6 +823,13 @@ class SelectionTest(unittest.TestCase):
         self.assertCountEqual(selected, [*NATIVE, "check-full"])
         self.assertEqual(sum("-Dcheck-part=execution" in batch for batch in batches), 1)
         self.assertEqual(sum("-Dcheck-part=callers" in batch for batch in batches), 1)
+
+    def test_daily_native_and_all_include_standalone_installer(self):
+        for platform in ("linux", "macos"):
+            for suite in ("native", "all"):
+                with self.subTest(platform=platform, suite=suite):
+                    rows = qualification(suite, platform)["include"]
+                    self.assertEqual(sum("installer-integration" in row["targets"] for row in rows), 1)
 
     def test_qualification_uses_existing_platform_targets_and_isolates_resources(self):
         for platform in ("linux", "macos"):

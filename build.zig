@@ -565,6 +565,11 @@ pub fn build(b: *std.Build) void {
     const host_launch_step = b.step("host-launch-integration", "Run detached Host launch, alias convergence and startup-failure cases");
     host_launch_step.dependOn(&host_launch_integration.step);
 
+    const installer_integration = b.addSystemCommand(&.{"python3"});
+    installer_integration.addFileArg(b.path("tests/integration/installer_integration.py"));
+    installer_integration.addFileArg(ci.path(release_safe));
+    b.step("installer-integration", "Run source and release installer cases through the production publication owner").dependOn(&installer_integration.step);
+
     const upgrade_release = addRuiWithIdentity(b, target, .ReleaseSafe, "rui-upgrade-release-fixture", pinned_transport, .{
         .version = b.fmt("0.{d}.10000", .{@import("src/store/schema.zig").schema_version}),
         .revision = buildRevision(b),
