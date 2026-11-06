@@ -635,6 +635,19 @@ def cmd_restart_host(args):
     print(json.dumps({"stopped": [r["pid"] for r in old], "instance": json.loads(status.stdout).get("instance")}))
 
 
+def session_start_id(stdout):
+    """Read only the authoritative Session identity in an accepted CLI receipt."""
+    try:
+        receipt = json.loads(stdout)
+        session = receipt["context"]["session"]
+        accepted = receipt["answer"]["status"] == "accepted" and "error" not in receipt
+        if not accepted or not isinstance(session, str) or not session or session.strip() != session:
+            raise ValueError("expected an accepted receipt with context.session")
+    except (ValueError, TypeError, KeyError) as error:
+        die(f"invalid session start receipt: {error}")
+    return session
+
+
 def cmd_new(args):
     build = load_build(args.sha)
     run_id = time.strftime("%Y%m%dT%H%M%S") + f"-{args.sha[:7]}-{os.getpid()}"
@@ -689,7 +702,7 @@ def cmd_new(args):
                              input=f"verify-rui opened {session}")
         if result.returncode != 0:
             die(f"start {session} failed: {result.stderr}")
-        meta["sessions"][session] = result.stdout.strip()
+        meta["sessions"][session] = session_start_id(result.stdout)
         handle = re.search(r"request: (\S+)", result.stderr)
         if handle:
             wait_request(run, handle.group(1))
@@ -1060,8 +1073,8 @@ def cmd_evidence(args):
     exports = {}
     for name, argv in (("request-list", ["request", "list"]),
                        ("sessions", ["session", "list", "--store", run.store, "--all"]),
-                       ("demo-inspect", ["session", "inspect", "--store", run.store, run.sid("demo"), "--profile", "full"]),
-                       ("approve-inspect", ["session", "inspect", "--store", run.store, run.sid("approve"), "--profile", "full"])):
+                       ("demo-inspect", ["session", "inspect", "--store", run.store, "--session", run.sid("demo"), "--profile", "full"]),
+                       ("approve-inspect", ["session", "inspect", "--store", run.store, "--session", run.sid("approve"), "--profile", "full"])):
         result = run.rui_cmd(*argv)
         (out / f"{name}.json").write_text(result.stdout)
         if result.stderr:
