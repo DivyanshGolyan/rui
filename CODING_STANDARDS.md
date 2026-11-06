@@ -16,6 +16,22 @@ Replace superseded text rather than creating parallel ADRs, proposals, glossarie
 Keep [Research](research/README.md) a compact index of reproducible evidence.
 Write the top-level documents and docs/ one sentence per line, so PRs that edit different sentences of one paragraph merge without a conflict; `python3 tests/ci/sentence_lines.py` rewrites them and the policy job checks them.
 
+## Contract enforcement
+
+Each listed contract has one owning enforcement; change the owner and its check together.
+
+| Contract | Owning enforcement | Existing local and CI checks |
+| --- | --- | --- |
+| [Mutation presentation and admission truth](ARCHITECTURE.md#public-operations) | `cli.writeMutationReply` owns quiet Configure success and contextual errors through `MutationPresentation`. Configure records admission before output and always invokes that renderer. | `human_cli_integration.py` checks quiet success; `canonical_failure_integration.py` checks original context, binding/null failures and no resend. Both run in `check`. |
+| [Original result and release deadlines](VERIFICATION.md#transport) | `model_fixture.wait_for_result_release` requires a deadline. Population callers create one deadline before their first result wait and forward it through all reads and global release. | `transport_h2_integration_test.py` drives shared, managed and seven population caller clocks; `host_process_test.py` drives the stop-receipt caller. Both run through existing build targets. |
+| [Required native receipts](ARCHITECTURE.md#shared-optional-stderr) | `start_ready_process` selects native capture and crash-cut plans and external failure retention before launch. `HostDiagnostics` rejects optional authority for named required phases. | `host_process_test.py` rejects missing, duplicate, lost and optional-only receipts and verifies retention after root teardown; `check` runs it. |
+| [Receipt versus publication retirement](VERIFICATION.md#native-owner-observations) | `crash_host` requires unsealed publication retirement within its original crash/reap budget. Ordinary teardown uses sealed `stop_process`; immutable final validity remains mandatory. | `host_process_test.py` holds delivered custody and injects a future writer through the actual crash caller; existing native publication holds remain in `check`. |
+| [No-launch crash cut](VERIFICATION.md#native-owner-observations) | The existing opt-in prepared transition blocks before launch authority. `ReleaseGate.assert_held` requires the owned empty FIFO, independently of marker absence and observation retirement. | Native Bash integration retains the gated prelaunch crash and recovery; `host_process_test.py` rejects released, credited and replaced gates and verifies unlink-failure closure. |
+| [Canonical fault fencing](ARCHITECTURE.md#canonical-state-and-transactions) | `enter` and `Access.finish`/`finishTransaction` in `src/store/Store.zig` own every locked Store entry point. Each declares the ordinary errors its body returns, checked at compile time; every other error from the body fences the Store before it returns. | `src/store/tests.zig` pins locking, fencing and classifier return to that owner and fences injected SQLite step faults on six entry points; `canonical_failure_integration.py` checks that a Host read fault fences instead of returning `result_not_found`. Both run in `check`. |
+| [Caller diagnostics](ARCHITECTURE.md#help-and-prerequisites) | `caller_error.of`, its catalog and invocation-owned witnesses classify CLI failures; `tests/ci/caller_errors.py` inventories CLI-owned production errors and ratchets pending causes against the same scoped trusted-main inventory. | `test_caller_errors.py` rejects pending growth, raw caller error names and unmapped errors in CLI-owned sources, without catalog coupling to Host-internal owners; prepush and CI policy run the gate. |
+| [Host stack budget](CODING_STANDARDS.md#host-stacks) | `tests/ci/stack_frames.py` and [stack_frames.json](tests/ci/stack_frames.json) own the ReleaseSafe frame budget, each Host thread's chain ceiling and the shrink-only exceptions. | `stack-frames` runs in `check`. `test_stack_frames.py` self-tests the gate and fails when an exception or ceiling grows past the trusted `origin/main` copy; the policy job runs it with the other `tests/ci` unittests. |
+| [Primary failure and mandatory disposal](CODING_STANDARDS.md#evidence) | Shared process, held-endpoint, Control and Bash disposal owners attempt every cleanup and keep the original failure primary. | `host_process_test.py` injects disposal and retention failures; `transport_h2_integration_test.py` drives body/cleanup fault pairs and successful-body cleanup failure. Existing build targets run both. |
+
 ## Engineering
 
 Ground design in concrete caller behavior.
@@ -108,9 +124,11 @@ On Host threads:
 
 ## Review
 
-Before opening a PR, and again on each review-fix round, run one independent correctness, design and complecting review in a fresh context (a subagent, or another thread when none is available), using the [product tenets](VERIFICATION.md#product-tenets).
-The author fixes each finding before opening the PR, or records in the PR why it stays, and fixes it at its class ([Ownership and transitions](#ownership-and-transitions)).
-Review signoff does not gate landing a coherent green change; [Landing](AGENTS.md#landing) owns the required proof and handling of known failed counterexamples.
+Codex on the PR is the code review: comment `@codex review` after every push, because it does not re-review on its own.
+The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.
+Reviewers apply the rules below and the [product tenets](VERIFICATION.md#product-tenets).
+The author fixes each finding at its class ([Ownership and transitions](#ownership-and-transitions)), or records in the PR why it stays.
+Review signoff does not gate landing a green change ([Landing](AGENTS.md#landing)).
 
 Review parity and failure paths as well as the diff:
 
@@ -161,7 +179,7 @@ Read native evidence from the lossless test observation channel; stderr phase tr
 Take Host-decided values such as the canonical Store, capacities and descriptor requirements from readiness rather than recomputing them; pass each Host option once through the shared launcher; and let synthesized durable populations pass a production read before measuring them.
 Code that runs only on scheduled or one-platform jobs gets no other drift check.
 
-For each new owner-boundary regression on a [strict path](AGENTS.md#landing), demonstrate that its counterexample goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup.
+For each new owner-boundary regression on a [strict path](tests/ci/strict_paths.py), demonstrate that its counterexample goes red on the unfixed path or a targeted mutation at the intended assertion, not fixture setup.
 Examples: [#271 custody negative control](https://github.com/DivyanshGolyan/rui/commit/186514f) and [#258 qualification-oracle correction](https://github.com/DivyanshGolyan/rui/pull/258#issuecomment-5745097364).
 
 For documentation, check contract preservation, references and `git diff --check`.
@@ -170,7 +188,7 @@ Implementation claims require inspected source.
 Keep accepted decisions, source inspection, prototypes, compilation and native process-crash evidence distinct.
 OS-crash and power-loss recovery are outside the supported contract.
 
-For changes touching the [strict landing paths](AGENTS.md#landing), pause the affected outcome after a failed or unknown check, not independent work.
+For changes touching the [strict landing paths](tests/ci/strict_paths.py), pause the affected outcome after a failed or unknown check, not independent work.
 A Mac check, or a signature that [CI triage](.claude/skills/rui-ci-triage/SKILL.md) shows already fails on main, pauses nothing on main; it holds only `stable`.
 Otherwise, assertions, unexplained timeouts and unknown results require diagnosis, not replay.
 Elsewhere, Selected CI retries a failed shard once automatically, and other reds follow the landing rule: file an issue and fix forward.

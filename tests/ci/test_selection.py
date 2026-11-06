@@ -356,12 +356,88 @@ class SelectionTest(unittest.TestCase):
                     actual = 'success' if result.returncode == 0 else 'failure'
                 self.assertEqual(actual, expected)
 
-    def test_linux_producer_splits_only_beside_other_compiles(self):
-        from qualification import split_linux
-        self.assertTrue(split_linux(["check"]))
-        self.assertTrue(split_linux(["test", "test-logic"]))
-        self.assertFalse(split_linux(["test"]))
-        self.assertFalse(split_linux(["test-logic", "admission-debug-integration"]))
+    def test_producers_split_only_beside_other_compiles(self):
+        from qualification import split_build
+        for targets in (["check"], ["check-full"], ["test", "test-logic"],
+                        ["check", "admission-debug-integration"]):
+            self.assertTrue(split_build(targets), targets)
+        for targets in ([], ["test"], ["test-logic", "admission-debug-integration"]):
+            self.assertFalse(split_build(targets), targets)
+
+    def test_macos_split_workflow_uses_the_shared_handoff(self):
+        workflow = Path('.github/workflows/check.yml').read_text()
+        jobs = dict(re.findall(r'(?ms)^  ([a-z_]+):\n(.*?)(?=^  [a-z_]+:|\Z)', workflow))
+        self.assertIn('macos_split: ${{ steps.select.outputs.macos_split }}', jobs['plan'])
+        for name, part, artifact in (('macos_build', 'compiled', 'compiled-macos'),
+                                     ('macos_build_unit', 'compiled-unit', 'compiled-macos-unit')):
+            job = jobs[name]
+            self.assertIn('needs: plan', job)
+            self.assertIn('runs-on: macos-15', job)
+            self.assertIn('timeout-minutes: 15', job)
+            self.assertIn('check-part: ' + part + '\n', job)
+            self.assertIn('TARGETS: ${{ needs.plan.outputs.native_targets }}', job)
+            self.assertIn('artifact: ${{ steps.publish.outputs.artifact-id }}', job)
+            self.assertIn('name: ' + artifact + '-${{ github.run_attempt }}', job)
+            self.assertIn('if-no-files-found: error', job)
+        self.assertIn("if: ${{ needs.plan.outputs.macos_split == 'true' }}", jobs['macos_build_unit'])
+        self.assertIn('build "$TARGETS" --part unit', jobs['macos_build_unit'])
+        self.assertIn("PART: ${{ needs.plan.outputs.macos_split == 'true' && 'rest' || 'all' }}",
+                      jobs['macos_build'])
+        self.assertIn('build "$TARGETS" --part "$PART"', jobs['macos_build'])
+        suites = jobs['macos_suites']
+        self.assertIn('needs: [plan, macos_build, macos_build_unit]', suites)
+        self.assertIn('max-parallel: 3', suites)
+        self.assertIn('ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact }}', suites)
+        self.assertIn('UNIT_ARTIFACT_ID: ${{ needs.macos_build_unit.outputs.artifact }}', suites)
+        restore = 'run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"'
+        for name in ('linux_suites', 'macos_suites'):
+            self.assertIn(restore, jobs[name])
+        self.assertIn('needs: [plan, macos_build, macos_build_unit, macos_suites]', jobs['macos'])
+        self.assertIn('UNIT_RESULT: ${{ needs.macos_build_unit.result }}', jobs['macos'])
+        self.assertIn('SPLIT: ${{ needs.plan.outputs.macos_split }}', jobs['macos'])
+        # These jobs observe the aggregate, so neither can outrun the unit producer.
+        for name in ('report', 'completion'):
+            self.assertRegex(jobs[name], r'needs: \[[^\n]*\bmacos\b')
+
+    def test_macos_suites_and_aggregate_require_the_expected_unit_result(self):
+        workflow = Path('.github/workflows/check.yml').read_text()
+        suites = re.search(r'(?ms)^  macos_suites:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
+        gate = re.search(r'(?ms)^  macos:\n(.*?)(?=^  [a-z_]+:|\Z)', workflow)[1]
+        expression = re.search(r'if: \$\{\{ (.*?) \}\}', suites)[1]
+        # cancelled() overrides Actions' implicit success(), including skipped needs.
+        self.assertIn('!cancelled()', expression)
+        expression = re.sub(r'!(?!=)', 'not ', expression.replace('&&', 'and').replace('||', 'or'))
+        self.assertIn('always()', gate)
+        script = dedent(gate.split('run: |\n', 1)[1])
+        for split in ('true', 'false'):
+            for unit in ('success', 'skipped', 'failure', 'cancelled'):
+                for build, native in (('success', 'success'), ('failure', 'skipped'),
+                                      ('cancelled', 'skipped'), ('skipped', 'skipped'),
+                                      ('success', 'failure'), ('success', 'cancelled'),
+                                      ('success', 'skipped')):
+                    with self.subTest(split=split, unit=unit, build=build, native=native):
+                        expected_unit = unit == ('success' if split == 'true' else 'skipped')
+                        needs = SimpleNamespace(
+                            plan=SimpleNamespace(outputs=SimpleNamespace(native='true', macos_split=split)),
+                            macos_build=SimpleNamespace(result=build),
+                            macos_build_unit=SimpleNamespace(result=unit))
+                        admitted = eval(expression, {'__builtins__': {}, 'cancelled': lambda: False,
+                                                     'needs': needs})
+                        self.assertEqual(admitted, build == 'success' and expected_unit)
+                        result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
+                                                env=dict(os.environ, PLAN_RESULT='success', BUILD_RESULT=build,
+                                                         NATIVE_RESULT=native, SPLIT=split, UNIT_RESULT=unit))
+                        self.assertEqual(result.returncode == 0,
+                                         build == native == 'success' and expected_unit)
+        needs.plan.outputs.native = 'false'
+        self.assertFalse(eval(expression, {'__builtins__': {}, 'cancelled': lambda: False, 'needs': needs}))
+        needs.plan.outputs.native = 'true'
+        self.assertFalse(eval(expression, {'__builtins__': {}, 'cancelled': lambda: True, 'needs': needs}))
+        for plan in ('failure', 'cancelled', 'skipped'):
+            result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
+                                    env=dict(os.environ, PLAN_RESULT=plan, BUILD_RESULT='success',
+                                             NATIVE_RESULT='success', SPLIT='true', UNIT_RESULT='success'))
+            self.assertNotEqual(result.returncode, 0)
 
     def test_shared_state_and_unknown_code_fail_closed(self):
         for path in ("src/future_owner.zig", "tests/integration/future_case.py"):

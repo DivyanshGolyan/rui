@@ -16,7 +16,7 @@ Name the failing fixture and assertion from the log, decide whether the commit u
 
 ## 2. Read every failed job
 
-A run can fail in several jobs for different reasons. Read each failed job's own failing step before calling it derivative. An Auto-land `completion` job fails when its parent qualification was red or cancelled, so read the parent's jobs too, but it can also fail on its own, such as a dispatch HTTP 500. Recover with the matching procedure in [Landing](../../../AGENTS.md#landing): the lost-completion dispatch, or a rerun of the diagnosed Auto-land job after a runner failure.
+A run can fail in several jobs for different reasons. Read each failed job's own failing step before calling it derivative. An Auto-land `completion` job fails when its parent qualification was red or cancelled, so read the parent's jobs too, but it can also fail on its own, such as a dispatch HTTP 500. Recover with the matching procedure in [Landing cadence](../../../VERIFICATION.md#landing-cadence): the lost-completion dispatch, or a rerun of the diagnosed Auto-land job after a runner failure.
 
 ## 3. Decide whether the diff caused it
 
