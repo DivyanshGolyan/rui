@@ -787,15 +787,105 @@ class SelectionTest(unittest.TestCase):
             self.assertTrue(setup_requirements([target])["node"], target)
 
     def test_setup_installs_fixture_packages_for_any_target(self):
-        self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False})
-        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True})
-        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "node": False, "python": True})
-        self.assertEqual(setup_requirements(["ts-client"]), {"go": False, "node": True, "python": True})
+        self.assertEqual(setup_requirements([]), {"go": False, "node": False, "python": False, "tmux": False})
+        self.assertEqual(setup_requirements(["test-logic"]), {"go": False, "node": False, "python": True, "tmux": False})
+        self.assertEqual(setup_requirements(["measurement-check"]), {"go": True, "node": False, "python": True, "tmux": False})
+        self.assertEqual(setup_requirements(["ts-client"]), {"go": False, "node": True, "python": True, "tmux": False})
         imported = set()
         for fixture in (Path(__file__).parents[1] / "integration").glob("*.py"):
             imported |= set(re.findall(r"(?m)^\s*(?:import|from) (h2|pyte|wcwidth)\b", fixture.read_text()))
         pinned = {line.split("==")[0] for line in (Path(__file__).parents[1] / "integration/requirements.txt").read_text().split()}
         self.assertLessEqual(imported, pinned)
+
+    def test_tmux_requirement_only_follows_upgrade_target(self):
+        for targets in ([], ["check"], ["check-full"], ["installer-integration"], ["test-logic", "check-full"]):
+            with self.subTest(targets=targets):
+                self.assertFalse(setup_requirements(targets)["tmux"])
+        for targets in (["upgrade-integration"], ["check", "upgrade-integration"]):
+            with self.subTest(targets=targets):
+                self.assertTrue(setup_requirements(targets)["tmux"])
+
+    def test_setup_uses_actual_shard_targets_without_losing_resource_go(self):
+        for platform in ("linux", "macos"):
+            for row in qualification("all", platform)["include"]:
+                with self.subTest(platform=platform, row=row["name"]):
+                    required = setup_requirements(row["targets"])
+                    if row["resource"]:
+                        self.assertTrue(required["go"])
+                        self.assertFalse(required["tmux"])
+                    elif "measurement-check" not in row["targets"]:
+                        self.assertFalse(required["go"])
+        for path, jobs in ((".github/workflows/check.yml", ("linux_suites", "macos_suites")),
+                           (".github/workflows/qualify-macos.yml", ("qualify",))):
+            workflow = Path(path).read_text()
+            for job in jobs:
+                with self.subTest(path=path, job=job):
+                    body = re.split(r"(?m)^  [a-z_]+:\s*$", workflow.split(f"  {job}:\n", 1)[1], 1)[0]
+                    setup = body.split("- uses: ./.github/actions/setup", 1)[1].split("      - name:", 1)[0]
+                    self.assertIn("targets: ${{ toJSON(matrix.targets) }}", setup)
+                    self.assertIn("compiled: 'true'", setup)
+        for path, jobs in ((".github/workflows/check.yml", ("linux_build", "macos_build")),
+                           (".github/workflows/qualify-macos.yml", ("compile",))):
+            workflow = Path(path).read_text()
+            for job in jobs:
+                with self.subTest(path=path, job=job):
+                    body = re.split(r"(?m)^  [a-z_]+:\s*$", workflow.split(f"  {job}:\n", 1)[1], 1)[0]
+                    setup = body.split("- uses: ./.github/actions/setup", 1)[1].split("      - name:", 1)[0]
+                    self.assertIn("check-part: compiled", setup)
+                    self.assertIn("targets: ${{ needs.plan.outputs.", setup)
+
+    def test_tmux_setup_checks_and_installs_real_command(self):
+        setup = Path(".github/actions/setup/action.yml").read_text()
+        step = setup.split("    - name: Install tmux for upgrade integration\n", 1)[1].split("    - uses:", 1)[0]
+        self.assertIn("steps.requirements.outputs.tmux == 'true' && inputs.check-part != 'compiled'", step)
+        script = dedent(step.split("      run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / "bin"
+            tools.mkdir()
+            log = root / "log"
+            def tool(name, body):
+                path = tools / name
+                path.write_text("#!/bin/sh\n" + body)
+                path.chmod(0o755)
+            tool("uname", 'echo "$TEST_OS"\n')
+            installer = ("""printf '%s %s\n' "${0##*/}" "$*" >> "$LOG"
+if [ "$MODE" = fail ]; then exit 42; fi
+if [ "$MODE" != missing ]; then
+  case "$*" in *install*) printf '#!/bin/sh\nexit 0\n' > "$TOOLS/tmux"; /bin/chmod +x "$TOOLS/tmux" ;; esac
+fi
+""")
+            tool("brew", installer)
+            tool("sudo", installer)
+            def run(os_name, mode="ok", present=False):
+                tmux = tools / "tmux"
+                tmux.unlink(missing_ok=True)
+                log.unlink(missing_ok=True)
+                if present:
+                    tool("tmux", "exit 0\n")
+                env = {"PATH": str(tools), "TEST_OS": os_name, "MODE": mode,
+                       "LOG": str(log), "TOOLS": str(tools)}
+                result = subprocess.run(["/bin/bash", "-c", script], env=env, capture_output=True, text=True)
+                return result, log.read_text().splitlines() if log.exists() else []
+            for os_name in ("Darwin", "Linux"):
+                with self.subTest(os=os_name, present=True):
+                    result, calls = run(os_name, present=True)
+                    self.assertEqual((result.returncode, calls), (0, []))
+            for os_name, expected in (("Darwin", ["brew install tmux"]),
+                                      ("Linux", ["sudo apt-get update -q", "sudo apt-get install -yq tmux"])):
+                with self.subTest(os=os_name):
+                    result, calls = run(os_name)
+                    self.assertEqual((result.returncode, calls), (0, expected))
+                    self.assertTrue(result.stdout.strip().endswith("/tmux"))
+            result, calls = run("FreeBSD")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(calls, [])
+            for os_name in ("Darwin", "Linux"):
+                for mode in ("fail", "missing"):
+                    with self.subTest(os=os_name, mode=mode):
+                        result, calls = run(os_name, mode=mode)
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertTrue(calls)
 
     def test_shards_keep_every_selected_target_and_both_full_parts(self):
         targets = ["check-full", "codex-credential-integration", "test-full", "measurement-check"]
