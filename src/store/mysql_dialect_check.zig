@@ -559,3 +559,77 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     done.migrations += 1;
     writeRecord();
 }
+
+test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ordinary rows" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer setup("USE " ++ database) catch {};
+    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (step.from < 58) try load(migrated_database, schema.mysqlMigration(step.from), false);
+    }
+    // The fixture really is old wire 10 before the new DDL runs. Never
+    // substitute the current protocol constant into this input metadata.
+    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','10'),('format','58')", false);
+    // Distinct immutable archive/refusal identities exist before skills DDL.
+    try load(migrated_database, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES" ++
+        "('skills-58-archive',6,'rhvzwc',X'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1,'',0,0,1000)," ++
+        "('skills-58-refusal',2,'absent',X'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',0,'unknown_session',0,0,1001);" ++
+        "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused) VALUES('skills-58-archive','rhvzwc',NULL,2,0,1793781800,0);" ++
+        "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc','skills-58-archive');" ++
+        "INSERT INTO session_archive_command(command_key,archived) VALUES('skills-58-archive',1);" ++
+        "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES('skills-58-refusal','brhkcj',6,1793781801);" ++
+        "UPDATE session SET next_position=3 WHERE session_ref='rhvzwc';" ++
+        "UPDATE session SET next_position=7 WHERE session_ref='brhkcj'", false);
+    const saved_facts = "SELECT c.command_key,c.kind,c.target,HEX(c.input_digest),c.accepted,c.code,c.command_seq,a.archived,s.session_ref,s.selected_turn_id,s.position,s.admission_cutoff,s.stopped_at,s.parent_caused,intent.session_ref,r.sender_session_ref,r.sender_position,r.rejected_at " ++
+        "FROM core_command c LEFT JOIN session_archive_command a ON a.command_key=c.command_key LEFT JOIN session_stop s ON s.command_key=c.command_key LEFT JOIN session_archive intent ON intent.command_key=c.command_key LEFT JOIN sent_rejection r ON r.command_key=c.command_key " ++
+        "WHERE c.command_key IN ('skills-58-archive','skills-58-refusal') ORDER BY c.command_key";
+    var before_facts: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer before_facts.deinit();
+    try writeResult(saved_facts, &before_facts.writer);
+    try std.testing.expect(before_facts.written().len > 200);
+    var old_wire: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer old_wire.deinit();
+    try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &old_wire.writer);
+    try std.testing.expectEqualStrings("\n 2:10", old_wire.written());
+    var count: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer count.deinit();
+    try writeResult("SELECT count(*) FROM conversation_entry", &count.writer);
+    try std.testing.expectEqualStrings("\n 1:3", count.written());
+    // Explicit old columns make the oracle independent of the added source
+    // column. It covers every ordinary entry and its original public/private
+    // content identity and bytes across the actual ALTER TABLE migration.
+    const ordinary_rows = "SELECT e.session_ref,e.entry_ordinal,e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_operation_id,e.source_item_ordinal,e.content_id,e.recorded_at,HEX(c.digest),c.byte_length,c.private,k.chunk_index,HEX(k.bytes) " ++
+        "FROM conversation_entry e JOIN content c ON c.content_id=e.content_id LEFT JOIN content_chunk k ON k.content_id=c.content_id ORDER BY e.session_ref,e.entry_ordinal,k.chunk_index";
+    var before: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer before.deinit();
+    try writeResult(ordinary_rows, &before.writer);
+    try std.testing.expect(before.written().len > 100);
+    inline for (schema.migrations) |step| {
+        if (step.from >= 58) try load(migrated_database, schema.mysqlMigration(step.from), false);
+    }
+    var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer result.deinit();
+    try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
+    const current_wire = @import("../protocol.zig").wire_version;
+    try std.testing.expectEqualStrings(std.fmt.comptimePrint("\n {d}:{s}", .{ current_wire.len, current_wire }), result.written());
+    var after: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer after.deinit();
+    try writeResult(ordinary_rows, &after.writer);
+    try std.testing.expectEqualStrings(before.written(), after.written());
+    var after_facts: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer after_facts.deinit();
+    try writeResult(saved_facts, &after_facts.writer);
+    try std.testing.expectEqualStrings(before_facts.written(), after_facts.written());
+    var provenance: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer provenance.deinit();
+    try writeResult("SELECT count(*) FROM conversation_entry WHERE source_catalog_position IS NULL AND turn_id IS NOT NULL", &provenance.writer);
+    try std.testing.expectEqualStrings("\n 1:3", provenance.written());
+    try expectCatalog(migrated_database);
+    done.migrations += 1;
+    writeRecord();
+}

@@ -813,7 +813,8 @@ The actual Ingress tests cover text-free skill custody transfer, fragmented inpu
 
 The Store tests exercise six distinct content imports in child creation, `content_import` and `before_commit` rollback with reopen/retry, same-position/public catalog provenance, empty initial position zero and authenticated peer refusal causality/replay.
 Reload fault tests preserve catalog, instruction, position and command-result atomicity through both failure points, then verify same-key replay and no-op behavior after reopen.
-Populated format-56/wire-9 SQLite fixtures upgrade through the production Store and preserve ordinary content; the corresponding MySQL migration runs when a live test server is configured.
+Populated format-56/wire-9 and format-58/wire-10 SQLite fixtures upgrade through the production Store and preserve ordinary content; corresponding MySQL migrations run when a live test server is configured.
+Archive composition tests retain archive intent on skill refusal and idle reload, unarchive only a fresh admitted invocation, and preserve archive state on keyed replay.
 The adapter lifecycle test checks complete >10,000-byte CRLF/Unicode skill results in saved ordinary content and actual sealed provider input, metadata-only body edits, revision-one/authored-baseline preservation, idle nullable-Turn reports, frozen admitted Operations, serialized history prefixes, memo/cold reconstruction and real reopen after source deletion.
 Negative controls revert each boundary fix and must fail its owner assertion or actual Host custody boundary, not fixture setup.
 These are synthetic local evidence, not live provider, remote filesystem or power-loss qualification.

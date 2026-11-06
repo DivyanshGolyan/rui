@@ -2608,6 +2608,14 @@ test "skills reload reply facts apply only to accepted existing Configure mutati
             .conflict_tail = ",\"completion\":{\"status\":\"unavailable\"}",
         },
         .{
+            .target = .{ .session_archive = .{ .archived = true } },
+            .reply_type = "session_archive_reply",
+            .accepted_fields = ",\"archived\":true",
+            .accepted_tail = ",\"completion\":{\"status\":\"completed\"}",
+            .rejected_tail = ",\"completion\":{\"status\":\"unavailable\"}",
+            .conflict_tail = ",\"completion\":{\"status\":\"unavailable\"}",
+        },
+        .{
             .target = .{ .model_interruption = .{ .turn = 3, .operation = 4 } },
             .reply_type = "model_interruption_reply",
             .binding = ",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"4\"}",

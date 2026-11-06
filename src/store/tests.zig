@@ -12131,7 +12131,7 @@ test "skills peer refusal persists authenticated activity diagnostic and keyed r
                 try std.testing.expectEqual(@as(usize, 1), activity.count);
                 try std.testing.expectEqual(sender_position, activity.items[0].position);
                 try std.testing.expectEqualStrings("unknown_skill", activity.items[0].value.send_failed.code.slice());
-                try std.testing.expectEqualStrings(receiver.slice(), activity.items[0].value.send_failed.target.session.slice());
+                try std.testing.expectEqualStrings(receiver.slice(), activity.items[0].value.send_failed.target.?.session.slice());
                 const diagnostic_id = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key=?1 AND accepted=0 AND code='unknown_skill'", .{command.key.slice()});
                 const reference = try testingContentReference(&storage, diagnostic_id);
                 var reader: ContentReader = undefined;
@@ -12262,6 +12262,46 @@ test "skills reload settles catalog and result atomically across faults retry re
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog s JOIN content c ON c.content_id=s.catalog_content_id WHERE s.session_ref=?1 AND s.position=?2 AND c.digest=?3 AND c.private=0", .{ session.slice(), original_snapshot, store_testing.Blob{ .bytes = &protocol.contentDigest(skills_fixture_initial.ready.encoded) } }));
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id WHERE e.session_ref=?1 AND e.source_catalog_position=?2 AND c.digest=?3 AND c.private=0", .{ session.slice(), original_snapshot, store_testing.Blob{ .bytes = &protocol.contentDigest(skills_fixture_initial.ready.instruction.?) } }));
             }
+        }
+    }.run);
+}
+
+test "skills preserve archive intent until a fresh invocation is admitted" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "skills-archive-session");
+            var archive: protocol.SessionArchiveCommand = .{ .session = session };
+            try archive.key.set("skills-archive");
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
+            var command: protocol.MessageCommand = .{ .session = session, .skill = .{} };
+            try command.key.set("skills-archive-refused");
+            try command.skill.?.set("demo");
+            const failed: skills_fixture_domain.Capture = .{ .failed = .{ .code = .unknown_skill, .bytes = "The advertised name was not found" } };
+            const refused = storage.submitMessageCapturedSkills(&command, null, null, &failed, .{});
+            try std.testing.expect(refused == .rejected and refused.rejected.code == .unknown_skill);
+            try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
+            var reload: protocol.ConfigureCommand = .{ .session = session, .reload_skills = true };
+            try reload.key.set("skills-archive-reload");
+            const empty: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{} } };
+            try std.testing.expect(storage.configureWithCapturedSkills(&reload, null, null, &empty, .{}) == .accepted);
+            try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
+            try command.key.set("skills-archive-admitted");
+            const invocation: skills_fixture_domain.Capture = .{ .invocation = "Skill file: \"/skills/demo/SKILL.md\"\n\nComplete ordinary skill input" };
+            const accepted = storage.submitMessageCapturedSkills(&command, null, null, &invocation, .{});
+            try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+            try std.testing.expectEqual(protocol.SessionArchiveState.active, (try storage.inspectSessionForTesting(session.slice())).archive_state);
+            try archive.key.set("skills-archive-again");
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
+            const replay = storage.submitMessageCapturedSkills(&command, null, null, &failed, .{});
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
         }
     }.run);
 }

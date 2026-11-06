@@ -7,7 +7,7 @@ import { RuiRequestError, type RequestAnswer } from "./errors.ts";
 import type { components } from "./wire.ts";
 
 /** The wire version openapi.json describes. A test keeps the two equal. */
-export const WIRE_VERSION = "11";
+export const WIRE_VERSION = "10";
 
 /** The largest reply body read. The Host's own replies stay far below it. */
 const MAX_REPLY_BYTES = 64 * 1024 * 1024;

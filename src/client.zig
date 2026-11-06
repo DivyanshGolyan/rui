@@ -1350,6 +1350,8 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         configuration: ?CapturedConfiguration = null,
         require_model: ?bool = null,
         archived: bool = true,
+        reload_skills: ?bool = null,
+        skill: ?protocol_reply.JsonString(64) = null,
         sender: ?protocol_reply.JsonAddress = null,
         sender_handle: ?protocol_reply.JsonString(32) = null,
         text: ?struct { state: protocol_reply.JsonString(8), value: CapturedText } = null,

@@ -2487,7 +2487,7 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
         .skill => {
             var captured = try client.captureMessage(init.io, .{ .store = destination, .session = reference, .text_path = "", .skill = argument }, .{ .generated = destination }).get();
             var step: ?client.Step = null;
-            try sendCapturedMutation(requests_context, &captured, .{ .map = init.environ_map }, &step);
+            try sendCapturedMutation(requests_context, &captured, .{ .map = init.environ_map }, &step, .json);
         },
         .@"reload-skills" => {
             _ = try liveConfigure(init, requests_context, live, &.{"--reload-skills"}, "Usage: /reload-skills\n");

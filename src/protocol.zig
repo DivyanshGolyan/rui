@@ -8,7 +8,7 @@ const named_scratch = @import("named_scratch.zig");
 const store_id = @import("store_id.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
-pub const wire_version = "11";
+pub const wire_version = "10";
 
 /// Host-owned lifecycle state of a Message request.
 pub const MessageRequestState = enum { queued, processing, waiting_for_permission, completed, failed, cancelled, rejected };
