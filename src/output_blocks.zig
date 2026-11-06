@@ -25,6 +25,18 @@ pub fn Span(comptime Coordinate: type) type {
     };
 }
 
+/// Compare semantic fields only; unused alignment entries are not state.
+pub fn same(comptime Coordinate: type, a: Span(Coordinate), b: Span(Coordinate)) bool {
+    if (a.start != b.start or a.end != b.end or std.meta.activeTag(a.data) != std.meta.activeTag(b.data)) return false;
+    return switch (a.data) {
+        .literal_raw => true,
+        .quote => |q| std.meta.eql(q, b.data.quote),
+        .table => |cols| cols.count == b.data.table.count and
+            std.mem.eql(rows.Alignment, cols.alignment[0..cols.count], b.data.table.alignment[0..cols.count]) and
+            a.header_end == b.header_end and a.delimiter_end == b.delimiter_end and a.complete_end == b.complete_end,
+    };
+}
+
 pub fn Marks(comptime Coordinate: type) type {
     return struct {
         const Self = @This();

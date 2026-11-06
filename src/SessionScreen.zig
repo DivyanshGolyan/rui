@@ -115,6 +115,7 @@ drawn: struct { first: Position = .{}, rows: u16 = 0 } = .{},
 commands: ?slash_commands.Shown = null,
 height: u16 = 1,
 colour: bool,
+home: []const u8 = "",
 
 pub fn init(self: *Self, backend: *Backend) void {
     self.* = .{ .backend = backend, .colour = backend.policy().depth != .none };
@@ -146,20 +147,20 @@ pub fn liveStart(self: *Self) !u64 {
     return self.live.text.origin;
 }
 
-fn paneLayout(kind: ViewKind, columns: u16, method: vaxis.gwidth.Method) Viewport.Layout {
-    return .{ .width = @max(1, columns -| @as(u16, @intFromBool(kind == .live or kind == .transcript))), .method = method };
+fn paneLayout(kind: ViewKind, columns: u16, method: vaxis.gwidth.Method, home: []const u8) Viewport.Layout {
+    return .{ .width = @max(1, columns -| @as(u16, @intFromBool(kind == .live or kind == .transcript))), .method = method, .home = home };
 }
 
 pub fn textLayout(self: *const Self) Viewport.Layout {
-    return paneLayout(self.view, self.backend.geometry().cols, self.backend.widthMethod());
+    return paneLayout(self.view, self.backend.geometry().cols, self.backend.widthMethod(), self.home);
 }
 
 // An overlay does not lend its full-width layout to the retained transcript.
 // Capture and restore under that pane's own old/new rail-adjusted widths.
 fn reflowHiddenTranscript(self: *Self, columns: u16, method: vaxis.gwidth.Method) void {
     if (self.view != .message or self.message_return != .transcript) return;
-    const first = self.browsing.anchor(paneLayout(.transcript, self.backend.geometry().cols, self.backend.widthMethod()));
-    self.browsing.restore(paneLayout(.transcript, columns, method), .{ .offset = first.offset }, self.height, true);
+    const first = self.browsing.anchor(paneLayout(.transcript, self.backend.geometry().cols, self.backend.widthMethod(), self.home));
+    self.browsing.restore(paneLayout(.transcript, columns, method, self.home), .{ .offset = first.offset }, self.height, true);
 }
 
 pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
@@ -823,24 +824,24 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     self.drawn = .{ .first = layout.first, .rows = @intCast(layout.document_rows) };
     self.commands = footer.commands;
     if (self.commands) |*commands| commands.drew(layout.list_height != 0);
-    _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet));
-    projection.paint(&document.scroll, window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = layout.height - layout.document_offset }), self.colour);
+    _ = try layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet), .{});
+    try projection.paint(&document.scroll, window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = layout.height - layout.document_offset }), self.colour, self.backend.scratch());
     if (layout.document_offset != 0) {
         // The conversation's latest rows fill the rows above a whole Action;
         // they are context, never read rows of the Action.
         try self.live.text.prepare();
-        _ = self.live.text.draw(window.child(.{ .y_off = layout.navigation_height, .height = layout.document_offset }), self.live.text.positionAtRow(self.textLayout(), self.live.text.rowCount(self.textLayout()) -| layout.document_offset), true, self.colour, .{});
+        _ = try self.live.text.draw(window.child(.{ .y_off = layout.navigation_height, .height = layout.document_offset }), self.live.text.positionAtRow(self.textLayout(), self.live.text.rowCount(self.textLayout()) -| layout.document_offset), true, self.colour, .{}, .{ .scratch = self.backend.scratch(), .home = self.textLayout().home });
     }
     const failure = std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected");
-    _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status_height }), .{}, true, self.colour, self.style(if (selector) .attention else .quiet));
+    _ = try layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status_height }), .{}, true, self.colour, self.style(if (selector) .attention else .quiet), .{});
     // Only a failure's own line is marked; standing notices below stay quiet.
-    if (failure and !selector) _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status.lineRows(self.textLayout(), 0) }), .{}, true, self.colour, self.style(.failure));
+    if (failure and !selector) _ = try layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status.lineRows(self.textLayout(), 0) }), .{}, true, self.colour, self.style(.failure), .{});
     var call_row = layout.calls_row;
     for (0..layout.used) |index| {
-        _ = layout.calls[index].draw(window.child(.{ .y_off = call_row, .height = layout.call_heights[index] }), .{}, true, self.colour, self.style(live.style(index)));
+        _ = try layout.calls[index].draw(window.child(.{ .y_off = call_row, .height = layout.call_heights[index] }), .{}, true, self.colour, self.style(live.style(index)), .{});
         call_row += layout.call_heights[index];
     }
-    _ = layout.heading.draw(window.child(.{ .y_off = call_row, .height = layout.overflow_height }), .{}, true, self.colour, self.style(.quiet));
+    _ = try layout.heading.draw(window.child(.{ .y_off = call_row, .height = layout.overflow_height }), .{}, true, self.colour, self.style(.quiet), .{});
     // Cells borrow the clock's bytes until the frame is rendered.
     const live_clock = try scratch.create([work_line.max_clock_bytes]u8);
     if (layout.live_height != 0) self.drawLive(window.child(.{ .y_off = layout.live_row, .height = 1 }), size.col, footer.live.?, live_clock);
@@ -877,7 +878,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     // reason's frame offer the denial.
     var says_deny = false;
     if (layout.notice.length != 0) {
-        _ = layout.notice.draw(window.child(.{ .y_off = line_row, .height = layout.line_height }), .{}, true, self.colour, self.style(if (std.mem.startsWith(u8, footer.notice, "!")) .failure else .normal));
+        _ = try layout.notice.draw(window.child(.{ .y_off = line_row, .height = layout.line_height }), .{}, true, self.colour, self.style(if (std.mem.startsWith(u8, footer.notice, "!")) .failure else .normal), .{});
         says_deny = std.mem.indexOf(u8, footer.notice, deny_words) != null;
     } else if (layout.line_height != 0) {
         // While an Action waits, the line under the input says how to decide it.
@@ -2580,7 +2581,7 @@ test "quote draft screen fence opacity does not promote code markers" {
     try std.testing.expectEqualStrings("  >>", rowText(screen, 22, &storage));
 }
 
-test "typed saved-file loading preserves raw provenance through prepend Message overlay and literal paint" {
+test "typed saved-file loading preserves raw provenance through prepend Message overlay and safe rich paint" {
     const io = std.testing.io;
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -2619,11 +2620,166 @@ test "typed saved-file loading preserves raw provenance through prepend Message 
     _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
     var storage: [128]u8 = undefined;
     var escaped = false;
-    for (0..size.row) |row| if (std.mem.indexOf(u8, rowText(screen, @intCast(row), &storage), "\\x1b[31m|\\xff") != null) {
+    for (0..size.row) |row| if (std.mem.eql(u8, rowText(screen, @intCast(row), &storage), "\\x1b[31m            \\xff")) {
         escaped = true;
     };
     try std.testing.expect(escaped);
     // No raw source SGR/OSC becomes a style/link in the selected frame.
     const cells = Test.window(screen);
     for (0..size.row) |row| for (0..size.col) |col| try std.testing.expectEqualStrings("", cells.readCell(@intCast(col), @intCast(row)).?.link.uri);
+}
+
+test "typed frozen pending header catches up metadata across Message resize without moving first source" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const overlay = try tmp.dir.createFile(io, "message", .{ .read = true });
+    defer overlay.close(io);
+    try overlay.writePositionalAll(io, "Message body\n", 0);
+    const raw = "h|x\n---|---\na|b\n";
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try screen.appendPrepared(raw[0..4], 0, &span, &admission);
+    const size: std.posix.winsize = .{ .row = 12, .col = 20, .xpixel = 0, .ypixel = 0 };
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(0);
+    const first = screen.browsing.anchor(screen.textLayout());
+    try screen.showMessage(io, overlay);
+    try screen.appendPrepared(raw[4..], 4, &span, &admission);
+    const wide: std.posix.winsize = .{ .row = 14, .col = 40, .xpixel = 0, .ypixel = 0 };
+    _ = try Test.render(screen, &out.writer, wide, "", 0, .{}, &.{});
+    try screen.leaveMessage();
+    try std.testing.expectEqual(first, screen.browsing.anchor(screen.textLayout()));
+    try std.testing.expectEqual(@as(usize, 0), try screen.catchUp());
+    try std.testing.expectEqual(@as(usize, 2), screen.browsing.projection(screen.textLayout()).total);
+    try std.testing.expectEqual(first, screen.browsing.anchor(screen.textLayout()));
+    try std.testing.expectEqual(@as(u6, 1), screen.browsing.text.blocks.count);
+    const collapsed = screen.transcriptCollapsed();
+    span.data = .literal_raw;
+    try screen.appendPrepared("", raw.len, &span, &admission);
+    const before = screen.browsing.text.generation;
+    _ = try screen.catchUp();
+    try std.testing.expect(before != screen.browsing.text.generation);
+    try std.testing.expectEqual(@as(usize, 3), screen.browsing.projection(screen.textLayout()).total);
+    try std.testing.expectEqual(first, screen.browsing.anchor(screen.textLayout()));
+    const unchanged = screen.browsing.text.generation;
+    const live_generation = screen.live.text.generation;
+    try screen.appendPrepared("", raw.len, &span, &admission);
+    _ = try screen.catchUp();
+    try std.testing.expectEqual(unchanged, screen.browsing.text.generation);
+    try std.testing.expectEqual(live_generation, screen.live.text.generation);
+    try std.testing.expectEqual(collapsed, screen.transcriptCollapsed());
+    try std.testing.expectEqualStrings(raw, screen.browsing.text.text());
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+    try std.testing.expectEqual(first, screen.browsing.anchor(screen.textLayout()));
+}
+
+test "typed rich output actual frame owns generated links through encode under shared budget" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const raw = "left|right\n:---:|---:\n" ++ "[界e\u{301}](https://example.test/a)|` a `\n";
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 11, .delimiter_end = 22, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = .{ .center, .right, .left, .left, .left, .left, .left, .left } } } };
+    var admission: Document.Admission = .{};
+    try screen.appendPrepared(raw, 0, &span, &admission);
+    const size: std.posix.winsize = .{ .row = 20, .col = 40, .xpixel = 0, .ypixel = 0 };
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    // Encoding already consumed generated scratch; retained backend links own
+    // their copies and must survive the next frame's arena disposal too.
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "https://example.test/a") != null);
+    out.clearRetainingCapacity();
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    try std.testing.expectEqualStrings(raw, screen.live.text.text());
+    try std.testing.expect(screen.backend.usage().peak <= Backend.memory_limit);
+    std.debug.print("output actual frame peak={d}B used={d}B Screen={d}B budget={d}B\n", .{ screen.backend.usage().peak, screen.backend.usage().used, @sizeOf(Self), Backend.memory_limit });
+}
+
+test "typed tiny-row actual cold warm scroll and invalidation frame costs" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var raw: [240 * 1024]u8 = undefined;
+    const header = "h|x\n---|---\n";
+    @memcpy(raw[0..header.len], header);
+    var length: usize = header.len;
+    while (length + 4 <= raw.len) : (length += 4) @memcpy(raw[length..][0..4], "a|b\n");
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = length, .header_end = 4, .delimiter_end = 12, .complete_end = length, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try screen.appendPrepared(raw[0..length], 0, &span, &admission);
+    const size: std.posix.winsize = .{ .row = 16, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const before = std.Io.Clock.awake.now(io);
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    const cold = std.Io.Clock.awake.now(io);
+    for (0..10) |_| {
+        out.clearRetainingCapacity();
+        _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    }
+    const warm = std.Io.Clock.awake.now(io);
+    try screen.beginTranscript(screen.live.text.origin);
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+    const detached = std.Io.Clock.awake.now(io);
+    for (0..10) |_| {
+        _ = screen.browse(false, false);
+        out.clearRetainingCapacity();
+        _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    }
+    const scrolled = std.Io.Clock.awake.now(io);
+    // Width and metadata invalidation both reuse the SAME scalar generation/
+    // layout owner; neither a warm tail sample nor a second cache hides them.
+    const resized: std.posix.winsize = .{ .row = 16, .col = 30, .xpixel = 0, .ypixel = 0 };
+    _ = try Test.render(screen, &out.writer, resized, "", 0, .{}, &.{});
+    const reflow = std.Io.Clock.awake.now(io);
+    span.data = .literal_raw;
+    try screen.appendPrepared("", length, &span, &admission);
+    _ = try screen.catchUp();
+    _ = try Test.render(screen, &out.writer, resized, "", 0, .{}, &.{});
+    const metadata = std.Io.Clock.awake.now(io);
+    std.debug.print("output tiny-row actual {d}B coldFrame={d}ns warmTail10={d}ns scrollKeyFrames10={d}ns widthReflow={d}ns metadataCatchupReflow={d}ns chargedPeak={d}B\n", .{ length, cold.nanoseconds - before.nanoseconds, warm.nanoseconds - cold.nanoseconds, scrolled.nanoseconds - detached.nanoseconds, reflow.nanoseconds - scrolled.nanoseconds, metadata.nanoseconds - reflow.nanoseconds, screen.backend.usage().peak });
+    try std.testing.expectEqualStrings(raw[0..length], screen.browsing.text.text());
+    try std.testing.expect(screen.backend.usage().peak <= Backend.memory_limit);
+}
+
+test "typed rich cell scratch refusal cannot select fallback geometry or grant frame authority" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    const raw = "h|x\n---|---\na|[界](https://example.test)\n";
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try screen.appendPrepared(raw, 0, &span, &admission);
+    const layout: Viewport.Layout = .{ .width = 39, .method = .unicode };
+    const rows = screen.live.text.rowCount(layout);
+    try std.testing.expectEqual(@as(usize, 2), rows);
+    try screen.backend.begin(.{ .rows = 20, .cols = 40, .x_pixel = 0, .y_pixel = 0 });
+    screen.backend.memory.fault = .{ .after = 0 };
+    try std.testing.expectError(error.OutOfMemory, screen.live.text.draw(screen.backend.window().child(.{ .width = 39 }), .{}, true, false, .{}, .{ .scratch = screen.backend.scratch() }));
+    try std.testing.expectEqual(rows, screen.live.text.rowCount(layout));
+    try std.testing.expectError(error.RenderBackendPoisoned, screen.backend.encode());
+    try std.testing.expect(screen.backend.usage().peak <= Backend.memory_limit);
+    try std.testing.expect(screen.offer == null);
+    std.debug.print("output generated-cell refusal chargedPeak={d}B; source geometry remains {d} rows, no encoded receipt\n", .{ screen.backend.usage().peak, rows });
 }

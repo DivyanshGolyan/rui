@@ -786,7 +786,7 @@ test "routine tools stay subordinate in every state without colouring assistant 
             try doc.prepare();
             var cells: [160]vaxis.Cell = @splat(.{});
             var screen: vaxis.Screen = .{ .width = 80, .height = 2, .width_method = .unicode, .buf = &cells };
-            _ = doc.draw(.{ .screen = &screen, .width = 80, .height = 2, .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0 }, .{}, true, colour, .{});
+            _ = try doc.draw(.{ .screen = &screen, .width = 80, .height = 2, .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0 }, .{}, true, colour, .{}, .{});
             try std.testing.expectEqualStrings("A", screen.readCell(0, 1).?.char.grapheme);
             try std.testing.expectEqual(vaxis.Color.default, screen.readCell(0, 1).?.style.fg);
             try std.testing.expect(!screen.readCell(0, 1).?.style.bold);

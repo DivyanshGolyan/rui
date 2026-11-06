@@ -516,7 +516,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // A stop searches only from the oldest Message that waited at the last
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
-    job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) }, job.home);
+    job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued), .blocks = output.capability() }, job.home);
     // One shown at its Admission is delivered too.
     job.result.delivered = @max(job.result.delivered, job.drawn.admission);
     job.result.output_length = output.offset;
@@ -561,7 +561,7 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     try job.files.inspection.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed, .typed = &job.result.output_blocks };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home);
+    try prepared.renderBlocks(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home, if (latest) null else output.capability());
     if (!latest) job.result.history_cursor = prepared.page.continuation();
 }
 
@@ -580,7 +580,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
         .echo => |echo| {
             const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .at = echo.message.admitted_at, .value = .{ .admission = echo.message } };
             var compact = false;
-            try View.message(requests, job.store, job.session, item, echo.message, .lasting(job.held), &output, job.colour, &compact);
+            try View.messageBlocks(requests, job.store, job.session, item, echo.message, .lasting(job.held), &output, job.colour, &compact, output.capability());
             job.result.listing = null;
         },
         .range => |range| {
@@ -594,7 +594,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                 for (page.facts.items[0..page.facts.count]) |item| {
                     if (item.position < range.lowest) break;
                     const value = listed(item, range.shown) orelse continue;
-                    try View.message(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour, &compact);
+                    try View.messageBlocks(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour, &compact, output.capability());
                     var next = range;
                     next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
                     job.result.listing = .{ .range = next };
@@ -1812,6 +1812,8 @@ const FakeHost = struct {
     /// The Store's end, which a page asked for at no end reads.
     end: u64,
     held: bool = false,
+    payload: []const u8 = text,
+    listing: bool = false,
     refuse_content: bool = false,
     pages: usize = 0,
     contents: usize = 0,
@@ -1941,7 +1943,7 @@ const FakeHost = struct {
                 return respond(fd, "409 Conflict", "application/json", "", writer.buffered());
             }
             var extra: [128]u8 = undefined;
-            respond(fd, "200 OK", "application/octet-stream", try std.fmt.bufPrint(&extra, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ text.len, text.len }), text);
+            respond(fd, "200 OK", "application/octet-stream", try std.fmt.bufPrint(&extra, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ self.payload.len, self.payload.len }), self.payload);
         } else self.others += 1;
     }
 
@@ -1984,7 +1986,7 @@ const FakeHost = struct {
         job.store = root;
         job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
         var task: Task = .{ .io = io };
-        try scan(job, &task);
+        if (self.listing) try list(job, &task, job.target.listing) else try scan(job, &task);
         self.shown = self.output[0..try inspection.readPositionalAll(io, &self.output, 0)];
     }
 };
@@ -2204,4 +2206,40 @@ test "typed bridge partial raw I/O remains fatal and cannot replay as rejection"
     try std.testing.expectError(error.InputOutput, answer.finish());
     try std.testing.expectError(error.InputOutput, answer.feed("more"));
     try std.testing.expectEqual(calls, Fault.writes);
+}
+
+test "production live and seam listing activate only assistant tables and submitted quote authority" {
+    const raw = "h|x\n---|---\na|b\n\n> quoted body with **literal user syntax**";
+    const reference: protocol.ActivityItem.Content = .{ .length = raw.len, .digest = protocol.contentDigest(raw) };
+    const tail = [_]FakeHost.Tail{.{ .value = .{ .assistant = .{ .content = reference } } }};
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .payload = raw };
+    var job: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(u6, 2), job.result.output_blocks.count);
+    try std.testing.expect(job.result.output_blocks.items[0].data == .table);
+    try std.testing.expect(job.result.output_blocks.items[1].data == .quote);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "a|b") != null);
+    const message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 };
+    host = .{ .history = 0, .tail = &.{}, .end = 1, .payload = raw, .listing = true };
+    job = .{ .session = "k7m2qx", .target = .{ .listing = .{ .echo = .{ .output = 0, .end = 1, .position = 1, .ordinal = 0, .message = message } } } };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(u6, 1), job.result.output_blocks.count);
+    try std.testing.expect(job.result.output_blocks.items[0].data == .quote);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "**literal user syntax**") != null);
+    var excluded = message;
+    excluded.state = .excluded;
+    const range_tail = [_]FakeHost.Tail{.{ .value = .{ .admission = excluded } }};
+    host = .{ .history = 0, .tail = &range_tail, .end = 1, .payload = raw, .listing = true };
+    job = .{ .session = "k7m2qx", .target = .{ .listing = Listing.within(1, 1, 2, null).? } };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(u6, 1), job.result.output_blocks.count);
+    try std.testing.expect(job.result.output_blocks.items[0].data == .quote);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "**literal user syntax**") != null);
+    var peer = message;
+    peer.sender = .{ .session = .{} };
+    try peer.sender.?.session.set("q9wd7r");
+    host = .{ .history = 0, .tail = &.{}, .end = 1, .payload = raw, .listing = true };
+    job = .{ .session = "k7m2qx", .target = .{ .listing = .{ .echo = .{ .output = 0, .end = 1, .position = 1, .ordinal = 0, .message = peer } } } };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(u6, 0), job.result.output_blocks.count);
 }

@@ -2908,8 +2908,8 @@ Bare links omit trailing sentence punctuation, including `;` and unmatched final
 Other link targets (including Markdown file targets), links inside code or emphasis, Markdown link titles and complete addresses longer than 2,048 bytes after local expansion and encoding stay literal, and `/copy` still sends the original Markdown with every address.
 The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
 A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.
-Prepared typed output has an explicit capability path that remains inactive in production until its common consuming-unit layout is enabled.
-The concrete gate is capability injection: live `Taking.blocks` defaults to null, history calls the untyped `Prepared.render` wrapper, and seam listings call untyped `message`; only focused tests currently supply capture capabilities.
+Live activity, saved transcript preparation and both seam-listing routes explicitly inject the same typed capture capability.
+The untyped wrappers remain the default for CLI, inspection and other consumers; syntax-looking bytes alone never grant authority.
 `AnswerRenderer` owns its single pre-inline quote/fence opacity and table admission traversal; the existing 4,096-byte held storage is shared with legacy links and fences, not duplicated.
 The opacity context never expands strict legacy delimiter stripping or LastCode/copy-code credit; while legacy fence effects still own bytes, prose/table admission remains ineligible even if a broader opacity closer was recognized.
 Only a shared backtick candidate may reach the strict legacy opener owner; opacity-only tilde opener info remains safe literal source.
@@ -2924,11 +2924,28 @@ The same prepared-span cursor routes actual live staged windows and saved-histor
 Document edits carry bytes, styles and clipped/rebased marks through normalization, discard, suffix catch-up, prepend, clear and pane copies.
 Header loss downgrades surviving raw source in its existing slot; tail loss keeps only the last actual complete boundary, while a clipped quote marker loses annotation but retains escaped prose and links.
 Opaque bytes never enter the trusted ANSI parser or global Unicode normalization; their literal measurement and paint use the same replayable safety projection, borrowing retained clusters or immutable TerminalText escape spellings through encoding.
-Metadata-only promotion or downgrade advances the existing Document generation, not a separate cache key.
+Metadata-only promotion or downgrade advances the existing Document generation, not a separate cache key; identical semantic updates do not invalidate the scalar census.
+Frozen suffix catch-up checks its complete prior byte/style prefix, then applies the current source proof in the same slot, including pending-header promotion and byte-identical downgrade at an unchanged endpoint.
 Retained append and prepend plan descriptor plus pending credit before subtracting source room; retries strictly reduce copied bytes, and pinned append never evicts its existing prefix.
 Prepend trims newer text at complete line boundaries or refuses an unaffordable pending reservation before copying, preserving the existing retention fact.
 Each body's logical credit is source bytes plus used descriptors and pending reservation within 256 KiB; physically resident arrays, worker/rewrite stack and the backend's separate 32 MiB charged budget are accounted independently.
-The custody checkpoint adds no assistant table/quote presentation, output layout cache, row index or canonical source/copy mutation.
+One local monotone consuming-unit cursor owns forward/reverse traversal, census, source-position projection and paint.
+A table header and delimiter consume one unit even when narrow geometry requires literal fallback; there is no row/cell index or new cache.
+The same pure `table_row` parser supplies at most eight transient ranges.
+Columns share available width equally (earlier columns receive any remainder), with one blank cell between columns and source-declared left/center/right alignment.
+The existing assistant inline engine has an explicit cell-only entry, without block recognition.
+Window owns grapheme/word placement in both measurement and paint; standalone whitespace behavior does not split whitespace-plus-combining clusters.
+A complete row uses rich columns only when every cell fits its column's cluster width and the total normalized payload stays within 8,192 bytes.
+Narrow, malformed, incomplete or over-output-limit units use the same lossless terminal-safe literal projection; allocator pressure instead fails the frame, never changes geometry.
+Committed generated cell bytes/styles live in charged backend scratch through encoding.
+ASCII alphanumeric/space-only identity cells borrow immutable source; other cells use the same bounded inline/normalization owner.
+Alignment only shifts already-painted complete cells within a cleared cell rectangle, never determines source positions, extent or retention from grid contents.
+Authoritative quote annotations retain original first-row markers and trusted styles/links, with a static ASCII gutter on soft continuations.
+The whole logical line falls back when its prefix bisects a grapheme, lacks two body cells, or any body cluster is wider than the body.
+Sidenotes and collapsed user summaries keep their existing geometry.
+UserBody never enters assistant inline formatting.
+No canonical source, copy/export or submission bytes change.
+Cold rich census costs are distinct from cached redraw and scroll-key costs; width and semantic metadata changes invalidate the existing single scalar census.
 
 Normal tool presentation shows only the canonical outcome heading, including an optional numeric failed exit.
 A fixed 64-byte first-line scan derives the exit from a complete matching Bash outcome line; it retains no output excerpt, warnings or hints.

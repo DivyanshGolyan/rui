@@ -28,6 +28,12 @@ Tool outcomes in normal conversation show only their description and outcome, wi
 `/details` escapes the retained tool bytes safely and marks shortened results with `Earlier output omitted`.
 Its raw export command reads the full unchanged saved result.
 
+Assistant answers and saved transcripts show simple pipe tables with up to eight columns, including left/center/right alignment and inline emphasis, code and links.
+Very narrow or oversized rows stay readable as literal, safely escaped source instead of losing cells.
+Quoted lines retain their original first-row markers and continue with an ASCII `>` gutter when they wrap; fenced code stays literal.
+Your submitted Messages get quote gutters too, but their Markdown emphasis and tables stay literal.
+Copy/export still uses the original saved bytes, not the visual columns or generated gutters.
+
 ## Approve Bash commands
 
 By default, Bash runs without asking (`bypass`).

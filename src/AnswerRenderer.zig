@@ -84,6 +84,27 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
     for (bytes) |byte| try self.blockByte(byte);
 }
 
+/// A proved identity subset of inline-cell output, not a second recognizer.
+/// Syntax, links, controls and Unicode take the normal inline/safety owner.
+pub fn plainCell(bytes: []const u8) bool {
+    for (bytes) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != ' ') return false;
+    return true;
+}
+
+/// Table cells reuse the inline owner without headings, lists or fences.
+/// Callers supply one bounded raw cell, never a hard-line/context traversal.
+pub fn feedCell(self: *Renderer, bytes: []const u8) !void {
+    std.debug.assert(self.blocks == null and std.mem.indexOfScalar(u8, bytes, '\n') == null);
+    for (bytes) |byte| try self.prose(byte);
+}
+
+pub fn finishCell(self: *Renderer) !void {
+    try self.endLink();
+    try self.flushSpan();
+    try self.transition(.{});
+    try self.terminal_text.finish(self.out);
+}
+
 fn feedLegacy(self: *Renderer, bytes: []const u8) !void {
     for (bytes) |byte| {
         if (self.fence_pending and self.fence_body_start != 0) {
@@ -2092,4 +2113,37 @@ test "typed quoted fence EOF scopes keep exact outer depth and literal source" {
 test "null capability retains legacy tilde info formatting" {
     try expectRendered("~~~ **x**\n> code\n~~~\n", "~~~ \x1b[1mx\x1b[0m\n> code\n~~~\n");
     try expectRendered("~~~ [x](https://example.test)", comptime "~~~ " ++ linked("https://example.test", "x"));
+}
+
+test "inline cell mode retains inline owner but never promotes block syntax" {
+    const cases = .{
+        .{ "# title", "# title" },
+        .{ "- item", "- item" },
+        .{ "```", "```" },
+        .{ "> text", "> text" },
+        .{ "**bold**", "\x1b[1mbold\x1b[0m" },
+        .{ "` x `", "\x1b[4m x \x1b[0m" },
+        .{ "a\x1b[31m", "a\\x1b[31m" },
+    };
+    inline for (cases) |case| {
+        for (0..case[0].len + 1) |split| {
+            var bytes: [256]u8 = undefined;
+            var out = std.Io.Writer.fixed(&bytes);
+            var renderer: Renderer = .{ .out = &out };
+            try renderer.feedCell(case[0][0..split]);
+            try renderer.feedCell(case[0][split..]);
+            try renderer.finishCell();
+            try std.testing.expectEqualStrings(case[1], out.buffered());
+        }
+    }
+    for ([_][]const u8{ "", "aZ09", " a  b " }) |raw| {
+        try std.testing.expect(plainCell(raw));
+        var bytes: [32]u8 = undefined;
+        var out = std.Io.Writer.fixed(&bytes);
+        var renderer: Renderer = .{ .out = &out };
+        try renderer.feedCell(raw);
+        try renderer.finishCell();
+        try std.testing.expectEqualStrings(raw, out.buffered());
+    }
+    for ([_][]const u8{ "a_b", "e\u{301}", "[x](https://example.test)", "\t", "\x1b", "`a`" }) |raw| try std.testing.expect(!plainCell(raw));
 }

@@ -3,6 +3,8 @@
 //! bytes, trusted styles and which row of which logical line a view starts at.
 const std = @import("std");
 const OutputBlocks = @import("output_blocks.zig");
+const AnswerRenderer = @import("AnswerRenderer.zig");
+const TableRow = @import("table_row.zig");
 const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
@@ -12,6 +14,9 @@ pub const Document = Sized(capacity, true);
 pub const Method = gwidth.Method;
 
 pub const capacity = 256 * 1024;
+/// Deterministic per-unit normalized inline payload limit, before any paint.
+/// Source beyond this finite expansion keeps its safe literal projection.
+pub const cell_output_limit = 8192;
 /// Clusters wider than the narrowest supported terminal are shown escaped.
 pub const widest_cluster = 8;
 /// Longer clusters (for example thousands of combining marks) are shown
@@ -40,6 +45,7 @@ pub const Position = struct {
 pub const Layout = struct {
     width: u16,
     method: gwidth.Method,
+    home: []const u8 = "",
 
     /// A window that only measures: print with `commit = false` never writes.
     fn measuring(self: Layout, screen: *vaxis.Screen) vaxis.Window {
@@ -160,6 +166,65 @@ pub fn cellStyle(value: u8, colour: bool) CellStyle {
         .foreground = if (colour and index != 0 and index <= foregrounds.len) foregrounds[index - 1] else null,
     };
 }
+
+fn runAddress(bytes: []const u8, styles: []const u8, origin: u64, position: usize) []const u8 {
+    if (foregroundIndex(styles[position]) != linked_index) return "";
+    var end = position;
+    while (end > 0 and foregroundIndex(styles[end - 1]) == linked_index) end -= 1;
+    var start = end;
+    while (start > 0 and foregroundIndex(styles[start - 1]) == address_index) start -= 1;
+    if (start == 0 and origin != 0) return "";
+    return bytes[start..end];
+}
+
+fn runStyle(value: u8, colour: bool, plain: vaxis.Style) vaxis.Style {
+    const style = cellStyle(value, colour);
+    return .{ .bold = style.bold, .dim = style.dim, .italic = style.italic, .ul_style = if (style.underline) .single else .off, .fg = if (style.foreground) |index| .{ .index = index } else .default, .bg = plain.bg };
+}
+
+/// Clone-independent borrowed runs. Window owns lookahead and wrapping; payload
+/// is immutable retained source or charged scratch surviving frame encoding.
+const StyledRuns = struct {
+    bytes: []const u8,
+    styles: []const u8,
+    origin: u64 = 0,
+    at: usize = 0,
+    end: usize,
+    channel_end: usize = 0,
+    notes: bool = false,
+    colour: bool = true,
+    plain: vaxis.Style = .{},
+
+    pub fn next(self: *StyledRuns) ?vaxis.Segment {
+        const styled = self.styles.len != 0;
+        while (self.at < self.end) {
+            const start = self.at;
+            if (start >= self.channel_end) {
+                self.channel_end = self.end;
+                if (styled) {
+                    self.channel_end = start + 1;
+                    while (self.channel_end < self.end and displayChannel(self.styles[self.channel_end]) == displayChannel(self.styles[start])) self.channel_end += 1;
+                }
+            }
+            if (styled and (displayChannel(self.styles[start]) == .address or isSidenote(self.styles[start]) != self.notes)) {
+                self.at = self.channel_end;
+                continue;
+            }
+            var stop = self.channel_end;
+            if (styled) {
+                var clusters = unicode.graphemeIterator(self.bytes[start..self.channel_end]);
+                stop = start + clusters.next().?.len;
+                while (clusters.next()) |cluster| {
+                    if (self.styles[start + cluster.start] != self.styles[start]) break;
+                    stop = start + cluster.start + cluster.len;
+                }
+            }
+            self.at = stop;
+            return .{ .text = self.bytes[start..stop], .style = if (styled) runStyle(self.styles[start], self.colour, self.plain) else self.plain, .link = .{ .uri = if (styled) runAddress(self.bytes, self.styles, self.origin, start) else "" } };
+        }
+        return null;
+    }
+};
 
 /// Collapsed blocks' summaries in a range of text: see `collapsed`.
 pub const Summaries = struct { count: usize = 0, last: ?usize = null };
@@ -335,6 +400,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             if (self.blocks.count == 0) return;
             const last = &self.blocks.items[self.blocks.count - 1];
             if (last.end != self.length or self.origin + last.start != @max(admission.destination, self.origin)) return;
+            const previous = last.*;
             if (loaded >= source.complete_end) admission.complete = source.complete_end;
             if (source.data == .table and admission.intact and admission.destination >= self.origin and loaded >= source.delimiter_end) {
                 last.data = source.data;
@@ -347,8 +413,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 last.delimiter_end = 0;
                 last.complete_end = 0;
             }
-            self.dirty = true;
-            self.generation +%= 1;
+            if (!OutputBlocks.same(u32, previous, last.*)) {
+                self.dirty = true;
+                self.generation +%= 1;
+            }
         }
 
         fn reserveBlock(self: *Self) !void {
@@ -438,13 +506,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// run right before that text. Empty when the text is not a link or
         /// its address began before the retained text.
         fn address(self: *const Self, position: usize) []const u8 {
-            if (foregroundIndex(self.styles[position]) != linked_index) return "";
-            var end = position;
-            while (end > 0 and foregroundIndex(self.styles[end - 1]) == linked_index) end -= 1;
-            var start = end;
-            while (start > 0 and foregroundIndex(self.styles[start - 1]) == address_index) start -= 1;
-            if (start == 0 and self.origin != 0) return "";
-            return self.bytes[start..end];
+            return runAddress(self.bytes[0..self.length], &self.styles, self.origin, position);
         }
 
         pub fn clear(self: *Self) void {
@@ -615,22 +677,103 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return std.mem.indexOfScalarPos(u8, bytes, offset, '\n') orelse bytes.len;
         }
 
+        const Unit = struct {
+            start: usize,
+            end: usize,
+            block: ?*const OutputBlocks.Span(u32),
+            header: bool = false,
+            block_index: usize = 0,
+        };
+
+        /// Local monotone source/block traversal. Header and delimiter consume
+        /// one source unit in BOTH directions, including literal fallback.
+        const Units = struct {
+            document: *const Self,
+            at: usize,
+            index: usize,
+
+            fn forward(document: *const Self, offset: usize) Units {
+                var value: Units = .{ .document = document, .at = @min(offset, document.text().len), .index = 0 };
+                if (semantic) for (document.blocks.slice(), 0..) |block, index| {
+                    if (block.end <= value.at) {
+                        value.index = index + 1;
+                        continue;
+                    }
+                    if (block.data == .table and block.start <= value.at and value.at < block.delimiter_end) value.at = if (std.mem.lastIndexOfScalar(u8, document.bytes[0..block.start], '\n')) |line| line + 1 else 0;
+                    break;
+                };
+                return value;
+            }
+
+            fn reverse(document: *const Self, offset: usize) Units {
+                return .{ .document = document, .at = @min(offset, document.text().len), .index = if (semantic) document.blocks.count else 0 };
+            }
+
+            fn annotation(self: *Units, start: usize, end: usize) ?*const OutputBlocks.Span(u32) {
+                if (!semantic) return null;
+                const marks = self.document.blocks.slice();
+                var quote: ?*const OutputBlocks.Span(u32) = null;
+                var index = self.index;
+                while (index < marks.len and marks[index].start < end) : (index += 1) {
+                    if (marks[index].end <= start) continue;
+                    if (marks[index].data != .quote) return &marks[index];
+                    if (quote == null) quote = &marks[index];
+                }
+                return quote;
+            }
+
+            fn unit(self: *Units, start: usize, block: ?*const OutputBlocks.Span(u32)) Unit {
+                const raw_end = self.document.lineEnd(start);
+                var result: Unit = .{ .start = start, .end = raw_end + @intFromBool(raw_end < self.document.text().len), .block = block };
+                if (block) |span| if (span.data == .table and start < span.delimiter_end and span.delimiter_end <= span.complete_end) {
+                    result.start = if (std.mem.lastIndexOfScalar(u8, self.document.bytes[0..span.start], '\n')) |line| line + 1 else 0;
+                    result.end = span.delimiter_end;
+                    if (result.end == span.end and result.end < self.document.text().len and self.document.bytes[result.end] == '\n') result.end += 1;
+                    result.header = true;
+                };
+                return result;
+            }
+
+            fn next(self: *Units) ?Unit {
+                if (self.at >= self.document.text().len) return null;
+                if (semantic) {
+                    const marks = self.document.blocks.slice();
+                    while (self.index < marks.len and marks[self.index].end <= self.at) self.index += 1;
+                }
+                var result = self.unit(self.at, self.annotation(self.at, self.document.lineEnd(self.at)));
+                result.block_index = self.index;
+                self.at = result.end;
+                return result;
+            }
+
+            fn previous(self: *Units) ?Unit {
+                if (self.at == 0) return null;
+                const stop = self.at - @intFromBool(self.document.bytes[self.at - 1] == '\n');
+                const start = if (std.mem.lastIndexOfScalar(u8, self.document.bytes[0..stop], '\n')) |line| line + 1 else 0;
+                if (semantic) {
+                    const marks = self.document.blocks.slice();
+                    while (self.index > 0 and marks[self.index - 1].start >= self.at) self.index -= 1;
+                    while (self.index > 1 and marks[self.index - 2].end > start) self.index -= 1;
+                }
+                const after = self.index;
+                self.index -|= 1;
+                var result = self.unit(start, self.annotation(start, self.at));
+                result.block_index = self.index;
+                self.index = after;
+                self.at = result.start;
+                return result;
+            }
+        };
+
         pub fn nextLine(self: *const Self, offset: usize) ?usize {
-            const next = self.lineEnd(offset) + 1;
-            return if (next < self.text().len) next else null;
+            var units = Units.forward(self, offset);
+            const unit = units.next() orelse return null;
+            return if (unit.end < self.text().len) unit.end else null;
         }
 
         pub fn previousLine(self: *const Self, offset: usize) ?usize {
-            if (offset == 0) return null;
-            return if (std.mem.lastIndexOfScalar(u8, self.bytes[0 .. offset - 1], '\n')) |line| line + 1 else 0;
-        }
-
-        fn opaqueAt(self: *const Self, offset: usize) bool {
-            if (semantic) for (self.blocks.slice()) |block| {
-                if (block.start > offset) break;
-                if (offset < block.end and block.data != .quote) return true;
-            };
-            return false;
+            var units = Units.reverse(self, offset);
+            return if (units.previous()) |unit| unit.start else null;
         }
 
         /// No generated cell borrows scratch: raw clusters borrow retained
@@ -638,6 +781,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         const LiteralRuns = struct {
             bytes: []const u8,
             method: gwidth.Method,
+            width: u16 = widest_cluster,
             at: usize = 0,
             escaped_end: usize = 0,
 
@@ -656,7 +800,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     while (scalars.nextCodepoint()) |point| {
                         if (TerminalText.isControl(point) and point != '\t') unsafe = true;
                     }
-                    if (!unsafe and representable(raw, self.method)) {
+                    if (!unsafe and representable(raw, self.method) and gwidth.gwidth(raw, self.method) <= self.width) {
                         self.at += raw.len;
                         return .{ .text = raw };
                     }
@@ -672,14 +816,61 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
         };
 
+        const LiteralRange = struct {
+            document: *const Self,
+            at: usize,
+            end: usize,
+            index: usize,
+            width: u16,
+            colour: bool,
+            plain: vaxis.Style,
+            method: Method,
+            raw: ?LiteralRuns = null,
+            raw_start: usize = 0,
+            trusted: ?StyledRuns = null,
+
+            pub fn next(self: *LiteralRange) ?vaxis.Segment {
+                while (true) {
+                    if (self.raw) |*source| {
+                        if (source.next()) |segment_| {
+                            self.at = self.raw_start + source.at;
+                            var segment = segment_;
+                            segment.style = self.plain;
+                            return segment;
+                        }
+                        self.raw = null;
+                    }
+                    if (self.trusted) |*source| {
+                        const segment = source.next();
+                        self.at = source.at;
+                        if (segment != null) return segment;
+                        self.trusted = null;
+                    }
+                    if (self.at >= self.end) return null;
+                    var stop = self.end;
+                    if (semantic) {
+                        const marks = self.document.blocks.slice();
+                        while (self.index < marks.len and (marks[self.index].end <= self.at or marks[self.index].data == .quote)) self.index += 1;
+                        if (self.index < marks.len) {
+                            const mark = marks[self.index];
+                            if (mark.start <= self.at) {
+                                self.raw_start = self.at;
+                                self.raw = .{ .bytes = self.document.bytes[self.at..@min(self.end, mark.end)], .method = self.method, .width = self.width };
+                                continue;
+                            }
+                            stop = @min(stop, mark.start);
+                        }
+                    }
+                    self.trusted = .{ .bytes = self.document.bytes[0..self.document.length], .styles = if (styled) self.document.styles[0..self.document.length] else &.{}, .origin = self.document.origin, .at = self.at, .end = stop, .colour = self.colour, .plain = self.plain };
+                }
+            }
+        };
+
         /// Prints one logical line with its first row at window row `row`
         /// (negative rows are clipped), or only measures it. Returns its rows.
         /// Measuring and drawing segment identically, so they wrap identically.
-        pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, plain: vaxis.Style) u16 {
+        fn printProse(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, plain: vaxis.Style, annotation: ?*const OutputBlocks.Span(u32)) u16 {
             const end = self.lineEnd(offset);
-            if (self.opaqueAt(offset)) {
-                return rowsUsed(window.child(.{ .y_off = row }).printIterator(LiteralRuns{ .bytes = self.bytes[offset..end], .method = self.width_method }, .{ .wrap = .word, .commit = commit }));
-            }
             var user = false;
             // A line of summary text alone (a peer Message's line) keeps one
             // row, ending in `…` when it does not fit.
@@ -724,6 +915,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 return 1;
             }
+            if (annotation) |quote| return self.printQuote(body, row, offset, shown, quote, commit, colour, plain);
             const split = hanging(self.bytes[offset..end], body.width, user);
             if (commit) _ = self.printRange(body.child(.{ .y_off = row, .height = 1 }), offset, offset + split.bytes, .none, false, true, colour, plain);
             const rows = rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), offset + split.bytes, end, .word, false, commit, colour, plain));
@@ -734,116 +926,255 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return rows;
         }
 
-        /// Replayable borrowed runs: Window owns word lookahead across every
-        /// style boundary; copied cursors never share mutable scratch/state.
-        const RangeRuns = struct {
-            document: *const Self,
-            at: usize,
-            end: usize,
-            channel_end: usize = 0,
-            notes: bool,
-            colour: bool,
-            plain: vaxis.Style,
-
-            pub fn next(self: *RangeRuns) ?vaxis.Segment {
-                while (self.at < self.end) {
-                    const start = self.at;
-                    if (start >= self.channel_end) self.channel_end = channelEnd(&self.document.styles, start, self.end);
-                    const channel_end = self.channel_end;
-                    if (styled and (displayChannel(self.document.styles[start]) == .address or isSidenote(self.document.styles[start]) != self.notes)) {
-                        self.at = channel_end;
-                        continue;
-                    }
-                    var stop = channel_end;
-                    if (styled) {
-                        var clusters = unicode.graphemeIterator(self.document.bytes[start..channel_end]);
-                        const first = clusters.next().?;
-                        stop = start + first.len;
-                        while (clusters.next()) |cluster| {
-                            if (self.document.styles[start + cluster.start] != self.document.styles[start]) break;
-                            stop = start + cluster.start + cluster.len;
-                        }
-                    }
-                    self.at = stop;
-                    return .{
-                        .text = self.document.bytes[start..stop],
-                        .style = self.document.segmentStyle(start, self.colour, self.plain),
-                        .link = .{ .uri = if (styled) self.document.address(start) else "" },
-                    };
-                }
-                return null;
-            }
-        };
-
         /// One print invocation per logical range: no batch boundary can lose
         /// word lookahead or carry a caller-owned continuation offset.
         fn printRange(self: *const Self, window: vaxis.Window, from: usize, end: usize, wrap: @FieldType(vaxis.PrintOptions, "wrap"), notes: bool, commit: bool, colour: bool, plain: vaxis.Style) vaxis.Window.PrintResult {
-            return window.printIterator(RangeRuns{ .document = self, .at = from, .end = end, .notes = notes, .colour = colour, .plain = plain }, .{ .wrap = wrap, .commit = commit });
+            return window.printIterator(StyledRuns{ .bytes = self.bytes[0..self.length], .styles = if (styled) self.styles[0..self.length] else &.{}, .origin = self.origin, .at = from, .end = end, .notes = notes, .colour = colour, .plain = plain }, .{ .wrap = wrap, .commit = commit });
         }
 
         fn segmentStyle(self: *const Self, position: usize, colour: bool, plain: vaxis.Style) vaxis.Style {
-            if (!styled) return plain;
-            const value = cellStyle(self.styles[position], colour);
-            return .{ .bold = value.bold, .dim = value.dim, .italic = value.italic, .ul_style = if (value.underline) .single else .off, .fg = if (value.foreground) |index| .{ .index = index } else .default };
+            return if (styled) runStyle(self.styles[position], colour, plain) else plain;
+        }
+
+        fn printQuote(self: *const Self, body: vaxis.Window, row: i17, offset: usize, end: usize, annotation: *const OutputBlocks.Span(u32), commit: bool, colour: bool, plain: vaxis.Style) u16 {
+            const quote = annotation.data.quote;
+            const body_at = annotation.start + @as(usize, quote.bytes);
+            const first = body.child(.{ .y_off = row });
+            const literal = struct {
+                fn draw(document: *const Self, window: vaxis.Window, from: usize, to: usize, write: bool, colours: bool, style: vaxis.Style) u16 {
+                    return rowsUsed(document.printRange(window, from, to, .grapheme, false, write, colours, style));
+                }
+            }.draw;
+            if (body_at > end) return literal(self, first, offset, end, commit, colour, plain);
+            var clusters = unicode.graphemeIterator(self.bytes[offset..end]);
+            var boundary = body_at == offset;
+            while (clusters.next()) |cluster| {
+                const stop = offset + cluster.start + cluster.len;
+                if (stop >= body_at) {
+                    boundary = stop == body_at;
+                    break;
+                }
+            }
+            const prefix = self.printRange(first, offset, body_at, .none, false, false, colour, plain);
+            const cells = prefix.col;
+            if (!boundary or prefix.overflow or cells < quote.bytes or body.width < @as(u32, cells) + 2) return literal(self, first, offset, end, commit, colour, plain);
+            const source: StyledRuns = .{ .bytes = self.bytes[0..self.length], .styles = if (styled) self.styles[0..self.length] else &.{}, .origin = self.origin, .at = body_at, .end = end, .colour = colour, .plain = plain };
+            if (!fits(source, body.width - cells, body.screen.width_method)) return literal(self, first, offset, end, commit, colour, plain);
+            var screen: vaxis.Screen = undefined;
+            const measurement = (Layout{ .width = body.width - cells, .method = body.screen.width_method }).measuring(&screen);
+            const measured = self.printRange(measurement, body_at, end, .word, false, false, colour, plain);
+            // A row within one source unit is u16. Whole-line fallback keeps
+            // a very long quote navigable rather than truncating its census.
+            if (measured.overflow) return literal(self, first, offset, end, commit, colour, plain);
+            const rows = rowsUsed(measured);
+            if (commit) {
+                _ = self.printRange(first.child(.{ .height = 1 }), offset, body_at, .none, false, true, colour, plain);
+                _ = self.printRange(first.child(.{ .x_off = cells }), body_at, end, .word, false, true, colour, plain);
+                const leading = cells - quote.bytes;
+                const gutter = (draft_layout.Line{ .start = 0, .end = 0, .cells = 0, .continuation = .{ .cells = quote.bytes, .depth = quote.depth, .indent = quote.indent } }).gutter();
+                const style = self.segmentStyle(annotation.start, colour, plain);
+                const visible_rows = visible(first.child(.{ .height = rows }));
+                for (@min(@max(1, visible_rows.start), visible_rows.end)..visible_rows.end) |index| {
+                    const area = first.child(.{ .y_off = @intCast(index), .height = 1, .width = cells });
+                    for (0..leading) |col| area.writeCell(@intCast(col), 0, .{ .style = style });
+                    _ = area.child(.{ .x_off = leading }).print(&.{ .{ .text = gutter[0], .style = style }, .{ .text = gutter[1], .style = style }, .{ .text = gutter[2], .style = style } }, .{ .wrap = .none });
+                }
+            }
+            return rows;
+        }
+
+        pub const Paint = struct { scratch: ?std.mem.Allocator = null, home: []const u8 = "" };
+
+        const CellDocument = Sized(cell_output_limit * 4, true);
+
+        fn cell(raw: []const u8, method: Method, home: []const u8, output: *CellDocument) bool {
+            var storage: [cell_output_limit]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&storage);
+            var renderer: AnswerRenderer = .{ .out = &writer, .home = home };
+            renderer.feedCell(raw) catch return false;
+            renderer.finishCell() catch return false;
+            output.* = .{ .width_method = method };
+            output.append(writer.buffered()) catch return false;
+            output.prepare() catch return false;
+            // The normalization workspace allows four escaped bytes per input
+            // byte. Never display a tail-retained cell after bounded expansion.
+            return output.origin == 0 and output.length <= cell_output_limit;
+        }
+
+        fn preparedCell(raw: []const u8, method: Method, home: []const u8, colour: bool, workspace: *CellDocument) ?StyledRuns {
+            if (AnswerRenderer.plainCell(raw)) return .{ .bytes = raw, .styles = &.{}, .end = raw.len, .colour = colour };
+            if (!cell(raw, method, home, workspace)) return null;
+            return runs(workspace, colour);
+        }
+
+        fn runs(document: *const CellDocument, colour: bool) StyledRuns {
+            return .{ .bytes = document.text(), .styles = document.styles[0..document.length], .end = document.length, .colour = colour };
+        }
+
+        fn columns(width: u16, count: u4) ?[TableRow.max_columns]u16 {
+            if (count < 1 or count > TableRow.max_columns or width < 2 * @as(u16, count) - 1) return null;
+            const content = width - (count - 1);
+            var widths: [TableRow.max_columns]u16 = undefined;
+            for (widths[0..count], 0..) |*value, index| value.* = content / count + @intFromBool(index < content % count);
+            return widths;
+        }
+
+        fn fits(runs_: StyledRuns, width: u16, method: Method) bool {
+            var source = runs_;
+            while (source.next()) |segment| {
+                var iterator = unicode.graphemeIterator(segment.text);
+                while (iterator.next()) |cluster| if (gwidth.gwidth(cluster.bytes(segment.text), method) > width) return false;
+            }
+            return true;
+        }
+
+        fn visible(window: vaxis.Window) struct { start: u16, end: u16 } {
+            const end: u16 = @intCast(@max(0, @min(window.height, @as(i32, window.screen.height) - window.y_off)));
+            return .{ .start = @intCast(@min(end, @max(0, -window.y_off, -window.parent_y_off))), .end = end };
+        }
+
+        fn alignCell(window: vaxis.Window, alignment: TableRow.Alignment, plain: vaxis.Style) void {
+            if (alignment == .left) return;
+            const rows = visible(window);
+            for (rows.start..rows.end) |row_| {
+                const row: u16 = @intCast(row_);
+                var used: u16 = 0;
+                for (0..window.width) |col_| {
+                    const col: u16 = @intCast(col_);
+                    const value = window.readCell(col, row) orelse continue;
+                    if (!value.default and (!std.mem.eql(u8, value.char.grapheme, " ") or value.style.ul_style != .off or value.link.uri.len != 0)) used = @min(window.width, @max(used, col + value.char.width));
+                }
+                const slack = window.width - used;
+                const shift = if (alignment == .right) slack else slack / 2;
+                var col = used;
+                while (col != 0) {
+                    col -= 1;
+                    if (window.readCell(col, row)) |value| window.writeCell(col + shift, row, value);
+                }
+                for (0..shift) |blank| window.writeCell(@intCast(blank), row, .{ .style = plain, .default = true });
+            }
+        }
+
+        fn table(self: *const Self, window: vaxis.Window, row: i17, unit: Unit, commit: bool, colour: bool, plain: vaxis.Style, paint: Paint) !?u16 {
+            const block = unit.block.?;
+            if (unit.header and unit.start != block.start) return null;
+            if (unit.end > block.end and !std.mem.eql(u8, self.bytes[block.end..unit.end], "\n")) return null;
+            const widths = columns(window.width, block.data.table.count) orelse return null;
+            const source_end = if (unit.header) block.header_end else @min(unit.end, block.end);
+            if (source_end > block.complete_end) return null;
+            const lf = self.bytes[source_end - 1] == '\n';
+            const raw = self.bytes[unit.start .. source_end - @intFromBool(lf)];
+            const parsed = switch (TableRow.parse(raw, if (lf) .line_feed else .canonical_eof, block.data.table.count)) {
+                .row => |value| value,
+                else => return null,
+            };
+            var formatted: CellDocument = undefined;
+            var height: u16 = 1;
+            var budget: usize = 0;
+            for (parsed.cells[0..parsed.count], 0..) |range, index| {
+                const source = preparedCell(raw[range.start..range.end], window.screen.width_method, paint.home, colour, &formatted) orelse return null;
+                budget += source.bytes.len;
+                if (budget > cell_output_limit or !fits(source, widths[index], window.screen.width_method)) return null;
+                var screen: vaxis.Screen = undefined;
+                const measurement = (Layout{ .width = widths[index], .method = window.screen.width_method }).measuring(&screen);
+                height = @max(height, rowsUsed(measurement.printIterator(source, .{ .wrap = .word, .commit = false })));
+            }
+            if (!commit) return height;
+            const scratch = paint.scratch orelse return error.PaintScratchRequired;
+            var column: u16 = 0;
+            for (parsed.cells[0..parsed.count], 0..) |range, index| {
+                var source = preparedCell(raw[range.start..range.end], window.screen.width_method, paint.home, colour, &formatted).?;
+                source.plain = plain;
+                if (source.styles.len != 0) {
+                    if (unit.header) for (formatted.styles[0..formatted.length]) |*value| {
+                        value.* |= 1;
+                    };
+                    source.bytes = try scratch.dupe(u8, source.bytes);
+                    source.styles = try scratch.dupe(u8, source.styles);
+                } else source.plain.bold = unit.header;
+                const area = window.child(.{ .x_off = column, .y_off = row, .width = widths[index], .height = height });
+                const shown = visible(area);
+                for (shown.start..shown.end) |y| for (0..area.width) |x| area.writeCell(@intCast(x), @intCast(y), .{ .style = plain, .default = true });
+                _ = area.printIterator(source, .{ .wrap = .word });
+                alignCell(area, block.data.table.alignment[index], plain);
+                column += widths[index] + @as(u16, @intFromBool(index + 1 < parsed.count));
+            }
+            return height;
+        }
+
+        fn printUnit(self: *const Self, window: vaxis.Window, row: i17, unit: Unit, commit: bool, colour: bool, plain: vaxis.Style, paint: Paint) !u16 {
+            if (semantic) if (unit.block) |block| if (block.data == .table and unit.start >= block.start) {
+                if (try self.table(window, row, unit, commit, colour, plain, paint)) |height| return height;
+            };
+            if (unit.header or (unit.block != null and unit.block.?.data != .quote)) {
+                var at = unit.start;
+                var rows: u16 = 0;
+                while (at < unit.end) {
+                    const end = @min(self.lineEnd(at), unit.end);
+                    rows +|= rowsUsed(window.child(.{ .y_off = row + @as(i17, rows) }).printIterator(LiteralRange{ .document = self, .at = at, .end = end, .index = unit.block_index, .width = window.width, .colour = colour, .plain = plain, .method = window.screen.width_method }, .{ .wrap = .grapheme, .commit = commit }));
+                    at = end + @intFromBool(end < unit.end);
+                }
+                return rows;
+            }
+            return self.printProse(window, row, unit.start, commit, colour, plain, if (unit.block != null and unit.block.?.data == .quote) unit.block else null);
+        }
+
+        fn unitRows(self: *const Self, layout: Layout, unit: Unit) u16 {
+            var screen: vaxis.Screen = undefined;
+            return self.printUnit(layout.measuring(&screen), 0, unit, false, false, .{}, .{ .home = layout.home }) catch unreachable;
         }
 
         pub fn lineRows(self: *const Self, layout: Layout, offset: usize) u16 {
-            var screen: vaxis.Screen = undefined;
-            return self.printLine(layout.measuring(&screen), 0, offset, false, false, .{});
+            var units = Units.forward(self, offset);
+            return if (units.next()) |unit| self.unitRows(layout, unit) else 0;
         }
 
-        /// Draws rows from `first` into `window`; returns the rows drawn and
-        /// the first row left undrawn, or `Position.end` when none remain.
-        pub fn draw(self: *const Self, window: vaxis.Window, from: Position, commit: bool, colour: bool, plain: vaxis.Style) struct { rows: usize, next: Position } {
+        pub const Drawn = struct { rows: usize, next: Position };
+
+        pub fn draw(self: *const Self, window: vaxis.Window, from: Position, commit: bool, colour: bool, plain: vaxis.Style, paint: Paint) !Drawn {
             if (self.text().len == 0) return .{ .rows = 0, .next = .end };
             var row: i32 = -@as(i32, from.row);
-            var line: ?usize = from.offset;
-            while (line) |offset| : (line = self.nextLine(offset)) {
-                if (row >= window.height) return .{ .rows = window.height, .next = .{ .offset = offset } };
-                const used = self.printLine(window, @intCast(row), offset, commit, colour, plain);
-                if (row + used > window.height) return .{ .rows = window.height, .next = .{ .offset = offset, .row = @intCast(window.height - row) } };
+            var units = Units.forward(self, from.offset);
+            while (units.next()) |unit| {
+                if (row >= window.height) return .{ .rows = window.height, .next = .{ .offset = unit.start } };
+                const used = try self.printUnit(window, @intCast(row), unit, commit, colour, plain, paint);
+                if (row + used > window.height) return .{ .rows = window.height, .next = .{ .offset = unit.start, .row = @intCast(window.height - row) } };
                 row += used;
             }
             return .{ .rows = @intCast(row), .next = .end };
         }
 
-        /// Rows from `from` that fit `height`, without drawing.
-        pub fn measure(self: *const Self, layout: Layout, from: Position, height: u16) struct { rows: usize, next: Position } {
+        pub fn measure(self: *const Self, layout: Layout, from: Position, height: u16) Drawn {
             var screen: vaxis.Screen = undefined;
             var window = layout.measuring(&screen);
             window.height = height;
-            const result = self.draw(window, from, false, false, .{});
-            return .{ .rows = result.rows, .next = result.next };
+            return self.draw(window, from, false, false, .{}, .{ .home = layout.home }) catch unreachable;
         }
 
-        /// Number of laid-out rows; no navigation state belongs to text.
         pub fn rowCount(self: *const Self, layout: Layout) usize {
-            if (self.text().len == 0) return 0;
             var total: usize = 0;
-            var line: ?usize = 0;
-            while (line) |offset| : (line = self.nextLine(offset)) total += self.lineRows(layout, offset);
+            var units = Units.forward(self, 0);
+            while (units.next()) |unit| total += self.unitRows(layout, unit);
             return total;
         }
 
         pub fn positionAtRow(self: *const Self, layout: Layout, row: usize) Position {
-            if (self.text().len == 0) return .end;
             var remaining = row;
-            var line: ?usize = 0;
-            while (line) |offset| : (line = self.nextLine(offset)) {
-                const used = self.lineRows(layout, offset);
-                if (remaining < used) return .{ .offset = offset, .row = @intCast(remaining) };
+            var units = Units.forward(self, 0);
+            while (units.next()) |unit| {
+                const used = self.unitRows(layout, unit);
+                if (remaining < used) return .{ .offset = unit.start, .row = @intCast(remaining) };
                 remaining -= used;
             }
             return .end;
         }
 
         pub fn rowOf(self: *const Self, layout: Layout, position: Position) usize {
-            if (self.text().len == 0) return 0;
             var row: usize = 0;
-            var line: ?usize = 0;
-            while (line) |offset| : (line = self.nextLine(offset)) {
-                const used = self.lineRows(layout, offset);
-                if (offset >= position.offset) return row + @min(position.row, used - 1);
+            var units = Units.forward(self, 0);
+            while (units.next()) |unit| {
+                const used = self.unitRows(layout, unit);
+                if (position.offset < unit.end) return row + @min(position.row, used - 1);
                 row += used;
             }
             return row;
@@ -895,10 +1226,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 if (!semantic) break;
                 planned = self.blocks;
                 var continuation: ?struct { old: OutputBlocks.Span(u32), source: OutputBlocks.Span(u32) } = null;
-                if (count != 0 and planned.count != 0) {
+                if ((count != 0 or suffix == 0) and planned.count != 0) {
                     const last = planned.items[planned.count - 1];
                     for (source.blocks.slice()) |block| {
-                        if (block.start < start and start < block.end and last.end == self.length and
+                        if (block.start < start and (start < block.end or (suffix == 0 and start == block.end)) and last.end == self.length and
                             last.end - last.start == start - block.start and
                             std.mem.eql(u8, self.bytes[last.start..last.end], source.bytes[block.start..start]) and
                             std.mem.eql(u8, self.styles[last.start..last.end], source.styles[block.start..start]))
@@ -932,21 +1263,28 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     continue;
                 };
                 if (continuation) |joined| {
-                    // Caller proves this contiguous normalized suffix. Compare
-                    // its complete prior block prefix too: prepend rebases the
-                    // document origin, not this block's source identity.
-                    const index = self.blocks.count - 1;
-                    const end = planned.items[index].end;
-                    planned.items[index] = joined.old;
-                    planned.items[index].end = end;
-                    if (joined.old.data == .table and joined.source.data == .table) {
-                        const stop = start + count;
-                        if (joined.source.complete_end <= stop) {
-                            planned.items[index].complete_end = @intCast(self.length + joined.source.complete_end - start);
-                        } else if (std.mem.lastIndexOfScalar(u8, source.bytes[start..stop], '\n')) |lf| {
-                            planned.items[index].complete_end = @intCast(self.length + lf + 1);
-                        }
+                    // The complete prior byte/style prefix proves this SAME
+                    // block across prepend rebasing. Its CURRENT source proof
+                    // also owns pending promotion and metadata-only downgrade.
+                    const stop = @min(start + count, joined.source.end);
+                    var value = joined.old;
+                    value.end = @intCast(self.length + stop - start);
+                    value.data = .literal_raw;
+                    value.header_end = 0;
+                    value.delimiter_end = 0;
+                    value.complete_end = 0;
+                    if (joined.source.data == .table and joined.source.delimiter_end <= stop) {
+                        const base = joined.old.start;
+                        const from = joined.source.start;
+                        value.data = joined.source.data;
+                        value.header_end = @intCast(base + joined.source.header_end - from);
+                        value.delimiter_end = @intCast(base + joined.source.delimiter_end - from);
+                        const complete = if (joined.source.complete_end <= stop) joined.source.complete_end else from + std.mem.lastIndexOfScalar(u8, source.bytes[from..stop], '\n').? + 1;
+                        value.complete_end = @intCast(base + complete - from);
                     }
+                    if (count == 0) {
+                        std.debug.assert(planned.reserve(value));
+                    } else planned.items[self.blocks.count - 1] = value;
                 }
                 const room = self.plannedRoom(self.length, &planned) orelse {
                     // The copied descriptor itself may not fit. Retry empty;
@@ -960,6 +1298,11 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     continue;
                 }
                 break;
+            }
+            if (semantic and count == 0 and planned.count == self.blocks.count) {
+                var unchanged = true;
+                for (planned.slice(), self.blocks.slice()) |after, before| unchanged = unchanged and OutputBlocks.same(u32, before, after);
+                if (unchanged) return 0;
             }
             if (semantic) self.blocks.clear();
             self.copyInterval(.{ .bytes = source.bytes[0..source.length], .styles = &source.styles }, start, start + count, self.length) catch unreachable;
@@ -1031,43 +1374,41 @@ pub const TextRows = struct {
     }
     pub fn row(self: TextRows, at: Position) usize {
         if (at.offset <= self.text.length / 2) return self.text.rowOf(self.layout, at);
-        var end = self.text.length + @intFromBool(self.text.length != 0 and self.text.bytes[self.text.length - 1] != '\n');
+        var units = Document.Units.reverse(self.text, self.text.length);
         var remaining = self.total;
-        while (self.text.previousLine(end)) |offset| {
-            const used = self.text.lineRows(self.layout, offset);
+        while (units.previous()) |unit| {
+            const used = self.text.unitRows(self.layout, unit);
             remaining -= used;
-            if (offset <= at.offset) return if (at.offset >= self.text.length) self.total else remaining + @min(at.row, used - 1);
-            end = offset;
+            if (unit.start <= at.offset) return if (at.offset >= self.text.length) self.total else remaining + @min(at.row, used - 1);
         }
         return 0;
     }
     pub fn position(self: TextRows, at: usize) Position {
         if (at >= self.total) return .end;
         if (at <= self.total / 2) return self.text.positionAtRow(self.layout, at);
-        var end = self.text.length + @intFromBool(self.text.bytes[self.text.length - 1] != '\n');
+        var units = Document.Units.reverse(self.text, self.text.length);
         var remaining = self.total;
-        while (self.text.previousLine(end)) |offset| {
-            remaining -= self.text.lineRows(self.layout, offset);
-            if (remaining <= at) return .{ .offset = offset, .row = @intCast(at - remaining) };
-            end = offset;
+        while (units.previous()) |unit| {
+            remaining -= self.text.unitRows(self.layout, unit);
+            if (remaining <= at) return .{ .offset = unit.start, .row = @intCast(at - remaining) };
         }
         unreachable;
     }
 
-    pub fn paint(self: TextRows, scroll: *vaxis.widgets.ScrollView, parent: vaxis.Window, colour: bool) void {
+    pub fn paint(self: TextRows, scroll: *vaxis.widgets.ScrollView, parent: vaxis.Window, colour: bool, scratch: std.mem.Allocator) !void {
         if (self.total == 0) return;
         const bounds = scroll.bounds(parent);
         const first = self.position(bounds.y1);
         if (first.order(.end) == .eq) return;
         var row_: usize = bounds.y1 - first.row;
-        var line: ?usize = first.offset;
-        while (line) |offset| : (line = self.text.nextLine(offset)) {
+        var units = Document.Units.forward(self.text, first.offset);
+        while (units.next()) |unit| {
             if (row_ >= bounds.y2) break;
-            const used = self.text.lineRows(self.layout, offset);
+            const used = self.text.unitRows(self.layout, unit);
             if (row_ + used > bounds.y1) {
                 const delta: i17 = if (row_ >= bounds.y1) @intCast(row_ - bounds.y1) else -@as(i17, @intCast(bounds.y1 - row_));
                 const window = parent.child(.{ .y_off = delta, .width = @intCast(bounds.x2 - bounds.x1) });
-                _ = self.text.printLine(window, 0, offset, true, colour, .{});
+                _ = try self.text.printUnit(window, 0, unit, true, colour, .{}, .{ .scratch = scratch, .home = self.layout.home });
             }
             row_ += used;
         }
@@ -1149,7 +1490,7 @@ test "an Action's wrapped description, command and stdin rows carry a wrap mark,
         var test_screen: TestScreen = undefined;
         // From the command's second row too, so its first row is above the window.
         for ([_]Position{ .{}, .{ .offset = command, .row = 1 } }) |from| {
-            const drawn = view.draw(test_screen.window(24, 20), from, true, false, .{});
+            const drawn = try view.draw(test_screen.window(24, 20), from, true, false, .{}, .{});
             var storage: [128]u8 = undefined;
             var spoofs: usize = 0;
             for (0..drawn.rows) |index| {
@@ -1175,7 +1516,7 @@ test "vaxis wraps reading text at words with hanging indentation" {
     try view.prepare();
     const layout: Layout = .{ .width = 16, .method = .unicode };
     var test_screen: TestScreen = undefined;
-    const drawn = view.draw(test_screen.window(16, 14), .{}, true, false, .{});
+    const drawn = try view.draw(test_screen.window(16, 14), .{}, true, false, .{}, .{});
     const expected = [_][]const u8{
         "  The plain rui",  "  command isn't", "  on PATH",
         "0123456789abcdef", "next",
@@ -1197,7 +1538,7 @@ test "vaxis wraps reading text at words with hanging indentation" {
     // A word keeps its punctuation across a style change.
     var styled: Sized(64, true) = .{};
     try styled.append("ab \x1b[4mcd\x1b[0m.");
-    _ = styled.draw(test_screen.window(5, 2), .{}, true, false, .{});
+    _ = try styled.draw(test_screen.window(5, 2), .{}, true, false, .{}, .{});
     try std.testing.expectEqualStrings("cd.", test_screen.row(1, &storage));
     // A wide cluster that would cross the edge starts the next row.
     var wide: Sized(64, false) = .{};
@@ -1263,7 +1604,7 @@ test "trusted renderer styles survive fragmented output retention" {
     var marked: Sized(32, true) = .{};
     try marked.append("\x1b[94m›\x1b[39m hi");
     var test_screen: TestScreen = undefined;
-    _ = marked.draw(test_screen.window(8, 1), .{}, true, true, .{});
+    _ = try marked.draw(test_screen.window(8, 1), .{}, true, true, .{}, .{});
     try std.testing.expectEqual(vaxis.Color{ .index = 12 }, test_screen.screen.readCell(0, 0).?.style.fg);
     try std.testing.expectEqual(vaxis.Color.default, test_screen.screen.readCell(2, 0).?.style.fg);
 }
@@ -1287,7 +1628,7 @@ test "user text is dim italic with colour and keeps its body column without it" 
     try std.testing.expectEqual(CellStyle{}, at.style(&view, "agent", true));
     try std.testing.expectEqual(CellStyle{ .italic = true }, at.style(&view, "x", false));
     var test_screen: TestScreen = undefined;
-    _ = view.draw(test_screen.window(20, 3), .{}, true, true, .{});
+    _ = try view.draw(test_screen.window(20, 3), .{}, true, true, .{}, .{});
     const cell = test_screen.screen.readCell(2, 0).?.style;
     try std.testing.expect(cell.dim and cell.italic and cell.fg == .default);
 
@@ -1300,7 +1641,7 @@ test "user text is dim italic with colour and keeps its body column without it" 
             var line: Sized(64, true) = .{};
             if (user) try line.append("\x1b[2m");
             try line.append(body);
-            const drawn = line.draw(test_screen.window(12, 4), .{}, true, colour, .{});
+            const drawn = try line.draw(test_screen.window(12, 4), .{}, true, colour, .{}, .{});
             try std.testing.expectEqual(@as(usize, 3), drawn.rows);
             const column: usize = if (user) 2 else 0;
             for (1..drawn.rows) |row| {
@@ -1332,16 +1673,16 @@ test "a sidenote shows in the right margin of its line's first row from 60 colum
         .{ .width = 64, .sidenotes = false, .rows = &.{ "› " ++ ys, &xs } },
     }) |case| {
         view.sidenotes = case.sidenotes;
-        const drawn = view.draw(test_screen.window(case.width, 4), .{}, true, true, .{});
+        const drawn = try view.draw(test_screen.window(case.width, 4), .{}, true, true, .{}, .{});
         try std.testing.expectEqual(case.rows.len, drawn.rows);
         try std.testing.expectEqual(case.rows.len, view.measure(.{ .width = case.width, .method = .unicode }, .{}, 99).rows);
         for (case.rows, 0..) |text, index| try std.testing.expectEqualStrings(text, test_screen.row(@intCast(index), &storage));
     }
     view.sidenotes = true;
-    _ = view.draw(test_screen.window(64, 4), .{}, true, true, .{});
+    _ = try view.draw(test_screen.window(64, 4), .{}, true, true, .{}, .{});
     const note = test_screen.screen.readCell(59, 0).?.style;
     try std.testing.expect(note.dim and !note.italic);
-    _ = view.draw(test_screen.window(64, 4), .{}, true, false, .{});
+    _ = try view.draw(test_screen.window(64, 4), .{}, true, false, .{}, .{});
     try std.testing.expectEqual(vaxis.Style{}, test_screen.screen.readCell(59, 0).?.style);
 }
 
@@ -1363,13 +1704,13 @@ test "a peer line keeps one row with its time in the right margin, as a user blo
         // Below 60 no margin shows, and a long line ends in `…` on its one row.
         .{ .width = 40, .rows = .{ line, "→ 9f8e7d · " ++ @as([28]u8, @splat('x')) ++ "…" } },
     }) |case| {
-        const drawn = view.draw(test_screen.window(case.width, 2), .{}, true, false, .{});
+        const drawn = try view.draw(test_screen.window(case.width, 2), .{}, true, false, .{}, .{});
         try std.testing.expectEqual(@as(u16, 2), drawn.rows);
         try std.testing.expectEqual(@as(u16, 2), view.measure(.{ .width = case.width, .method = .unicode }, .{}, 99).rows);
         for (case.rows, 0..) |text, index| try std.testing.expectEqualStrings(text, test_screen.row(@intCast(index), &storage));
     }
     // Upright: the line is dim with colour, never italic.
-    _ = view.draw(test_screen.window(80, 2), .{}, true, true, .{});
+    _ = try view.draw(test_screen.window(80, 2), .{}, true, true, .{}, .{});
     const style = test_screen.screen.readCell(0, 0).?.style;
     try std.testing.expect(style.dim and !style.italic);
     // Only a `┄` row is a collapsed block for Ctrl-O: never a peer line, even
@@ -1397,7 +1738,7 @@ test "a peer line's wide last cluster yields to the ellipsis instead of crossing
         try view.append("\x1b[2;8m" ++ kept ++ "雪\x1b[0m");
         const window = test_screen.window(40, 1);
         test_screen.screen.width_method = method;
-        _ = view.draw(window, .{}, true, false, .{});
+        _ = try view.draw(window, .{}, true, false, .{}, .{});
         try std.testing.expectEqualStrings(kept ++ "…", test_screen.row(0, &storage));
     }
 }
@@ -1485,7 +1826,7 @@ test "older text prepends above the rows in view and trims newer text at capacit
 /// Each drawn cell's link address in one row, `-` for a cell with none.
 fn expectLinks(view: anytype, from: Position, width: u16, expected: []const []const u8) !void {
     var test_screen: TestScreen = undefined;
-    _ = view.draw(test_screen.window(width, 1), from, true, true, .{});
+    _ = try view.draw(test_screen.window(width, 1), from, true, true, .{}, .{});
     for (expected, 0..) |uri, column| {
         const cell = test_screen.screen.readCell(@intCast(column), 0).?;
         errdefer std.debug.print("column={d} grapheme={s} uri={s}\n", .{ column, cell.char.grapheme, cell.link.uri });
@@ -1508,7 +1849,7 @@ test "a link's text carries its hidden address to the cells, however its bytes a
         try view.prepare();
         // The address takes no cell: the row reads as the text alone.
         var test_screen: TestScreen = undefined;
-        _ = view.draw(test_screen.window(20, 1), .{}, true, true, .{});
+        _ = try view.draw(test_screen.window(20, 1), .{}, true, true, .{}, .{});
         var row: [64]u8 = undefined;
         try std.testing.expectEqualStrings("See g.dev. xy!", std.mem.trimEnd(u8, test_screen.row(0, &row), " "));
         try expectLinks(&view, .{}, 20, &.{ "-", "-", "-", "-", a, a, a, a, a, "-", "-", a, b, "-" });
@@ -1566,7 +1907,7 @@ test "rendered local path cells carry the file URI but the sentence semicolon do
         try view.append(output.written());
         try view.prepare();
         var screen: TestScreen = undefined;
-        _ = view.draw(screen.window(80, 1), .{}, true, true, .{});
+        _ = try view.draw(screen.window(80, 1), .{}, true, true, .{}, .{});
         var row: [128]u8 = undefined;
         try std.testing.expectEqualStrings(input, std.mem.trimEnd(u8, screen.row(0, &row), " "));
         for (0..input.len) |column| {
@@ -1701,7 +2042,7 @@ test "ScrollView translated printing keeps wrapped link cells and hanging indent
     pane.scroll.scroll.y = 1;
     const rows = pane.projection(layout);
     pane.scroll.draw(window, .{ .cols = layout.width, .rows = rows.total });
-    rows.paint(&pane.scroll, window, false);
+    try rows.paint(&pane.scroll, window, false, std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), pane.scroll.scroll.y);
     try std.testing.expectEqualStrings(" ", screen.screen.readCell(0, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("g", screen.screen.readCell(2, 0).?.char.grapheme);
@@ -1722,7 +2063,7 @@ test "one logical word keeps its golden wrapping across more than 64 retained st
         try doc.append("\x1b[0m");
         try doc.prepare();
         var screen: TestScreen = undefined;
-        const result = doc.draw(screen.window(40, 3), .{}, true, true, .{});
+        const result = try doc.draw(screen.window(40, 3), .{}, true, true, .{}, .{});
         var line: [64]u8 = undefined;
         if (prefix.len == 0) {
             try std.testing.expectEqual(@as(usize, 2), result.rows);
@@ -1748,7 +2089,7 @@ test "lazy retained runs keep whitespace links and clipped hanging rows continuo
     try doc.append(TerminalText.link_close ++ "\x1b[0m a\x1b[1m \x1b[0mb\n");
     try doc.prepare();
     var screen: TestScreen = undefined;
-    _ = doc.draw(screen.window(40, 2), .{ .row = 1 }, true, true, .{});
+    _ = try doc.draw(screen.window(40, 2), .{ .row = 1 }, true, true, .{}, .{});
     var line: [64]u8 = undefined;
     try std.testing.expectEqualStrings("  " ++ @as([38]u8, @splat('W')), screen.row(0, &line));
     try std.testing.expectEqualStrings("  WWWW a b", screen.row(1, &line));
@@ -1761,8 +2102,7 @@ test "retained run lookahead copies advance independently and never split a styl
     var doc: Sized(256, true) = .{};
     try doc.append("A\x1b[1me\x1b[0ḿZ\x1b[1mB\x1b[0m");
     try doc.prepare();
-    const Runs = @TypeOf(doc).RangeRuns;
-    var runs: Runs = .{ .document = &doc, .at = 0, .end = doc.length, .notes = false, .colour = true, .plain = .{} };
+    var runs: StyledRuns = .{ .bytes = doc.text(), .styles = doc.styles[0..doc.length], .at = 0, .end = doc.length, .notes = false, .colour = true, .plain = .{} };
     try std.testing.expectEqualStrings("A", runs.next().?.text);
     var lookahead = runs;
     try std.testing.expectEqualStrings("é", lookahead.next().?.text);
@@ -1785,7 +2125,7 @@ test "display channel boundaries cannot hide combining marks or change link meta
         try std.testing.expectEqualStrings(uri, doc.address(uri.len));
         try expectLinks(&doc, .{}, 20, &.{ uri, uri, uri, uri, uri, uri, uri, uri });
         var screen: TestScreen = undefined;
-        _ = doc.draw(screen.window(20, 1), .{}, true, true, .{});
+        _ = try doc.draw(screen.window(20, 1), .{}, true, true, .{}, .{});
         var line: [64]u8 = undefined;
         try std.testing.expectEqualStrings("\\u{301}Z", screen.row(0, &line));
     }
@@ -1794,7 +2134,7 @@ test "display channel boundaries cannot hide combining marks or change link meta
     try joined.prepare();
     // Link metadata isn't normalized onto the unlinked combining bytes.
     try std.testing.expectEqual(@as(u8, 0), foregroundIndex(joined.styles[uri.len + 1]));
-    var runs: @TypeOf(joined).RangeRuns = .{ .document = &joined, .at = 0, .end = joined.length, .notes = false, .colour = true, .plain = .{} };
+    var runs: StyledRuns = .{ .bytes = joined.text(), .styles = joined.styles[0..joined.length], .at = 0, .end = joined.length, .notes = false, .colour = true, .plain = .{} };
     const glyph = runs.next().?;
     try std.testing.expectEqualStrings("é", glyph.text);
     try std.testing.expectEqualStrings(uri, glyph.link.uri);
@@ -1813,7 +2153,7 @@ test "display channel boundaries cannot hide combining marks or change link meta
     var zwj: Sized(128, true) = .{};
     try zwj.append("👩\x1b[1m‍🚀\x1b[0mZ");
     try zwj.prepare();
-    var zwj_runs: @TypeOf(zwj).RangeRuns = .{ .document = &zwj, .at = 0, .end = zwj.length, .notes = false, .colour = true, .plain = .{} };
+    var zwj_runs: StyledRuns = .{ .bytes = zwj.text(), .styles = zwj.styles[0..zwj.length], .at = 0, .end = zwj.length, .notes = false, .colour = true, .plain = .{} };
     try std.testing.expectEqualStrings("👩‍🚀Z", zwj_runs.next().?.text);
     try std.testing.expect(zwj_runs.next() == null);
 }
@@ -1872,7 +2212,7 @@ test "hanging prefixes include combining marks on their final space before split
         try doc.append(line);
         try doc.prepare();
         var screen: TestScreen = undefined;
-        _ = doc.draw(screen.window(20, 2), .{}, true, false, .{});
+        _ = try doc.draw(screen.window(20, 2), .{}, true, false, .{}, .{});
     }
 }
 
@@ -2022,9 +2362,11 @@ test "typed opaque rewrite remains byte-exact beside expanding trusted prose and
     try text.prepare();
     try std.testing.expectEqualDeep(original, text.blocks.items[0]);
     var screen: TestScreen = undefined;
-    _ = text.draw(screen.window(40, 10), .{}, true, false, .{});
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    _ = try text.draw(screen.window(40, 10), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
     var storage: [128]u8 = undefined;
-    try std.testing.expectEqualStrings("\\u202e|\\xff", screen.row(2, &storage));
+    try std.testing.expectEqualStrings("\\u202e               \\xff", screen.row(1, &storage));
 }
 
 test "typed literal custody census cost stays linear for tiny rows and one oversized cluster" {
@@ -2190,5 +2532,380 @@ test "typed planned credit preserves header downgrade and bounded shared slot pr
         try std.testing.expectEqual(used == OutputBlocks.limit, try newer.prepend(&older));
         try std.testing.expectEqual(older.length + admitted, newer.length);
         try std.testing.expectEqual(@as(u6, OutputBlocks.limit), newer.blocks.count);
+    }
+}
+
+test "typed consuming table units share alignment row mapping and lossless narrow fallback" {
+    const raw = "L|M|R\n---|:---:|---:\na|bb|c\n";
+    const header_end = 6;
+    const delimiter_end = 21;
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = header_end, .delimiter_end = delimiter_end, .complete_end = raw.len, .data = .{ .table = .{ .count = 3, .alignment = .{ .left, .center, .right, .left, .left, .left, .left, .left } } } };
+    var document: Document = .{};
+    var admission: Document.Admission = .{};
+    try document.appendPrepared(raw, 0, &span, &admission);
+    try document.prepare();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var screen: TestScreen = undefined;
+    const layout: Layout = .{ .width = 13, .method = .wcwidth };
+    const rows = TextRows.init(&document, layout);
+    try std.testing.expectEqual(@as(usize, 2), rows.total);
+    try std.testing.expectEqual(@as(?usize, delimiter_end), document.nextLine(0));
+    try std.testing.expectEqual(@as(?usize, 0), document.previousLine(delimiter_end));
+    try std.testing.expectEqual(@as(usize, 0), rows.row(.{ .offset = header_end }));
+    for (0..rows.total) |index| try std.testing.expectEqual(index, rows.row(rows.position(index)));
+    _ = try document.draw(screen.window(13, 4), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
+    var storage: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("L     M     R", screen.row(0, &storage));
+    try std.testing.expectEqualStrings("a     bb    c", screen.row(1, &storage));
+    try std.testing.expect(screen.screen.readCell(6, 0).?.style.bold);
+    try std.testing.expect(!screen.screen.readCell(6, 1).?.style.bold);
+    const narrow: Layout = .{ .width = 4, .method = .wcwidth };
+    try std.testing.expectEqual(@as(usize, 8), document.rowCount(narrow));
+    for (0..8) |index| {
+        const at = document.positionAtRow(narrow, index);
+        try std.testing.expectEqual(index, document.rowOf(narrow, at));
+        try std.testing.expectEqual(index, TextRows.init(&document, narrow).row(at));
+    }
+    try std.testing.expectEqualStrings(raw, document.text());
+}
+
+test "typed table alignment preserves wide glyphs code spaces links neighbors and clipped rows" {
+    const raw = "left|right\n:---:|---:\n界é|[x](https://example.test)\n` a `||\n";
+    const header_end = 11;
+    const delimiter_end = 22;
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = header_end, .delimiter_end = delimiter_end, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = .{ .center, .right, .left, .left, .left, .left, .left, .left } } } };
+    var document: Document = .{};
+    var admission: Document.Admission = .{};
+    try document.appendPrepared(raw, 0, &span, &admission);
+    try document.prepare();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var screen: TestScreen = undefined;
+    _ = try document.draw(screen.window(11, 4), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
+    var storage: [128]u8 = undefined;
+    try std.testing.expectEqualStrings(" 界é      x", screen.row(1, &storage));
+    try std.testing.expectEqualStrings("  a", screen.row(2, &storage));
+    try std.testing.expectEqualStrings("https://example.test", screen.screen.readCell(10, 1).?.link.uri);
+    try std.testing.expectEqual(@as(u8, 2), screen.screen.readCell(1, 1).?.char.width);
+    try std.testing.expectEqualStrings("é", screen.screen.readCell(3, 1).?.char.grapheme);
+    try std.testing.expect(screen.screen.readCell(1, 2).?.style.ul_style != .off);
+    try std.testing.expect(screen.screen.readCell(3, 2).?.style.ul_style != .off);
+    const previous = document.positionAtRow(.{ .width = 11, .method = .wcwidth }, 1);
+    _ = try document.draw(screen.window(11, 1), previous, true, false, .{}, .{ .scratch = arena.allocator() });
+    try std.testing.expectEqualStrings(" 界é      x", screen.row(0, &storage));
+    try std.testing.expectEqualStrings(raw, document.text());
+}
+
+test "typed quote gutters use source markers fixed depth and whole-line fallback" {
+    const cases = [_]struct { raw: []const u8, bytes: u8, depth: u4, width: u16, rows: []const []const u8 }{
+        .{ .raw = "> abcd efgh ijkl", .bytes = 2, .depth = 1, .width = 10, .rows = &.{ "> abcd", "> efgh", "> ijkl" } },
+        .{ .raw = "> > abcd efgh ijkl", .bytes = 4, .depth = 2, .width = 10, .rows = &.{ "> > abcd", ">>  efgh", ">>  ijkl" } },
+        .{ .raw = "> > abcd efgh", .bytes = 2, .depth = 1, .width = 10, .rows = &.{ "> > abcd", "> efgh" } },
+        .{ .raw = "> ", .bytes = 2, .depth = 1, .width = 10, .rows = &.{">"} },
+        .{ .raw = "> ab cd", .bytes = 2, .depth = 1, .width = 3, .rows = &.{ "> a", "b c", "d" } },
+        .{ .raw = "> \xcc\x81X", .bytes = 2, .depth = 1, .width = 5, .rows = &.{"> \xcc\x81X"} },
+    };
+    for (cases) |case| {
+        var document: Document = .{};
+        const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = case.raw.len, .data = .{ .quote = .{ .bytes = case.bytes, .depth = case.depth, .indent = 0 } } };
+        var admission: Document.Admission = .{};
+        try document.appendPrepared(case.raw, 0, &span, &admission);
+        try document.prepare();
+        const layout: Layout = .{ .width = case.width, .method = .wcwidth };
+        const rows = TextRows.init(&document, layout);
+        try std.testing.expectEqual(case.rows.len, rows.total);
+        var screen: TestScreen = undefined;
+        _ = try document.draw(screen.window(case.width, 8), .{}, true, false, .{}, .{});
+        var storage: [128]u8 = undefined;
+        for (case.rows, 0..) |expected, row| {
+            try std.testing.expectEqualStrings(expected, screen.row(@intCast(row), &storage));
+            try std.testing.expectEqual(row, rows.row(rows.position(row)));
+        }
+        try std.testing.expectEqualStrings(case.raw, document.text());
+    }
+}
+
+test "typed byte-identical metadata changes row count and preserves logical anchors with same generation owner" {
+    const raw = "h|x\n---|---\na|b\n";
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .data = .literal_raw };
+    var pane: Pane = .{};
+    var admission: Document.Admission = .{};
+    try pane.text.appendPrepared(raw, 0, &span, &admission);
+    const layout: Layout = .{ .width = 40, .method = .wcwidth };
+    try std.testing.expectEqual(@as(usize, 3), pane.projection(layout).total);
+    pane.scroll.scroll.y = 2;
+    const anchor = pane.anchor(layout);
+    try std.testing.expectEqual(@as(usize, 12), anchor.offset);
+    const generation = pane.text.generation;
+    span.data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } };
+    span.header_end = 4;
+    span.delimiter_end = 12;
+    span.complete_end = raw.len;
+    try pane.text.appendPrepared("", raw.len, &span, &admission);
+    try std.testing.expect(pane.text.generation != generation);
+    try std.testing.expectEqual(@as(usize, 2), pane.projection(layout).total);
+    pane.restore(layout, anchor, 3, true);
+    try std.testing.expectEqual(anchor, pane.anchor(layout));
+    const promoted = pane.text.generation;
+    span.data = .literal_raw;
+    try pane.text.appendPrepared("", raw.len, &span, &admission);
+    try std.testing.expect(pane.text.generation != promoted);
+    try std.testing.expectEqual(@as(usize, 3), pane.projection(layout).total);
+    pane.restore(layout, anchor, 3, true);
+    try std.testing.expectEqual(anchor, pane.anchor(layout));
+    for ([_]u16{ 2, 20, 80, 20 }) |width| {
+        const reflow: Layout = .{ .width = width, .method = .wcwidth };
+        pane.restore(reflow, anchor, 3, true);
+        try std.testing.expectEqual(anchor, pane.anchor(reflow));
+    }
+    try std.testing.expectEqualStrings(raw, pane.text.text());
+}
+
+test "typed tiny-row rich census initial cost at retained capacity" {
+    const source = try std.testing.allocator.alloc(u8, 240 * 1024);
+    defer std.testing.allocator.free(source);
+    @memcpy(source[0..12], "h|x\n---|---\n");
+    for (0..(source.len - 12) / 4) |row| @memcpy(source[12 + 4 * row ..][0..4], "a|b\n");
+    var document: Document = .{};
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = source.len, .data = .literal_raw };
+    var admission: Document.Admission = .{};
+    try document.appendPrepared(source, 0, &span, &admission);
+    const layout: Layout = .{ .width = 79, .method = .wcwidth };
+    const start = std.Io.Clock.awake.now(std.testing.io);
+    const literal_rows = document.rowCount(layout);
+    const middle = std.Io.Clock.awake.now(std.testing.io);
+    span.data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } };
+    span.header_end = 4;
+    span.delimiter_end = 12;
+    span.complete_end = source.len;
+    try document.appendPrepared("", source.len, &span, &admission);
+    const rich_rows = document.rowCount(layout);
+    const finish = std.Io.Clock.awake.now(std.testing.io);
+    try std.testing.expectEqual(literal_rows - 1, rich_rows);
+    std.debug.print("output cold census tiny rows 240KiB literal={d}ns rich={d}ns /1\n", .{ middle.nanoseconds - start.nanoseconds, finish.nanoseconds - middle.nanoseconds });
+}
+
+test "typed table clipped paint clears shorter cells without touching separators or neighbors" {
+    const raw = "h|r\n---|---:\naaa bbb|one two\n";
+    const short = "h|r\n---|---:\nz|q\n";
+    const delimiter_end = 13;
+    var document: Document = .{};
+    var admission: Document.Admission = .{};
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = delimiter_end, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = .{ .left, .right, .left, .left, .left, .left, .left, .left } } } };
+    try document.appendPrepared(raw, 0, &span, &admission);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var screen: TestScreen = undefined;
+    const root = screen.window(20, 4);
+    root.fill(.{ .char = .{ .grapheme = "*", .width = 1 }, .style = .{ .bg = .{ .index = 4 } } });
+    const area = root.child(.{ .x_off = 2, .y_off = 1, .width = 13, .height = 1 });
+    const background: vaxis.Style = .{ .bg = .{ .index = 3 } };
+    _ = try document.draw(area, .{ .offset = delimiter_end, .row = 1 }, true, true, background, .{ .scratch = arena.allocator() });
+    var storage: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("**bbb   *   two*****", screen.row(1, &storage));
+    try std.testing.expectEqualStrings("********************", screen.row(0, &storage));
+    document.clear();
+    span.end = short.len;
+    span.complete_end = short.len;
+    admission = .{};
+    try document.appendPrepared(short, 0, &span, &admission);
+    _ = try document.draw(area, .{ .offset = delimiter_end }, true, true, background, .{ .scratch = arena.allocator() });
+    try std.testing.expectEqualStrings("**z     *     q*****", screen.row(1, &storage));
+    try std.testing.expectEqual(@as(u8, 3), root.readCell(2, 1).?.style.bg.index);
+    try std.testing.expectEqual(@as(u8, 3), root.readCell(4, 1).?.style.bg.index);
+    try std.testing.expectEqual(@as(u8, 4), root.readCell(8, 1).?.style.bg.index);
+    try std.testing.expectEqualStrings("", root.readCell(14, 1).?.link.uri);
+}
+
+test "typed literal mixed prefixes preserve hidden URI authority and escape only opaque source" {
+    const uri = "https://example.test";
+    const raw = "h|x\n---|---\n\x1b[31m|\xff\n";
+    var document: Document = .{};
+    try document.append(comptime linkBytes(uri, "label") ++ " ");
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try document.appendPrepared(raw, 0, &span, &admission);
+    try document.prepare();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var screen: TestScreen = undefined;
+    _ = try document.draw(screen.window(40, 4), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
+    var storage: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("label h|x", screen.row(0, &storage));
+    try std.testing.expectEqualStrings("---|---", screen.row(1, &storage));
+    try std.testing.expectEqualStrings("\\x1b[31m             \\xff", screen.row(2, &storage));
+    try std.testing.expectEqualStrings(uri, screen.screen.readCell(0, 0).?.link.uri);
+    try std.testing.expectEqualStrings("", screen.screen.readCell(6, 0).?.link.uri);
+    const layout: Layout = .{ .width = 40, .method = .wcwidth };
+    const rows = TextRows.init(&document, layout);
+    for (0..rows.total) |row| try std.testing.expectEqual(row, rows.row(rows.position(row)));
+    try std.testing.expectEqualStrings(uri ++ "label " ++ raw, document.text());
+}
+
+test "typed raw cell layout uses the projection width method not retained preparation method" {
+    const raw = "|h|\n|---|\n|👩‍🚀|\n";
+    var document: Document = .{};
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 10, .complete_end = raw.len, .data = .{ .table = .{ .count = 1, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try document.appendPrepared(raw, 0, &span, &admission);
+    try std.testing.expectEqual(@as(usize, 2), document.rowCount(.{ .width = 3, .method = .unicode }));
+    try std.testing.expectEqual(@as(usize, 17), document.rowCount(.{ .width = 3, .method = .wcwidth }));
+    try std.testing.expectEqualStrings(raw, document.text());
+}
+
+test "typed frozen suffix propagates pending promotion and byte-identical downgrade" {
+    const raw = "h|x\n---|---\na|b\n";
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    var live: Document = .{};
+    try live.appendPrepared(raw[0..4], 0, &span, &admission);
+    var frozen: Pane = .{};
+    frozen.text = live;
+    const layout: Layout = .{ .width = 20, .method = .unicode };
+    try std.testing.expect(frozen.text.blocks.items[0].data == .literal_raw);
+    try live.appendPrepared(raw[4..], 4, &span, &admission);
+    try std.testing.expectEqual(raw.len - 4, frozen.text.appendRetained(&live, 4));
+    try std.testing.expectEqual(@as(u6, 1), frozen.text.blocks.count);
+    try std.testing.expect(frozen.text.blocks.items[0].data == .table);
+    try std.testing.expectEqual(@as(usize, 2), frozen.projection(layout).total);
+    const generation = frozen.text.generation;
+    span.data = .literal_raw;
+    try live.appendPrepared("", raw.len, &span, &admission);
+    try std.testing.expectEqual(@as(usize, 0), frozen.text.appendRetained(&live, live.length));
+    try std.testing.expect(frozen.text.blocks.items[0].data == .literal_raw);
+    try std.testing.expect(frozen.text.generation != generation);
+    try std.testing.expectEqual(@as(usize, 3), frozen.projection(layout).total);
+    span.data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } };
+    try live.appendPrepared("", raw.len, &span, &admission);
+    try std.testing.expectEqual(@as(usize, 0), frozen.text.appendRetained(&live, live.length));
+    try std.testing.expect(frozen.text.blocks.items[0].data == .table);
+    try std.testing.expectEqual(@as(usize, 2), frozen.projection(layout).total);
+    try std.testing.expectEqualStrings(raw, frozen.text.text());
+}
+
+test "typed decorated quote and cell keep whitespace combining clusters through library word layout" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var pixels: TestScreen = undefined;
+    var storage: [128]u8 = undefined;
+    const quote = "> a \u{301}bc def ghi";
+    var document: Document = .{};
+    var admission: Document.Admission = .{};
+    const annotation: OutputBlocks.Span(u64) = .{ .start = 0, .end = quote.len, .data = .{ .quote = .{ .bytes = 2, .depth = 1, .indent = 0 } } };
+    try document.appendPrepared(quote, 0, &annotation, &admission);
+    _ = try document.draw(pixels.window(8, 4), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
+    try std.testing.expectEqualStrings("> a \u{301}bc", pixels.row(0, &storage));
+    try std.testing.expectEqualStrings("> def", pixels.row(1, &storage));
+    try std.testing.expectEqualStrings(quote, document.text());
+    document.clear();
+    admission = .{};
+    const table = "|h|\n|---|\n|[a \u{301}bc](https://example.test)|\n";
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = table.len, .header_end = 4, .delimiter_end = 10, .complete_end = table.len, .data = .{ .table = .{ .count = 1, .alignment = @splat(.left) } } };
+    try document.appendPrepared(table, 0, &span, &admission);
+    _ = try document.draw(pixels.window(5, 4), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
+    try std.testing.expectEqualStrings("a \u{301}bc", pixels.row(1, &storage));
+    try std.testing.expectEqualStrings("https://example.test", pixels.screen.readCell(1, 1).?.link.uri);
+    try std.testing.expectEqualStrings(table, document.text());
+}
+
+test "typed equal share uses every supported geometry width and rejects narrow columns" {
+    for (1..9) |count| {
+        for (1..24577) |width| {
+            const sizes = Document.columns(@intCast(width), @intCast(count));
+            if (width < count * 2 - 1) {
+                try std.testing.expect(sizes == null);
+                continue;
+            }
+            var sum: usize = count - 1;
+            for (sizes.?[0..count], 0..) |size, index| {
+                sum += size;
+                try std.testing.expect(size >= 1);
+                try std.testing.expect(sizes.?[0] - size <= 1);
+                if (index != 0) try std.testing.expect(sizes.?[index - 1] >= size);
+            }
+            try std.testing.expectEqual(width, sum);
+        }
+    }
+}
+
+test "typed over-output-budget cell falls back losslessly without paint allocation" {
+    const header = "|h|\n|---|\n";
+    var raw: [header.len + 2103]u8 = undefined;
+    @memcpy(raw[0..header.len], header);
+    raw[header.len] = '|';
+    @memset(raw[header.len + 1 ..][0..2100], 1);
+    raw[raw.len - 2] = '|';
+    raw[raw.len - 1] = '\n';
+    var document: Document = .{};
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = header.len, .complete_end = raw.len, .data = .{ .table = .{ .count = 1, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try document.appendPrepared(&raw, 0, &span, &admission);
+    const layout: Layout = .{ .width = 40, .method = .unicode };
+    try std.testing.expectEqual(@as(usize, 212), document.rowCount(layout));
+    const at = Position{ .offset = header.len };
+    var screen: TestScreen = undefined;
+    _ = try document.draw(screen.window(40, 2), at, true, false, .{}, .{});
+    var storage: [128]u8 = undefined;
+    try std.testing.expect(std.mem.startsWith(u8, screen.row(0, &storage), "|\\x01\\x01"));
+    try std.testing.expectEqualStrings(&raw, document.text());
+    for (0..document.rowCount(layout)) |index| try std.testing.expectEqual(index, document.rowOf(layout, document.positionAtRow(layout, index)));
+}
+
+test "typed long-cell census paint cost and bounded workspace are explicit" {
+    const io = std.testing.io;
+    var raw: [240 * 1024]u8 = undefined;
+    const header = "|head|\n|---|\n";
+    @memcpy(raw[0..header.len], header);
+    var length: usize = header.len;
+    const cell_text = "界e\u{301} **x** ";
+    while (length + 4096 <= raw.len) {
+        raw[length] = '|';
+        var end = length + 1;
+        while (end + cell_text.len + 2 < length + 4096) : (end += cell_text.len) @memcpy(raw[end..][0..cell_text.len], cell_text);
+        raw[end] = '|';
+        raw[end + 1] = '\n';
+        length = end + 2;
+    }
+    var document: Document = .{};
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = length, .header_end = 7, .delimiter_end = header.len, .complete_end = length, .data = .{ .table = .{ .count = 1, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try document.appendPrepared(raw[0..length], 0, &span, &admission);
+    const before = std.Io.Clock.awake.now(io);
+    const rows = TextRows.init(&document, .{ .width = 40, .method = .unicode });
+    const measured = std.Io.Clock.awake.now(io);
+    var pixels: TestScreen = undefined;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const drawn = try document.draw(pixels.window(40, 10), .{}, true, true, .{}, .{ .scratch = arena.allocator() });
+    const painted = std.Io.Clock.awake.now(io);
+    try std.testing.expect(rows.total > 10);
+    try std.testing.expectEqual(@as(usize, 10), drawn.rows);
+    try std.testing.expectEqualStrings(raw[0..length], document.text());
+    std.debug.print("output long-cell {d}B census={d}ns paint10={d}ns rows={d}; CellDocument={d}B output={d}B Renderer={d}B stack workspaces; committed scratch used={d}B\n", .{ length, measured.nanoseconds - before.nanoseconds, painted.nanoseconds - measured.nanoseconds, rows.total, @sizeOf(Document.CellDocument), cell_output_limit, @sizeOf(AnswerRenderer), arena.queryCapacity() });
+}
+
+test "typed incomplete tail and ragged rows remain literal even beside complete rich units" {
+    for ([_][]const u8{ "a|b", "a|b|c\n" }) |tail| {
+        const header = "h|x\n---|---\n";
+        var buffer: [64]u8 = undefined;
+        const raw = try std.fmt.bufPrint(&buffer, "{s}{s}", .{ header, tail });
+        var document: Document = .{};
+        var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = header.len, .complete_end = if (tail[tail.len - 1] == '\n') raw.len else header.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+        var admission: Document.Admission = .{};
+        try document.appendPrepared(raw, 0, &span, &admission);
+        var pixels: TestScreen = undefined;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        _ = try document.draw(pixels.window(20, 3), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
+        var storage: [128]u8 = undefined;
+        try std.testing.expectEqualStrings(std.mem.trimEnd(u8, tail, "\n"), pixels.row(1, &storage));
+        try std.testing.expectEqualStrings(raw, document.text());
+        if (span.complete_end != raw.len) {
+            span.complete_end = raw.len; // Explicit canonical seal, not retention.
+            try document.appendPrepared("", raw.len, &span, &admission);
+            _ = try document.draw(pixels.window(20, 3), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
+            try std.testing.expectEqualStrings("a          b", pixels.row(1, &storage));
+        }
     }
 }
