@@ -102,7 +102,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
                 .interrupted = &self.interrupted,
             };
             self.front.init.io = std.testing.io;
-            self.front.input.init();
+            self.front.input.init(&self.terminal.stream);
             self.front.submission = .{ .io = std.testing.io, .store = self.front.store, .session = self.front.session, .directory = path, .input = &self.front.input, .environment = .empty };
             try self.setPage("EARLIER PAGE\n");
             try self.action.writePositionalAll(std.testing.io, "\n? Print exact\n  $ printf exact\n", 0);

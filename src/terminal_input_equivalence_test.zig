@@ -468,30 +468,30 @@ test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain qu
             defer _ = std.c.close(pipe[1]);
             if (std.c.dup2(pipe[0], 0) != 0) return error.TestDupFailed;
             var terminal: Terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = undefined };
-            var input: Input = .{};
+            const input = &terminal.stream;
             for (prefix) |byte| _ = input.feed(byte, 1_000_000_000);
             try std.testing.expectEqual(pending, input.pending());
             clock.at = 1_000_000_000 + duration + offset;
             try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], &.{more}, 1));
             if (offset < 0) {
-                const read = (try terminal.next(io, &input, 0)).?;
+                const read = (try terminal.next(io, 0)).?;
                 try std.testing.expectEqual(more, read.byte);
                 try std.testing.expectEqual(clock.at, read.at);
                 try std.testing.expect(input.feed(read.byte, read.at) == .none);
                 try std.testing.expectEqual(pending, input.pending());
                 // A fed byte, not an empty poll, renews the inactivity clock.
                 clock.at += duration - 1;
-                try std.testing.expectEqual(@as(?Terminal.Read, null), try terminal.next(io, &input, 0));
+                try std.testing.expectEqual(@as(?Terminal.Read, null), try terminal.next(io, 0));
                 clock.at += 1;
-                try std.testing.expectError(error.InputDeadline, terminal.next(io, &input, 0));
+                try std.testing.expectError(error.InputDeadline, terminal.next(io, 0));
             } else {
-                try std.testing.expectError(error.InputDeadline, terminal.next(io, &input, 0));
+                try std.testing.expectError(error.InputDeadline, terminal.next(io, 0));
                 if (pending == .escape) try std.testing.expect(try input.expire() != .none) else try std.testing.expectError(error.IncompleteTerminalInput, input.expire());
                 // Expiry did not consume ready input. It remains for the next
                 // read, not swallowed as part of an expired prefix. (Incomplete
                 // expiry ends the caller; read as its successor would.)
-                const idle: Input = .{};
-                try std.testing.expectEqual(more, (try terminal.next(io, if (pending == .escape) &input else &idle, 0)).?.byte);
+                if (pending == .incomplete) terminal.stream = .{};
+                try std.testing.expectEqual(more, (try terminal.next(io, 0)).?.byte);
             }
         }
     }
@@ -508,24 +508,24 @@ test "TD2 SessionTerminal expiry boundaries use a controlled clock and retain qu
         var storage: [128]u8 = undefined;
         @memcpy(storage[0..8], "headTAIL");
         var editor: Editor = .{ .buffer = &storage, .length = 8, .cursor = 4 };
-        var input: Input = .{};
+        const input = &terminal.stream;
         var outcome: Outcome = .{ .length = 0, .cursor = 0, .event = .none, .submits = 0, .rejected = false };
         try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], "\x1b", 1));
-        const escape = (try terminal.next(io, &input, 0)).?;
-        feedAt(&editor, &input, escape, &outcome);
+        const escape = (try terminal.next(io, 0)).?;
+        feedAt(&editor, input, escape, &outcome);
         try std.testing.expectEqual(Input.Pending.escape, input.pending());
         try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], &.{enter}, 1));
         clock.at += 80_000_000 + offset;
         if (offset >= 0) {
-            try std.testing.expectError(error.InputDeadline, terminal.next(io, &input, 0));
+            try std.testing.expectError(error.InputDeadline, terminal.next(io, 0));
             try std.testing.expect(try input.expire() != .none);
             try std.testing.expectEqualStrings("headTAIL", storage[0..editor.length]);
             try std.testing.expectEqual(@as(usize, 4), editor.cursor);
             try std.testing.expectEqual(@as(usize, 0), outcome.submits);
         }
-        const read = (try terminal.next(io, &input, 0)).?;
+        const read = (try terminal.next(io, 0)).?;
         try std.testing.expectEqual(enter, read.byte);
-        feedAt(&editor, &input, read, &outcome);
+        feedAt(&editor, input, read, &outcome);
         try std.testing.expectEqualStrings(if (offset < 0) "head\nTAIL" else "headTAIL", storage[0..editor.length]);
         try std.testing.expectEqual(@as(usize, if (offset < 0) 5 else 4), editor.cursor);
         try std.testing.expectEqual(@as(usize, if (offset < 0) 0 else 1), outcome.submits);

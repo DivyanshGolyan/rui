@@ -18,6 +18,8 @@ flags: [2]c_int,
 output: c_int = 1,
 /// The terminal's input descriptor; tests supply a pipe.
 input: c_int = 0,
+/// The invocation's byte decoder survives every screen and draft reset.
+stream: Input = .{},
 screen: *Screen,
 active: bool = true,
 result: anyerror!void = {},
@@ -386,8 +388,8 @@ pub const Read = struct { byte: u8, at: i96 };
 
 /// One byte, read within `wait` milliseconds, or null. The input stream owns
 /// when its pending input expires; InputDeadline asks the caller to expire it.
-pub fn next(self: *Self, io: std.Io, input: *const Input, wait: i32) !?Read {
-    const timeout = switch (input.wait(std.Io.Clock.awake.now(io).nanoseconds, wait)) {
+pub fn next(self: *Self, io: std.Io, wait: i32) !?Read {
+    const timeout = switch (self.stream.wait(std.Io.Clock.awake.now(io).nanoseconds, wait)) {
         .expire => return error.InputDeadline,
         .poll => |milliseconds| milliseconds,
     };

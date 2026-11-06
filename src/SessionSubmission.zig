@@ -5,6 +5,7 @@ const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const Input = @import("SessionInput.zig");
+const TerminalInput = @import("TerminalInput.zig");
 const Task = @import("ClientTask.zig");
 const Self = @This();
 
@@ -188,8 +189,9 @@ test "submission bounded gestures consume only the original and do not requeue f
     for (0..3) |kind| {
         for (1..4) |gestures| {
             errdefer std.debug.print("submission gestures: kind={d}, gestures={d}\n", .{ kind, gestures });
+            var stream: TerminalInput = .{};
             var input: Input = undefined;
-            input.init();
+            input.init(&stream);
             var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty };
             // An idle gesture has no authority over a future original.
             try self.requestRecovery(null);
@@ -241,8 +243,9 @@ test "submission bounded joined outcomes precede retry and retire original autho
         for (std.enums.values(Outcome)) |outcome| {
             for (1..4) |gestures| {
                 errdefer std.debug.print("submission join: kind={d}, outcome={s}, gestures={d}\n", .{ kind, @tagName(outcome), gestures });
+                var stream: TerminalInput = .{};
                 var input: Input = undefined;
-                input.init();
+                input.init(&stream);
                 var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
                 self.intent = if (kind == 0) .{ .message = input.submitText("original B") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
                 self.reply = .{ .status = 200, .context = .{ .kind = if (kind == 0) .message else .permission_decision }, .target = if (kind == 0) .{ .message = .{ .bytes = 10, .digest = protocol.contentDigest("original B") } } else .{ .permission_decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } }, .answer = .{ .replayed = false, .result = switch (outcome) {
@@ -406,8 +409,9 @@ test "submission reservation failure retains unsent intent ahead of accepted his
     var vtable = std.testing.io.vtable.*;
     vtable.randomSecure = Failing.random;
     for (0..3) |kind| {
+        var stream: TerminalInput = .{};
         var input: Input = undefined;
-        input.init();
+        input.init(&stream);
         var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .accepted = .{ .kind = .message, .key = @splat('A') } };
         const intent: Intent = if (kind == 0) .{ .message = input.submitText("original café!") } else .{ .decision = .{ .action = 9, .decision = if (kind == 1) .allow_once else .deny } };
         for ("next té!\x1b[D") |byte| _ = input.feed(byte);
@@ -453,8 +457,9 @@ test "an accepted reason names its Action's denial; a rejected one denies nothin
     const directory = root[0..try tmp.dir.realPath(std.testing.io, &root)];
     for ([_]enum { accepted, rejected, lost }{ .accepted, .rejected, .lost }) |outcome| {
         errdefer std.debug.print("reason outcome={s}\n", .{@tagName(outcome)});
+        var stream: TerminalInput = .{};
         var input: Input = undefined;
-        input.init();
+        input.init(&stream);
         var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = directory, .input = &input, .environment = .empty, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
         self.intent = .{ .message_then_deny = .{ .ticket = input.submitText("skip"), .action = 19 } };
         self.reply = Worker.reply(outcome == .accepted);
@@ -514,8 +519,9 @@ test "submission cancelled and failed joins preserve independent publication fac
     for (0..3) |kind| {
         for ([_]Publication{ .not_sent, .unknown, .published }) |publication| {
             for ([_]Task.Run{ Worker.initial, Worker.cancelled, Worker.failed }) |run| {
+                var stream: TerminalInput = .{};
                 var input: Input = undefined;
-                input.init();
+                input.init(&stream);
                 var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .accepted = .{ .kind = .message, .key = @splat('A') }, .publication = publication, .key = @splat('B'), .state = .unconfirmed };
                 self.intent = if (kind == 0) .{ .message = input.submitText("original B café!") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
                 for ("newer té!\x1b[D") |byte| _ = input.feed(byte);
@@ -557,8 +563,9 @@ test "submission recovery validates reopened originals and pins the saved reader
     for (0..3) |kind| {
         for (std.enums.values(Variant)) |variant| {
             errdefer std.debug.print("intent {d}, reopened variant {s}\n", .{ kind, @tagName(variant) });
+            var stream: TerminalInput = .{};
             var input: Input = undefined;
-            input.init();
+            input.init(&stream);
             var vtable = io.vtable.*;
             vtable.fileSync = Failure.sync;
             var self: Self = .{ .io = .{ .userdata = io.userdata, .vtable = &vtable }, .store = root, .session = "k7m2qx", .directory = root, .input = &input, .environment = .empty };
@@ -677,8 +684,9 @@ test "submission settles wire Admission only after join and releases only accept
             try body.writeAll("}");
             var response_buffer: [1536]u8 = undefined;
             const response = try std.fmt.bufPrint(&response_buffer, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n{s}", .{ if (conflict) "409 Conflict" else "200 OK", body.buffered().len, body.buffered() });
+            var stream: TerminalInput = .{};
             var input: Input = undefined;
-            input.init();
+            input.init(&stream);
             var self: Self = .{ .io = io, .store = root, .session = "k7m2qx", .directory = root, .input = &input, .environment = .empty };
             defer {
                 self.cancel();

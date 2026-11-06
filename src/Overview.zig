@@ -275,7 +275,6 @@ state: view.State,
 caps: view.Caps,
 terminal: *SessionTerminal,
 interrupted: *client.Cancellation,
-input: TerminalInput = .{},
 /// The composer's line editor, the conversation's, which owns the draft.
 composer: TerminalEditor = undefined,
 draft: [view.draft_capacity]u8 = undefined,
@@ -493,7 +492,7 @@ fn turn(self: *Self) !?Next {
     const awake_ms: u64 = @intCast(@max(@divFloor(awake_ns, std.time.ns_per_ms), 0));
     if (try self.draw(awake_ms / view.spin_interval_ms)) |next| return next;
     const spins = if (self.shown) |*held| held.spins else false;
-    const timeout = switch (self.input.wait(awake_ns, self.budget(now_ms, awake_ms, spins))) {
+    const timeout = switch (self.terminal.stream.wait(awake_ns, self.budget(now_ms, awake_ms, spins))) {
         .expire => 0,
         .poll => |milliseconds| milliseconds,
     };
@@ -892,9 +891,9 @@ fn saveDefault(self: *Self, binding: view.Default) !void {
 /// key once the stream says it expired.
 fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
     for (0..bytes) |count| {
-        const read = (self.terminal.next(self.init.io, &self.input, if (count == 0) wait else 0) catch |err| switch (err) {
+        const read = (self.terminal.next(self.init.io, if (count == 0) wait else 0) catch |err| switch (err) {
             error.InputDeadline => {
-                const expired = try self.input.expire();
+                const expired = try self.terminal.stream.expire();
                 if (expired != .none) {
                     if (try self.compose(expired)) |next| return next;
                 }
@@ -902,8 +901,8 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
             },
             else => return err,
         }) orelse return null;
-        var decoded = self.input.feed(read.byte, read.at);
-        while (decoded != .none) : (decoded = self.input.next()) switch (decoded) {
+        var decoded = self.terminal.stream.feed(read.byte, read.at);
+        while (decoded != .none) : (decoded = self.terminal.stream.next()) switch (decoded) {
             .event => |value| switch (value.event) {
                 // An answer applies whenever it comes; a late one repaints.
                 .color_report => |report| if (report.kind == .bg) {
@@ -3243,7 +3242,7 @@ fn pressKey(rig: *Rig, bytes: []const u8) !?Ending {
     const Expiry = struct {
         fn done(overview: *Self) !bool {
             if (try overview.readInput(0, 1) != null) return error.TestUnexpectedResult;
-            return overview.input.pending() == .none;
+            return overview.terminal.stream.pending() == .none;
         }
     };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), rig.overview, Expiry.done);

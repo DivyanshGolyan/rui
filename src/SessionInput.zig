@@ -39,9 +39,9 @@ pub const Landing = union(enum) {
     show: Found,
 };
 
-/// The invocation's one terminal byte stream. Draft resets, bank switches and
-/// the Session's choice editor never replace it.
-stream: TerminalInput = .{},
+/// Borrowed from the terminal invocation. Draft initialization, bank switches
+/// and replacement editors never construct or reset the decoder.
+stream: *TerminalInput,
 banks: [2][capacity]u8 = undefined,
 editors: [2]Editor = undefined,
 // The one queued inspection command; only queueCommand and takeCommand change it.
@@ -56,8 +56,8 @@ revision: u64 = 0,
 /// What Tab adds; null until the screen sets it, so Tab types a tab.
 completion: ?Editor.Completion = null,
 
-pub fn init(self: *Self) void {
-    self.* = .{};
+pub fn init(self: *Self, stream: *TerminalInput) void {
+    self.* = .{ .stream = stream };
     for (&self.editors, 0..) |*editor, bank| editor.* = self.empty(@intCast(bank));
 }
 
@@ -254,8 +254,9 @@ fn checked(self: *const Self, ticket: Ticket) !@TypeOf(self.submitted.?) {
 }
 
 test "SessionInput loan release preserves next Unicode draft and cursor" {
+    var stream: TerminalInput = .{};
     var input: Self = undefined;
-    input.init();
+    input.init(&stream);
     for ("aéZ\x1b[D") |byte| _ = input.feed(byte);
     const ticket = input.feed('\r').message;
     for ("next!\x1b[D\x1b[D") |byte| _ = input.feed(byte);
@@ -267,8 +268,9 @@ test "SessionInput loan release preserves next Unicode draft and cursor" {
 }
 
 test "SessionInput malformed rejection resets only the active composition" {
+    var stream: TerminalInput = .{};
     var input: Self = undefined;
-    input.init();
+    input.init(&stream);
     for ("original") |byte| _ = input.feed(byte);
     const ticket = input.feed('\r').message;
     for ("\xff") |byte| _ = input.feed(byte);
@@ -289,8 +291,9 @@ test "SessionInput malformed rejection resets only the active composition" {
 }
 
 test "SessionInput retained loan and stale tickets cannot consume next composition" {
+    var stream: TerminalInput = .{};
     var input: Self = undefined;
-    input.init();
+    input.init(&stream);
     for ("old") |byte| _ = input.feed(byte);
     const ticket = input.feed('\r').message;
     for ("new\x1b[D") |byte| _ = input.feed(byte);
@@ -304,22 +307,39 @@ test "SessionInput retained loan and stale tickets cannot consume next compositi
 }
 
 test "one stream survives draft resets and replacement editors" {
+    var stream: TerminalInput = .{};
+    for ("\x1bO") |byte| _ = stream.feed(byte, 0);
     var input: Self = undefined;
-    input.init();
+    input.init(&stream);
+    // Initializing a fresh draft borrows the already-started sequence.
+    try std.testing.expectEqual(Editor.Pending.incomplete, input.pending());
+    try std.testing.expectEqual(keymap.Outcome(keymap.Key){ .action = .down }, input.feed('B').editor);
+    try std.testing.expectEqualStrings("", input.composition().bytes);
     // A sequence split across a draft reset is decoded once: an arrow, not
     // its final byte as typed text.
     for ("draft\x1b[") |byte| _ = input.feed(byte);
     input.clear();
     try std.testing.expectEqual(keymap.Outcome(keymap.Key){ .action = .up }, input.feed('A').editor);
     try std.testing.expectEqualStrings("", input.composition().bytes);
+    // Sealing the command-line Message and releasing its bank reset only
+    // editors; the invocation's pending sequence still finishes once.
+    for ("\x1b[") |byte| _ = input.feed(byte);
+    const ticket = input.submitText("sent");
+    try std.testing.expectEqualStrings("sent", try input.message(ticket));
+    try input.release(ticket);
+    try std.testing.expectEqual(Editor.Pending.incomplete, input.pending());
+    try std.testing.expectEqual(keymap.Outcome(keymap.Key){ .action = .up }, input.feed('A').editor);
+    try std.testing.expectEqualStrings("", input.composition().bytes);
     // An editor that replaces another mid-paste, like a fresh choice field,
     // rejects the paste's remainder instead of adopting it as typed input.
     var storage: [16]u8 = undefined;
     for ("\x1b[200~") |byte| _ = input.feed(byte);
+    input.init(&stream);
+    try std.testing.expectEqual(Editor.Pending.incomplete, input.pending());
     var choice: Editor = .{ .buffer = &storage, .allow_paste = false };
-    for ("a\x1b[201~") |byte| _ = choice.feed(&input.stream, byte);
+    for ("a\x1b[201~") |byte| _ = choice.feed(input.stream, byte);
     try std.testing.expectEqualStrings("", storage[0..choice.length]);
-    try std.testing.expect(std.meta.eql(choice.feed(&input.stream, '\r'), .{ .refused = .invalid }));
+    try std.testing.expect(std.meta.eql(choice.feed(input.stream, '\r'), .{ .refused = .invalid }));
     try std.testing.expectEqual(Editor.Pending.none, input.pending());
 }
 
@@ -330,8 +350,9 @@ test "a recalled Message is the draft until an edit, never a caret move" {
     const file = try tmp.dir.createFile(io, "recalled", .{ .read = true });
     defer file.close(io);
     try file.writePositionalAll(io, "/sent\nagain", 0);
+    var stream: TerminalInput = .{};
     var input: Self = undefined;
-    input.init();
+    input.init(&stream);
     const found: Found = .{ .at = .{ .position = 7, .end = 9 }, .length = "/sent\nagain".len, .slash = true };
     try input.fill(io, file, found);
     try std.testing.expectEqualStrings("//sent\nagain", input.composition().bytes);
@@ -363,8 +384,9 @@ test "a recall step lands only on the draft it began from, one at a time" {
     defer file.close(io);
     try file.writePositionalAll(io, "newest", 0);
     const newest: Found = .{ .at = .{ .position = 9, .end = 9 }, .length = 6, .slash = false };
+    var stream: TerminalInput = .{};
     var input: Self = undefined;
-    input.init();
+    input.init(&stream);
 
     // Typing during a read: the read lands nowhere, and Ctrl-P on the typed
     // draft says so even while another read runs.
@@ -449,8 +471,9 @@ test "Tab puts in the list's first word at the draft's end and adds a tab anywhe
         .{ .typed = "\t", .shown = "\t" },
     };
     for (cases) |case| {
+        var stream: TerminalInput = .{};
         var input: Self = undefined;
-        input.init();
+        input.init(&stream);
         input.complete(.{ .context = &{}, .add = List.add });
         for (case.typed) |byte| _ = input.feed(byte);
         try std.testing.expectEqualStrings(case.shown, input.composition().bytes);
