@@ -746,6 +746,7 @@ pub const Prompt = struct {
     action: Prompt.Action = .stop,
 };
 pub const archive_prompt = "Stop and archive {s}? enter yes {s} esc no";
+const archive_waiting = "{s}: Stopping and archiving; waiting for work to settle.";
 
 /// What both screens say while a stop waits for its second Ctrl-X: the
 /// Session's reference and a separator dot.
@@ -1463,7 +1464,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .requested => |completion| {
                     state.answer(at, .done, "");
                     if (result.request.archived) {
-                        if (completion == .pending) state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref}) else state.say(.quiet, "Archived {s}.", .{&ref});
+                        if (completion == .pending) state.say(.attention, archive_waiting, .{&ref}) else state.say(.quiet, "Archived {s}.", .{&ref});
                     } else state.say(.quiet, "Restored {s}; work was not restarted.", .{&ref});
                 },
                 .failed => |code| {
@@ -1786,6 +1787,17 @@ fn labelOf(text: []const u8) Bounded(max_label_bytes) {
 /// replaces the set, `not_modified` keeps every row.
 fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     const selected_at = if (state.selected) |ref| position(state, ref) orelse 0 else 0;
+    // Only replace the notice for the Session whose wait it describes.
+    // An unknown request or a newer notice remains actionable and untouched.
+    if (answer.delta != .not_modified) for (state.pending.items) |incoming| {
+        if (incoming.archive_state != .archived) continue;
+        var waiting_buffer: [128]u8 = undefined;
+        const waiting = std.fmt.bufPrint(&waiting_buffer, archive_waiting, .{&incoming.reference}) catch unreachable;
+        if (state.notice) |notice| if (std.mem.eql(u8, notice.text(), waiting)) {
+            state.say(.quiet, "Archived {s}.", .{&incoming.reference});
+            break;
+        };
+    };
     switch (answer.delta) {
         .not_modified => {},
         .changed => {
@@ -2300,7 +2312,7 @@ fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
 /// Slash commands consume their submitted line; a key leaves its draft alone.
 fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, draft: ArchiveDraft, effects: *Effects) void {
     if (archive == .archiving) {
-        state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref});
+        state.say(.attention, archive_waiting, .{&ref});
         return;
     }
     if (archive == .archived) {
@@ -4191,6 +4203,7 @@ test "typed busy archive runs immediately and never hides before settled server 
     row.state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } };
     _ = try refresh(&state, .changed, testToken(3), &.{row});
     try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
+    try std.testing.expectEqualStrings("Archived aaaaaa.", state.notice.?.text());
     try expectEffects(&.{.{ .archive = .{ .reference = row.reference, .archived = false } }}, try step(&state, .{ .conversed = .{ .reference = row.reference, .work = .idle, .input = .unarchive } }));
     _ = try step(&state, .{ .archive = .{ .request = .{ .reference = row.reference, .archived = false }, .outcome = .{ .requested = .completed } } });
     try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
@@ -4198,6 +4211,36 @@ test "typed busy archive runs immediately and never hides before settled server 
     _ = try refresh(&state, .changed, testToken(4), &.{row});
     try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
     try std.testing.expectEqual(Kind.stopped, std.meta.activeTag(state.find(row.reference).?.state));
+}
+
+test "archive completion only replaces the matching waiting notice" {
+    var a = session("aaaaaa", .{ .working = ago(1) }, .{});
+    var b = session("bbbbbb", .{ .working = ago(1) }, .{});
+    var state = try opened(&.{ a, b });
+    defer state.deinit();
+    for ([_]Reference{ a.reference, b.reference }) |ref| {
+        try expectEffects(&.{.{ .archive = .{ .reference = ref } }}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .{ .archive_command = .active } } }));
+        _ = try step(&state, .{ .archive = .{ .request = .{ .reference = ref }, .outcome = .{ .requested = .pending } } });
+    }
+    try std.testing.expectEqualStrings("bbbbbb: Stopping and archiving; waiting for work to settle.", state.notice.?.text());
+    a.archive_state = .archived;
+    _ = try refresh(&state, .changed, testToken(2), &.{a});
+    try std.testing.expectEqualStrings("bbbbbb: Stopping and archiving; waiting for work to settle.", state.notice.?.text());
+    b.archive_state = .archived;
+    _ = try refresh(&state, .changed, testToken(3), &.{b});
+    try std.testing.expectEqualStrings("Archived bbbbbb.", state.notice.?.text());
+
+    // A newer unresolved request retains its recovery guidance even when a
+    // listing observes its target archived; the request is still unknown.
+    a.archive_state = .active;
+    _ = try refresh(&state, .changed, testToken(4), &.{a});
+    try expectEffects(&.{.{ .archive = .{ .reference = a.reference } }}, try step(&state, .{ .conversed = .{ .reference = a.reference, .work = .working, .input = .{ .archive_command = .active } } }));
+    _ = try step(&state, .{ .archive = .{ .request = .{ .reference = a.reference }, .outcome = .{ .unconfirmed = "saved-handle" } } });
+    a.archive_state = .archived;
+    _ = try refresh(&state, .changed, testToken(5), &.{a});
+    try std.testing.expectEqualStrings("! aaaaaa archive unsure; recover saved-handle. Nothing hidden locally.", state.notice.?.text());
+    try std.testing.expectEqual(@as(usize, 1), state.request_count);
+    try std.testing.expectEqual(.unknown, state.requests[0].status);
 }
 
 test "archive failure and unconfirmed requests stay visible and surface recoverable errors" {

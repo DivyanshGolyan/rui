@@ -471,7 +471,7 @@ test "run returns detached on Ctrl-D and leaves the lent terminal begun, with no
         const self = try std.testing.allocator.create(Self);
         defer std.testing.allocator.destroy(self);
         const files: Files = .{ .scratch = page, .action = page, .inspection = page };
-        const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted, quiet_overview);
+        const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, &terminal, &interrupted, quiet_overview);
         try std.testing.expectEqual(Outcome.detached, outcome);
         try std.testing.expectEqualStrings("", self.input.composition().bytes);
         try std.testing.expectEqual(TerminalInput.Pending.none, terminal.stream.pending());
