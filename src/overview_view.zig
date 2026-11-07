@@ -374,6 +374,8 @@ pub const StartResult = union(enum) {
 };
 
 pub const Event = union(enum) {
+    /// An explicit skill replacement exceeded the editor capacity; no edit occurred.
+    skill_refused,
     composed: Composed,
     /// The size of the screen the shell draws next; keys read until the
     /// next one act on that screen.
@@ -1486,6 +1488,7 @@ fn lookup(keyed: []const Keyed, ref: Reference) ?u32 {
 pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
+        .skill_refused => state.say(.attention, "! Skill does not fit; draft retained.", .{}),
         .composed => |value| try compose(state, value, &effects),
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| switch (reply) {

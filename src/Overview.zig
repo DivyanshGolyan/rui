@@ -23,6 +23,7 @@ const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
 const OverviewPaint = @import("OverviewPaint.zig");
 const ClientTask = @import("ClientTask.zig");
+const SkillMenu = @import("SkillMenu.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
@@ -315,6 +316,7 @@ done: [2]c_int = .{ -1, -1 },
 signalled: [2]c_int = .{ -1, -1 },
 
 worker: ClientTask = .{},
+skill_menu: SkillMenu = .{},
 upgrade_requested: bool = false,
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
@@ -400,7 +402,10 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
     var terminal = SessionTerminal.begin(screen, !notices.multiplexed) catch |err| return self.failed(err, options.open);
     terminal.notices = notices;
     self.terminal = &terminal;
-    const ended = self.loop();
+    const ended: anyerror!Ending = initialized: {
+        self.skill_menu.init(init.gpa, init.io, options.store, .{ .workspace = options.workspace }) catch |err| break :initialized err;
+        break :initialized self.loop();
+    };
     return self.finish(ended);
 }
 
@@ -477,6 +482,7 @@ fn destroy(self: *Self) void {
     if (self.scratch) |file| file.close(self.init.io);
     if (self.command_page) |file| file.close(self.init.io);
     self.closePipes();
+    self.composer.deinitAttachments(self.init.gpa);
     self.state.deinit();
     self.menu.deinit(self.init.gpa);
     self.init.gpa.destroy(self);
@@ -506,10 +512,12 @@ fn loop(self: *Self) !Ending {
 /// the worker or a signal.
 fn turn(self: *Self) !?Next {
     const now_ms = self.realMs();
+    if (!self.upgrade_requested) try self.refreshSkills();
     if (self.upgrade_requested) {
         if (try self.quiesceUpgrade()) {
             const outcome = try UpgradePanel.run(self.init, self.options.store, self.terminal, self.interrupted);
             self.upgrade_requested = false;
+            self.skill_menu.invalidate();
             switch (outcome) {
                 .unchanged => {},
                 .compatible => self.state.upgrade_blocked = false,
@@ -552,10 +560,12 @@ fn proceed(self: *Self, next: Next) ?Ending {
     switch (next) {
         .leave => return .overview,
         .open => |reference| {
+            self.skill_menu.cancel();
             self.opened = reference;
             // Both views paint the SAME retained grid; changing the borrower
             // is not a reason to discard a healthy libvaxis diff reference.
             if (self.ops.converse(self, self.opened)) |left| return .{ .conversation = left };
+            self.skill_menu.invalidate();
             return null;
         },
     }
@@ -591,7 +601,16 @@ fn event(self: *Self, value: view.Event) !?Next {
         .save_default => |binding| self.queue(.{ .save = binding }),
         .command => |command| self.queue(.{ .command = .{ .name = command.name, .session = command.session, .line = try self.init.gpa.dupe(u8, command.text) } }),
         .open => |reference| next = .{ .open = reference },
-        .clear_draft => self.composer = self.emptyComposer(self.composer.edits +% 1),
+        .clear_draft => self.resetComposer(),
+        .attach_skill => |range| {
+            self.composer.attachSkill(self.init.gpa, range.start, range.end, range.name) catch |err| switch (err) {
+                error.SkillCapacityExceeded => return self.event(.skill_refused),
+                else => return err,
+            };
+            self.skill_menu.dismiss(self.composer.edits, self.composer.cursor);
+            self.state.commands = null;
+        },
+        .dismiss_skills => self.skill_menu.dismiss(self.composer.edits, self.composer.cursor),
         // A refused addition says so as a refused key does.
         .append => |text| switch (self.composer.append(text)) {
             .refused => |why| refused = why,
@@ -643,7 +662,28 @@ fn sendStatuses(self: *Self) void {
 }
 
 fn composerDraft(self: *const Self) view.Draft {
-    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor, .edits = self.composer.edits };
+    const bytes = self.draft[0..self.composer.length];
+    return .{ .bytes = bytes, .cursor = self.composer.cursor, .anchor = self.draft_anchor, .edits = self.composer.edits, .attachments = self.composer.attachments(), .skill_choices = self.skill_menu.choices(bytes, self.composer.cursor, self.composer.edits) };
+}
+
+/// Metadata follows exactly the Workspace the next start's configuration uses.
+fn skillWorkspace(self: *const Self) []const u8 {
+    for (view.start_options, 0..) |option, index| if (std.mem.eql(u8, option, "workspace")) return self.state.settings.get(index) orelse self.options.workspace;
+    unreachable;
+}
+
+/// No metadata mutation while a frame still borrows its rows.
+fn refreshSkills(self: *Self) !void {
+    if (try self.skill_menu.setScope(.{ .workspace = self.skillWorkspace() })) self.state.commands = null;
+    if (try self.skill_menu.refresh(self.draft[0..self.composer.length], self.composer.cursor, self.composer.edits)) self.state.commands = null;
+    if (self.skill_menu.failure()) |err| return err;
+}
+
+/// Retire discovery without blocking raw-mode editing or starting another read.
+fn pauseSkills(self: *Self) !void {
+    self.skill_menu.cancel();
+    if (try self.skill_menu.refresh("", 0, self.composer.edits)) self.state.commands = null;
+    if (self.skill_menu.failure()) |err| return err;
 }
 
 /// Takes the queued job at `index` out of the queue.
@@ -877,7 +917,7 @@ fn startInput(self: *const Self, start: *const view.OwnedStart, compaction_buffe
     // Read at each start, so an /effort chosen in a conversation since this
     // overview opened applies.
     const saved_effort = start_effort.applied(if (start_effort.readsSaved()) try self.savedEffort() else null);
-    return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .configuration = .{
+    return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .skills = start.skills(), .configuration = .{
         .store = self.options.store,
         .session = .create,
         .require_model = true,
@@ -1032,7 +1072,11 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
         if (TerminalEditor.frozenAction(view.keys, decoded) == .exit) return .leave;
         return null;
     }
-    const input = if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.plainEnter(decoded))
+    const draft = self.composerDraft();
+    const skill_tab = if (draft.skill_choices) |choices| !choices.dismissed else false;
+    const input = if (self.state.inputMode() == .compose and skill_tab and TerminalEditor.plainTab(decoded))
+        view.Input.complete
+    else if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.plainEnter(decoded))
         view.Input{ .composer = .submit }
     else if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.select(view.keys, decoded) == .enter)
         view.Input{ .composer = .none }
@@ -1041,8 +1085,14 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
     return self.event(.{ .composed = .{ .input = input, .draft = self.composerDraft() } });
 }
 
-/// An empty draft, whose Tab puts in the command list's highlighted word.
-/// `edits` continues the count, so no two drafts share one.
+/// Clear through the editor owner without losing range storage or revision identity.
+fn resetComposer(self: *Self) void {
+    const revision = self.composer.edits +% 1;
+    self.composer.reset();
+    self.composer.edits = revision;
+}
+
+/// An empty draft whose Tab completes the builtin-only argument list.
 fn emptyComposer(self: *Self, edits: u32) TerminalEditor {
     return .{ .buffer = &self.draft, .completion = .{ .context = self, .add = tabCompletion }, .edits = edits };
 }
@@ -1054,6 +1104,7 @@ fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     const self: *const Self = @ptrCast(@alignCast(context));
     if (view.commands.suggest(draft, .{}) == null) return null;
     const shown = view.nextCommands(&self.state, self.composerDraft()) orelse return "";
+    if (shown.list.containsSkills()) return "";
     return shown.completion();
 }
 
@@ -1136,9 +1187,10 @@ fn resize(self: *Self, size: std.posix.winsize) !?Next {
 /// frame. Until then only input, the worker or a signal wakes it.
 fn budget(self: *const Self, now_ms: u64, awake_ms: u64, spins: bool) i32 {
     const tick: i32 = if (self.state.upgrade_blocked or self.upgrade_requested) 16 else if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
-    if (!spins) return tick;
+    const polled = if (self.skill_menu.busy()) (if (tick < 0) 25 else @min(tick, 25)) else tick;
+    if (!spins) return polled;
     const frame: i32 = @intCast(view.spin_interval_ms - awake_ms % view.spin_interval_ms);
-    return if (tick < 0) frame else @min(tick, frame);
+    return if (polled < 0) frame else @min(polled, frame);
 }
 
 /// Complete the frozen bytes before an ordinary view transition. The first
@@ -1213,6 +1265,7 @@ fn observed(raw: *anyopaque, read: protocol.session_work.Work, name: []const u8,
 fn service(raw: *anyopaque) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
+    try self.pauseSkills();
     if (self.state.upgrade_blocked) return false;
     const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) {
@@ -1231,6 +1284,7 @@ fn service(raw: *anyopaque) !bool {
 }
 
 fn quiesceUpgrade(self: *Self) !bool {
+    try self.pauseSkills();
     if (self.worker.thread == null) try self.dispatch(.all);
     if (self.worker.thread != null) {
         switch (self.job.quiescence()) {
@@ -1246,7 +1300,7 @@ fn quiesceUpgrade(self: *Self) !bool {
         }
     }
     self.state.upgrade_pending = true;
-    return self.worker.thread == null and self.job_count == 0;
+    return self.worker.thread == null and self.job_count == 0 and !self.skill_menu.busy();
 }
 
 fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !bool {
@@ -1257,6 +1311,7 @@ fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !boo
             return self.quiesceUpgrade();
         },
         .ready, .incompatible => {
+            self.skill_menu.invalidate();
             self.state.upgrade_pending = handoff == .ready;
             self.state.upgrade_blocked = handoff == .incompatible;
             self.state.next_list_ms = 0;
@@ -1279,6 +1334,8 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
 /// own guidance and the Detached notice follow.
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
+    self.state.commands = null;
+    const metadata_closed = self.skill_menu.close();
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
     const saved = self.flushSaves();
@@ -1289,9 +1346,15 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
             try restored;
             _ = try answered;
             try saved;
+            try metadata_closed;
             try self.terminal.detached(self.options.store, null, null);
         },
         .conversation => |*left| {
+            if (metadata_closed) |_| {} else |err| {
+                if (left.ended) |_| {
+                    left.ended = err;
+                } else |_| {}
+            }
             if (answered) |_| {} else |err| left.ended = err;
             saved catch |err| {
                 left.ended = err;
@@ -1635,6 +1698,7 @@ const Rig = struct {
     }
 
     fn close(rig: *Rig) void {
+        rig.overview.skill_menu.close() catch unreachable;
         rig.overview.worker.cancel();
         if (rig.overview.worker.thread != null) rig.overview.worker.join() catch {};
         rig.overview.destroy();
@@ -3480,7 +3544,7 @@ test "Tab completes from the draft's own list, however many keys arrive before a
     try std.testing.expectEqualStrings("/help", rig.overview.composerDraft().bytes);
     // Two Tabs in one batch: the second completes from the list the first
     // one's word calls for.
-    rig.overview.composer = rig.overview.emptyComposer(rig.overview.composer.edits +% 1);
+    rig.overview.resetComposer();
     try std.testing.expect(try rig.press("/conf\t\t") == null);
     try std.testing.expectEqualStrings("/configure --permission-mode ", rig.overview.composerDraft().bytes);
 }
@@ -3496,7 +3560,7 @@ test "Shift-Up and Shift-Down select the row above and below, whatever the draft
             .{ .bytes = "\x1b[1;2:1B", .row = 3 },
         }) |case| {
             errdefer std.debug.print("draft={s} key={s}\n", .{ draft, case.bytes[1..] });
-            rig.overview.composer = rig.overview.emptyComposer(rig.overview.composer.edits +% 1);
+            rig.overview.resetComposer();
             try std.testing.expect(try rig.press(draft) == null);
             rig.overview.state.selected = shownRow(rig, 2);
             try std.testing.expect(try rig.press(case.bytes) == null);
@@ -4115,4 +4179,154 @@ test "upgrade quiescence cancels read jobs rather than granting them mutation cu
     try std.testing.expect(Read.cancelled);
     try std.testing.expect(rig.overview.worker.thread == null);
     try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+}
+
+/// Explicit metadata fixture: the same owned page and borrowed row shape the
+/// shared reader installs, without a Host or skill-file access in UI tests.
+fn inlineTestMenu(self: *Self, prefix: []const u8) !void {
+    const suggestions = @import("skill_suggestions.zig");
+    const gpa = self.init.gpa;
+    try self.skill_menu.init(gpa, self.init.io, self.options.store, .{ .workspace = self.skillWorkspace() });
+    errdefer self.skill_menu.close() catch unreachable;
+    try self.skill_menu.wanted.set(prefix);
+    const entries = try gpa.alloc(suggestions.Entry, 1);
+    errdefer gpa.free(entries);
+    const name = try gpa.dupe(u8, "review");
+    errdefer gpa.free(name);
+    const description = try gpa.dupe(u8, "Review work");
+    entries[0] = .{ .name = name, .description = description };
+    self.skill_menu.page = .{ .entries = entries, .revision = 1, .total = 1 };
+    self.skill_menu.entries[0] = .{ .kind = .skill, .word = "review", .shown = "/review", .description = description, .runs = false };
+    self.skill_menu.count = 1;
+    self.skill_menu.generation = 1;
+    self.skill_menu.wanted_valid = true;
+}
+
+test "inline overview shell attaches middle UTF8 token on Tab or Enter then sends immutable names" {
+    const Start = struct {
+        fn start(_: *Self, _: client.Requests, input: client.MessageInput, reply: *Reply) !void {
+            try std.testing.expectEqualStrings("é /review, next", input.text.?);
+            try std.testing.expectEqual(@as(usize, 1), input.skills.len);
+            try std.testing.expectEqualStrings("review", input.skills[0]);
+            Seen.now.starts += 1;
+            reply.* = .refused("rejected");
+        }
+    };
+    for ([_][]const u8{ "\t", "\r" }) |key| {
+        var cancellation: client.Cancellation = .{};
+        var ops = fake_operations;
+        ops.start = Start.start;
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+        defer rig.close();
+        try std.testing.expect(try rig.press("é /rev-tail, next\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[C") == null);
+        try std.testing.expectEqual(@as(usize, 6), rig.overview.composer.cursor);
+        try rig.overview.inlineTestMenu("re");
+        try std.testing.expect(try rig.overview.draw(0) == null);
+        try std.testing.expect(try rig.press(key) == null);
+        try std.testing.expectEqualStrings("é /review, next", rig.overview.composerDraft().bytes);
+        try std.testing.expectEqual(@as(usize, 1), rig.overview.composer.attachments().len);
+        try std.testing.expectEqual(@as(usize, 10), rig.overview.composer.cursor);
+        try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+        try std.testing.expect(try rig.press("\r") == null);
+        // A local clear while the owned start waits cannot mutate its text,
+        // selected names or metadata on the worker's later read.
+        try std.testing.expect(try rig.press("\x1b[27u") == null);
+        try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.attachments().len);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
+    }
+}
+
+test "inline overview shell pending Escape suppresses hidden Tab until cursor changes" {
+    const rig = try openComposer();
+    defer rig.close();
+    try std.testing.expect(try rig.press("ask /rev") == null);
+    try rig.overview.inlineTestMenu("other");
+    // A different wanted prefix means this current token is pending, even
+    // before the shell schedules its metadata request.
+    try std.testing.expect(try rig.press("\t\r") == null);
+    try std.testing.expectEqualStrings("ask /rev", rig.overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+    try std.testing.expect(try rig.press("\x1b[27u") == null);
+    try std.testing.expectEqualStrings("ask /rev", rig.overview.composerDraft().bytes);
+    try std.testing.expect(rig.overview.composerDraft().skill_choices.?.dismissed);
+    try std.testing.expect(try rig.press("\t") == null);
+    try std.testing.expectEqualStrings("ask /rev\t", rig.overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.attachments().len);
+    try std.testing.expect(try rig.press("\x1b[D") == null);
+    try std.testing.expect(!rig.overview.composerDraft().skill_choices.?.dismissed);
+}
+
+test "inline overview shell metadata scope equals effective held creation Workspace" {
+    const rig = try openComposer();
+    defer rig.close();
+    try std.testing.expectEqualStrings("/work", rig.overview.skillWorkspace());
+    try std.testing.expect(try rig.press("/configure --workspace /effective\r") == null);
+    try std.testing.expectEqualStrings("/effective", rig.overview.skillWorkspace());
+    try std.testing.expect(try rig.press("ask /review") == null);
+    try rig.overview.composer.attachSkill(std.testing.allocator, 4, 11, "review");
+    const own = try (view.StartRequest{ .settings = &rig.overview.state.settings, .text = rig.overview.composerDraft().bytes, .attachments = rig.overview.composer.attachments() }).own(std.testing.allocator);
+    defer own.deinit(std.testing.allocator);
+    var buffer: [20]u8 = undefined;
+    const input = try rig.overview.startInput(&own, &buffer);
+    try std.testing.expectEqualStrings(rig.overview.skillWorkspace(), input.configuration.?.workspace.value);
+    try std.testing.expectEqualStrings("review", input.skills[0]);
+    const revision = rig.overview.composer.edits;
+    rig.overview.resetComposer();
+    try std.testing.expect(rig.overview.composer.edits != revision);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.attachments().len);
+}
+
+test "inline overview shell capacity refusal retains draft cursor revision and marks" {
+    const rig = try openComposer();
+    defer rig.close();
+    rig.overview.composer.buffer = rig.overview.draft[0..14];
+    try std.testing.expect(try rig.press("ask /rev, next\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D") == null);
+    try std.testing.expectEqual(@as(usize, 8), rig.overview.composer.cursor);
+    try rig.overview.inlineTestMenu("rev");
+    try std.testing.expect(try rig.overview.draw(0) == null);
+    const revision = rig.overview.composer.edits;
+    try std.testing.expect(try rig.press("\t") == null);
+    try std.testing.expectEqualStrings("ask /rev, next", rig.overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 8), rig.overview.composer.cursor);
+    try std.testing.expectEqual(revision, rig.overview.composer.edits);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.attachments().len);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+    try std.testing.expect(std.mem.indexOf(u8, rig.overview.state.notice.?.text(), "draft retained") != null);
+}
+
+test "inline overview shell finish joins metadata before freeing attachments and preserves primary failure" {
+    const Borrower = struct {
+        overview: *Self,
+        observed: bool = false,
+
+        fn run(raw: *anyopaque, task: *ClientTask) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), &task.cancellation.stopped, test_poll.isSet);
+            // Record the owner boundary before replying: later test teardown
+            // cannot grant credit for an observation made after finish returned.
+            self.observed = !self.overview.terminal.active and self.overview.composer.attachments().len == 1;
+            return error.MetadataFailure;
+        }
+    };
+    for ([_]bool{ false, true }) |primary| {
+        const rig = try openComposer();
+        defer rig.close();
+        // A negative control may leave the deliberate borrower failure to
+        // this cleanup; retire it without masking the earlier assertion.
+        defer rig.overview.skill_menu.close() catch |err| {
+            std.debug.assert(err == error.MetadataFailure);
+        };
+        try std.testing.expect(try rig.press("ask /review") == null);
+        try rig.overview.composer.attachSkill(std.testing.allocator, 4, 11, "review");
+        try rig.overview.inlineTestMenu("review");
+        var borrower: Borrower = .{ .overview = rig.overview };
+        try rig.overview.skill_menu.task.start(std.testing.io, &borrower, Borrower.run);
+        var buffer: [256]u8 = undefined;
+        _ = try finishedWith(rig, .overview, if (primary) error.TerminalRestoreFailed else {}, if (primary) error.TerminalRestoreFailed else error.MetadataFailure, &buffer);
+        try std.testing.expect(borrower.observed);
+        try std.testing.expect(!rig.overview.skill_menu.busy());
+        try std.testing.expect(rig.overview.skill_menu.allocator == null);
+        try std.testing.expectEqual(@as(usize, 1), rig.overview.composer.attachments().len);
+    }
 }
