@@ -6,7 +6,7 @@ import os
 import pathlib
 import pty
 from terminal_process import COLUMNS, ROWS, open_pty
-from terminal_screen import ScreenCapture, shown
+from terminal_screen import ScreenCapture, cell_rows, shown
 import re
 import select
 import shutil
@@ -638,6 +638,23 @@ def interactive_cases(state, binding=False, null_code=False):
     print(f"{'null' if null_code else 'binding' if binding else 'canonical'} PTY: Configure/Message/Permission/overview start fail before outcome interpretation, restore terminal and retain original capture", flush=True)
 
 
+def assert_details_unavailable(capture):
+    """Check this fixture's transcript and footer in one committed cell grid."""
+    cells = capture.completed_cells
+    raw = capture.completed
+    assert capture.generation and not capture.synchronized, raw
+    assert len(cells) == ROWS and all(len(row) == COLUMNS for row in cells), raw
+    transcript_end = ROWS - 3
+    assert all(row[-1].data == "▐" for row in cells[:transcript_end]), raw
+    footer = cell_rows(cells, transcript_end, ROWS, 0, COLUMNS)
+    assert [row.rstrip(" ") for row in footer] == [
+        "─" * COLUMNS, "›", "! Details unavailable; draft retained."
+    ], raw
+    transcript = "\n".join(row.rstrip(" ") for row in
+        cell_rows(cells, 0, transcript_end, 0, COLUMNS - 1))
+    assert shown("! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy", transcript), raw
+
+
 def permission_read_cases(state):
     import human_cli_integration as human
     home = state / "permission-read"
@@ -739,8 +756,7 @@ def permission_read_cases(state):
             output = human.current_screen(master)
             # The transcript keeps the whole diagnostic, wrapped at the width;
             # the notice under the input names only what failed.
-            assert "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy" in " ".join(output.split()), output
-            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Details unavailable; draft retained.", output
+            assert_details_unavailable(human.terminal_capture(master))
             assert caller.poll() is None, output
             os.write(master, b"\x03")
             _, errors = human.terminal_exit(caller, master, timeout=10)
