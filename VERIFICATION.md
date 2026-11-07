@@ -801,6 +801,7 @@ The [small Host memory trial](research/memory-trial/README.md) is a collection e
 `skills-integration` uses an isolated Workspace and HOME and a deterministic loopback model endpoint which records incoming bytes before replying.
 It exercises Host-owned Configure and initial-Message creation, default and explicitly restricted tools, full raw invocation/path, idle no-op and metadata reload, keyed replay after file deletion and process restart, bound model invocation and child `start_agent` discovery.
 The fixture uses native public readers and actual provider inputs, not direct Store edits or terminal excerpts.
+Mismatched repository symlinks and HOME directory aliases retain their declared names through creation, invocation, reload and replay.
 An actual PTY `/skill` invocation uses the retained Message pipeline and exposes its normal HOME-owned request handle through `/requests`; plain `request inspect`, `list` and `recover` retain that identity and frozen admitted bytes after the source file and terminal disappear, without another provider request or Conversation input.
 
 `zig build yaml-linux-compile` compiles all pinned libyaml sources as strict C99 against Linux glibc headers for x86-64 and ARM64 without linking or executing a Host.
@@ -808,6 +809,9 @@ It reuses `configureYaml`, whose POSIX feature exposure is scoped to the depende
 The ordinary Linux CI builds retain the same dependency compile boundary; this focused target does not add work to an ordinary build.
 
 Focused `skills ` tests cover real YAML scalars/ignored nested metadata, repository-over-home precedence, worktree and non-git roots, symlinks, unreadability, explicit caps, malformed UTF-8 and metadata-only deltas.
+Directory-alias regressions cover lowercase, mixed-case, underscore, long and Unicode spellings in both roots, malformed declared-name fallback and bytewise collision winners under reversed creation orders.
+External symlink aliases retain canonical paths, deduplicate the same target and produce no catalog delta after an alias-only rename.
+Description regressions cover unchanged short and exact-limit ASCII and multibyte scalars, visible Unicode-safe truncation above 1,024 code points, catalog round trips and full unchanged invocation content.
 Catalog JSON requires actual string tokens for name, description and path, rejecting numeric/byte-array coercions while preserving escaped Unicode.
 A full 4096-entry ordering regression covers the constant-stack heap sorts used by discovery, encoding, decoding and deltas.
 The Linux `stack-frames` gate measures the real catalog decode and Configure/creating-Message import paths.

@@ -8,6 +8,7 @@ const View = @import("session_view.zig");
 const Screen = @import("SessionScreen.zig");
 const protocol = @import("protocol.zig");
 const attention = @import("attention.zig");
+const stderr = @import("stderr.zig");
 const preferences = @import("preferences.zig");
 const termios = @import("posix");
 const Self = @This();
@@ -275,6 +276,103 @@ fn monotonicMs() i64 {
     var now: std.c.timespec = undefined;
     std.debug.assert(std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &now) == 0);
     return @as(i64, now.sec) * std.time.ms_per_s + @divFloor(now.nsec, std.time.ns_per_ms);
+}
+
+/// Deliver an upgrade receipt after restoration within the same departure
+/// deadline. Unlike optional diagnostics, a short write is not success.
+pub fn receipt(self: *Self, bytes: []const u8) !void {
+    std.debug.assert(!self.active);
+    if (!stderr.tryAcquire()) return error.UpgradeReceiptOutputFailed;
+    defer stderr.release();
+    const Fd = struct {
+        fn getFlags(_: @This()) c_int {
+            return std.c.fcntl(2, std.c.F.GETFL);
+        }
+        fn setFlags(_: @This(), flags: c_int) c_int {
+            return std.c.fcntl(2, std.c.F.SETFL, flags);
+        }
+        fn write(ops: @This(), bytes_: []const u8) error{ WouldBlock, Failed }!usize {
+            _ = ops;
+            return (NativeOutput{ .fd = 2 }).write(bytes_);
+        }
+        fn waitWritable(_: @This(), milliseconds: i32) void {
+            (NativeOutput{ .fd = 2 }).waitWritable(milliseconds);
+        }
+        fn disable(_: @This()) void {
+            stderr.disableHeld();
+        }
+    };
+    return self.receiptWithOps(bytes, Fd{});
+}
+
+fn receiptWithOps(self: *Self, bytes: []const u8, ops: anytype) !void {
+    const flags = ops.getFlags();
+    if (flags < 0) return error.UpgradeReceiptOutputFailed;
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    const change = flags & nonblock == 0;
+    const enabled = !change or ops.setFlags(flags | nonblock) == 0;
+    const delivered = enabled and writeWithin(ops, bytes, self.release_deadline_ms);
+    // SETFL can mutate despite an error; always restore after an attempt.
+    if (change and ops.setFlags(flags) != 0) {
+        ops.disable();
+        return error.UpgradeReceiptOutputFailed;
+    }
+    if (!delivered) return error.UpgradeReceiptOutputFailed;
+}
+
+test "receipt retries suffix under one deadline and reports output and flag failures" {
+    const Fake = struct {
+        flags: c_int = 0,
+        sets: usize = 0,
+        writes: usize = 0,
+        waits: usize = 0,
+        poisoned: bool = false,
+        fail_restore: bool = false,
+        mode: enum { drain, closed, blocked } = .drain,
+        bytes: [32]u8 = undefined,
+        len: usize = 0,
+        fn getFlags(self: *@This()) c_int {
+            return self.flags;
+        }
+        fn setFlags(self: *@This(), flags: c_int) c_int {
+            self.sets += 1;
+            if (self.sets == 2 and self.fail_restore) return -1;
+            self.flags = flags;
+            return 0;
+        }
+        fn write(self: *@This(), part: []const u8) error{ WouldBlock, Failed }!usize {
+            self.writes += 1;
+            if (self.mode == .closed) return error.Failed;
+            if (self.mode == .blocked or self.writes == 2) return error.WouldBlock;
+            const n = @min(part.len, if (self.writes == 1) @as(usize, 3) else part.len);
+            @memcpy(self.bytes[self.len..][0..n], part[0..n]);
+            self.len += n;
+            return n;
+        }
+        fn waitWritable(self: *@This(), _: i32) void {
+            self.waits += 1;
+        }
+        fn disable(self: *@This()) void {
+            self.poisoned = true;
+        }
+    };
+    var terminal: Self = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = undefined, .active = false, .release_deadline_ms = monotonicMs() + release_wait_ms };
+    var ok: Fake = .{};
+    try terminal.receiptWithOps("cleanup path", &ok);
+    try std.testing.expectEqualStrings("cleanup path", ok.bytes[0..ok.len]);
+    try std.testing.expectEqual(@as(usize, 3), ok.writes);
+    try std.testing.expectEqual(@as(usize, 2), ok.waits);
+    try std.testing.expectEqual(@as(c_int, 0), ok.flags);
+    var closed: Fake = .{ .mode = .closed };
+    try std.testing.expectError(error.UpgradeReceiptOutputFailed, terminal.receiptWithOps("receipt", &closed));
+    try std.testing.expectEqual(@as(c_int, 0), closed.flags);
+    terminal.release_deadline_ms = monotonicMs();
+    var blocked: Fake = .{ .mode = .blocked };
+    try std.testing.expectError(error.UpgradeReceiptOutputFailed, terminal.receiptWithOps("receipt", &blocked));
+    try std.testing.expectEqual(@as(usize, 1), blocked.writes);
+    var unrestored: Fake = .{ .fail_restore = true };
+    try std.testing.expectError(error.UpgradeReceiptOutputFailed, terminal.receiptWithOps("receipt", &unrestored));
+    try std.testing.expect(unrestored.poisoned);
 }
 
 fn detachedWithOps(self: *Self, store: []const u8, opened: ?[]const u8, action: ?u64, ops: anytype) !void {

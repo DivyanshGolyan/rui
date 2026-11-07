@@ -1257,48 +1257,31 @@ fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
     try sink.feed(try std.fmt.bufPrint(&storage, format, args));
 }
 
-/// Which Message states a read labels. Live output labels none: its next
-/// pages show what became of each Message. A read that stays on screen
-/// labels a stop's exclusion, which lasts, and a queued Message only while
-/// work under way holds the queue (`WorkState.holdsQueue`). A pending
-/// Session acts at once, so that label would be stale at the next frame.
+/// Live output labels none; lasting reads retain only a stop's actionable
+/// exclusion warning. Queue custody is shown elsewhere, not per Message.
 pub const Labels = enum {
     none,
     excluded,
-    excluded_and_queued,
-
-    pub fn lasting(held: bool) Labels {
-        return if (held) .excluded_and_queued else .excluded;
-    }
 };
 
-/// What a Message's state was when read. Only a stop's exclusion asks
-/// something of the person, so only it carries the mark.
+/// Only a stop's exclusion asks something of the person.
 pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state"), labels: Labels) ?[]const u8 {
     if (labels == .none) return null;
     return switch (state) {
-        .applied => null,
-        .queued => if (labels == .excluded_and_queued) "Queued" else null,
+        .applied, .queued => null,
         .excluded => "! Stopped before it ran · send it again to run it",
     };
 }
 
-test "a queued Message is labelled only while work under way holds it" {
-    const working: protocol.WorkState = .{ .working = .{ .since = 1 } };
-    // Opened between admission and the model request that reads it: the
-    // Session is pending, so a label would be stale by the next frame.
-    const starting: protocol.WorkState = .{ .pending = .{ .since = 1 } };
-    try std.testing.expect(messageLabel(.queued, .lasting(starting.holdsQueue())) == null);
-    try std.testing.expectEqualStrings("Queued", messageLabel(.queued, .lasting(working.holdsQueue())).?);
-    // A stop's exclusion asks the person to act whatever the work is doing.
-    try std.testing.expectEqualStrings("! Stopped before it ran · send it again to run it", messageLabel(.excluded, .lasting(false)).?);
-    try std.testing.expect(messageLabel(.applied, .excluded_and_queued) == null);
-    // Live output's next pages say what became of each Message.
+test "only excluded Messages have an actionable lasting label" {
+    try std.testing.expect(messageLabel(.queued, .excluded) == null);
+    try std.testing.expect(messageLabel(.applied, .excluded) == null);
+    try std.testing.expectEqualStrings("! Stopped before it ran · send it again to run it", messageLabel(.excluded, .excluded).?);
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
 }
 
-/// One Message in full, labelled unless applied: live, in the opening and in
-/// a transcript's listing alike.
+/// One Message in full: live, in the opening and in a transcript listing.
+/// Only a lasting stop exclusion carries a per-Message warning.
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool, compact: *bool) !void {
     return messageBlocks(requests, store, session, item, value, labels, sink, colour, compact, null);
 }
@@ -1674,7 +1657,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     drawn = .{ .admission = value.admission, .position = item.position };
                     sink.drew(drawn.admission);
                 }
-                try messageBlocks(requests, store, session, item, value, if (historical) .lasting(page.facts.work.work.state.holdsQueue()) else .none, sink, colour, compact_tools, taking.blocks);
+                try messageBlocks(requests, store, session, item, value, if (historical) .excluded else .none, sink, colour, compact_tools, taking.blocks);
             },
             .user => |value| {
                 // Live, another Session's Message showed as its Admission,
@@ -1755,7 +1738,7 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
             first = false;
             value.state = .excluded;
             var compact = false;
-            try messageBlocks(requests, store, session, item, value, .lasting(false), sink, colour, &compact, blocks);
+            try messageBlocks(requests, store, session, item, value, .excluded, sink, colour, &compact, blocks);
         }
         cursor = page.continuation() orelse return;
     }
@@ -1895,4 +1878,48 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     const projection = Consent.project(screen.consent, .{ .action_page = true, .read = true }, false);
     try std.testing.expect(projection.approval == .preview);
     try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
+}
+
+test "queued received Messages retain sources and time without repeated labels; exclusion keeps its warning" {
+    const Sink = struct {
+        bytes: [2048]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    var source: protocol.NamedPeer = .{ .session = .{} };
+    try source.session.set("9f8e7d");
+    try source.label.set("Review peer");
+    var value: protocol.ActivityItem.Message = .{
+        .admission = 12,
+        .key = .{},
+        .turn = null,
+        .state = .queued,
+        .content = .{ .length = 19, .digest = @splat(0) },
+        .admitted_at = 1_800_000_000,
+        .sender = source,
+    };
+    var item: protocol.ActivityItem = .{ .position = 30, .at = value.admitted_at, .value = .{ .received = value } };
+    var sink: Sink = .{};
+    var compact = false;
+    // The same renderer receives live, opening, listing and echo policies.
+    for ([_]Labels{ .none, .excluded, .excluded, .excluded }) |labels| {
+        try messageBlocks(undefined, "unused", "unused", item, value, labels, &sink, false, &compact, null);
+    }
+    value.state = .excluded;
+    item.value = .{ .received = value };
+    try messageBlocks(undefined, "unused", "unused", item, value, .excluded, &sink, false, &compact, null);
+    const actual = sink.bytes[0..sink.length];
+    var time_buffer: [5]u8 = undefined;
+    const time = clock(value.admitted_at, &time_buffer).?;
+    var row_buffer: [128]u8 = undefined;
+    const row = try std.fmt.bufPrint(&row_buffer, Mark.summary ++ "← Received message from Review peer" ++ Mark.sidenote ++ "{s}" ++ Mark.reset ++ "\n", .{time});
+    var expected: [1024]u8 = undefined;
+    const all = try std.fmt.bufPrint(&expected, "\n{s}{s}{s}{s}\n! Stopped before it ran · send it again to run it\n{s}", .{ row, row, row, row, row });
+    try std.testing.expectEqualStrings(all, actual);
+    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, actual, "← Received message from Review peer"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, actual, "! Stopped before it ran"));
+    try std.testing.expect(std.mem.indexOf(u8, actual, "Queued") == null);
 }

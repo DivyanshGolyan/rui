@@ -214,9 +214,6 @@ pub const Job = struct {
     older: ?protocol_reply.ConversationCursor = null,
     target: Target = .older,
     recall: ?Input.Step = null,
-    // The latest live work held queued input: a listed echo, whose read
-    // was earlier, is labelled by it.
-    held: bool = false,
     // Messages shown in live output before this read.
     messages: Messages = .{},
     // The Messages waiting at the live cursor, as the Host reported them;
@@ -580,7 +577,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
         .echo => |echo| {
             const item: protocol.ActivityItem = .{ .position = echo.position, .ordinal = echo.ordinal, .at = echo.message.admitted_at, .value = .{ .admission = echo.message } };
             var compact = false;
-            try View.messageBlocks(requests, job.store, job.session, item, echo.message, .lasting(job.held), &output, job.colour, &compact, output.capability());
+            try View.messageBlocks(requests, job.store, job.session, item, echo.message, .excluded, &output, job.colour, &compact, output.capability());
             job.result.listing = null;
         },
         .range => |range| {
@@ -594,7 +591,7 @@ fn list(job: *Job, task: *Task, step: Listing) !void {
                 for (page.facts.items[0..page.facts.count]) |item| {
                     if (item.position < range.lowest) break;
                     const value = listed(item, range.shown) orelse continue;
-                    try View.messageBlocks(requests, job.store, job.session, item, value, .lasting(page.facts.work.work.state.holdsQueue()), &output, job.colour, &compact, output.capability());
+                    try View.messageBlocks(requests, job.store, job.session, item, value, .excluded, &output, job.colour, &compact, output.capability());
                     var next = range;
                     next.cursor = .{ .end = range.end, .position = item.position, .ordinal = item.ordinal, .direction = .backward };
                     job.result.listing = .{ .range = next };

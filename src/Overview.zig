@@ -318,6 +318,17 @@ signalled: [2]c_int = .{ -1, -1 },
 worker: ClientTask = .{},
 skill_menu: SkillMenu = .{},
 upgrade_requested: bool = false,
+upgrade_cancel_draining: bool = false,
+upgrade_job: UpgradePanel = .{},
+upgrade_running: bool = false,
+upgrade_shown: []const u8 = "",
+upgrade_note: [768]u8 = undefined,
+upgrade_note_len: usize = 0,
+upgrade_displayed: [768]u8 = undefined,
+upgrade_displayed_len: usize = 0,
+upgrade_notice_pending: bool = false,
+upgrade_note_revision: u64 = 0,
+upgrade_report: ?std.Io.Writer.Allocating = null,
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
 /// The job the worker runs or last ran, and its output.
@@ -476,6 +487,8 @@ fn closePipes(self: *Self) void {
 }
 
 fn destroy(self: *Self) void {
+    self.upgrade_job.deinit();
+    if (self.upgrade_report) |*report| report.deinit();
     std.debug.assert(self.worker.thread == null);
     self.job.deinit(self.init.gpa);
     for (self.jobs[0..self.job_count]) |job| job.deinit(self.init.gpa);
@@ -512,19 +525,46 @@ fn loop(self: *Self) !Ending {
 /// the worker or a signal.
 fn turn(self: *Self) !?Next {
     const now_ms = self.realMs();
-    if (!self.upgrade_requested) try self.refreshSkills();
-    if (self.upgrade_requested) {
+    if (!self.upgrade_requested and !self.upgrade_cancel_draining and !self.state.upgrade_blocked) try self.refreshSkills();
+    if (self.upgrade_cancel_draining) {
         if (try self.quiesceUpgrade()) {
-            const outcome = try UpgradePanel.run(self.init, self.options.store, self.terminal, self.interrupted);
-            self.upgrade_requested = false;
+            self.upgrade_cancel_draining = false;
             self.skill_menu.invalidate();
-            switch (outcome) {
-                .unchanged => {},
-                .compatible => self.state.upgrade_blocked = false,
-                .incompatible => self.state.upgrade_blocked = true,
-            }
             self.state.upgrade_pending = !self.state.upgrade_blocked;
             self.state.next_list_ms = 0;
+        }
+    } else if (self.upgrade_requested) {
+        if (self.upgrade_running or try self.quiesceUpgrade()) {
+            if (!self.upgrade_running) {
+                try self.keepUpgrade();
+                try self.upgrade_job.begin(self.init, self.options.store);
+                self.upgrade_running = true;
+                self.upgrade_shown = "";
+            }
+            const done = try self.upgrade_job.advance();
+            const status = self.upgrade_job.status();
+            if (done or !std.mem.eql(u8, status, self.upgrade_shown)) {
+                self.upgrade_shown = status;
+                var out = std.Io.Writer.fixed(&self.upgrade_note);
+                self.upgrade_job.writeSummary(&out) catch {};
+                const summary = out.buffered();
+                self.upgrade_note_len = std.mem.indexOfScalar(u8, summary, '\n') orelse summary.len;
+                self.upgrade_notice_pending = true;
+                self.upgrade_note_revision +%= 1;
+            }
+            if (done) {
+                const outcome = self.upgrade_job.outcome;
+                self.upgrade_running = false;
+                self.upgrade_requested = false;
+                self.skill_menu.invalidate();
+                switch (outcome) {
+                    .unchanged => {},
+                    .compatible => self.state.upgrade_blocked = false,
+                    .incompatible => self.state.upgrade_blocked = true,
+                }
+                self.state.upgrade_pending = !self.state.upgrade_blocked;
+                self.state.next_list_ms = 0;
+            }
         }
     } else if (!self.state.upgrade_blocked) {
         if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |next| return next;
@@ -534,6 +574,7 @@ fn turn(self: *Self) !?Next {
     // stall or race the spinner; ticks keep the Host's wall clock.
     const awake_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds;
     const awake_ms: u64 = @intCast(@max(@divFloor(awake_ns, std.time.ns_per_ms), 0));
+    self.offerUpgradeNotice();
     if (try self.draw(awake_ms / view.spin_interval_ms)) |next| return next;
     const spins = self.spins;
     const timeout = switch (self.terminal.stream.wait(awake_ns, self.budget(now_ms, awake_ms, spins))) {
@@ -549,10 +590,25 @@ fn turn(self: *Self) !?Next {
     if (fds[2].revents != 0) drain(self.signalled[0]);
     if (fds[1].revents != 0) {
         drain(self.done[0]);
-        if (try self.complete()) |next| return next;
+        const next = try self.complete();
+        if (self.upgrade_cancel_draining) self.state.upgrade_pending = true;
+        if (next) |value| return value;
     }
     if (fds[0].revents != 0 or timeout == 0) return self.readInput(0, 4096);
     return null;
+}
+
+/// Do not replace an approval, stop prompt or another notice. Keep the latest
+/// command result pending until the ordinary notice slot can show it.
+fn offerUpgradeNotice(self: *Self) void {
+    if (!self.upgrade_notice_pending or self.state.prompt != null or self.state.picker != null) return;
+    if (self.state.notice) |*notice| if (!std.mem.eql(u8, notice.text(), self.upgrade_displayed[0..self.upgrade_displayed_len])) return;
+    var notice: view.Notice = .{ .colour = .normal };
+    @memcpy(notice.bytes[0..self.upgrade_note_len], self.upgrade_note[0..self.upgrade_note_len]);
+    notice.len = self.upgrade_note_len;
+    @memcpy(self.upgrade_displayed[0..notice.len], notice.bytes[0..notice.len]);
+    self.upgrade_displayed_len = notice.len;
+    self.state.notice = notice;
 }
 
 /// Leaves, or lends the terminal to a Session until the person returns.
@@ -580,6 +636,9 @@ fn drain(fd: c_int) void {
 /// Session and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
     const effects = try view.step(&self.state, value);
+    // An older read may settle after cancellation; its view event cannot
+    // release admission before that borrower is drained and a fresh list runs.
+    if (self.upgrade_requested or self.upgrade_cancel_draining) self.state.upgrade_pending = true;
     var next: ?Next = null;
     var refused: ?keymap.Refusal = null;
     for (effects.slice()) |effect| switch (effect) {
@@ -1075,6 +1134,18 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
         if (TerminalEditor.frozenAction(view.keys, decoded) == .exit) return .leave;
         return null;
     }
+    if (self.upgrade_requested and decoded == .event and !decoded.event.pasted and decoded.event.event == .key_press) {
+        const key = decoded.event.event.key_press;
+        if (key.codepoint == vaxis.Key.escape or (key.mods.ctrl and key.codepoint == 'c') or key.codepoint == 3) {
+            if (self.upgrade_running) self.upgrade_job.cancel() else {
+                self.upgrade_requested = false;
+                self.upgrade_cancel_draining = true;
+                self.state.upgrade_pending = true;
+                self.state.next_list_ms = 0;
+            }
+            return null;
+        }
+    }
     const draft = self.composerDraft();
     const skill_tab = if (draft.skill_choices) |choices| !choices.dismissed else false;
     const input = if (self.state.inputMode() == .compose and skill_tab and TerminalEditor.plainTab(decoded))
@@ -1160,6 +1231,7 @@ fn drawFrame(self: *Self, frame: u64, size: std.posix.winsize) !?Next {
     // Waiting reports go first, while this is still only allocating memory.
     self.terminal.writeWaiting(backend.prefixWriter()) catch return error.OutOfMemory;
     const drawn = try OverviewPaint.draw(backend.window(), backend.scratch(), &self.state, self.composerDraft(), self.caps, frame);
+    const notice_revision = self.upgrade_note_revision;
     self.draft_anchor = drawn.draft_anchor;
     self.state.commands = drawn.commands;
     self.spins = drawn.spins;
@@ -1177,6 +1249,11 @@ fn drawFrame(self: *Self, frame: u64, size: std.posix.winsize) !?Next {
     };
     // Also the existing acknowledgement point for a genuinely empty frame.
     self.terminal.wrote();
+    if (self.upgrade_notice_pending and drawn.notice_visible and notice_revision == self.upgrade_note_revision) {
+        if (self.state.notice) |*notice| if (std.mem.eql(u8, notice.text(), self.upgrade_note[0..self.upgrade_note_len])) {
+            self.upgrade_notice_pending = false;
+        };
+    }
     return self.pumped;
 }
 
@@ -1191,7 +1268,7 @@ fn resize(self: *Self, size: std.posix.winsize) !?Next {
 /// core's next tick, and while the screen spins, no later than its next
 /// frame. Until then only input, the worker or a signal wakes it.
 fn budget(self: *const Self, now_ms: u64, awake_ms: u64, spins: bool) i32 {
-    const tick: i32 = if (self.state.upgrade_blocked or self.upgrade_requested) 16 else if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
+    const tick: i32 = if (self.state.upgrade_blocked or self.upgrade_requested or self.upgrade_cancel_draining) 16 else if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
     const polled = if (self.skill_menu.busy()) (if (tick < 0) 25 else @min(tick, 25)) else tick;
     if (!spins) return polled;
     const frame: i32 = @intCast(view.spin_interval_ms - awake_ms % view.spin_interval_ms);
@@ -1236,6 +1313,13 @@ fn converse(self: *Self, session: view.Reference) ?Left {
     self.caps.width = screen.backend.widthMethod();
     const returned = if (ended) |outcome| outcome == .returned else |_| false;
     if (returned) ended = frontend.back() orelse {
+        frontend.keepUpgrade() catch |err| return .{ .session = session, .frontend = frontend, .files = files, .ended = err };
+        if (frontend.upgrade_report) |*report| {
+            if (self.upgrade_report == null) self.upgrade_report = .init(self.init.gpa);
+            self.upgrade_report.?.writer.writeAll(report.written()) catch |err| return .{ .session = session, .frontend = frontend, .files = files, .ended = err };
+            report.deinit();
+            frontend.upgrade_report = null;
+        }
         self.init.gpa.destroy(frontend);
         for (opened) |file| file.close(io);
         return null;
@@ -1272,6 +1356,14 @@ fn service(raw: *anyopaque) !bool {
     errdefer self.lent_failed = true;
     try self.pauseSkills();
     if (self.state.upgrade_blocked) return false;
+    if (self.upgrade_cancel_draining) {
+        if (try self.quiesceUpgrade()) {
+            self.upgrade_cancel_draining = false;
+            self.state.upgrade_pending = true;
+            self.state.next_list_ms = 0;
+        }
+        return true;
+    }
     const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) {
         _ = try self.event(.{ .tick = now_ms });
@@ -1317,6 +1409,7 @@ fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !boo
         },
         .ready, .incompatible => {
             self.skill_menu.invalidate();
+            self.upgrade_cancel_draining = handoff == .ready and (self.worker.thread != null or self.job_count != 0 or self.skill_menu.busy());
             self.state.upgrade_pending = handoff == .ready;
             self.state.upgrade_blocked = handoff == .incompatible;
             self.state.next_list_ms = 0;
@@ -1332,6 +1425,42 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
     return .{ .text = said.text, .asking = said.asking, .stoppable = said.stoppable };
 }
 
+fn keepUpgrade(self: *Self) !void {
+    if (!self.upgrade_job.started) return;
+    if (self.upgrade_job.result != null or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible) {
+        if (self.upgrade_report == null) self.upgrade_report = .init(self.init.gpa);
+        if (self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible)
+            try self.upgrade_job.writeReport(&self.upgrade_report.?.writer)
+        else
+            try self.upgrade_job.writeReceipt(&self.upgrade_report.?.writer);
+    }
+    self.upgrade_job.deinit();
+}
+
+fn writeUpgradeReports(self: *Self, fatal: bool) !void {
+    var failure: ?anyerror = null;
+    if (self.upgrade_report) |*report| self.terminal.receipt(report.written()) catch |err| {
+        failure = err;
+    };
+    if (self.upgrade_job.started and (fatal or self.upgrade_job.result != null or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible)) {
+        var out: std.Io.Writer.Allocating = .init(self.init.gpa);
+        defer out.deinit();
+        const detailed = fatal or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible;
+        const rendered = if (detailed) self.upgrade_job.writeReport(&out.writer) else self.upgrade_job.writeReceipt(&out.writer);
+        if (rendered) |_| {
+            self.terminal.receipt(out.written()) catch |err| {
+                failure = failure orelse err;
+            };
+        } else |err| {
+            failure = failure orelse err;
+        }
+    }
+    if (failure) |err| {
+        stderr.diagnostic("rui: Upgrade receipt output incomplete ({s}); retained cleanup paths may be missing.\n", .{@errorName(err)});
+        return err;
+    }
+}
+
 /// Every way out: restores the terminal, answers the worker's job through
 /// `complete` as the loop does, runs the saves the core asked for, then
 /// writes the ledger's guidance before anything that can return. The
@@ -1340,6 +1469,10 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
     self.state.commands = null;
+    const unfinished_upgrade = self.upgrade_job.started and !self.upgrade_job.finished;
+    self.upgrade_job.settle();
+    const fatal = (if (ended) |_| self.interrupted.stopped.load(.acquire) else |_| true) or std.meta.isError(restored);
+    const receipt = self.writeUpgradeReports(fatal or unfinished_upgrade);
     const metadata_closed = self.skill_menu.close();
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
@@ -1351,19 +1484,21 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
             try restored;
             _ = try answered;
             try saved;
+            try receipt;
             try metadata_closed;
             try self.terminal.detached(self.options.store, null, null);
         },
         .conversation => |*left| {
-            if (metadata_closed) |_| {} else |err| {
-                if (left.ended) |_| {
-                    left.ended = err;
-                } else |_| {}
-            }
             if (answered) |_| {} else |err| left.ended = err;
             saved catch |err| {
                 left.ended = err;
             };
+            receipt catch |err| {
+                if (!std.meta.isError(left.ended)) left.ended = err;
+            };
+            if (metadata_closed) |_| {} else |err| {
+                if (!std.meta.isError(left.ended)) left.ended = err;
+            }
             return self.leave(left.*, restored);
         },
     }
@@ -4099,6 +4234,84 @@ test "conversation archive and restore use the exact unlisted opened reference t
     try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
 }
 
+test "upgrade result waits behind an existing notice and stop prompt until a matching frame is written" {
+    const rig = try openComposer();
+    defer rig.close();
+    const self = rig.overview;
+    self.upgrade_notice_pending = true;
+    self.upgrade_note_revision = 17;
+    const result = "Upgrade installed; Host ready";
+    @memcpy(self.upgrade_note[0..result.len], result);
+    self.upgrade_note_len = result.len;
+    var warning: view.Notice = .{ .colour = .attention };
+    const text = "Existing safety notice";
+    @memcpy(warning.bytes[0..text.len], text);
+    warning.len = text.len;
+    self.state.notice = warning;
+    self.offerUpgradeNotice();
+    try std.testing.expectEqualStrings(text, self.state.notice.?.text());
+    try std.testing.expect(self.upgrade_notice_pending);
+    var output: [4096]u8 = undefined;
+    try std.testing.expect(try self.draw(0) == null);
+    try std.testing.expect(rig.drawn(&output).len != 0);
+    drain(rig.output[0]);
+    try std.testing.expect(self.upgrade_notice_pending);
+    self.state.notice = null;
+    self.state.prompt = .{ .stop = "k7m2qx".* };
+    self.offerUpgradeNotice();
+    try std.testing.expect(self.state.notice == null and self.upgrade_notice_pending);
+    try std.testing.expect(try self.draw(0) == null);
+    try std.testing.expect(rig.drawn(&output).len != 0);
+    drain(rig.output[0]);
+    try std.testing.expect(self.upgrade_notice_pending);
+    self.state.prompt = null;
+    self.offerUpgradeNotice();
+    try std.testing.expectEqualStrings(result, self.state.notice.?.text());
+    try std.testing.expect(self.upgrade_notice_pending); // offering is not delivery
+
+    // A newer result has not been offered yet. Writing the old notice must
+    // not acknowledge the latest result, even though it occupies the slot.
+    const latest = "Upgrade cancelled; Host unchanged";
+    @memcpy(self.upgrade_note[0..latest.len], latest);
+    self.upgrade_note_len = latest.len;
+    self.upgrade_note_revision = 18;
+    try std.testing.expect(try self.draw(0) == null);
+    try std.testing.expect(rig.drawn(&output).len != 0);
+    drain(rig.output[0]);
+    try std.testing.expect(self.upgrade_notice_pending);
+    try std.testing.expectEqualStrings(result, self.state.notice.?.text());
+    self.offerUpgradeNotice();
+    try std.testing.expectEqualStrings(latest, self.state.notice.?.text());
+    try std.testing.expect(self.upgrade_notice_pending);
+    try std.testing.expect(try self.draw(0) == null);
+    try std.testing.expect(rig.drawn(&output).len != 0);
+    drain(rig.output[0]);
+    try std.testing.expect(!self.upgrade_notice_pending);
+    try std.testing.expectEqual(@as(u64, 18), self.upgrade_note_revision);
+}
+
+test "a pre-cancellation list cannot release upgrade admission" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    _ = try overview.event(.{ .tick = test_now_s * 1000 });
+    overview.upgrade_cancel_draining = true;
+    overview.state.upgrade_pending = true;
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(overview.state.upgrade_pending);
+    const before = overview.state.request_count;
+    _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = .{ .archive = .active } } });
+    try std.testing.expectEqual(before, overview.state.request_count);
+    // A list started after the old work has drained is the first one that
+    // may release the hold.
+    overview.upgrade_cancel_draining = false;
+    overview.state.next_list_ms = 0;
+    _ = try overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms });
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(!overview.state.upgrade_pending);
+}
+
 test "upgrade quiescence settles accepted queued and running archive mutations before releasing the panel" {
     const Gate = struct {
         var entered: std.atomic.Value(bool) = .init(false);
@@ -4184,6 +4397,109 @@ test "upgrade quiescence cancels read jobs rather than granting them mutation cu
     try std.testing.expect(Read.cancelled);
     try std.testing.expect(rig.overview.worker.thread == null);
     try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+}
+
+test "upgrade metadata-only quiescence and ready drain retain authored skill intent without relaunch" {
+    const Borrower = struct {
+        overview: *Self,
+        original: *const view.OwnedStart,
+        entered: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        observed: bool = false,
+
+        fn run(raw: *anyopaque, task: *ClientTask) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.entered.store(true, .release);
+            // Cancellation alone cannot retire this borrower. The test grants
+            // the reply independently, after checking both admission barriers.
+            try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), &self.release, test_poll.isSet);
+            const ranges = self.overview.composer.attachments();
+            const names = self.original.skills();
+            self.observed = task.cancellation.stopped.load(.acquire) and
+                std.mem.eql(u8, self.overview.composerDraft().bytes, "ask /review /rev") and
+                self.overview.composer.cursor == 16 and ranges.len == 1 and
+                ranges[0].start == 4 and ranges[0].end == 11 and
+                std.mem.eql(u8, self.original.original(), "ask /review /rev") and
+                std.mem.eql(u8, self.original.text(), "ask /review /rev") and
+                names.len == 1 and std.mem.eql(u8, names[0], "review");
+            return error.Cancelled;
+        }
+
+        fn completed(task: *ClientTask) bool {
+            return task.completed();
+        }
+    };
+    const rig = try openComposer();
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try rig.press("ask /review /rev") == null);
+    try overview.composer.attachSkill(std.testing.allocator, 4, 11, "review");
+    overview.composer.cursor = overview.composer.length;
+    const revision = overview.composer.edits;
+    var original = try (view.StartRequest{
+        .settings = &overview.state.settings,
+        .text = overview.composerDraft().bytes,
+        .original = overview.composerDraft().bytes,
+        .attachments = overview.composer.attachments(),
+    }).own(std.testing.allocator);
+    defer original.deinit(std.testing.allocator);
+    try overview.inlineTestMenu("rev");
+    var borrower: Borrower = .{ .overview = overview, .original = &original };
+    defer {
+        borrower.release.store(true, .release);
+        // Retire even on an assertion failure, before borrowed test state dies.
+        overview.skill_menu.close() catch unreachable;
+    }
+    try overview.skill_menu.task.start(std.testing.io, &borrower, Borrower.run);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &borrower.entered, test_poll.isSet);
+    try std.testing.expect(overview.worker.thread == null);
+    try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+    try std.testing.expect(!try upgradeHandoff(overview, .quiesce));
+    try std.testing.expect(overview.skill_menu.task.cancellation.stopped.load(.acquire));
+    try std.testing.expect(overview.skill_menu.busy());
+    try std.testing.expect(!overview.skill_menu.task.completed());
+    try std.testing.expect(overview.state.upgrade_pending);
+    try std.testing.expect(!overview.skill_menu.wanted_valid);
+    try std.testing.expect(overview.skill_menu.page == null);
+    try std.testing.expect(try upgradeHandoff(overview, .ready));
+    // Only metadata is busy: neither the main worker nor queued work can
+    // accidentally supply the cancellation-draining admission hold.
+    try std.testing.expect(overview.upgrade_cancel_draining);
+    var output: [4096]u8 = undefined;
+    try std.testing.expect(try overview.turn() == null);
+    drain(rig.output[0]);
+    try std.testing.expect(overview.upgrade_cancel_draining);
+    try std.testing.expect(overview.skill_menu.busy());
+    try std.testing.expect(overview.skill_menu.task.context == @as(*anyopaque, @ptrCast(&borrower)));
+    try std.testing.expect(!overview.skill_menu.wanted_valid);
+    try std.testing.expectEqualStrings("", overview.skill_menu.wanted.slice());
+    try std.testing.expect(!try upgradeHandoff(overview, .quiesce));
+    borrower.release.store(true, .release);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &overview.skill_menu.task, Borrower.completed);
+    try std.testing.expect(try overview.turn() == null);
+    _ = rig.drawn(&output);
+    drain(rig.output[0]);
+    try std.testing.expect(borrower.observed);
+    try std.testing.expect(!overview.upgrade_cancel_draining);
+    try std.testing.expect(overview.state.upgrade_pending); // a fresh list still owes admission
+    try std.testing.expect(!overview.skill_menu.busy());
+    try std.testing.expect(!overview.skill_menu.wanted_valid);
+    try std.testing.expect(overview.skill_menu.allocator != null); // drain is not final disposal
+    try std.testing.expect(overview.worker.thread == null);
+    try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+    try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
+    try std.testing.expectEqualStrings("ask /review /rev", overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 16), overview.composer.cursor);
+    try std.testing.expectEqual(revision, overview.composer.edits);
+    try std.testing.expectEqualSlices(TerminalEditor.Attachment, &.{.{ .start = 4, .end = 11 }}, overview.composer.attachments());
+    overview.resetComposer();
+    try std.testing.expect(try rig.press("next draft") == null);
+    try std.testing.expectEqualStrings("next draft", overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 0), overview.composer.attachments().len);
+    try std.testing.expectEqualStrings("ask /review /rev", original.original());
+    try std.testing.expectEqualStrings("ask /review /rev", original.text());
+    try std.testing.expectEqual(@as(usize, 1), original.skills().len);
+    try std.testing.expectEqualStrings("review", original.skills()[0]);
 }
 
 /// Explicit metadata fixture: the same owned page and borrowed row shape the

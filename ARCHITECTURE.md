@@ -491,10 +491,14 @@ The shared Host capture owner discovers only `<repository>/.agents/skills` and t
 The repository is the nearest ancestor with a `.git` directory or worktree `.git` file; outside a repository, the Session Workspace is the repository root for discovery.
 Only direct child directories containing a valid `SKILL.md` are candidates, including symlinks; broken paths and missing roots are absent, while other root/file I/O failures fail the whole capture.
 A valid repository skill wins a same-name home skill.
+Within each root, the lexically smallest valid candidate directory name in bytewise order wins a repeated declared name.
 No `.claude` roots, marketplace discovery, installation or package machinery participates.
 
 Pinned LibYAML validates the complete frontmatter document, including quoted, literal and folded scalars.
-Required `name` and `description` follow the Agent Skills format, and the name must match its candidate directory.
+Required `name` and nonempty Unicode `description` follow the Agent Skills format, except that overlong descriptions remain discoverable.
+The declared name, not the directory or symlink spelling, is the catalog and invocation identity.
+Catalog descriptions longer than 1,024 Unicode code points are shortened to the first 1,023 followed by `…`, keeping discovery useful without unbounded model metadata.
+This changes only catalog metadata; the source file and full invocation content remain unchanged.
 Unknown optional/vendor fields are ignored, including `disable-model-invocation` even when true and tool/permission metadata.
 Discovery reads no sibling resources and runs no script.
 The initial nonempty Catalog appends an immutable catalog-origin System Instruction before any model Operation; an empty Catalog is still captured durably but adds no instruction.
@@ -1462,7 +1466,7 @@ MySQL schema application and backup remain operator-owned.
 
 `rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
 `rui upgrade --check` is read-only and starts no Host.
-The shared local `UpgradePanel` offers explicit Install and Cancel from both overview and conversation, without sending `/upgrade` to the model or adding an updater service.
+The local `/upgrade` command checks and installs an eligible stable release from both overview and conversation, without sending the command to the model or adding an updater service.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
 Restart can interrupt work in every Session in that Store, not other Stores.
 No running Host means install only.

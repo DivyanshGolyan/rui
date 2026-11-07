@@ -77,8 +77,17 @@ saved_requests: reads.SavedRequests = .{},
 recover_line: [slash_commands_shared.recover_line_bytes]u8 = undefined,
 reader: Task = .{},
 upgrade_requested: bool = false,
+upgrade_job: UpgradePanel = .{},
+upgrade_running: bool = false,
+upgrade_shown: []const u8 = "",
+upgrade_note: [768]u8 = undefined,
+upgrade_note_len: usize = 0,
+upgrade_note_shown: bool = false,
+upgrade_note_revision: u64 = 0,
+upgrade_report: ?std.Io.Writer.Allocating = null,
 upgrade_blocked: bool = false,
 upgrade_reobserving: bool = false,
+upgrade_reobserve_draining: bool = false,
 // The reader's only context; the UI reads its result after join.
 job: Job = .{},
 // When the next live read may start.
@@ -224,7 +233,7 @@ const notice_capacity = @max(
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -340,6 +349,7 @@ fn startInput(self: *Self) void {
 /// a failure or recovery to show is instead the ending of a normal `leave`.
 pub fn back(self: *Self) ?(anyerror!Outcome) {
     std.debug.assert(self.leaving == .returned);
+    if (self.upgrade_job.started and !self.upgrade_job.finished) return .detached;
     const plan = departure.exit(self.settle({}), null, self.submission.view() != null);
     if (plan.failure) |err| return err;
     if (plan.recovery_before_notice or self.reading.pending_diagnostic != null) return .detached;
@@ -364,6 +374,32 @@ pub const Departure = struct {
 /// the guidance that follows restoration. The caller prints the Detached notice.
 pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
     std.debug.assert(!self.terminal.active);
+    const unfinished_upgrade = self.upgrade_job.started and !self.upgrade_job.finished;
+    self.upgrade_job.settle();
+    const fatal = (if (ended) |outcome| outcome == .interrupted else |_| true) or std.meta.isError(restored) or unfinished_upgrade;
+    var receipt_failure: ?anyerror = null;
+    if (self.upgrade_report) |*report| {
+        self.terminal.receipt(report.written()) catch |err| {
+            receipt_failure = err;
+        };
+        report.deinit();
+        self.upgrade_report = null;
+    }
+    if (self.upgrade_job.started and (fatal or unfinished_upgrade or self.upgrade_job.result != null or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible)) {
+        var out: std.Io.Writer.Allocating = .init(self.init.gpa);
+        defer out.deinit();
+        const detailed = fatal or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible;
+        const rendered = if (detailed) self.upgrade_job.writeReport(&out.writer) else self.upgrade_job.writeReceipt(&out.writer);
+        if (rendered) |_| {
+            self.terminal.receipt(out.written()) catch |err| {
+                receipt_failure = receipt_failure orelse err;
+            };
+        } else |err| {
+            receipt_failure = receipt_failure orelse err;
+        }
+    }
+    self.upgrade_job.deinit();
+    if (receipt_failure) |err| stderr.diagnostic("rui: Upgrade receipt output incomplete ({s}); retained cleanup paths may be missing.\n", .{@errorName(err)});
     const settled = self.settle(restored);
     self.submission.close();
     if (self.reading.pending_diagnostic != null) {
@@ -384,7 +420,7 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
     };
     const action_view = self.terminal.screen.action_view != null;
     return .{
-        .end = if (plan.failure) |err| err else ended,
+        .end = receiptEnd(ended, plan.failure, receipt_failure),
         .action = if (action_view) self.live.work.first_action else null,
         // Never a main-screen notice before confirmed restoration.
         .failure_notice = action_view and !std.meta.isError(restored),
@@ -392,7 +428,23 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
     };
 }
 
+// Existing departure/restore failures take precedence over output failure.
+fn receiptEnd(ended: anyerror!Outcome, prior: ?anyerror, receipt_failure: ?anyerror) anyerror!Outcome {
+    if (prior) |err| return err;
+    _ = ended catch |err| return err;
+    if (receipt_failure) |err| return err;
+    return ended;
+}
+
+test "departure preserves earlier failure and propagates receipt output failure" {
+    try std.testing.expectError(error.TerminalRestoreFailed, receiptEnd(.detached, error.TerminalRestoreFailed, error.UpgradeReceiptOutputFailed));
+    try std.testing.expectError(error.Cancelled, receiptEnd(error.Cancelled, null, error.UpgradeReceiptOutputFailed));
+    try std.testing.expectError(error.UpgradeReceiptOutputFailed, receiptEnd(.detached, null, error.UpgradeReceiptOutputFailed));
+    try std.testing.expectEqual(Outcome.detached, try receiptEnd(.detached, null, null));
+}
+
 fn stop(self: *Self) void {
+    self.upgrade_job.cancel();
     // A running command observes exit as an interruption, exactly as a signal.
     if (self.inspection.command_running) self.interrupted.requestStop();
     self.reader.cancel();
@@ -849,7 +901,13 @@ fn upgradeHeld(self: *const Self) bool {
 }
 
 fn quiesceUpgrade(self: *Self) !bool {
-    self.notice = "Upgrade: waiting for Client borrowers; draft and original retained.";
+    if (!self.upgrade_running) {
+        const waiting = "Upgrade: waiting for client work · Esc cancels";
+        @memcpy(self.upgrade_note[0..waiting.len], waiting);
+        self.upgrade_note_len = waiting.len;
+        self.upgrade_note_shown = false;
+        self.upgrade_note_revision +%= 1;
+    }
     self.skill_menu.cancel();
     if (try self.skill_menu.refresh("", 0, self.input.revision)) self.terminal.screen.commands = null;
     self.submission.retry = null;
@@ -869,10 +927,50 @@ fn quiesceUpgrade(self: *Self) !bool {
     return lender_ready and self.reader.thread == null and self.submission.task.thread == null and !self.skill_menu.busy();
 }
 
-fn showUpgrade(self: *Self) !void {
-    const outcome = try UpgradePanel.run(self.init, self.store, self.terminal, self.interrupted);
+/// Keep completed receipts for the restored terminal, even across retries.
+pub fn keepUpgrade(self: *Self) !void {
+    if (!self.upgrade_job.started) return;
+    if (self.upgrade_job.result != null or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible) {
+        if (self.upgrade_report == null) self.upgrade_report = .init(self.init.gpa);
+        if (self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible)
+            try self.upgrade_job.writeReport(&self.upgrade_report.?.writer)
+        else
+            try self.upgrade_job.writeReceipt(&self.upgrade_report.?.writer);
+    }
+    self.upgrade_job.deinit();
+}
+
+fn advanceUpgrade(self: *Self) !void {
+    if (!self.upgrade_running) {
+        try self.keepUpgrade();
+        try self.upgrade_job.begin(self.init, self.store);
+        self.upgrade_running = true;
+        self.upgrade_shown = "";
+    }
+    const done = try self.upgrade_job.advance();
+    const status = self.upgrade_job.status();
+    if (done or !std.mem.eql(u8, status, self.upgrade_shown)) {
+        self.upgrade_shown = status;
+        var out = std.Io.Writer.fixed(&self.upgrade_note);
+        self.upgrade_job.writeSummary(&out) catch {};
+        const summary = out.buffered();
+        self.upgrade_note_len = std.mem.indexOfScalar(u8, summary, '\n') orelse summary.len;
+        self.upgrade_note_shown = false;
+        self.upgrade_note_revision +%= 1;
+        self.dirty = true;
+    }
+    if (!done) return;
+    const outcome = self.upgrade_job.outcome;
+    self.upgrade_running = false;
     self.upgrade_requested = false;
     self.applyUpgrade(outcome);
+    // applyUpgrade updates the hold; the joined job owns the actual result.
+    var out = std.Io.Writer.fixed(&self.upgrade_note);
+    self.upgrade_job.writeSummary(&out) catch {};
+    const summary = out.buffered();
+    self.upgrade_note_len = std.mem.indexOfScalar(u8, summary, '\n') orelse summary.len;
+    self.upgrade_note_shown = false;
+    self.upgrade_note_revision +%= 1;
     if (self.lender.upgrade) |handoff| {
         _ = try handoff(self.lender.context, if (self.upgrade_blocked) .incompatible else .ready);
     }
@@ -893,7 +991,7 @@ fn applyUpgrade(self: *Self, outcome: UpgradePanel.Outcome) void {
             self.upgrade_reobserving = false;
         },
     }
-    self.notice = if (self.upgrade_blocked) upgrade_recovery else "Upgrade closed; draft and original retained. No work was resent.";
+    if (self.upgrade_blocked) self.notice = upgrade_recovery;
     self.dirty = true;
 }
 
@@ -929,7 +1027,7 @@ fn driveActive(self: *Self) !void {
         const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
         if (self.upgrade_requested) {
-            const ready = self.quiesceUpgrade() catch |err| {
+            const ready = if (self.upgrade_running) true else self.quiesceUpgrade() catch |err| {
                 if (err == error.CanonicalStoreFailure) return err;
                 self.upgrade_requested = false;
                 self.upgrade_blocked = true;
@@ -941,7 +1039,7 @@ fn driveActive(self: *Self) !void {
                 if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
                 continue;
             };
-            if (ready) try self.showUpgrade();
+            if (ready) try self.advanceUpgrade();
             if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
             _ = try self.step(16);
             continue;
@@ -954,7 +1052,10 @@ fn driveActive(self: *Self) !void {
         }
         if (self.upgrade_reobserving) {
             if (self.reader.thread != null and self.reader.completed()) {
+                const draining = self.upgrade_reobserve_draining;
+                var settled = true;
                 self.settleReader() catch |err| {
+                    settled = false;
                     if (err == error.CanonicalStoreFailure) return err;
                     self.upgrade_blocked = true;
                     self.upgrade_reobserving = false;
@@ -963,6 +1064,8 @@ fn driveActive(self: *Self) !void {
                     self.notice = writer.buffered();
                     if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
                 };
+                self.upgrade_reobserve_draining = false;
+                if (draining and settled) self.upgrade_reobserving = true;
                 self.withdrawDecided();
             }
             if (self.upgrade_reobserving and self.reader.thread == null) try self.launch(self.freeze(.activity), reads.scan);
@@ -1141,12 +1244,16 @@ fn drawFrame(self: *Self) !void {
     } else null;
     // The overview's stop prompt or notice, else the conversation's own.
     const said = self.lender.line(self.lender.context, self.live.work.state.asOf(now_ms));
-    const notice = said.text orelse self.notice;
+    const notice = said.text orelse self.notice orelse if (self.upgrade_note_len != 0) self.upgrade_note[0..self.upgrade_note_len] else null;
     var facts = self.line.facts(&self.hint, self.session);
     if (facts) |*shown| shown.stop = said.stoppable;
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .attachments = self.input.attachments(), .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
+    const notice_revision = self.upgrade_note_revision;
+    const rendered_upgrade = said.text == null and self.notice == null and !screen.actionVisible() and self.upgrade_note_len != 0;
+    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .attachments = self.input.attachments(), .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
+    _ = screen.presented(delivered);
+    if (delivered.notice and rendered_upgrade and notice_revision == self.upgrade_note_revision) self.upgrade_note_shown = true;
 }
 
 fn refreshSkills(self: *Self) !void {
@@ -1760,6 +1867,23 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
         if (Editor.frozenAction(conversation_keys, decoded) == .detach) self.leaving = .detached;
         return;
     }
+    if (!self.upgrade_requested and self.upgrade_note_shown) self.upgrade_note_len = 0;
+    if (self.upgrade_requested and decoded == .event and !decoded.event.pasted and decoded.event.event == .key_press) {
+        const key = decoded.event.event.key_press;
+        if (key.codepoint == vaxis.Key.escape or (key.mods.ctrl and key.codepoint == 'c') or key.codepoint == 3) {
+            if (self.upgrade_running) self.upgrade_job.cancel() else {
+                self.upgrade_requested = false;
+                self.upgrade_reobserving = !self.upgrade_blocked;
+                self.upgrade_reobserve_draining = self.reader.thread != null;
+                self.poll_at = 0;
+                self.reading.prepared_action = null;
+                self.notice = "Upgrade cancelled; draft and original retained.";
+                if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, if (self.upgrade_blocked) .incompatible else .ready);
+            }
+            self.dirty = true;
+            return;
+        }
+    }
     const screen = self.terminal.screen;
     const offer = screen.spendOffer();
     const selected = Editor.select(conversation_keys, decoded);
@@ -2336,7 +2460,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         self.live.view = result.live;
         self.live.cursor = result.cursor;
         self.reading.opening = false;
-        self.upgrade_reobserving = false;
+        if (!self.upgrade_reobserve_draining) self.upgrade_reobserving = false;
         if (self.reading.phase == .permission) {
             self.reading.prepared_action = result.action;
             self.reading.prepared_summary = result.summary;
@@ -4573,6 +4697,76 @@ test "upgrade command stays local and preserves the actual draft cursor and orig
     try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
 }
 
+test "inline session upgrade quiescence drains metadata without spending marks or delivery credit" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const original = held.self.input.submitText("retained original");
+    held.self.submission.intent = .{ .message = original };
+    held.self.submission.state = .unconfirmed;
+    held.self.submission.key = @splat('K');
+    _ = held.self.input.append("/demo");
+    try held.self.input.attachSkill(std.testing.allocator, 0, 5, "demo");
+    const revision = held.self.input.revision;
+    const cursor = held.self.input.composition().cursor;
+    try fixtureSkillMenu(&held.self, "demo", "demo");
+    const Borrower = struct {
+        release: std.Io.Event = .unset,
+        fn run(raw: *anyopaque, task: *Task) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            gate.release.waitUncancelable(task.io);
+        }
+        fn completed(task: *Task) bool {
+            return task.completed();
+        }
+    };
+    var borrower: Borrower = .{};
+    defer {
+        borrower.release.set(std.testing.io);
+        held.self.skill_menu.task.join() catch unreachable;
+    }
+    held.self.upgrade_requested = true;
+    try held.self.skill_menu.task.start(std.testing.io, &borrower, Borrower.run);
+    try std.testing.expect(!try held.self.quiesceUpgrade());
+    try std.testing.expect(held.self.skill_menu.busy());
+    try std.testing.expect(held.self.skill_menu.task.cancellation.stopped.load(.acquire));
+    try std.testing.expect(!held.self.upgrade_job.started);
+    try std.testing.expect(!held.self.upgrade_note_shown);
+    try std.testing.expectEqualStrings("Upgrade: waiting for client work · Esc cancels", held.self.upgrade_note[0..held.self.upgrade_note_len]);
+    borrower.release.set(std.testing.io);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(5)), &held.self.skill_menu.task, Borrower.completed);
+    try std.testing.expect(try held.self.quiesceUpgrade());
+    try std.testing.expect(!held.self.skill_menu.busy());
+    try std.testing.expect(try held.self.quiesceUpgrade());
+    try std.testing.expect(!held.self.skill_menu.busy());
+    try std.testing.expectEqualStrings("/demo", held.self.input.composition().bytes);
+    try std.testing.expectEqual(cursor, held.self.input.composition().cursor);
+    try std.testing.expectEqual(revision, held.self.input.revision);
+    try std.testing.expectEqual(@as(usize, 1), held.self.input.attachments().len);
+    try std.testing.expectEqualStrings("retained original", try held.self.input.message(original));
+    try std.testing.expectEqual(Submission.State.unconfirmed, held.self.submission.view().?.state);
+    const note_revision = held.self.upgrade_note_revision;
+    held.self.upgrade_running = true;
+    held.self.upgrade_note_shown = true;
+    try std.testing.expect(try held.self.quiesceUpgrade());
+    try std.testing.expectEqual(note_revision, held.self.upgrade_note_revision);
+    try std.testing.expect(held.self.upgrade_note_shown);
+}
+
+test "cancelling a quiescing upgrade keeps the draft without starting a worker" {
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = undefined };
+    self.* = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .upgrade_requested = true };
+    self.input.init(&terminal.stream);
+    _ = self.input.append("unsent draft");
+    const before = self.input.composition();
+    try self.inputEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } }, .pasted = false } });
+    try std.testing.expect(!self.upgrade_requested and !self.upgrade_job.started);
+    try std.testing.expect(self.upgrade_reobserving);
+    try std.testing.expectEqualStrings("unsent draft", self.input.composition().bytes);
+    try std.testing.expectEqual(before.cursor, self.input.composition().cursor);
+}
+
 test "upgrade outcomes retain Unicode draft cursor selection and unresolved original until safe reobservation" {
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
@@ -5057,6 +5251,23 @@ test "upgrade holds refuse archive shortcuts confirmations and slash commands wi
         try std.testing.expect(held.self.input.queuedCommand() == null);
         try std.testing.expect(held.self.reader.thread == null and held.self.submission.task.thread == null);
     };
+}
+
+test "a pre-cancellation activity result cannot release upgrade reobservation" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.reading.phase = .activity;
+    self.upgrade_reobserving = true;
+    self.upgrade_reobserve_draining = true;
+    self.job.result = .{ .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try self.applyReader(.complete);
+    try std.testing.expect(self.upgrade_reobserving and self.upgradeHeld());
+    // The next activity snapshot is launched only after the old borrower
+    // joins; only that fresh observation may reopen admission.
+    self.upgrade_reobserve_draining = false;
+    try self.applyReader(.complete);
+    try std.testing.expect(!self.upgrade_reobserving);
 }
 
 test "upgrade reobservation retains a refused archive command from the completion list" {

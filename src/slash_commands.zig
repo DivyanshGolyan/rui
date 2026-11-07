@@ -152,7 +152,7 @@ pub const conversation = Commands(ConversationName, .{
     .skill = .{ .argument = .{ .required = "NAME" }, .description = "invoke an advertised skill as ordinary input" },
     .status = .{ .description = "settings and work" },
     .unarchive = .{ .description = "restore this Session without restarting work" },
-    .upgrade = .{ .description = "check stable Rui; install restarts this Store's Host" },
+    .upgrade = .{ .description = "install stable Rui; may restart this Store's Host" },
     .wait = .{ .description = null },
 });
 
