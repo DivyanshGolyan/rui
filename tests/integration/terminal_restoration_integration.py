@@ -2477,6 +2477,57 @@ def startup_reporting_cases(state, library):
             )
 
 
+def visible_stream_hook_boundary(state, library):
+    """Exercise the real interposer with pre-arm, partial and committed frames."""
+    source, executable = state / "visible-hook.c", state / "visible-hook"
+    arm, log = state / "visible-hook-arm", state / "visible-hook.log"
+    source.write_text(r"""
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+#define SEND(s) do { const char *p = (s); if (write(1, p, strlen(p)) != (ssize_t)strlen(p)) return __LINE__; } while (0)
+int main(int argc, char **argv) {
+    if (argc != 2) return 1;
+    SEND("\033[?2026h\033[H\033[2JVISIBLE-CANCEL-PREFIX\033[?2026l");
+    int fd = open(argv[1], O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0 || close(fd)) return 2;
+    /* A pre-arm marker and an unrelated complete frame must not hold. */
+    SEND("\033[?2026h\033[H\033[2Jno marker\033[?2026l");
+    SEND("\033[?2026h\033[H\033[2JVISIBLE-CANCEL-PREFIX");
+    /* Even a post-arm marker must not hold until its frame is complete. */
+    SEND(" progress");
+    SEND("\033[?2026l");
+    errno = 0;
+    if (write(1, "blocked", 7) != -1 || errno != EAGAIN) return 3;
+    return 0;
+}
+""")
+    subprocess.run(["cc", str(source), "-o", str(executable)], check=True)
+    master, slave = open_pty()
+    caller = None
+    try:
+        caller = subprocess.Popen([str(executable), str(arm)], stdin=slave, stdout=slave,
+            stderr=subprocess.PIPE, env={**os.environ, os_semantics.PRELOAD: str(library),
+                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "visible-stream",
+                "RUI_TERMINAL_STREAM_ARM": str(arm)})
+        result = caller.wait(timeout=5)
+        assert result == 0, (result, caller.stderr.read())
+        capture = human.terminal_capture(master, fresh=True)
+        frames = []
+        capture.listener = lambda frame, x, y: frames.append(frame)
+        while select.select([master], [], [], 0)[0]:
+            capture.feed(os.read(master, 65536))
+        assert len(frames) == 3, frames
+        assert "VISIBLE-CANCEL-PREFIX" in frames[0] and "no marker" in frames[1], frames
+        assert "VISIBLE-CANCEL-PREFIX progress" in frames[2], frames
+        assert log.read_text().splitlines() == ["visible-prefix-written", "visible-frame-closed", "visible-stream-held"]
+        print("visible stream hook: pre-arm, unclosed-frame and held-write controls passed", flush=True)
+    finally:
+        dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+            lambda: human.forget_terminal(master), lambda: os.close(master), lambda: os.close(slave))
+
+
 def visible_stream_handoff_cases(state, library):
     """A command during held visible output waits, then runs once."""
     marker = "VISIBLE-CANCEL-PREFIX"
@@ -2492,7 +2543,7 @@ def visible_stream_handoff_cases(state, library):
         responses = [fixture.sse_tool_calls("visible", [("bash", "visible-call", text)])] if phase == "permission" else [
             fixture.sse_answer("visible", "visible-r", "visible-m", long)[0]]
         if phase == "history":
-            responses += [fixture.sse_answer(f"short-{i}", f"short-{i}-r", f"short-{i}-m", "OPENING-READY")[0] for i in range(8)]
+            responses += [fixture.sse_answer(f"short-{i}", f"short-{i}-r", f"short-{i}-m", f"{marker} history {i}\nOPENING-READY")[0] for i in range(8)]
         endpoint = fixture.SuccessEndpoint(responses)
         thread = threading.Thread(target=endpoint.serve_forever)
         thread.start()
@@ -2518,9 +2569,19 @@ def visible_stream_handoff_cases(state, library):
             if phase != "opening":
                 ready = "VISIBLE-END" if phase == "details" else "OPENING-READY" if phase == "history" else "› "
                 human.read_terminal(master, ready, composer=True)
+                generation = human.terminal_capture(master).generation
                 arm.touch()
                 os.write(master, (f"/{phase}\n" if phase in ("history", "details") else "produce content\n").encode())
-            human.read_terminal(master, marker)
+            if phase == "history":
+                capture = human.terminal_capture(master)
+                fixture.wait_for(human.draining(master, lambda: log.exists() and
+                    "visible-frame-closed" in log.read_text() and capture.generation > generation),
+                    "armed marker frame intercepted")
+                assert marker in capture.completed and human.looking_back(capture.completed), capture.completed
+                events = log.read_text().splitlines()
+                assert events.index("visible-prefix-written") < events.index("visible-frame-closed"), events
+            else:
+                human.read_terminal(master, marker)
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             if phase == "completion":
                 # A live page shows whole: its marker frame already ends the
@@ -3314,6 +3375,7 @@ def main(selected=None):
             completed = True
             return
         if selected in (None, "visible-stream"):
+            visible_stream_hook_boundary(state, library)
             visible_stream_handoff_cases(state, library)
         if selected == "visible-stream":
             completed = True

@@ -704,6 +704,18 @@ def current_screen(master):
     return terminal_capture(master).completed
 
 
+def exact_railed_row(capture, text):
+    """Find an exact source row only in the current committed cell grid."""
+    cells = capture.completed_cells
+    columns = capture.screen.columns
+    assert cells and columns > 1 and all(len(row) == columns for row in cells), "invalid frame geometry"
+    for row in cells:
+        if cell_rows([row], 0, 1, 0, columns - 1)[0].rstrip(" ") == text:
+            assert row[-1].data == "▐", "missing physical transcript rail"
+            return True
+    return False
+
+
 def shown(text, screen):
     from terminal_screen import shown as wrapped
     return wrapped(text, screen)
@@ -1463,6 +1475,19 @@ def conversation_protocol_cases():
         capture = ScreenCapture(80, len(rows))
         capture.feed(terminal_frame(rows, (len(rows) - 1, 3)))
         return capture
+    # Exercise the actual committed cell observer: content rail glyphs are
+    # not chrome, and a missing or displaced physical rail cannot pass.
+    rail = capture_rows(["Saved heading".ljust(79) + "▐", "literal ▐".ljust(79) + "▐", "›"])
+    assert exact_railed_row(rail, "Saved heading")
+    assert exact_railed_row(rail, "literal ▐")
+    assert not exact_railed_row(rail, "literal")
+    for bad in ("Saved heading".ljust(80), "Saved heading".ljust(78) + "▐ "):
+        broken = capture_rows([bad, "›"])
+        try:
+            accepted = exact_railed_row(broken, "Saved heading")
+        except AssertionError:
+            accepted = False
+        assert not accepted, "invalid physical rail accepted"
     for label in LOOKBACK_LABELS:
         assert looking_back("body\n" + label)
         assert not looking_back(label + "\nnotice takes priority")
@@ -2650,7 +2675,7 @@ def persistent_opening_case():
         output = output.rsplit("\n", 1)[0]
         assert output.count("literal **user** é") == 1, ("opening lost or duplicated User", output)
         assert "\n› literal **user** é" in output, output
-        assert "\nSaved heading\n" in output and "# Saved heading" not in output, output
+        assert exact_railed_row(terminal_capture(master), "Saved heading") and "# Saved heading" not in output, output
         assert all(noise not in output for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), output
         assert output.count("Saved heading") == 1, ("opening bypassed assistant renderer", output)
         assert output.count("saved bold é") == 1 and "**saved" not in output, output
