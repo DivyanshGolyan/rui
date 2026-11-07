@@ -172,5 +172,6 @@ def smoke(fixture, row):
         terminal.wait(lambda text: "TD4 tmux answer" in text, "answer")
         assert_submitted(fixture.endpoint.requests, [row["expected"]])
     terminal.call("send-keys", "-t", "td4:0.0", "-l", "/exit")
-    terminal.call("send-keys", "-t", "td4:0.0", "Enter")
+    # Fixture control explicitly dismisses pending skill choices before Enter.
+    terminal.call("send-keys", "-t", "td4:0.0", "C-g", "Enter")
     terminal.finish()
