@@ -27,6 +27,7 @@ const model_picker = @import("model_picker.zig");
 const provider_name = @import("provider_name.zig");
 const session_work = @import("session_work.zig");
 const slash_commands = @import("slash_commands.zig");
+const skill_completion = @import("skill_completion.zig");
 pub const commands = slash_commands.overview;
 const TerminalText = @import("TerminalText.zig");
 const work_line = @import("work_line.zig");
@@ -190,7 +191,19 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 /// The most bytes a draft holds, as the shell's line editor caps it.
 pub const draft_capacity = 65_536;
 
-pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: usize = 0, edits: u32 = 0 };
+pub const Draft = struct {
+    bytes: []const u8 = "",
+    cursor: usize = 0,
+    anchor: usize = 0,
+    edits: u32 = 0,
+    attachments: []const skill_completion.Range = &.{},
+    skill_choices: ?slash_commands.SkillChoices = null,
+
+    pub fn leadingSkill(self: Draft) bool {
+        for (self.attachments) |range| if (range.start == 0) return true;
+        return false;
+    }
+};
 
 /// Where the next input goes, which the shell's route and `render` both
 /// read: the composer, the composer frozen while a start waits, or the
@@ -204,6 +217,7 @@ pub const Composed = struct { input: Input, draft: Draft };
 /// composer), or at the sign-in choice. Typing and a paste at the choice go
 /// to the composer, so a `composer` input in `choice` mode leaves the choice.
 pub const Input = union(enum) {
+    complete,
     composer: keymap.Outcome(Action),
     choice: Choice,
 };
@@ -549,6 +563,8 @@ pub const Effect = union(enum) {
     clear_draft,
     /// Add these static bytes at the draft's end, as Tab does.
     append: []const u8,
+    attach_skill: struct { start: usize, end: usize, name: []const u8 },
+    dismiss_skills,
     /// Tell the person, if they look away, of the listing's news.
     notify: Alert,
     /// Run the command's line as a conversation runs it, and answer with
@@ -702,6 +718,8 @@ pub const StartSettings = struct {
 pub const StartRequest = struct {
     settings: *const StartSettings,
     text: []const u8,
+    original: ?[]const u8 = null,
+    attachments: []const skill_completion.Range = &.{},
     /// The provider and model, `nextBinding`'s: the shell reads these, never
     /// the settings' own.
     binding: Binding = .{},
@@ -709,10 +727,27 @@ pub const StartRequest = struct {
     pub fn own(self: StartRequest, gpa: Allocator) error{OutOfMemory}!OwnedStart {
         const provider = self.binding.provider orelse "";
         const model = self.binding.model orelse "";
-        const bytes = try gpa.alloc(u8, self.text.len + self.settings.used + provider.len + model.len);
+        const original = self.original orelse self.text;
+        const bytes = try gpa.alloc(u8, original.len + self.settings.used + provider.len + model.len);
+        errdefer gpa.free(bytes);
+        const names = try gpa.alloc([]const u8, self.attachments.len);
+        errdefer gpa.free(names);
         var writer = std.Io.Writer.fixed(bytes);
-        inline for (.{ self.text, self.settings.bytes[0..self.settings.used], provider, model }) |part| writer.writeAll(part) catch unreachable;
-        return .{ .bytes = bytes, .text_len = self.text.len, .held = self.settings.held, .provider_len = if (self.binding.provider) |name| name.len else null, .model_len = if (self.binding.model) |name| name.len else null };
+        inline for (.{ original, self.settings.bytes[0..self.settings.used], provider, model }) |part| writer.writeAll(part) catch unreachable;
+        var count: usize = 0;
+        for (self.attachments) |range| {
+            const name = bytes[range.start + 1 .. range.end];
+            var duplicate = false;
+            for (names[0..count]) |previous| if (std.mem.eql(u8, previous, name)) {
+                duplicate = true;
+                break;
+            };
+            if (!duplicate) {
+                names[count] = name;
+                count += 1;
+            }
+        }
+        return .{ .bytes = bytes, .text_len = original.len, .text_offset = original.len - self.text.len, .names = names, .name_count = count, .held = self.settings.held, .provider_len = if (self.binding.provider) |name| name.len else null, .model_len = if (self.binding.model) |name| name.len else null };
     }
 };
 
@@ -721,13 +756,24 @@ pub const StartRequest = struct {
 pub const OwnedStart = struct {
     bytes: []u8,
     text_len: usize,
+    text_offset: usize = 0,
+    names: []const []const u8 = &.{},
+    name_count: usize = 0,
     held: [start_options.len]?StartSettings.Range,
     /// The binding's lengths, its bytes last: the provider, then the model.
     provider_len: ?usize = null,
     model_len: ?usize = null,
 
     pub fn text(self: *const OwnedStart) []const u8 {
+        return self.bytes[self.text_offset..self.text_len];
+    }
+
+    pub fn original(self: *const OwnedStart) []const u8 {
         return self.bytes[0..self.text_len];
+    }
+
+    pub fn skills(self: *const OwnedStart) []const []const u8 {
+        return self.names[0..self.name_count];
     }
 
     /// The provider and model the Session starts on.
@@ -746,6 +792,7 @@ pub const OwnedStart = struct {
     }
 
     pub fn deinit(self: OwnedStart, gpa: Allocator) void {
+        gpa.free(self.names);
         gpa.free(self.bytes);
     }
 };
@@ -2005,6 +2052,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
     const prompt = state.prompt;
     if (prompt != null and prompt.?.action == .archive) {
         const confirms = switch (value.input) {
+            .complete => false,
             .choice => |choice| choice == .enter,
             .composer => |outcome| outcome == .submit,
         };
@@ -2013,6 +2061,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
     // Session mutations enter their semantic owner before generic input
     // cancellation can discard a confirmation or a submitted draft.
     const action: ?Action = switch (value.input) {
+        .complete => null,
         .choice => |choice| if (choice == .action) choice.action else null,
         .composer => |outcome| if (outcome == .action) outcome.action else null,
     };
@@ -2023,12 +2072,20 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
     };
     state.notice = null;
     const submits = switch (value.input) {
-        .choice => false,
+        .choice, .complete => false,
         .composer => |outcome| outcome == .submit,
     };
     if (!submits) state.prompt = null;
     const mode = state.inputMode();
     const outcome: keymap.Outcome(Action) = switch (value.input) {
+        .complete => {
+            if (mode != .compose) return;
+            if (skillCompletion(state, value.draft, effects)) return;
+            if (nextCommands(state, value.draft)) |shown| if (!shown.list.containsSkills() or (shown.seen == .drawn and shown.list.entries[shown.highlight].kind == .command)) {
+                effects.add(.{ .append = shown.completion() });
+            };
+            return;
+        },
         .choice => |choice| choice: {
             std.debug.assert(mode == .choice);
             const picker = &state.picker.?;
@@ -2070,6 +2127,12 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             .clear => if (prompt != null) {} else if (picker) |shown| switch (shown.step) {
                 .sign_in => shown.step = .models,
                 .models => state.closePicker(),
+            } else if (skillChoices(value.draft)) |_| {
+                if (nextCommands(state, value.draft)) |shown| {
+                    state.commands = shown;
+                    state.commands.?.close();
+                }
+                effects.add(.dismiss_skills);
             } else if (shownCommands(state, value.draft)) |shown| {
                 shown.close();
             } else if (state.panel != null) state.closePanel() else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
@@ -2086,7 +2149,10 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
         .submit => if (picker != null) {
             state.prompt = null;
             pick(state, effects);
+        } else if (skillCompletion(state, value.draft, effects)) {
+            state.prompt = null;
         } else if (shownCommands(state, value.draft)) |shown| {
+            if (value.draft.attachments.len != 0) return enterAttached(state, value.draft.bytes, value.draft.attachments, effects);
             const taken = shown.list.enter(shown.highlight);
             if (taken.runs and value.draft.bytes.len + taken.rest.len <= draft_capacity) {
                 var line: [draft_capacity]u8 = undefined;
@@ -2100,7 +2166,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
                 shown.highlight = 0;
                 effects.add(.{ .append = taken.rest });
             }
-        } else try enter(state, value.draft.bytes, effects),
+        } else try enterAttached(state, value.draft.bytes, value.draft.attachments, effects),
         .refused => |why| {
             if (why.endsLine()) effects.add(.clear_draft);
             switch (why) {
@@ -2184,7 +2250,13 @@ fn admitHostRequest(state: *State) bool {
 }
 
 fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
-    const parsed: ?commands.Parsed = if (text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//")) commands.parse(text) else null;
+    return enterAttached(state, text, &.{}, effects);
+}
+
+fn enterAttached(state: *State, text: []const u8, attachments: []const skill_completion.Range, effects: *Effects) error{OutOfMemory}!void {
+    const selected_leading = (Draft{ .attachments = attachments }).leadingSkill();
+    const parsed: ?commands.Parsed = if (!selected_leading and text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//")) commands.parse(text) else null;
+    if (parsed != null and attachments.len != 0) return state.say(.attention, "! A command cannot send attached skills; select the leading skill or use // for text.", .{});
     if (parsed) |result| switch (result) {
         .command => |command| switch (command.name) {
             .archive => return archiveIntent(state, .{ .selected_archive = .submitted }, effects),
@@ -2217,9 +2289,9 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         return effects.add(.{ .open = row.reference });
     }
     // As in a conversation, `//` starts text with one slash.
-    if (text[0] != '/' or std.mem.startsWith(u8, text, "//")) {
+    if (selected_leading or text[0] != '/' or std.mem.startsWith(u8, text, "//")) {
         if (!state.request(.start, null)) return;
-        return effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text, .binding = state.nextBinding() } });
+        return effects.add(.{ .start = .{ .settings = &state.settings, .text = if (!selected_leading and text[0] == '/') text[1..] else text, .original = text, .attachments = attachments, .binding = state.nextBinding() } });
     }
     const command = switch (parsed.?) {
         .unknown => {
@@ -2800,6 +2872,7 @@ pub const Style = struct {
     background: Background = .ground,
     bold: bool = false,
     reverse: bool = false,
+    underline: bool = false,
 };
 
 /// Where the screen's rows go: the top from row 0, a gap, the list, the
@@ -2871,7 +2944,35 @@ pub fn nextCommands(state: *const State, draft: Draft) ?slash_commands.Shown {
         .model = state.nextBinding().model,
         .effort = if (held) |text| std.meta.stringToEnum(model_capability.ReasoningEffort, text) else null,
     };
-    return slash_commands.Shown.next(state.commands, draft.edits, commands.suggest(draft.bytes, context));
+    const builtin = if (!draft.leadingSkill() and draft.cursor == draft.bytes.len) commands.suggest(draft.bytes, context) else null;
+    const choices = skillChoices(draft) orelse return slash_commands.Shown.next(state.commands, draft.edits, builtin);
+    const token = skill_completion.candidate(draft.bytes, draft.cursor).?;
+    const merged = slash_commands.withSkills(builtin, draft.bytes[token.start..draft.cursor], choices.entries);
+    if (choices.entries.len == 0) return slash_commands.Shown.next(state.commands, draft.edits, builtin);
+    return slash_commands.Shown.nextAt(state.commands, draft.edits, draft.cursor, token.start, token.end, choices.generation, merged);
+}
+
+/// A selected token is no longer a discovery target until an edit drops its mark.
+fn skillChoices(draft: Draft) ?slash_commands.SkillChoices {
+    const choices = draft.skill_choices orelse return null;
+    if (choices.dismissed) return null;
+    const token = skill_completion.candidate(draft.bytes, draft.cursor) orelse return null;
+    for (draft.attachments) |range| if (range.start == token.start and range.end == token.end) return null;
+    return choices;
+}
+
+/// Pending or not-yet-drawn skills consume selection keys without sending.
+fn skillCompletion(state: *State, draft: Draft, effects: *Effects) bool {
+    const choices = skillChoices(draft) orelse return false;
+    if (choices.pending) return true;
+    const current = nextCommands(state, draft) orelse return false;
+    if (!current.list.containsSkills()) return false;
+    if (current.seen != .drawn) return current.seen != .closed;
+    const entry = current.list.entries[current.highlight];
+    if (entry.kind != .skill) return false;
+    const token = skill_completion.candidate(draft.bytes, draft.cursor).?;
+    effects.add(.{ .attach_skill = .{ .start = token.start, .end = token.end, .name = entry.word } });
+    return true;
 }
 
 /// The list for `draft`, which Enter, Esc and the arrows act on when the
@@ -3174,12 +3275,17 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                 try std.testing.expectEqual(alert.more, got.notify.more);
             },
             .append => |text| try std.testing.expectEqualStrings(text, got.append),
+            .attach_skill => |range| {
+                try std.testing.expectEqual(range.start, got.attach_skill.start);
+                try std.testing.expectEqual(range.end, got.attach_skill.end);
+                try std.testing.expectEqualStrings(range.name, got.attach_skill.name);
+            },
             .command => |command| {
                 try std.testing.expectEqual(command.name, got.command.name);
                 try std.testing.expectEqualStrings(command.text, got.command.text);
                 try std.testing.expectEqual(command.session, got.command.session);
             },
-            .list_models, .clear_draft, .upgrade, .exit => {},
+            .list_models, .clear_draft, .dismiss_skills, .upgrade, .exit => {},
         }
     }
 }
@@ -4571,4 +4677,205 @@ test "upgrade holds settle accepted archive restore and stop completions without
             }
         }
     };
+}
+
+const inline_test_skills = [_]slash_commands.Entry{
+    .{ .kind = .skill, .word = "review", .shown = "/review", .description = "Review work", .runs = false },
+};
+
+fn inlineComplete(state: *State, draft: Draft) !Effects {
+    return step(state, .{ .composed = .{ .input = .complete, .draft = draft } });
+}
+
+test "inline overview selects the whole middle token at every UTF8 punctuation cursor" {
+    const cases = .{
+        .{ "é /rev-tail, next", @as(usize, 3), @as(usize, 12) },
+        .{ "before /rev-tail. next", @as(usize, 7), @as(usize, 16) },
+        .{ "/rev-tail! after", @as(usize, 0), @as(usize, 9) },
+    };
+    inline for (cases) |case| {
+        for (case[1] + 1..case[1] + 5) |cursor| {
+            for ([_]bool{ false, true }) |tab| {
+                var state = try testState();
+                defer state.deinit();
+                const draft: Draft = .{ .bytes = case[0], .cursor = cursor, .edits = 17, .skill_choices = .{ .entries = &inline_test_skills, .generation = 8, .total = 1 } };
+                drawWithRoom(&state, draft);
+                // A leading /rev also offers /rename. Pick the typed skill row,
+                // whose kind is independent of the builtin spelling/table.
+                state.commands.?.highlight = state.commands.?.list.count - 1;
+                const effects = if (tab) try inlineComplete(&state, draft) else try submit(&state, draft);
+                try expectEffects(&.{.{ .attach_skill = .{ .start = case[1], .end = case[2], .name = "review" } }}, effects);
+                try std.testing.expectEqual(@as(usize, 0), state.request_count);
+            }
+        }
+    }
+}
+
+test "inline overview pending undrawn changed and closed skills cannot send or secretly attach" {
+    for ([_]bool{ false, true }) |tab| {
+        for (0..7) |change| {
+            var state = try testState();
+            defer state.deinit();
+            var draft: Draft = .{ .bytes = "ask /rev", .cursor = 8, .edits = 4, .skill_choices = .{ .entries = &inline_test_skills, .generation = 2, .total = 1 } };
+            drawWithRoom(&state, draft);
+            switch (change) {
+                0 => draft.skill_choices.?.pending = true,
+                1 => state.commands.?.seen = .hidden,
+                2 => draft.edits += 1,
+                3 => draft.cursor -= 1,
+                4 => draft.skill_choices.?.generation += 1,
+                5 => draft.bytes = "ask /rev-more",
+                6 => {
+                    state.commands.?.close();
+                    // Closed menus are only completion barriers for Tab;
+                    // Enter may send literal text after explicit dismissal.
+                    if (!tab) continue;
+                },
+                else => unreachable,
+            }
+            try expectEffects(&.{}, if (tab) try inlineComplete(&state, draft) else try submit(&state, draft));
+            try std.testing.expectEqual(@as(usize, 0), state.request_count);
+        }
+    }
+}
+
+test "inline overview Escape dismisses pending metadata before draft or settings" {
+    var state = try testState();
+    defer state.deinit();
+    var draft: Draft = .{ .bytes = "ask /rev", .cursor = 8, .edits = 4, .skill_choices = .{ .pending = true } };
+    try std.testing.expect(configure(&state, "--workspace /other"));
+    try expectEffects(&.{.dismiss_skills}, try press(&state, draft, .clear));
+    try std.testing.expectEqualStrings("/other", state.settings.get(startOption("workspace").?).?);
+    draft.skill_choices = .{ .dismissed = true, .entries = &inline_test_skills, .generation = 3, .total = 1 };
+    try expectEffects(&.{}, try inlineComplete(&state, draft));
+    const effects = try submit(&state, draft);
+    try std.testing.expectEqualStrings("ask /rev", effects.slice()[0].start.text);
+    try std.testing.expectEqual(@as(usize, 0), effects.slice()[0].start.attachments.len);
+}
+
+test "inline overview selected leading skill overrides builtin collisions but unmarked builtin refuses other skills" {
+    for ([_][]const u8{ "/help", "/archive", "/configure", "/exit", "/upgrade" }) |word| {
+        var state = try testState();
+        defer state.deinit();
+        const ranges = [_]skill_completion.Range{.{ .start = 0, .end = word.len }};
+        const draft: Draft = .{ .bytes = word, .cursor = word.len, .attachments = &ranges };
+        drawWithRoom(&state, draft);
+        try std.testing.expect(state.commands == null);
+        const effects = try submit(&state, draft);
+        try std.testing.expectEqual(@as(usize, 1), effects.len);
+        try std.testing.expect(effects.slice()[0] == .start);
+        try std.testing.expectEqualStrings(word, effects.slice()[0].start.text);
+        const owned = try effects.slice()[0].start.own(std.testing.allocator);
+        defer owned.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings(word[1..], owned.skills()[0]);
+    }
+    for ([_][]const u8{ "/help /review", "/archive /review", "/configure --label /review" }) |text| {
+        var state = try testState();
+        defer state.deinit();
+        const start = std.mem.lastIndexOfScalar(u8, text, '/').?;
+        const ranges = [_]skill_completion.Range{.{ .start = start, .end = text.len }};
+        const draft: Draft = .{ .bytes = text, .cursor = text.len, .attachments = &ranges };
+        drawWithRoom(&state, draft);
+        try expectEffects(&.{}, try submit(&state, draft));
+        try std.testing.expectEqual(@as(usize, 0), state.request_count);
+        try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "cannot send attached skills") != null);
+    }
+}
+
+test "inline overview owned fresh start retains original distinct ordered names and settings after next draft" {
+    var state = try testState();
+    defer state.deinit();
+    try std.testing.expect(configure(&state, "--workspace /effective --label first"));
+    var text = "//literal /review /other /review".*;
+    var ranges = [_]skill_completion.Range{ .{ .start = 10, .end = 17 }, .{ .start = 18, .end = 24 }, .{ .start = 25, .end = 32 } };
+    const draft: Draft = .{ .bytes = &text, .cursor = text.len, .attachments = &ranges };
+    const effects = try submit(&state, draft);
+    const owned = try effects.slice()[0].start.own(std.testing.allocator);
+    defer owned.deinit(std.testing.allocator);
+    @memset(&text, 'x');
+    ranges[0].end = 11;
+    state.settings = .{};
+    try std.testing.expectEqualStrings("//literal /review /other /review", owned.original());
+    try std.testing.expectEqualStrings("/literal /review /other /review", owned.text());
+    try std.testing.expectEqual(@as(usize, 2), owned.skills().len);
+    try std.testing.expectEqualStrings("review", owned.skills()[0]);
+    try std.testing.expectEqualStrings("other", owned.skills()[1]);
+    try std.testing.expectEqualStrings("/effective", owned.get(startOption("workspace").?).?);
+    try std.testing.expectEqualStrings("first", owned.get(startOption("label").?).?);
+}
+
+test "inline overview unselected exact names stay literal and selected second Enter starts once" {
+    for ([_]bool{ false, true }) |selected| {
+        var state = try testState();
+        defer state.deinit();
+        const ranges = [_]skill_completion.Range{.{ .start = 4, .end = 11 }};
+        const draft: Draft = .{ .bytes = "ask /review", .cursor = 11, .attachments = if (selected) &ranges else &.{}, .skill_choices = .{ .entries = &inline_test_skills, .generation = 1, .total = 1 } };
+        drawWithRoom(&state, draft);
+        if (selected) {
+            const effects = try submit(&state, draft);
+            const owned = try effects.slice()[0].start.own(std.testing.allocator);
+            defer owned.deinit(std.testing.allocator);
+            try std.testing.expectEqualStrings("ask /review", owned.text());
+            try std.testing.expectEqualStrings("review", owned.skills()[0]);
+        } else {
+            try expectEffects(&.{.{ .attach_skill = .{ .start = 4, .end = 11, .name = "review" } }}, try submit(&state, draft));
+            try std.testing.expectEqual(@as(usize, 0), state.request_count);
+        }
+    }
+    var state = try testState();
+    defer state.deinit();
+    // Text inserted/pasted without an explicit menu choice has no marks.
+    const effects = try submit(&state, .{ .bytes = "ask /review", .cursor = 11 });
+    const owned = try effects.slice()[0].start.own(std.testing.allocator);
+    defer owned.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), owned.skills().len);
+}
+
+test "inline overview failed and unconfirmed starts preserve existing fresh composer transitions" {
+    for ([_]bool{ false, true }) |attached| {
+        for ([_]bool{ false, true }) |unknown| {
+            var state = try testState();
+            defer state.deinit();
+            const ranges = [_]skill_completion.Range{.{ .start = 4, .end = 11 }};
+            const draft: Draft = .{ .bytes = "ask /review", .cursor = 11, .attachments = if (attached) &ranges else &.{} };
+            const effects = try submit(&state, draft);
+            const owned = try effects.slice()[0].start.own(std.testing.allocator);
+            defer owned.deinit(std.testing.allocator);
+            try std.testing.expectEqual(InputMode.frozen, state.inputMode());
+            const settled = try step(&state, .{ .start = if (unknown) .{ .unconfirmed = "original-key" } else .{ .failed = "rejected" } });
+            try expectEffects(if (unknown) &.{.clear_draft} else &.{}, settled);
+            try std.testing.expectEqual(InputMode.compose, state.inputMode());
+            try std.testing.expectEqualStrings("ask /review", owned.text());
+            try std.testing.expectEqual(@as(usize, if (attached) 1 else 0), owned.skills().len);
+            if (unknown) {
+                try std.testing.expectEqualStrings("original-key", state.requests[0].text.slice());
+                try std.testing.expectEqual(.unknown, state.requests[0].status);
+                // The cleared draft never resubmits the old selected intent.
+                try expectEffects(&.{}, try submit(&state, .{}));
+                try std.testing.expectEqual(@as(usize, 1), state.request_count);
+            }
+        }
+    }
+}
+
+test "inline overview kinded collision preserves builtin Tab and skill Enter as different intent" {
+    const skills = [_]slash_commands.Entry{.{ .kind = .skill, .word = "help", .shown = "/help", .description = "Help skill", .runs = false }};
+    for ([_]bool{ false, true }) |skill| {
+        var state = try testState();
+        defer state.deinit();
+        state.size = .{ .width = 80, .height = 40 };
+        const draft: Draft = .{ .bytes = "/he", .cursor = 3, .edits = 5, .skill_choices = .{ .entries = &skills, .generation = 2, .total = 1 } };
+        drawWithRoom(&state, draft);
+        try std.testing.expectEqual(@as(usize, 2), state.commands.?.list.count);
+        state.commands.?.highlight = if (skill) 1 else 0;
+        if (skill) {
+            try expectEffects(&.{.{ .attach_skill = .{ .start = 0, .end = 3, .name = "help" } }}, try submit(&state, draft));
+            try std.testing.expect(state.panel == null);
+        } else {
+            try expectEffects(&.{.{ .append = "lp" }}, try inlineComplete(&state, draft));
+            try expectEffects(&.{.clear_draft}, try submit(&state, draft));
+            try std.testing.expect(state.panel != null and state.panel.? == .help);
+        }
+        try std.testing.expectEqual(@as(usize, 0), state.request_count);
+    }
 }
