@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Canonical invocation failure at real producers and current caller boundaries."""
 import errno
+import hashlib
 import json
 import os
 import pathlib
@@ -18,12 +19,66 @@ import sys
 import tempfile
 import termios
 import threading
+import traceback
 import time
 
 import model_fixture as fixture
 import host_process
 from host_process import canonical_fixture_root, preserve_failure_metadata, retain_failure_state
 import os_semantics
+
+# Captured before host_process.enter strips non-fixture environment variables.
+# This isolated debugging hook is opt-in and never passed to the actor or Host.
+DETAILS_EVIDENCE = None
+
+
+class DetailsEvidence:
+    def __init__(self, directory, capture):
+        self.directory = pathlib.Path(directory)
+        info = self.directory.lstat()
+        assert self.directory.is_dir() and not self.directory.is_symlink()
+        assert info.st_uid == os.getuid() and info.st_mode & 0o777 == 0o700
+        self.wire = os.fdopen(os.open(self.directory / "wire.bin", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb", buffering=0)
+        self.digest = hashlib.sha256()
+        self.length = 0
+        self.capture = capture
+        self.feed = capture.feed
+        capture.feed = self.record
+
+    def record(self, data):
+        remaining = memoryview(data)
+        while remaining:
+            written = self.wire.write(remaining)
+            if not written:
+                raise OSError("evidence wire write made no progress")
+            remaining = remaining[written:]
+        self.digest.update(data)
+        self.length += len(data)
+        self.feed(data)
+
+    def write_json(self, name, value):
+        fd = os.open(self.directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(value, out, ensure_ascii=True, indent=2)
+            out.write("\n")
+
+    def snapshot(self):
+        capture = self.capture
+        self.write_json("cells.json", {
+            "columns": capture.screen.columns, "rows": capture.screen.lines,
+            "live_cursor": {"x": capture.screen.cursor.x, "y": capture.screen.cursor.y},
+            "generation": capture.generation, "synchronized": capture.synchronized,
+            "completed": capture.completed,
+            "cells": [[{"x": x, "y": y, **cell._asdict()} for x, cell in enumerate(row)]
+                      for y, row in enumerate(capture.completed_cells)],
+        })
+
+    def close(self, error):
+        self.capture.feed = self.feed
+        self.wire.close()
+        self.write_json("result.json", {"wire_bytes": self.length,
+            "wire_sha256": self.digest.hexdigest(), "failure": error})
+
 
 ERROR = {"version": host_process.WIRE_VERSION, "type": "invocation_error", "code": "canonical_store_failure"}
 ERROR_BYTES = json.dumps(ERROR, separators=(",", ":")).encode()
@@ -730,7 +785,10 @@ def permission_read_cases(state):
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
         caller = None
+        evidence = None
         try:
+            if DETAILS_EVIDENCE:
+                evidence = DetailsEvidence(DETAILS_EVIDENCE, human.terminal_capture(master))
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), details_session],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
@@ -739,6 +797,11 @@ def permission_read_cases(state):
             output = human.current_screen(master)
             # The transcript keeps the whole diagnostic, wrapped at the width;
             # the notice under the input names only what failed.
+            if evidence:
+                try:
+                    evidence.snapshot()
+                except Exception:
+                    traceback.print_exc()  # Keep the fixture assertion as the oracle.
             assert_details_unavailable(human.terminal_capture(master), columns=COLUMNS, rows=ROWS)
             assert caller.poll() is None, output
             os.write(master, b"\x03")
@@ -749,6 +812,14 @@ def permission_read_cases(state):
             actual = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "recoverable details failure did not restore terminal"
         finally:
+            if evidence:
+                failure = traceback.format_exc() if sys.exc_info()[0] else None
+                try:
+                    evidence.close(failure)
+                except Exception:
+                    # Preserve fixture cleanup and any original assertion. Missing
+                    # evidence is reported on stderr and is not a successful capture.
+                    traceback.print_exc()
             proxy.close()
             if caller is not None and caller.poll() is None:
                 caller.kill()
@@ -978,5 +1049,6 @@ def main(selected="all"):
 
 
 if __name__ == "__main__":
+    DETAILS_EVIDENCE = os.environ.get("RUI_DETAILS_EVIDENCE")
     host_process.enter()
     main(sys.argv[2] if len(sys.argv) == 3 else "all")
