@@ -5850,3 +5850,213 @@ test "upgrade reobservation retains a refused archive command from the completio
         try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
     }
 }
+
+test "delayed permission queued inspection and Message input retain separate authority" {
+    const Host = struct {
+        fn nonblocking(fd: std.posix.fd_t) !void {
+            const flags = std.c.fcntl(fd, std.c.F.GETFL);
+            if (flags < 0) return error.FcntlFailed;
+            const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+            if (std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return error.FcntlFailed;
+        }
+
+        fn ready(fd: std.posix.fd_t, events: i16, deadline: std.Io.Clock.Timestamp) !void {
+            const Watch = struct { fd: std.posix.fd_t, events: i16 };
+            try test_poll.waitUntil(std.testing.io, deadline, Watch{ .fd = fd, .events = events }, struct {
+                fn check(watch: Watch) !bool {
+                    var fds = [_]std.posix.pollfd{.{ .fd = watch.fd, .events = watch.events, .revents = 0 }};
+                    return try std.posix.poll(&fds, 0) != 0;
+                }
+            }.check);
+        }
+
+        fn writeAll(fd: std.posix.fd_t, bytes: []const u8, deadline: std.Io.Clock.Timestamp) !void {
+            var written: usize = 0;
+            while (written < bytes.len) {
+                try ready(fd, std.posix.POLL.OUT, deadline);
+                const count = std.c.write(fd, bytes.ptr + written, bytes.len - written);
+                if (count < 0) switch (std.posix.errno(count)) {
+                    .INTR, .AGAIN => continue,
+                    else => return error.FixtureWriteFailed,
+                };
+                if (count == 0) return error.UnexpectedEof;
+                written += @intCast(count);
+            }
+        }
+
+        fn readRequest(fd: std.posix.fd_t, deadline: std.Io.Clock.Timestamp, request: []u8) ![]const u8 {
+            var used: usize = 0;
+            while (true) {
+                if (used == request.len) return error.RequestTooLarge;
+                try ready(fd, std.posix.POLL.IN, deadline);
+                const count = std.c.read(fd, request.ptr + used, request.len - used);
+                if (count < 0) switch (std.posix.errno(count)) {
+                    .INTR, .AGAIN => continue,
+                    else => return error.FixtureReadFailed,
+                };
+                if (count == 0) return error.UnexpectedEof;
+                used += @intCast(count);
+                if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                    const start = (std.mem.indexOf(u8, request[0..end], "Content-Length: ") orelse return error.InvalidRequest) + "Content-Length: ".len;
+                    const finish = (std.mem.indexOf(u8, request[start .. end + 2], "\r\n") orelse return error.InvalidRequest) + start;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) return request[0..used];
+                }
+            }
+        }
+
+        fn accept(listener: *std.Io.net.Server, route: []const u8) !std.Io.net.Stream {
+            const deadline = test_poll.after(std.testing.io, .fromSeconds(5));
+            try ready(listener.socket.handle, std.posix.POLL.IN, deadline);
+            const peer = try listener.accept(std.testing.io);
+            errdefer peer.close(std.testing.io);
+            try nonblocking(peer.socket.handle);
+            var request: [16384]u8 = undefined;
+            const received = try readRequest(peer.socket.handle, deadline, &request);
+            var prefix: [128]u8 = undefined;
+            try std.testing.expectStringStartsWith(received, try std.fmt.bufPrint(&prefix, "POST {s} HTTP/1.1\r\n", .{route}));
+            try std.testing.expect(std.mem.indexOf(u8, received, "\"session\":\"k7m2qx\"") != null);
+            return peer;
+        }
+        fn reply(peer: std.Io.net.Stream, body: []const u8, content_type: []const u8) !void {
+            const deadline = test_poll.after(std.testing.io, .fromSeconds(5));
+            var header: [256]u8 = undefined;
+            try writeAll(peer.socket.handle, try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ content_type, body.len }), deadline);
+            try writeAll(peer.socket.handle, body, deadline);
+        }
+    };
+    const io = std.testing.io;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    var directory = try @import("socket_fixture.zig").Directory.init();
+    defer directory.cleanup();
+    const root = directory.root[0..directory.root_len];
+    var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    const paths = lease.paths;
+    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("remove fixture socket");
+    }
+    const scratch = try held.tmp.dir.createFile(io, "permission-scratch", .{ .read = true });
+    defer scratch.close(io);
+    const action = try held.tmp.dir.createFile(io, "permission-action", .{ .read = true });
+    defer action.close(io);
+    const inspection = try held.tmp.dir.createFile(io, "permission-inspection", .{ .read = true });
+    defer inspection.close(io);
+    self.files = .{ .scratch = scratch, .action = action, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
+    self.store = root;
+    self.session = "k7m2qx";
+    self.submission.store = root;
+    self.submission.session = self.session;
+    self.line.read = .{ .revision = 1, .end = 0 };
+    self.init.gpa = std.testing.allocator;
+    self.init.environ_map = &held.environ;
+    self.poll_at = std.math.maxInt(i96);
+    defer {
+        self.reader.cancel();
+        self.reader.join() catch {};
+    }
+    try held.settle();
+    try self.launch(self.freeze(.permission), reads.permission);
+    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1, .work = .{ .state = .{ .approval = .{ .since = 1 } }, .turn = 1, .operation = 1, .first_action = 10 } } };
+    try facts.work.workspace.set("/w");
+    var page_bytes: [4096]u8 = undefined;
+    var page = std.Io.Writer.fixed(&page_bytes);
+    try facts.writeJson(&page);
+    {
+        const peer = try Host.accept(&listener, "/v1/activity-page");
+        defer peer.close(io);
+        try Host.reply(peer, page.buffered(), "application/json");
+    }
+    const reference = "{\"type\":\"text\",\"bytes\":\"13\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
+    const current = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"10\",\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"1\",\"unresolved\":[{\"action\":\"10\",\"parent_operation\":\"19\",\"call_ordinal\":\"0\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":" ++ reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":\"Run parser tests\",\"code\":\"pending_permission\",\"publication_position\":null}}],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[{\"action\":\"10\",\"permission_revision\":\"23\"}],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    {
+        const peer = try Host.accept(&listener, "/v1/inspect-session");
+        defer peer.close(io);
+        try Host.reply(peer, current, "application/json");
+    }
+    {
+        const peer = try Host.accept(&listener, "/v1/read-action-arguments");
+        defer peer.close(io);
+        // The real permission borrower is blocked on its exact arguments. Queue
+        // the inspection through the public terminal stream, before completing it.
+        try stepKeys(held, "/help\r");
+        try std.testing.expectEqualStrings("/help", self.input.queuedCommand().?);
+        try stepKeys(held, "independent message");
+        try std.testing.expectEqualStrings("independent message", self.input.composition().bytes);
+        try std.testing.expect(self.submission.view() == null);
+        try std.testing.expect(self.reading.phase == .permission and !self.reader.completed());
+        const arguments = "{\"cmd\":\"echo gated\",\"description\":\"Gate\",\"timeout_ms\":null}";
+        try Host.reply(peer, arguments, "text/plain");
+    }
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), self, struct {
+        fn done(frontend: *Self) bool {
+            return frontend.reader.completed();
+        }
+    }.done);
+    try std.testing.expectEqual(@as(?u64, 10), self.job.result.action);
+    try std.testing.expect(self.submission.view() == null and held.screen.consent == null);
+
+    const Gate = struct {
+        held: *HeldFrontend,
+        listener: *std.Io.net.Server,
+        deadline: i96,
+        injected: bool = false,
+        checked: bool = false,
+        fn service(raw: *anyopaque) !bool {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            const frontend = &gate.held.self;
+            if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= gate.deadline) return error.TestUnexpectedResult;
+            var sink: [65536]u8 = undefined;
+            while (std.c.read(gate.held.pipes[1][0], &sink, sink.len) > 0) {}
+            if (!gate.injected and frontend.reading.phase == .inspection and frontend.inspection.command_running and frontend.reader.thread != null and frontend.reader.completed()) {
+                try std.testing.expectEqual(@as(?u64, 10), frontend.reading.prepared_action);
+                try std.testing.expect(frontend.submission.view() == null and gate.held.screen.consent == null);
+                try std.testing.expectEqualStrings("independent message", frontend.input.composition().bytes);
+                try std.testing.expectEqual(@as(isize, 1), std.c.write(gate.held.pipes[0][1], "\r", 1));
+                gate.injected = true;
+            } else if (gate.injected and gate.held.screen.consent != null and frontend.reader.thread == null) {
+                const submitted = frontend.submission.view();
+                std.debug.print("INTERLEAVE action={d} phase={s} submitted={} draft=[{s}] offered={}\n", .{ gate.held.screen.consent.?.action, @tagName(frontend.reading.phase), submitted != null, frontend.input.composition().bytes, gate.held.screen.offered() != null });
+                if (submitted != null) {
+                    const intent = frontend.submission.intent.?;
+                    try std.testing.expect(intent == .message);
+                    try std.testing.expectEqualStrings("independent message", try frontend.input.message(intent.message));
+                    // Capture the real Message request, then give one explicit
+                    // failure response. This fixture never admits or executes it.
+                    const deadline = test_poll.after(std.testing.io, .fromSeconds(5));
+                    try Host.ready(gate.listener.socket.handle, std.posix.POLL.IN, deadline);
+                    const peer = try gate.listener.accept(std.testing.io);
+                    defer peer.close(std.testing.io);
+                    try Host.nonblocking(peer.socket.handle);
+                    var bytes: [16384]u8 = undefined;
+                    const request = try Host.readRequest(peer.socket.handle, deadline, &bytes);
+                    std.debug.print("INTERLEAVE real admission bytes=[{s}]\n", .{request});
+                    try std.testing.expectStringStartsWith(request, "POST /v1/message HTTP/1.1\r\n");
+                    try std.testing.expect(std.mem.indexOf(u8, request, "\"session\":\"k7m2qx\"") != null);
+                    try std.testing.expect(std.mem.endsWith(u8, request, ",\"text\":{\"state\":\"value\",\"value\":\"independent message\"}}"));
+                    const failed = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"fixture_unavailable\"}";
+                    var header: [256]u8 = undefined;
+                    try Host.writeAll(peer.socket.handle, try std.fmt.bufPrint(&header, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{failed.len}), deadline);
+                    try Host.writeAll(peer.socket.handle, failed, deadline);
+                }
+                gate.checked = true;
+                try std.testing.expect(submitted == null);
+                try std.testing.expectEqualStrings("independent message", frontend.input.composition().bytes);
+                try std.testing.expectEqual(@as(isize, 1), std.c.write(gate.held.pipes[0][1], "\x03", 1));
+                try pump(frontend);
+                return error.TestUnexpectedResult;
+            }
+            return false;
+        }
+    };
+    var gate: Gate = .{ .held = held, .listener = &listener, .deadline = std.Io.Clock.awake.now(io).nanoseconds + 10 * std.time.ns_per_s };
+    self.lender = quiet_overview;
+    self.lender.context = &gate;
+    self.lender.service = Gate.service;
+    try std.testing.expectError(error.InteractiveInterrupted, self.driveActive());
+    try std.testing.expect(gate.injected and gate.checked);
+}
