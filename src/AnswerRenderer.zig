@@ -107,6 +107,47 @@ pub fn feed(self: *Renderer, bytes: []const u8) !void {
     }
 }
 
+fn feedLegacy(self: *Renderer, bytes: []const u8) !void {
+    for (bytes) |byte| {
+        if (self.fence_pending and self.fence_body_start != 0) {
+            try self.fencedByte(byte);
+            continue;
+        }
+        if (self.line_start) {
+            if (byte != '\n' and self.prefix_len < prefix_limit) {
+                self.prefix[self.prefix_len] = byte;
+                self.prefix_len += 1;
+                // The longest accepted ordered marker needs three spaces,
+                // five digits, a dot and its following space.
+                if (self.prefix_len < 10 or (self.prefix_len < prefix_limit and Fence.candidate(self.prefix[0..self.prefix_len]))) continue;
+                if (self.prefix_len == prefix_limit and Fence.candidate(self.prefix[0..self.prefix_len])) self.literal_line = true;
+                try self.flushPrefix();
+                continue;
+            }
+            try self.flushPrefix();
+        }
+        if (byte == '\n') {
+            try self.endLink();
+            self.boundary = .prose;
+            try self.flushSpan();
+            self.escape_next = false;
+            self.literal_run = null;
+            if (self.line_style) try self.transition(.{});
+            self.line_style = false;
+            if (self.fence_pending) {
+                self.held[self.fence_len] = byte;
+                self.fence_len += 1;
+                self.fence_body_start = self.fence_len;
+                self.fence_line_start = self.fence_len;
+            } else try self.safe(byte);
+            self.literal_line = false;
+            self.line_start = true;
+            continue;
+        }
+        try self.prose(byte);
+    }
+}
+
 pub fn finish(self: *Renderer) !void {
     if (self.line_start and self.prefix_len != 0) {
         // A delimiter without its line ending is not a complete block marker.
@@ -129,10 +170,8 @@ fn flushPrefix(self: *Renderer) !void {
     self.line_start = false;
     const prefix = self.prefix[0..self.prefix_len];
     self.prefix_len = 0;
-    var fence_indent: usize = 0;
-    while (fence_indent < prefix.len and fence_indent < 3 and prefix[fence_indent] == ' ') : (fence_indent += 1) {}
-    if (std.mem.startsWith(u8, prefix[fence_indent..], "```")) {
-        if (!self.literal_line and openingFence(prefix)) {
+    if (Fence.candidate(prefix)) {
+        if (!self.literal_line and Fence.opening(prefix)) {
             @memcpy(self.held[0..prefix.len], prefix);
             self.fence_len = prefix.len;
             self.fence_pending = true;
@@ -171,6 +210,8 @@ fn flushPrefix(self: *Renderer) !void {
     try self.proseSlice(prefix);
 }
 
+/// Finds an answer's last complete fenced code block as its bytes pass,
+/// by the fence lines that make the renderer show a block as code.
 fn fenceCandidate(prefix: []const u8) bool {
     var indent: usize = 0;
     while (indent < prefix.len and indent < 3 and prefix[indent] == ' ') : (indent += 1) {}
@@ -250,30 +291,26 @@ fn fencedByte(self: *Renderer, byte: u8) !void {
         // syntax and keep subsequent bytes literal until this block ends.
         try self.literalBlock(self.held[0..self.fence_len]);
         self.fence_literal = true;
-        self.fence_closer_possible = true;
-        self.fence_closer_indent = 0;
-        self.fence_closer_ticks = 0;
-        for (self.held[self.fence_line_start..self.fence_len]) |line_byte| self.fenceCloserByte(line_byte);
+        self.fence_closer = .{};
+        for (self.held[self.fence_line_start..self.fence_len]) |line_byte| self.fence_closer.feed(line_byte);
         self.fence_len = 0;
     }
     if (self.fence_literal) {
         try self.literalBlock(&.{byte});
         if (byte == '\n') {
-            if (self.fence_closer_possible and self.fence_closer_ticks == 3) {
+            if (self.fence_closer.matches()) {
                 self.fence_pending = false;
                 self.fence_literal = false;
                 self.fence_body_start = 0;
             }
-            self.fence_closer_possible = true;
-            self.fence_closer_indent = 0;
-            self.fence_closer_ticks = 0;
-        } else self.fenceCloserByte(byte);
+            self.fence_closer = .{};
+        } else self.fence_closer.feed(byte);
         return;
     }
     self.held[self.fence_len] = byte;
     self.fence_len += 1;
     if (byte == '\n') {
-        if (closingFence(self.held[self.fence_line_start .. self.fence_len - 1])) {
+        if (Fence.closing(self.held[self.fence_line_start .. self.fence_len - 1])) {
             try self.literalBlock(self.held[self.fence_body_start..self.fence_line_start]);
             self.fence_pending = false;
             self.fence_len = 0;
@@ -1607,3 +1644,35 @@ test "local path filename suffixes survive trimming the sentence semicolon" {
 test "a lone slash or tilde slash is not a local path link" {
     try expectRenderedHome("/ ~/ /; ~/;", "/ ~/ /; ~/;", "/home/test");
 }
+test "fence lexical delegation preserves rendered bytes and LastCode at every split" {
+    const cases = [_]struct { raw: []const u8, rendered: []const u8, code: ?[]const u8 }{
+        .{ .raw = "```sh\n*x*\n```\n", .rendered = "*x*\n", .code = "*x*" },
+        .{ .raw = "   ```c++\n  code\n   ```", .rendered = "  code\n", .code = "  code" },
+        .{ .raw = "```\n```\n", .rendered = "", .code = "" },
+        .{ .raw = "```sh\nunclosed\n", .rendered = "```sh\nunclosed\n", .code = null },
+        .{ .raw = "```bad info\nplain\n", .rendered = "```bad info\nplain\n", .code = null },
+        .{ .raw = "```\nx\n``` \ny\n```\n", .rendered = "x\n``` \ny\n", .code = "x\n``` \ny" },
+    };
+    for (cases) |case| {
+        try expectRendered(case.raw, case.rendered);
+        for (0..case.raw.len + 1) |split| {
+            var storage: [1024]u8 = undefined;
+            var out = std.Io.Writer.fixed(&storage);
+            var record: BlockRecorder = .{ .out = &out };
+            var renderer: Renderer = .{ .out = &out, .blocks = record.sink() };
+            try renderer.feed(case.raw[0..split]);
+            for (case.raw[split..]) |byte| try renderer.feed(&.{byte});
+            try renderer.finish();
+            try std.testing.expectEqualStrings(case.rendered, out.buffered());
+            try std.testing.expectEqual(@as(u6, 0), record.marks.count);
+            var code: LastCode = .{};
+            code.feed(case.raw[0..split]);
+            code.feed(case.raw[split..]);
+            if (case.code) |expected| {
+                const found = code.finish().?;
+                try std.testing.expectEqualStrings(expected, case.raw[@intCast(found.start)..][0..@intCast(found.length)]);
+            } else try std.testing.expect(code.finish() == null);
+        }
+    }
+}
+

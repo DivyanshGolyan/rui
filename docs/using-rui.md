@@ -20,6 +20,11 @@ Enter these at the `›` prompt.
 | `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
+Drafts keep typed `>` quote markers literal.
+When a quoted line wraps, an ASCII quote gutter continues its indentation and depth; very narrow lines wrap literally instead.
+Fenced code does not acquire quote gutters from `>` in its code.
+These display-only continuations never change the text you send.
+
 Tool outcomes in normal conversation show only their description and outcome, with a numeric failed exit when available.
 `/details` escapes the retained tool bytes safely and marks shortened results with `Earlier output omitted`.
 Its raw export command reads the full unchanged saved result.

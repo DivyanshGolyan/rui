@@ -2647,6 +2647,101 @@ test "a resize on a Message overlay reflows its hidden transcript at its own wid
     try expectHiddenTranscriptReflow(false);
 }
 
+test "quote draft screen paints literal markers and shared gutters at every caret in NO_COLOR" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const raw = "> alpha beta gamma";
+    const size: std.posix.winsize = .{ .row = 24, .col = 12, .xpixel = 0, .ypixel = 0 };
+    var storage: [160]u8 = undefined;
+    for (0..raw.len + 1) |cursor| {
+        _ = try Test.render(screen, &out.writer, size, raw, cursor, .{}, &.{});
+        try std.testing.expectEqualStrings("› > alpha", rowText(screen, 20, &storage));
+        try std.testing.expectEqualStrings("  > beta", rowText(screen, 21, &storage));
+        try std.testing.expectEqualStrings("  > gamma", rowText(screen, 22, &storage));
+        const expected_row: u16 = if (cursor < 8) 20 else if (cursor < 13) 21 else 22;
+        const expected_col: u16 = @intCast(2 + if (cursor < 8) cursor else 2 + cursor - (if (cursor < 13) @as(usize, 8) else 13));
+        try std.testing.expectEqual(expected_row, screen.backend.storage.?.vx.screen.cursor.row);
+        try std.testing.expectEqual(expected_col, screen.backend.storage.?.vx.screen.cursor.col);
+    }
+    // Recognition uses original tabs, not the one-cell display replacement.
+    _ = try Test.render(screen, &out.writer, size, ">\talpha beta gamma", 0, .{}, &.{});
+    try std.testing.expectEqualStrings("  beta gamma", rowText(screen, 22, &storage));
+    // Reflow is local; neither painter nor layout inserts into the draft.
+    _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 }, raw, raw.len, .{}, &.{});
+    try std.testing.expectEqualStrings("› > alpha beta gamma", rowText(screen, 22, &storage));
+    _ = try Test.render(screen, &out.writer, size, raw, raw.len, .{}, &.{});
+    try std.testing.expectEqualStrings("  > gamma", rowText(screen, 22, &storage));
+    const Input = @import("SessionInput.zig");
+    var stream: @import("TerminalInput.zig") = .{};
+    const input = try std.testing.allocator.create(Input);
+    defer std.testing.allocator.destroy(input);
+    input.init(&stream);
+    const source = "> \talpha beta gamma\n> > nested";
+    for ("\x1b[200~" ++ source ++ "\x1b[201~") |byte| _ = input.feed(byte);
+    const before = input.composition();
+    _ = try Test.render(screen, &out.writer, size, before.bytes, before.cursor, .{}, &.{});
+    try std.testing.expectEqualStrings(source, input.composition().bytes);
+    const sent = input.feed('\r').message;
+    try std.testing.expectEqualStrings(source, try input.message(sent));
+    _ = input.append("next draft");
+    try std.testing.expectEqualStrings(source, try input.message(sent));
+}
+
+test "quote draft screen hidden labels and exact edge caret include continuation rows" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 40, .col = 12, .xpixel = 0, .ypixel = 0 };
+    const raw = "> abcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefgh";
+    _ = try Test.render(screen, &out.writer, size, raw, raw.len, .{}, &.{});
+    var storage: [160]u8 = undefined;
+    try std.testing.expectEqualStrings("  >", rowText(screen, 38, &storage));
+    try std.testing.expectEqual(@as(u16, 4), screen.backend.storage.?.vx.screen.cursor.col);
+    try std.testing.expectEqual(@as(u16, 38), screen.backend.storage.?.vx.screen.cursor.row);
+    try std.testing.expectEqual(@as(usize, 26), screen.draft_anchor);
+    _ = try Test.render(screen, &out.writer, size, raw, 0, .{}, &.{});
+    try std.testing.expectEqualStrings("› > abcdefgh", rowText(screen, 29, &storage));
+    try std.testing.expectEqual(@as(usize, 0), screen.draft_anchor);
+}
+
+test "quote draft screen fence opacity does not promote code markers" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const raw = "```\n> alpha beta gamma\n```\n> alpha beta gamma";
+    _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = 12, .xpixel = 0, .ypixel = 0 }, raw, 0, .{}, &.{});
+    var storage: [160]u8 = undefined;
+    for ([_][]const u8{ "› ```", "  > alpha", "  beta gamma", "  ```", "  > alpha", "  > beta", "  > gamma" }, 16..) |row, index| {
+        try std.testing.expectEqualStrings(row, rowText(screen, @intCast(index), &storage));
+    }
+    const nested = "> > ab👩‍🚀abcdefghijkl";
+    const size: std.posix.winsize = .{ .row = 24, .col = 8, .xpixel = 0, .ypixel = 0 };
+    _ = screen.setWidth(.wcwidth);
+    _ = try Test.render(screen, &out.writer, size, nested, nested.len, .{}, &.{});
+    try std.testing.expectEqualStrings("  ghijkl", rowText(screen, 21, &storage));
+    try std.testing.expectEqualStrings("", rowText(screen, 22, &storage));
+    _ = screen.setWidth(.unicode);
+    _ = try Test.render(screen, &out.writer, size, nested, nested.len, .{}, &.{});
+    try std.testing.expectEqualStrings("  >>  kl", rowText(screen, 21, &storage));
+    try std.testing.expectEqualStrings("  >>", rowText(screen, 22, &storage));
+}
+
 test "a borrowed layout keeps live following and never restores Action offers or read credit" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();

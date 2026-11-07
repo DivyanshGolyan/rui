@@ -556,6 +556,36 @@ const DraftPieces = struct {
 };
 
 /// The draft's shown lines, one per row of `rows`, the prompt on its first.
+fn composer(painter: *RowPaint, state: *const State, draft: Draft, input: *const ComposerLayout, rows: view.Layout.Rows) error{OutOfMemory}!void {
+    std.debug.assert(rows.len() == input.view.rows);
+    const room = painter.width -| 4;
+    painter.at(rows.start);
+    if (state.inputMode() == .choice) {
+        try signInChoice(painter, state.menu.entries[state.highlighted().?].providers, state.picker.?.step.sign_in);
+        return;
+    }
+    if (draft.bytes.len == 0) {
+        painter.begin(false);
+        _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
+        _ = try painter.put(3, "Type a task to start a Session", room, .{ .colour = .quiet });
+        try painter.finish();
+        return;
+    }
+    const style: Style = .{ .colour = if (state.starting()) .quiet else .strong };
+    for (input.lines[0..rows.len()], 0..) |line, index| {
+        painter.at(@intCast(rows.start + index));
+        painter.begin(false);
+        if (input.view.first + index == 0) _ = try painter.put(1, painter.glyphs.prompt, 1, .{});
+        var column: u16 = 3;
+        for (line.gutter()) |part| {
+            _ = try painter.put(column, part, part.len, style);
+            column += @intCast(part.len);
+        }
+        _ = try painter.put(column, draft.bytes[line.start..line.end], room - line.prefixCells(), style);
+        try painter.finish();
+    }
+}
+/// The line under the input. `listed`: this frame shows the command list.
 fn hints(painter: *RowPaint, state: *const State, draft: Draft, listed: bool) error{OutOfMemory}!void {
     painter.begin(false);
     const room = painter.width -| 2;
@@ -3593,6 +3623,68 @@ test "direct overview scratch refusal cannot publish or preserve a partial paint
     try std.testing.expectError(error.OutOfMemory, draw(backend.window(), backend.scratch(), &state, .{}, .{}, 0));
     backend.end();
     try std.testing.expectError(error.RenderBackendPoisoned, backend.begin(.{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 }));
+}
+
+test "quote draft overview paints literal markers and shared gutters at every caret in NO_COLOR" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const raw = "> alpha beta gamma";
+    for (0..raw.len + 1) |cursor| {
+        var screen = try sizedRender(&state, .{ .bytes = raw, .cursor = cursor }, 14, 24, .{ .depth = .none }, 0);
+        defer screen.deinit();
+        var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer text.deinit();
+        try screen.write(&text.writer);
+        var lines = std.mem.splitScalar(u8, text.written(), '\n');
+        for (0..20) |_| _ = lines.next();
+        try std.testing.expectEqualStrings(" › > alpha", lines.next().?);
+        try std.testing.expectEqualStrings("   > beta", lines.next().?);
+        try std.testing.expectEqualStrings("   > gamma", lines.next().?);
+        const row: u16 = if (cursor < 8) 20 else if (cursor < 13) 21 else 22;
+        const column: u16 = @intCast(3 + if (cursor < 8) cursor else 2 + cursor - (if (cursor < 13) @as(usize, 8) else 13));
+        try std.testing.expectEqual(@as(?Rendered.Cursor, .{ .row = row, .column = column }), screen.cursor);
+    }
+    {
+        var literal = try sizedRender(&state, .{ .bytes = ">\talpha beta gamma" }, 14, 24, .{ .depth = .none }, 0);
+        defer literal.deinit();
+        var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer text.deinit();
+        try literal.write(&text.writer);
+        try std.testing.expect(std.mem.indexOf(u8, text.written(), "   beta gamma\n") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text.written(), "   > beta") == null);
+    }
+    // A sealed start owns the exact raw source, not the generated gutters.
+    const source = "> \talpha beta gamma\n> > quoted";
+    const draft: Draft = .{ .bytes = source, .cursor = source.len };
+    const empty: StartSettings = .{};
+    try expectEffects(&.{.{ .start = .{ .text = source, .settings = &empty } }}, try submit(&state, draft));
+}
+
+test "quote draft overview fence opacity does not promote code markers" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const raw = "```\n> alpha beta gamma\n```\n> alpha beta gamma";
+    var screen = try sizedRender(&state, .{ .bytes = raw }, 14, 24, .{ .depth = .none }, 0);
+    defer screen.deinit();
+    var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer text.deinit();
+    try screen.write(&text.writer);
+    var lines = std.mem.splitScalar(u8, text.written(), '\n');
+    for (0..16) |_| _ = lines.next();
+    for ([_][]const u8{ " › ```", "   > alpha", "   beta gamma", "   ```", "   > alpha", "   > beta", "   > gamma" }) |row| try std.testing.expectEqualStrings(row, lines.next().?);
+    const nested = "> > ab👩‍🚀abcdefghijkl";
+    for ([_]gwidth.Method{ .wcwidth, .unicode }) |method| {
+        var shaped = try sizedRender(&state, .{ .bytes = nested, .cursor = nested.len }, 10, 24, .{ .depth = .none, .width = method }, 0);
+        defer shaped.deinit();
+        var actual: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer actual.deinit();
+        try shaped.write(&actual.writer);
+        var rows = std.mem.splitScalar(u8, actual.written(), '\n');
+        for (0..21) |_| _ = rows.next();
+        try std.testing.expectEqualStrings(if (method == .wcwidth) "   ghijkl" else "   >>  kl", rows.next().?);
+        try std.testing.expectEqualStrings(if (method == .wcwidth) "" else "   >>", rows.next().?);
+        try std.testing.expectEqual(@as(?Rendered.Cursor, .{ .row = 22, .column = if (method == .wcwidth) 3 else 7 }), shaped.cursor);
+    }
 }
 
 test "archive state and confirmation paint through the actual shared backend" {

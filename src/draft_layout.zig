@@ -8,9 +8,13 @@
 //! breaks after its last joint that fits (`/`, `.`, `-` and the like), and
 //! at a cluster only when it has none. Spaces that reach past the edge hang
 //! there: they end the line, take no cell, and never start the next one.
-//! Nothing is stored per line: `shape` counts lines in one pass, and `fit`
-//! walks only up to the shown ones.
+//! Original raw syntax and display pieces share byte coordinates. A local
+//! Markdown context permits quote gutters only outside opaque fenced code.
+//! `shape` counts rows; `fit` stops at the last shown row, after preflighting
+//! any quoted logical line for the whole-line wide-cluster fallback.
 const std = @import("std");
+const prefix = @import("markdown_prefix.zig");
+const Quote = prefix.Quote;
 
 /// A newline breaks hard; a line may break after a space, and a word too
 /// wide for its line after a joint.
@@ -32,7 +36,25 @@ pub const Piece = struct { len: usize, cells: u16, kind: Kind };
 
 /// A visual line: draft bytes `start..end` drawn in `cells` cells. A newline
 /// or hanging spaces that end it lie between its `end` and the next `start`.
-pub const Line = struct { start: usize, end: usize, cells: u16 };
+pub const Line = struct {
+    start: usize,
+    end: usize,
+    cells: u16,
+    continuation: ?Quote.Continuation = null,
+
+    pub fn prefixCells(self: Line) u16 {
+        return if (self.continuation) |value| value.cells else 0;
+    }
+
+    /// Shared synthetic ASCII only; slices are static through frame encoding.
+    /// First rows have no synthetic prefix and retain every original marker.
+    pub fn gutter(self: Line) [3][]const u8 {
+        const value = self.continuation orelse return .{ "", "", "" };
+        const spaces = "                   ";
+        const markers = ">>>>>>>>";
+        return .{ spaces[0..value.indent], markers[0..value.depth], spaces[0 .. value.cells - value.indent - value.depth] };
+    }
+};
 
 /// The most rows an input ever shows.
 pub const max_rows = 10;
@@ -49,9 +71,6 @@ pub const Shape = struct {
     lines: usize,
     caret_line: usize,
     caret_column: u16,
-    /// The full line a caret past its end follows on a row of its own;
-    /// `lines` counts that row.
-    caret_follows_line: ?usize = null,
     anchor_line: usize = 0,
 };
 
@@ -64,29 +83,71 @@ pub const View = struct {
     hidden_below: usize,
 };
 
-/// Walks pieces into lines. `sink.line` receives each line in order with the
-/// caret's column when byte `cursor` is on it, and returns whether to go on.
-fn walk(pieces: anytype, width: u16, cursor: usize, sink: anytype) void {
+/// One row emitter owns both source rows and an exact-edge caret's empty row.
+/// Gutter cells are presentation only: neither source offsets nor cursor move.
+fn Rows(comptime Sink: type) type {
+    return struct {
+        sink: Sink,
+        width: u16,
+
+        fn line(self: @This(), value: Line, caret: ?u16, following: ?Quote.Continuation) bool {
+            if (caret) |column| {
+                if (@as(u32, column) + value.prefixCells() >= self.width) {
+                    if (!self.sink.line(value, null)) return false;
+                    const next: Line = .{ .start = value.end, .end = value.end, .cells = 0, .continuation = following };
+                    return self.sink.line(next, next.prefixCells());
+                }
+                return self.sink.line(value, column + value.prefixCells());
+            }
+            return self.sink.line(value, null);
+        }
+    };
+}
+
+/// Decide once per ORIGINAL logical line. The measured cursor is copied only
+/// for the whole-line wide-cluster fallback, not once per visual row. Context
+/// and measurements are local to this traversal; no editor state is retained.
+fn logical(raw: []const u8, pieces: anytype, width: u16, context: *prefix.Context) ?Quote.Continuation {
+    const head = raw[0..@min(raw.len, prefix.head_limit)];
+    const newline = std.mem.indexOfScalar(u8, head, '\n');
+    const ending: prefix.HeadEnding = if (newline != null) .line_feed else if (raw.len < prefix.head_limit) .canonical_eof else .limit_cut;
+    const decision = context.step(head[0 .. newline orelse head.len], ending).resolved;
+    context.* = decision.next;
+    const quote = decision.projection.quote orelse return null;
+    const continuation = quote.continuation(width) orelse return null;
+    const available = width - continuation.cells;
+    var source = pieces;
+    while (source.next()) |piece| {
+        if (piece.kind == .newline) break;
+        if (piece.cells > available) return null;
+    }
+    return continuation;
+}
+
+/// Walks measured source pieces into rows. Raw and pieces use identical byte
+/// coordinates/newlines, but raw retains tabs that display pieces may normalize.
+fn walk(raw: []const u8, pieces: anytype, width: u16, cursor: usize, sink: anytype) void {
     std.debug.assert(width > 0);
     var source = pieces;
+    var context: prefix.Context = .plain;
+    var following = logical(raw, source, width, &context);
+    var continuation: ?Quote.Continuation = null;
+    const rows: Rows(@TypeOf(sink)) = .{ .sink = sink, .width = width };
     var offset: usize = 0;
     var start: usize = 0;
+    var logical_start: usize = 0;
     var end: usize = 0;
     var cells: u16 = 0;
-    // Cells of spaces hanging past the edge. Any count past the edge puts
-    // a caret there on a row of its own, so these sums saturate: a draft
-    // of the editor's full capacity in spaces must not overflow them.
     var hanging: u16 = 0;
     var caret: ?u16 = null;
-    // Where the line may break: after its last space, and, for a word too
-    // wide for any line, after the word's last joint. The line then ends at
-    // `end` with `cells`, and `columns` counts hanging spaces too.
     const Break = struct { at: usize, end: usize, cells: u16, columns: u16 };
     var soft: ?Break = null;
     var joint: ?Break = null;
     while (source.next()) |piece| {
+        std.debug.assert(offset + piece.len <= raw.len);
         defer offset += piece.len;
-        if (piece.kind != .newline and cells > 0 and @as(u32, cells) + hanging + piece.cells > width) {
+        const prefix_cells: u16 = if (continuation) |value| value.cells else 0;
+        if (piece.kind != .newline and cells > 0 and @as(u32, cells) + hanging + piece.cells > width - prefix_cells) {
             if (piece.kind == .space) {
                 if (offset == cursor) caret = cells +| hanging;
                 hanging +|= piece.cells;
@@ -94,12 +155,13 @@ fn walk(pieces: anytype, width: u16, cursor: usize, sink: anytype) void {
                 continue;
             }
             // A joint breaks only a word still too wide after the space.
-            inline for (.{ false, true }) |at_joint| if (!at_joint or @as(u32, cells) + piece.cells > width) {
-                if (if (at_joint) joint else soft) |point| if (point.at > start) {
-                    if (!sink.line(.{ .start = start, .end = point.end, .cells = point.cells }, if (cursor < point.at) caret else null)) return;
+            inline for (.{ false, true }) |at_joint| if (!at_joint or @as(u32, cells) + piece.cells > width - (if (continuation) |value| @as(u16, value.cells) else 0)) {
+                if (if (at_joint) joint else soft) |point| if (point.at > start and point.at > logical_start + (if (following) |value| @as(usize, value.cells) else 0)) {
+                    if (!rows.line(.{ .start = start, .end = point.end, .cells = point.cells, .continuation = continuation }, if (cursor < point.at) caret else null, following)) return;
                     if (cursor < point.at) caret = null else if (caret) |column| caret = column - point.columns;
                     start = point.at;
                     cells -= point.cells;
+                    continuation = following;
                     hanging = 0;
                     if (joint) |*inside| {
                         if (inside.at > point.at) {
@@ -110,26 +172,29 @@ fn walk(pieces: anytype, width: u16, cursor: usize, sink: anytype) void {
                     soft = null;
                 };
             };
-            // The word after the break can still be too wide with this
-            // piece: it then breaks here, at a cluster.
-            if (cells > 0 and @as(u32, cells) + piece.cells > width) {
-                if (!sink.line(.{ .start = start, .end = offset, .cells = cells }, caret)) return;
+            if (cells > 0 and @as(u32, cells) + piece.cells > width - (if (continuation) |value| @as(u16, value.cells) else 0)) {
+                if (!rows.line(.{ .start = start, .end = offset, .cells = cells, .continuation = continuation }, caret, following)) return;
                 caret = null;
                 start = offset;
                 cells = 0;
+                continuation = following;
                 joint = null;
             }
         }
         if (offset == cursor) caret = cells +| hanging;
         if (piece.kind == .newline) {
-            if (!sink.line(.{ .start = start, .end = end, .cells = cells }, caret)) return;
+            std.debug.assert(std.mem.eql(u8, raw[offset..][0..piece.len], "\n"));
+            if (!rows.line(.{ .start = start, .end = end, .cells = cells, .continuation = continuation }, caret, following)) return;
             caret = null;
             start = offset + piece.len;
+            logical_start = start;
             end = start;
             cells = 0;
             hanging = 0;
             soft = null;
             joint = null;
+            continuation = null;
+            following = logical(raw[start..], source, width, &context);
             continue;
         }
         cells += piece.cells;
@@ -143,14 +208,15 @@ fn walk(pieces: anytype, width: u16, cursor: usize, sink: anytype) void {
             .newline, .other => {},
         }
     }
+    std.debug.assert(offset == raw.len);
     if (offset == cursor) caret = cells +| hanging;
-    _ = sink.line(.{ .start = start, .end = end, .cells = cells }, caret);
+    _ = rows.line(.{ .start = start, .end = end, .cells = cells, .continuation = continuation }, caret, following);
 }
 
 /// Counts the lines of `pieces` at `width` cells, finds the line and column
 /// of the caret at byte `cursor`, and the line that holds byte `anchor`. A
 /// cursor on a soft break belongs to the line it starts.
-pub fn shape(pieces: anytype, width: u16, cursor: usize, anchor: usize) Shape {
+pub fn shape(raw: []const u8, pieces: anytype, width: u16, cursor: usize, anchor: usize) Shape {
     const Counter = struct {
         count: usize = 0,
         anchor: usize,
@@ -170,26 +236,19 @@ pub fn shape(pieces: anytype, width: u16, cursor: usize, anchor: usize) Shape {
         }
     };
     var counter: Counter = .{ .anchor = anchor };
-    walk(pieces, width, cursor, &counter);
+    walk(raw, pieces, width, cursor, &counter);
     std.debug.assert(counter.found);
     var result = counter.result;
     result.lines = counter.count;
-    if (result.caret_column >= width) {
-        result.caret_follows_line = result.caret_line;
-        result.caret_line += 1;
-        result.caret_column = 0;
-        result.lines += 1;
-        if (result.anchor_line > result.caret_follows_line.?) result.anchor_line += 1;
-    }
     return result;
 }
 
 /// Shows at most `limit` lines of a draft with `value`: fills `out` with
 /// them, top to bottom, and returns which they are. The caller keeps
 /// `out[0].start` as the next frame's anchor.
-pub fn fit(pieces: anytype, width: u16, cursor: usize, value: Shape, limit: u16, out: *[max_rows]Line) View {
+pub fn fit(raw: []const u8, pieces: anytype, width: u16, cursor: usize, value: Shape, limit: u16, out: *[max_rows]Line) View {
     const shown = view(value, @min(limit, max_rows));
-    const count = collect(pieces, width, value, cursor, shown.first, out[0..shown.rows]);
+    const count = collect(raw, pieces, width, cursor, shown.first, out[0..shown.rows]);
     std.debug.assert(count == shown.rows);
     return shown;
 }
@@ -208,17 +267,15 @@ fn view(value: Shape, limit: u16) View {
 /// Fills `out` with lines `first..first + out.len` of `pieces`, the caret's
 /// own row included as an empty line, and stops walking there. Returns how
 /// many it filled.
-fn collect(pieces: anytype, width: u16, value: Shape, cursor: usize, first: usize, out: []Line) usize {
+fn collect(raw: []const u8, pieces: anytype, width: u16, cursor: usize, first: usize, out: []Line) usize {
     const Collector = struct {
         first: usize,
-        after: ?usize,
         out: []Line,
         index: usize = 0,
         filled: usize = 0,
 
         fn line(self: *@This(), walked: Line, _: ?u16) bool {
             self.put(walked);
-            if (self.after == self.index - 1) self.put(.{ .start = walked.end, .end = walked.end, .cells = 0 });
             return self.index < self.first + self.out.len;
         }
 
@@ -229,8 +286,8 @@ fn collect(pieces: anytype, width: u16, value: Shape, cursor: usize, first: usiz
             self.filled += 1;
         }
     };
-    var collector: Collector = .{ .first = first, .after = value.caret_follows_line, .out = out };
-    walk(pieces, width, cursor, &collector);
+    var collector: Collector = .{ .first = first, .out = out };
+    walk(raw, pieces, width, cursor, &collector);
     return collector.filled;
 }
 
@@ -279,8 +336,9 @@ fn cellsOf(text: []const u8) u16 {
 
 fn expectLines(text: []const u8, width: u16, expected: []const []const u8) !void {
     var storage: [32]Line = undefined;
-    const whole = shape(Bytes{ .bytes = text }, width, 0, 0);
-    const count = collect(Bytes{ .bytes = text }, width, whole, 0, 0, &storage);
+    const whole = shape(text, Bytes{ .bytes = text }, width, 0, 0);
+    const count = collect(text, Bytes{ .bytes = text }, width, 0, 0, &storage);
+    try std.testing.expectEqual(whole.lines, count);
     try std.testing.expectEqual(expected.len, count);
     for (expected, storage[0..count]) |want, line| try std.testing.expectEqualStrings(want, text[line.start..line.end]);
 }
@@ -333,9 +391,9 @@ test "spaces past the edge hang there and never start a line" {
     // The caret after a word that fills the line, before or after its
     // space, waits on a row of its own; after the space the next word is
     // where typing continues.
-    const before = shape(Bytes{ .bytes = "abcd ef" }, 4, 4, 0);
-    try std.testing.expectEqual(Shape{ .lines = 3, .caret_line = 1, .caret_column = 0, .caret_follows_line = 0 }, before);
-    const after = shape(Bytes{ .bytes = "abcd ef" }, 4, 5, 0);
+    const before = shape("abcd ef", Bytes{ .bytes = "abcd ef" }, 4, 4, 0);
+    try std.testing.expectEqual(Shape{ .lines = 3, .caret_line = 1, .caret_column = 0 }, before);
+    const after = shape("abcd ef", Bytes{ .bytes = "abcd ef" }, 4, 5, 0);
     try std.testing.expectEqual(Shape{ .lines = 2, .caret_line = 1, .caret_column = 0 }, after);
 }
 
@@ -343,11 +401,11 @@ test "a draft of the editor's full capacity in spaces lays out without overflow"
     const spaces: [65536]u8 = @splat(' ');
     var storage: [max_rows]Line = undefined;
     for ([_]usize{ 0, 5, 9, 10, 11, 30000, spaces.len }) |cursor| {
-        const got = shape(Bytes{ .bytes = &spaces }, 10, cursor, 0);
+        const got = shape(&spaces, Bytes{ .bytes = &spaces }, 10, cursor, 0);
         // Ten spaces fill the line; the rest hang past its edge.
         try std.testing.expectEqual(@as(usize, if (cursor >= 10) 2 else 1), got.lines);
         try std.testing.expectEqual(@as(u16, if (cursor >= 10) 0 else @intCast(cursor)), got.caret_column);
-        const shown = fit(Bytes{ .bytes = &spaces }, 10, cursor, got, 10, &storage);
+        const shown = fit(&spaces, Bytes{ .bytes = &spaces }, 10, cursor, got, 10, &storage);
         try std.testing.expectEqual(got.lines, shown.rows);
     }
 }
@@ -369,7 +427,7 @@ test "the caret follows its byte across soft and hard breaks" {
         .{ .cursor = 19, .line = 2, .column = 3 },
     };
     for (cases) |case| {
-        const got = shape(Bytes{ .bytes = text }, 10, case.cursor, 0);
+        const got = shape(text, Bytes{ .bytes = text }, 10, case.cursor, 0);
         try std.testing.expectEqual(@as(usize, 3), got.lines);
         try std.testing.expectEqual(case.line, got.caret_line);
         try std.testing.expectEqual(case.column, got.caret_column);
@@ -379,16 +437,16 @@ test "the caret follows its byte across soft and hard breaks" {
 test "a caret after a line that fills the width gets a row of its own" {
     var storage: [8]Line = undefined;
     for ([_][]const u8{ "abcdef", "abcdef\nx" }) |text| {
-        const got = shape(Bytes{ .bytes = text }, 6, 6, 0);
+        const got = shape(text, Bytes{ .bytes = text }, 6, 6, 0);
         try std.testing.expectEqual(@as(usize, 1), got.caret_line);
         try std.testing.expectEqual(@as(u16, 0), got.caret_column);
-        const count = collect(Bytes{ .bytes = text }, 6, got, 6, 0, &storage);
+        const count = collect(text, Bytes{ .bytes = text }, 6, 6, 0, &storage);
         try std.testing.expectEqual(got.lines, count);
         try std.testing.expectEqual(@as(usize, 6), storage[1].start);
         try std.testing.expectEqual(@as(usize, 6), storage[1].end);
     }
     // Short of the width, the caret stays on its line.
-    const short = shape(Bytes{ .bytes = "abcde" }, 6, 5, 0);
+    const short = shape("abcde", Bytes{ .bytes = "abcde" }, 6, 5, 0);
     try std.testing.expectEqual(@as(usize, 1), short.lines);
     try std.testing.expectEqual(@as(u16, 5), short.caret_column);
 }
@@ -417,10 +475,10 @@ test "the view keeps the caret in sight and moves as little as it can" {
 test "the anchor byte keeps its line first across a narrower width" {
     const text = "one two three four five six";
     // At width 9 the lines start at bytes 0, 8, 19; "three" starts at 8.
-    const wide = shape(Bytes{ .bytes = text }, 9, text.len, 8);
+    const wide = shape(text, Bytes{ .bytes = text }, 9, text.len, 8);
     try std.testing.expectEqual(@as(usize, 1), wide.anchor_line);
     // At width 5 "three" is the third line, and still shown first.
-    const narrow = shape(Bytes{ .bytes = text }, 5, 8, 8);
+    const narrow = shape(text, Bytes{ .bytes = text }, 5, 8, 8);
     try std.testing.expectEqual(@as(usize, 2), narrow.anchor_line);
     try std.testing.expectEqual(@as(usize, 2), view(narrow, 2).first);
 }
@@ -438,8 +496,7 @@ test "collect stops walking once the shown lines are filled" {
     const text: []const u8 = &lines;
     var calls: usize = 0;
     var storage: [2]Line = undefined;
-    const whole = shape(Bytes{ .bytes = text }, 4, 0, 0);
-    try std.testing.expectEqual(@as(usize, 2), collect(Counted{ .inner = .{ .bytes = text }, .calls = &calls }, 4, whole, 0, 0, &storage));
+    try std.testing.expectEqual(@as(usize, 2), collect(text, Counted{ .inner = .{ .bytes = text }, .calls = &calls }, 4, 0, 0, &storage));
     try std.testing.expect(calls < 8);
 }
 
@@ -449,9 +506,9 @@ test "every cursor of every draft lands in the view, on its own bytes, at every 
     var whole_storage: [64]Line = undefined;
     for (texts) |text| for (2..9) |w| for (1..4) |limit| for (0..text.len + 1) |cursor| {
         const width: u16 = @intCast(w);
-        const bare = shape(Bytes{ .bytes = text }, width, cursor, 0);
+        const bare = shape(text, Bytes{ .bytes = text }, width, cursor, 0);
         try std.testing.expect(bare.caret_column < width);
-        const whole = collect(Bytes{ .bytes = text }, width, bare, cursor, 0, &whole_storage);
+        const whole = collect(text, Bytes{ .bytes = text }, width, cursor, 0, &whole_storage);
         try std.testing.expectEqual(bare.lines, whole);
         // Every byte is on exactly one line, except the newlines and the
         // hanging spaces between them.
@@ -466,23 +523,198 @@ test "every cursor of every draft lands in the view, on its own bytes, at every 
         for (text[covered..]) |byte| try std.testing.expect(byte == '\n' or byte == ' ');
         // The caret sits on the line that holds its byte, after the cells
         // before it; past a full line it waits on a row of its own.
-        if (bare.caret_follows_line == null) {
-            const line = whole_storage[bare.caret_line];
-            try std.testing.expect(line.start <= cursor and cursor <= line.end);
-            try std.testing.expectEqual(cellsOf(text[line.start..cursor]), bare.caret_column);
-        } else try std.testing.expectEqual(bare.caret_follows_line.? + 1, bare.caret_line);
+        const caret_row = whole_storage[bare.caret_line];
+        if (cursor <= caret_row.end) {
+            try std.testing.expect(caret_row.start <= cursor);
+            try std.testing.expectEqual(cellsOf(text[caret_row.start..cursor]), bare.caret_column);
+        } else {
+            try std.testing.expect(bare.caret_line > 0);
+            try std.testing.expectEqual(caret_row.start, caret_row.end);
+            try std.testing.expectEqual(@as(u16, 0), bare.caret_column);
+            try std.testing.expectEqual(width, whole_storage[bare.caret_line - 1].cells);
+            for (text[caret_row.end..cursor]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
+        }
         for (0..whole) |previous| {
-            if (bare.caret_follows_line) |after| if (previous == after + 1) continue;
-            const got = shape(Bytes{ .bytes = text }, width, cursor, whole_storage[previous].start);
+            const got = shape(text, Bytes{ .bytes = text }, width, cursor, whole_storage[previous].start);
             try std.testing.expectEqual(previous, got.anchor_line);
             const shown = view(got, @intCast(limit));
             try std.testing.expect(shown.first <= got.caret_line and got.caret_line < shown.first + shown.rows);
             // The view stays where it was while the caret is in it.
             if (previous + shown.rows <= got.lines and previous <= got.caret_line and got.caret_line < previous + shown.rows)
                 try std.testing.expectEqual(previous, shown.first);
-            const count = collect(Bytes{ .bytes = text }, width, got, cursor, shown.first, storage[0..shown.rows]);
+            const count = collect(text, Bytes{ .bytes = text }, width, cursor, shown.first, storage[0..shown.rows]);
             try std.testing.expectEqual(@as(usize, shown.rows), count);
             try std.testing.expectEqualSlices(Line, whole_storage[shown.first..][0..shown.rows], storage[0..shown.rows]);
+        }
+    };
+}
+
+fn quoteLines(raw: []const u8, shown: []const u8, width: u16, cursor: usize, out: []Line) usize {
+    return collect(raw, Bytes{ .bytes = shown }, width, cursor, 0, out);
+}
+
+test "quote draft exact source rows and every caret preserve literal first markers" {
+    const raw = "> alpha beta gamma";
+    var storage: [max_rows]Line = undefined;
+    const count = quoteLines(raw, raw, 10, raw.len, &storage);
+    try std.testing.expectEqual(@as(usize, 3), count);
+    const expected = [_]Line{
+        .{ .start = 0, .end = 8, .cells = 8 },
+        .{ .start = 8, .end = 13, .cells = 5, .continuation = .{ .cells = 2, .depth = 1, .indent = 0 } },
+        .{ .start = 13, .end = 18, .cells = 5, .continuation = .{ .cells = 2, .depth = 1, .indent = 0 } },
+    };
+    try std.testing.expectEqualSlices(Line, &expected, storage[0..count]);
+    try std.testing.expectEqualStrings("> alpha ", raw[storage[0].start..storage[0].end]);
+    for (0..raw.len + 1) |cursor| {
+        const result = shape(raw, Bytes{ .bytes = raw }, 10, cursor, 0);
+        const row: usize = if (cursor < 8) 0 else if (cursor < 13) 1 else 2;
+        const column: u16 = @intCast(if (row == 0) cursor else 2 + cursor - expected[row].start);
+        try std.testing.expectEqual(row, result.caret_line);
+        try std.testing.expectEqual(column, result.caret_column);
+        try std.testing.expectEqual(@as(usize, 3), result.lines);
+    }
+    // Prefix spaces cannot strand the first marker row above a long body word.
+    try std.testing.expectEqual(@as(usize, 3), quoteLines("> abcdefghijk", "> abcdefghijk", 6, 0, &storage));
+    try std.testing.expectEqualStrings("> abcd", "> abcdefghijk"[storage[0].start..storage[0].end]);
+    try std.testing.expectEqualStrings("efgh", "> abcdefghijk"[storage[1].start..storage[1].end]);
+    try std.testing.expectEqualStrings("ijk", "> abcdefghijk"[storage[2].start..storage[2].end]);
+}
+
+test "quote draft exact edge caret row inherits gutter and hard newline resets" {
+    var storage: [max_rows]Line = undefined;
+    for ([_][]const u8{ "> abcd", "> abcd\nx" }) |raw| {
+        const result = shape(raw, Bytes{ .bytes = raw }, 6, 6, 0);
+        try std.testing.expectEqual(@as(usize, 1), result.caret_line);
+        try std.testing.expectEqual(@as(u16, 2), result.caret_column);
+        const count = quoteLines(raw, raw, 6, 6, &storage);
+        try std.testing.expectEqual(result.lines, count);
+        try std.testing.expectEqual(Line{ .start = 6, .end = 6, .cells = 0, .continuation = .{ .cells = 2, .depth = 1, .indent = 0 } }, storage[1]);
+    }
+    const raw = "> abcd\nx";
+    const after = shape(raw, Bytes{ .bytes = raw }, 6, 7, 0);
+    try std.testing.expectEqual(@as(usize, 1), after.caret_line);
+    try std.testing.expectEqual(@as(u16, 0), after.caret_column);
+    try std.testing.expectEqual(@as(usize, 2), quoteLines(raw, raw, 6, 7, &storage));
+    try std.testing.expect(storage[1].continuation == null);
+}
+
+test "quote draft original tabs cannot become syntax through display normalization" {
+    var storage: [max_rows]Line = undefined;
+    for ([_][]const u8{ "\t> alpha beta gamma", ">\talpha beta gamma" }, [_][]const u8{ " > alpha beta gamma", "> alpha beta gamma" }) |raw, display| {
+        const count = quoteLines(raw, display, 10, 0, &storage);
+        try std.testing.expect(count > 1);
+        for (storage[0..count]) |line| try std.testing.expect(line.continuation == null);
+    }
+    const raw = "> \talpha beta gamma";
+    const shown = ">  alpha beta gamma";
+    const count = quoteLines(raw, shown, 10, 0, &storage);
+    try std.testing.expect(storage[1].continuation != null);
+    try std.testing.expectEqual(@as(u16, 2), storage[1].prefixCells());
+    var covered: usize = 0;
+    var copy: [raw.len]u8 = undefined;
+    for (storage[0..count]) |line| {
+        @memcpy(copy[covered..line.end], raw[covered..line.end]);
+        covered = line.end;
+    }
+    @memcpy(copy[covered..], raw[covered..]);
+    try std.testing.expectEqualStrings(raw, &copy);
+}
+
+test "quote draft opacity is shared for top level and exact outer fenced code" {
+    var storage: [64]Line = undefined;
+    const raw = "````\n```\n> alpha beta gamma\n````\n> alpha beta gamma";
+    const count = quoteLines(raw, raw, 10, 0, &storage);
+    const outside = std.mem.lastIndexOf(u8, raw, "> alpha").?;
+    var saw_after = false;
+    for (storage[0..count]) |line| {
+        if (line.start < outside) try std.testing.expect(line.continuation == null);
+        if (line.start > outside) {
+            try std.testing.expect(line.continuation != null);
+            saw_after = true;
+        }
+    }
+    try std.testing.expect(saw_after);
+    const quoted = "> ~~~\n> > alpha beta gamma\n> ~~~\t\n> > actual nested quote";
+    const rows = quoteLines(quoted, quoted, 12, 0, &storage);
+    const code_start = std.mem.indexOf(u8, quoted, "> > alpha").?;
+    const close = std.mem.indexOf(u8, quoted, "> ~~~\t").?;
+    const actual = std.mem.indexOf(u8, quoted, "> > actual").?;
+    var saw_code = false;
+    var saw_nested = false;
+    for (storage[0..rows]) |line| if (line.continuation) |value| {
+        if (line.start > code_start and line.start < close) {
+            try std.testing.expectEqual(@as(u4, 1), value.depth);
+            saw_code = true;
+        }
+        if (line.start > actual) {
+            try std.testing.expectEqual(@as(u4, 2), value.depth);
+            saw_nested = true;
+        }
+    };
+    try std.testing.expect(saw_code and saw_nested);
+}
+
+test "quote draft narrow and whole logical wide cluster fallback is literal" {
+    const Wide = struct {
+        inner: Bytes,
+        pub fn next(self: *@This()) ?Piece {
+            var piece = self.inner.next() orelse return null;
+            if (piece.cells == 2) piece.cells = 4;
+            return piece;
+        }
+    };
+    const raw = "> abcd W abcdefghijkl";
+    var storage: [max_rows]Line = undefined;
+    const count = collect(raw, Wide{ .inner = .{ .bytes = raw } }, 5, 0, 0, &storage);
+    for (storage[0..count]) |line| try std.testing.expect(line.continuation == null);
+    for (1..5) |width| {
+        const shown = quoteLines("> abcdef", "> abcdef", @intCast(width), 0, &storage);
+        for (storage[0..shown]) |line| try std.testing.expectEqual(width >= 4 and line.start > 0, line.continuation != null);
+    }
+    const nested = "   > > alpha beta gamma";
+    for (1..10) |width| {
+        const rows = quoteLines(nested, nested, @intCast(width), 0, &storage);
+        for (storage[0..rows]) |line| if (line.continuation) |value| {
+            try std.testing.expect(width >= @as(usize, value.cells) + 2);
+            const parts = line.gutter();
+            try std.testing.expectEqualStrings("   ", parts[0]);
+            try std.testing.expectEqualStrings(">>", parts[1]);
+            try std.testing.expectEqual(@as(usize, value.cells), parts[0].len + parts[1].len + parts[2].len);
+        };
+    }
+    std.debug.print("draft sizes Line={d} Shape={d} shown10={d} bytes\n", .{ @sizeOf(Line), @sizeOf(Shape), @sizeOf([max_rows]Line) });
+    try std.testing.expect(@sizeOf(Line) <= 24);
+}
+
+test "quote draft width and source oracle spans every ASCII caret anchor and wrap" {
+    const samples = [_][]const u8{
+        "> alpha beta gamma",                                 "> abcd efghijklmnopqrst end",      "> ",                  ">",                 ">> ",
+        "   > > abc defghijkl end\n> next line",              "> > > abcdefghijklmnopqrstuvwxyz", "> a       b       c", "> abcd\n\n> efghi", ">  abcdefghijklmnopqrst ",
+        "```\n> literal code here\n```\n> actual prose here",
+    };
+    var storage: [128]Line = undefined;
+    for (samples) |raw| for (1..22) |columns| for (0..raw.len + 1) |cursor| {
+        const width: u16 = @intCast(columns);
+        const count = quoteLines(raw, raw, width, cursor, &storage);
+        const value = shape(raw, Bytes{ .bytes = raw }, width, cursor, 0);
+        try std.testing.expectEqual(count, value.lines);
+        var previous: usize = 0;
+        for (storage[0..count]) |line| {
+            try std.testing.expect(line.start >= previous and line.end >= line.start);
+            for (raw[previous..line.start]) |byte| try std.testing.expect(byte == ' ' or byte == '\n');
+            try std.testing.expect(line.cells + line.prefixCells() <= width);
+            previous = line.end;
+        }
+        for (raw[previous..]) |byte| try std.testing.expect(byte == ' ' or byte == '\n');
+        const caret = storage[value.caret_line];
+        try std.testing.expect(value.caret_column < width);
+        if (cursor <= caret.end) try std.testing.expectEqual(cursor - caret.start + caret.prefixCells(), value.caret_column);
+        for (storage[0..count], 0..) |line, index| {
+            const anchored = shape(raw, Bytes{ .bytes = raw }, width, cursor, line.start);
+            // A shared boundary belongs to the last emitted row at that byte.
+            var expected = index;
+            while (expected + 1 < count and storage[expected + 1].start == line.start) expected += 1;
+            try std.testing.expectEqual(expected, anchored.anchor_line);
         }
     };
 }
