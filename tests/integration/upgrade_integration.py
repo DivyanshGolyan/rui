@@ -620,6 +620,28 @@ def terminal_cases(root, binary, releases, artifacts):
                 screen.contains("enter Install")
                 screen.save(artifacts, f"{entry}-offer")
                 assert c.link.resolve() == c.original and c.status()["instance"] == previous["instance"]
+                # The first Escape closes the settled panel only after the
+                # next ESC [ arrives, leaving the paste prefix with the shared
+                # decoder. Keep the retained /upgrade draft and prove the
+                # entire pasted suffix and following arrow were dispatched.
+                screen.send("\x1b[?2027;3$y\x1b\x1b[200~XYZ\x1b[201~\x1b[DQ")
+                wait_for(screen.observe, "retained draft with handoff paste and arrow",
+                         ready=lambda _: screen.capture.draft("/upgradeXYQZ", len(prompt) + 11, prompt=prompt))
+                # Heart + VS16 is two cells in Unicode mode, one in wcwidth.
+                # The report was consumed by the panel but must govern the
+                # original screen's layout after return.
+                screen.send("\x15\x1b[200~A❤️B\x1b[201~")
+                def unicode_draft(_):
+                    capture = screen.capture
+                    cursor = capture.screen.cursor
+                    row = capture.screen.display[cursor.y]
+                    # pyte drops text following VS16; the explicit terminal
+                    # cursor position is the width oracle, not its cell model.
+                    return (not capture.synchronized and "A❤" in row
+                            and cursor.x == len(prompt) + 4)
+                wait_for(screen.observe, "Unicode width after panel return", ready=unicode_draft)
+                screen.send("\x15/upgrade\r")
+                screen.contains("enter Install")
                 screen.send("\r")
                 screen.until(gate.entered.is_set, "terminal installation archive gate")
                 screen.contains("preparing")

@@ -52,6 +52,9 @@ pub fn run(init: std.process.Init, store: []const u8, terminal: *SessionTerminal
     terminal.screen = screen;
     terminal.pump = .{ .context = &self, .step = pump };
     defer {
+        // Reports belong to the terminal, not the borrowed panel screen.
+        // Preserve the final method on the original layout owner on every exit.
+        original.setWidth(screen.vx.caps.unicode);
         terminal.screen = original;
         terminal.pump = pump_before;
         original.vx.queueRefresh();

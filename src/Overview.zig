@@ -514,6 +514,7 @@ fn turn(self: *Self) !?Next {
     if (self.upgrade_requested) {
         if (try self.quiesceUpgrade()) {
             const outcome = try UpgradePanel.run(self.init, self.options.store, self.terminal, self.interrupted);
+            self.caps.width = self.terminal.screen.vx.caps.unicode;
             self.upgrade_requested = false;
             switch (outcome) {
                 .unchanged => {},
