@@ -140,6 +140,7 @@ const sidenote_cells = 5;
 fn isSidenote(value: u8) bool {
     return value & (user_bit | summary_bit) == summary_bit;
 }
+const DisplayChannel = enum { body, note, address };
 fn displayChannel(style: u8) DisplayChannel {
     return if (foregroundIndex(style) == address_index) .address else if (isSidenote(style)) .note else .body;
 }
@@ -1157,7 +1158,7 @@ test "one logical word keeps its golden wrapping across more than 64 retained st
         try doc.append("\x1b[0m");
         try doc.prepare();
         var screen: TestScreen = undefined;
-        const result = try doc.draw(screen.window(40, 3), .{}, true, true, .{}, .{});
+        const result = doc.draw(screen.window(40, 3), .{}, true, true, .{});
         var line: [64]u8 = undefined;
         if (prefix.len == 0) {
             try std.testing.expectEqual(@as(usize, 2), result.rows);
@@ -1185,7 +1186,7 @@ test "display channel boundaries cannot hide combining marks or change link meta
         try std.testing.expectEqualStrings(uri, doc.address(uri.len));
         try expectLinks(&doc, .{}, 20, &.{ uri, uri, uri, uri, uri, uri, uri, uri });
         var screen: TestScreen = undefined;
-        _ = try doc.draw(screen.window(20, 1), .{}, true, true, .{}, .{});
+        _ = doc.draw(screen.window(20, 1), .{}, true, true, .{});
         var line: [64]u8 = undefined;
         try std.testing.expectEqualStrings("\\u{301}Z", screen.row(0, &line));
     }
@@ -1218,10 +1219,6 @@ test "display channel boundaries cannot hide combining marks or change link meta
     try std.testing.expect(zwj_runs.next() == null);
 }
 
-test "replayable run CPU comparison with former fixed batches at retained capacity" {
-    const doc = try std.testing.allocator.create(Document);
-    defer std.testing.allocator.destroy(doc);
-    const Former = struct {
 test "hanging prefixes include combining marks on their final space before splitting a range" {
     for ([_][]const u8{ "• ́X words wrap", "  ́X words wrap", "  $ ́X words wrap" }, [_]usize{ "• ́".len, "  ́".len, "  $ ́".len }) |line, expected| {
         const split = hanging(line, 20, false);
@@ -1237,7 +1234,6 @@ test "hanging prefixes include combining marks on their final space before split
         try doc.append(line);
         try doc.prepare();
         var screen: TestScreen = undefined;
-        _ = try doc.draw(screen.window(20, 2), .{}, true, false, .{}, .{});
+        _ = doc.draw(screen.window(20, 2), .{}, true, false, .{});
     }
 }
-
