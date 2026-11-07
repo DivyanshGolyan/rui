@@ -2485,7 +2485,7 @@ test "live and transcript chrome have identical cells with calls queue work draf
         _ = screen.backend.setPolicy(.{ .depth = if (colour) .indexed else .none, .width = screen.backend.widthMethod() });
         try screen.latest();
         screen.live.text.clear();
-        try screen.append("BODY-FIRST\nBODY-LAST");
+        try screen.append("BODY-FIRST ▐\nBODY-LAST");
         var held: View.Live = .{ .count = 1, .total = 1 };
         held.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
         try held.entries[0].presentation.description.?.set("Held call");
@@ -2495,9 +2495,16 @@ test "live and transcript chrome have identical cells with calls queue work draf
             if (transcript) try screen.beginTranscript(0);
             _ = screen.presented(try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, chrome, &held));
             var row: [256]u8 = undefined;
+            try std.testing.expectEqual(rows - 5, screen.height);
+            const raw = &screen.backend.storage.?.vx.screen_last;
+            for (0..rows) |y| {
+                const glyph = raw.readCell(79, @intCast(y)).?.char.grapheme;
+                try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, glyph, "▐"));
+            }
+            try std.testing.expectEqualStrings("▐", raw.readCell(11, 0).?.char.grapheme);
             try std.testing.expectEqual(@as(u16, 2), screen.drawn.rows);
             try std.testing.expect(screen.height > screen.drawn.rows);
-            try std.testing.expectEqualStrings("BODY-FIRST", rowText(screen, 0, &row));
+            try std.testing.expectEqualStrings("BODY-FIRST ▐", rowText(screen, 0, &row));
             try std.testing.expectEqualStrings("BODY-LAST", rowText(screen, 1, &row));
             try std.testing.expectEqualStrings("  • Held call · 42s", rowText(screen, 2, &row));
             for (3..rows - 4) |y| try std.testing.expectEqualStrings("", rowText(screen, @intCast(y), &row));
@@ -2508,12 +2515,47 @@ test "live and transcript chrome have identical cells with calls queue work draf
         }
         const waiting: protocol.WorkState = .{ .working = .{ .since = 100 } };
         _ = try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .queued = chrome.queued, .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &.{});
+        const raw = &screen.backend.storage.?.vx.screen_last;
+        try std.testing.expectEqual(rows - 5, screen.height);
+        for (0..rows) |y| try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, raw.readCell(79, @intCast(y)).?.char.grapheme, "▐"));
         var work_row: [256]u8 = undefined;
         try std.testing.expectEqual(@as(u16, 2), screen.drawn.rows);
         try std.testing.expectEqualStrings("• Waiting · 42s", rowText(screen, 2, &work_row));
         _ = try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "keep", 4, .{ .notice = "Important notice", .queued = chrome.queued, .live = chrome.live }, &held);
         var row: [256]u8 = undefined;
         try std.testing.expectEqualStrings("Important notice", rowText(screen, rows - 1, &row));
+    };
+    // The submitted-feedback observer has no calls/queue and one input row.
+    // Pin EVERY one-line status/work variant's raw extent, timestamp cells
+    // and literal body glyph without rowText's existing rail suppression.
+    for ([_]bool{ false, true }) |colour| for ([_][]const u8{ "", "Sending…", "Sent" }) |status| for ([_]bool{ false, true }) |working| {
+        screen.colour = colour;
+        _ = screen.backend.setPolicy(.{ .depth = if (colour) .indexed else .none, .width = screen.backend.widthMethod() });
+        try screen.latest();
+        screen.live.text.clear();
+        try screen.append("› " ++ View.Mark.sidenote ++ "11:42" ++ View.Mark.reset ++ View.Mark.body ++ "x" ++ View.Mark.reset ++ "\nBODY ▐\nLITERAL" ++ "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ++ "▐");
+        const waiting: protocol.WorkState = .{ .working = .{ .since = 100 } };
+        const size_: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+        for ([_]bool{ false, true }) |transcript| {
+            if (transcript) try screen.beginTranscript(0);
+            _ = try Test.render(screen, &out.writer, size_, "", 0, .{ .status = status, .live = if (working) work_line.of(&test_words, &waiting, 7, 142_000) else null }, &.{});
+            const rail_rows: u16 = 21 - @as(u16, @intFromBool(status.len != 0)) - @as(u16, @intFromBool(working));
+            try std.testing.expectEqual(rail_rows, screen.height);
+            const raw = &screen.backend.storage.?.vx.screen_last;
+            for (0..24) |y| try std.testing.expectEqual(y < rail_rows, std.mem.eql(u8, raw.readCell(79, @intCast(y)).?.char.grapheme, "▐"));
+            try std.testing.expectEqualStrings("›", raw.readCell(0, 0).?.char.grapheme);
+            try std.testing.expectEqualStrings("x", raw.readCell(2, 0).?.char.grapheme);
+            for (3..74) |x| try std.testing.expectEqualStrings(" ", raw.readCell(@intCast(x), 0).?.char.grapheme);
+            for ("11:42", 74..) |byte, x| try std.testing.expectEqualStrings(&.{byte}, raw.readCell(@intCast(x), 0).?.char.grapheme);
+            try std.testing.expectEqualStrings("▐", raw.readCell(5, 1).?.char.grapheme);
+            // Window owns wrapping: the long token's literal glyph occurs
+            // once in content cells, regardless of its soft-break column.
+            var literal: usize = 0;
+            for (2..5) |y| for (0..79) |x| {
+                literal += @intFromBool(std.mem.eql(u8, raw.readCell(@intCast(x), @intCast(y)).?.char.grapheme, "▐"));
+            };
+            try std.testing.expectEqual(@as(usize, 1), literal);
+        }
     };
 }
 

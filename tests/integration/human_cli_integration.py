@@ -1327,14 +1327,74 @@ def live_conversation(frame):
     return not frame.startswith("Browsing") and not looking_back(frame)
 
 
-def conversation_body(frame, columns, cursor, *, queued, call=None, work=None):
+def conversation_content(frame, cells, rail_rows):
+    """Project ONLY the physically owned rail cells of a proved conversation.
+
+    Cells are ScreenCapture's immutable snapshot from THIS commit, never the
+    newest grid paired with an older frame. The caller's fixed chrome shape
+    is pinned by actual Screen raw-cell tests, not inferred from prose length.
+    """
+    assert live_or_back_frame(frame), ("inspection is full width", frame)
+    assert cells and 0 < rail_rows < len(cells), ("rail extent", rail_rows)
+    columns = len(cells[0])
+    assert columns == 80 and all(len(row) == columns for row in cells), "fixed fixture grid"
+    raw_rows = ["".join(cell.data for cell in row).rstrip() for row in cells]
+    assert frame == "\n".join(raw_rows), ("frame/grid commit mismatch", frame)
+    for y in range(rail_rows):
+        assert cells[y][columns - 1].data == "▐", ("missing/moved physical rail", y, frame)
+    return ["".join(cell.data for cell in row[:columns - 1]).rstrip()
+            if y < rail_rows else raw_rows[y] for y, row in enumerate(cells)]
+
+
+def plain_conversation_content(frame, cells):
+    """The no-call/no-queue, one-row-composer fixtures ONLY.
+
+    Raw one-line Sending/Sent status and the named provider clock are positive
+    chrome facts. Actual Screen tests pin all six rail extents for this shape.
+    No source wrapping or row census is recomputed here.
+    """
+    rows = frame.split("\n")
+    assert len(rows) == len(cells) and rows[-2] == "›" and rows[-3] == "─" * 80, frame
+    status_text = "".join(cell.data for cell in cells[-4][:79]).rstrip()
+    status = int(status_text in ("Sending…", "Sent"))
+    if status:
+        assert rows[-4] == status_text, ("ambiguous full-width status", frame)
+    clock = re.compile(r"• Waiting · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
+    work = [y for y, row in enumerate(cells[:-3])
+            if clock.fullmatch("".join(cell.data for cell in row[:79]).rstrip())]
+    assert len(work) <= 1, ("ambiguous provider clock", frame)
+    content = conversation_content(frame, cells, len(rows) - 3 - status - len(work))
+    if work:
+        assert clock.fullmatch(content[work[0]]), ("provider row geometry", frame)
+        assert all(not row for row in content[work[0] + 1:len(rows) - 3 - status]), ("nonblank below provider work", frame)
+    return content
+
+
+def assert_submitted_feedback(frame, cells, times):
+    rows = plain_conversation_content(frame, cells)
+    composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
+    history = rows[:composer]
+    assert "›" not in [row.strip() for row in history], frame
+    for row in history:
+        if row.startswith("› "):
+            assert untimed(row) == "› x", ("submitted source changed", row)
+            # Physical width80 includes the independently validated rail;
+            # source width79 ends in the Host's actual admission minute.
+            assert len(row) == 79 and row[-5:] in times and not row[3:-5].strip(" "), (row, times)
+    if rows[composer].strip() == "›":
+        assert "› x" in map(untimed, history) or {"Sending…", "Sent"} & set(history), frame
+
+
+def conversation_body(frame, columns, cursor, *, cells, queued, call=None, work=None):
     """Partition ONLY the known one-call/work, one-row draft fixtures.
 
     Screen's actual coordinate witness pins source->call->blank gap and the
     bottom queue/rule/composer/footer. Validate ALL chrome before excluding it;
     never erase matching strings from prose or infer capacity as source rows.
     """
-    rows = frame.split("\n")
+    # This shape has exactly one call/work, one queue, rule, draft and footer.
+    # The actual Screen witness pins its rail at H-5, even with a short body.
+    rows = conversation_content(frame, cells, len(cells) - 5)
     assert len(rows) >= 8 and live_or_back_frame(frame), ("not a conversation", frame)
     assert cursor == (2, len(rows) - 2) and rows[-2] == "›", ("composer geometry", cursor, frame)
     assert rows[-3] == "─" * columns, ("rule geometry", frame)
@@ -1384,6 +1444,11 @@ def fitted_scroll(master, keys, draft):
 
 def conversation_protocol_cases():
     """Independent, current-frame protocol counterexamples; no PTY/Host."""
+    from terminal_screen import ScreenCapture
+    def capture_rows(rows):
+        capture = ScreenCapture(80, len(rows))
+        capture.feed(terminal_frame(rows, (len(rows) - 1, 3)))
+        return capture
     for label in LOOKBACK_LABELS:
         assert looking_back("body\n" + label)
         assert not looking_back(label + "\nnotice takes priority")
@@ -1392,21 +1457,27 @@ def conversation_protocol_cases():
     queue = "› QUEUED-SOURCE".ljust(72) + "3 queued"
     for height in (24, 200):
         for boundary in (2, height - 5):
-            body = ["BODY-FIRST"] + ["BODY-MIDDLE"] * (boundary - 2) + ["BODY-LAST"]
+            body = ["BODY-FIRST ▐"] + ["BODY-MIDDLE"] * (boundary - 2) + ["BODY-LAST"]
             rows = body + ["  • Held call · 42s"] + [""] * (height - 5 - boundary)
             rows += [queue, "─" * 80, "›", "Looking back · Ctrl-End: latest"]
+            rows = [row.ljust(79) + "▐" if y < height - 5 else row for y, row in enumerate(rows)]
             frame = "\n".join(rows)
             def observe(candidate):
-                actual = conversation_body("\n".join(candidate), 80, (2, height - 2), queued=queue, call="Held call")
+                capture = capture_rows(candidate)
+                actual = conversation_body(capture.completed, 80, (2, height - 2), cells=capture.completed_cells, queued=queue, call="Held call")
                 assert actual == "\n".join(body), ("source changed", actual)
                 assert "QUEUED-SOURCE" not in actual
             observe(rows)
             for change in ("missing", "moved", "ambiguous", "duplicate-in-body", "missing-queue", "moved-queue"):
                 bad = rows.copy()
-                if change == "missing": bad[boundary] = ""
-                elif change == "moved": bad[0], bad[boundary] = bad[boundary], bad[0]
-                elif change == "ambiguous": bad[0] = bad[boundary]
-                elif change == "duplicate-in-body": bad[0] = "› QUEUED-SOURCE"
+                def put(y, value):
+                    bad[y] = value.ljust(79) + "▐" if y < height - 5 else value
+                if change == "missing": put(boundary, "")
+                elif change == "moved":
+                    put(0, "  • Held call · 42s")
+                    put(boundary, "BODY-FIRST ▐")
+                elif change == "ambiguous": put(0, "  • Held call · 42s")
+                elif change == "duplicate-in-body": put(0, "› QUEUED-SOURCE")
                 elif change == "missing-queue": bad[-4] = ""
                 else: bad[-4], bad[-3] = bad[-3], bad[-4]
                 try:
@@ -1423,7 +1494,9 @@ def conversation_protocol_cases():
     # occupies the one live row, with its distinct UNINDENTED label.
     waiting_rows = ["BODY-FIRST", "BODY-LAST", "• Waiting · 42s"] + [""] * 17
     waiting_rows += [queue, "─" * 80, "›", "Looking back · Ctrl-End: latest"]
-    assert conversation_body("\n".join(waiting_rows), 80, (2, 22), queued=queue, work="Waiting") == "BODY-FIRST\nBODY-LAST"
+    waiting_rows = [row.ljust(79) + "▐" if y < 19 else row for y, row in enumerate(waiting_rows)]
+    waiting_capture = capture_rows(waiting_rows)
+    assert conversation_body(waiting_capture.completed, 80, (2, 22), cells=waiting_capture.completed_cells, queued=queue, work="Waiting") == "BODY-FIRST\nBODY-LAST"
     # One socket read can contain a correct barrier followed by a wrong
     # commit. The fitted-scroll observer MUST inspect both, not just newest
     # state or the first matching cursor. These are synthetic byte frames.
@@ -1487,6 +1560,76 @@ def conversation_protocol_cases():
         assert LIVE_CLOCK.sub(r"\1", prefix + "• Held call · 42s") == prefix + "• Held call · "
     assert not LIVE_LINE.search(" • Held call · 42s")
     print("conversation protocol: exact footer, 24/200-row body/chrome, six rejected corruptions and fitted every-frame equality passed", flush=True)
+
+
+def conversation_rail_cases():
+    """Physical-column oracles, independent of the production content mapper."""
+    from terminal_screen import ScreenCapture
+    def capture_rows(rows):
+        capture = ScreenCapture(80, len(rows))
+        capture.feed(terminal_frame(rows, (len(rows) - 1, 3)))
+        return capture
+    for status in ("", "Sending…", "Sent"):
+        for work in (False, True):
+            rail_rows = 21 - int(bool(status)) - int(work)
+            rows = [""] * 24
+            rows[0] = "LITERAL" + " " * 71 + "▐"
+            rows[1] = "› x" + " " * 71 + "11:42"
+            rows[3] = "é 界 ▐"
+            if work: rows[4] = "• Waiting · 42s"
+            if status: rows[20] = status
+            rows[21:] = ["─" * 80, "›", "Session s"]
+            rows = [row.ljust(79) + "▐" if y < rail_rows else row for y, row in enumerate(rows)]
+            capture = capture_rows(rows)
+            cells = capture.completed_cells
+            before = [[cell for cell in row] for row in cells]
+            actual = plain_conversation_content(capture.completed, cells)
+            assert actual[1] == "› x" + " " * 71 + "11:42"
+            assert actual[3] == "é 界 ▐", actual[3]
+            assert actual[0] == "LITERAL" + " " * 71 + "▐", actual[0]
+            assert_submitted_feedback(capture.completed, cells, {"11:42"})
+            try:
+                conversation_content(capture.completed.replace("11:42", "11:41"), cells, rail_rows)
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("old frame paired with a newer grid")
+            # No projection mutates source or the shared immutable grid.
+            assert cells == before and capture.completed == "\n".join(row.rstrip() for row in capture.screen.display)
+            for fault in ("missing", "moved", "extended", "wrong-column", "wrong-time", "shifted-time", "padding"):
+                bad = rows.copy()
+                if fault == "missing": bad[1] = rows[1][:-1] + " "
+                elif fault == "moved":
+                    bad[rail_rows - 1] = " " * 80
+                    bad[rail_rows] = " " * 79 + "▐"
+                elif fault == "extended": bad[rail_rows] = rows[rail_rows].ljust(80)[:79] + "▐"
+                elif fault == "wrong-column": bad[1] = rows[1][:78] + "▐ "
+                elif fault == "wrong-time": bad[1] = rows[1].replace("11:42", "11:43")
+                elif fault == "shifted-time": bad[1] = "› x" + " " * 70 + "11:42 ▐"
+                else: bad[1] = "› xBAD" + " " * 68 + "11:42▐"
+                rejected = capture_rows(bad)
+                try:
+                    assert_submitted_feedback(rejected.completed, rejected.completed_cells, {"11:42"})
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError(("bad rail/admission accepted", fault))
+    # Full-width inspection is NOT a conversation and never gets normalized;
+    # TIMED_ROW itself must not learn optional rails in arbitrary text.
+    literal = "› x" + " " * 72 + "11:42"
+    assert len(literal) == 80 and untimed(literal) == "› x"
+    assert untimed(literal + "▐") == literal + "▐"
+    rows = ["Browsing · Esc returns", "full-width source".ljust(79) + "▐"] + [""] * 19 + ["─" * 80, "›", "Session s"]
+    inspected = capture_rows(rows)
+    before = inspected.completed
+    try:
+        conversation_content(before, inspected.completed_cells, 21)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("inspection lost full-width authority")
+    assert inspected.completed == before
+    print("conversation rail: six raw extents, literal/Unicode body, exact timestamp/admission/padding, missing/moved/wrong-column and full-width inspection passed", flush=True)
 
 
 def return_to_live(master, key=b"\x1b", timeout=15, *, input_fd=None):
@@ -4487,6 +4630,7 @@ def renderer_cases():
 
     listed_call_readiness_cases()
     conversation_protocol_cases()
+    conversation_rail_cases()
 
     # Every-frame oracles see each synchronized commit, not just the newest one after a read.
     control, seen = ScreenCapture(), []
@@ -4557,11 +4701,11 @@ def renderer_cases():
             finally:
                 self.capture.listener = previous
 
-        def every_frame(self):
+        def every_frame(self, *, with_cells=False):
             """Every committed frame from now on. One read can commit several
             frames; the newest after a read hides the ones before it."""
             frames = []
-            self.capture.listener = lambda screen, x, y: frames.append(screen)
+            self.capture.listener = lambda screen, x, y: frames.append((screen, self.capture.completed_cells) if with_cells else screen)
             return frames
 
         def send(self, text, marker=None, *, predicate=None):
@@ -5208,21 +5352,13 @@ def renderer_cases():
         marker = answer("submitted feedback")
         with terminal(session) as tty:
             tty.send("x", predicate=lambda: tty.capture.draft("x", 3))
-            frames = tty.every_frame()
+            frames = tty.every_frame(with_cells=True)
             sent = time.time()
             tty.send("\n", marker)
             # The time is the Host's admission second, in this local zone.
             times = {time.strftime("%H:%M", time.localtime(second)) for second in range(int(sent), int(time.time()) + 1)}
-            for frame in frames:
-                rows = frame.rstrip("\n").split("\n")
-                composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
-                history = rows[:composer]
-                assert "›" not in [row.strip() for row in history], frame
-                for row in history:
-                    if untimed(row) == "› x":
-                        assert len(row) == 80 and row[-5:] in times, (row, times)
-                if rows[composer].strip() == "›":
-                    assert "› x" in map(untimed, history) or {"Sending…", "Sent"} & set(history), frame
+            for frame, cells in frames:
+                assert_submitted_feedback(frame, cells, times)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: a submitted Message shows as sending or in full from Enter on", flush=True)
@@ -5924,8 +6060,8 @@ def renderer_cases():
             assert looking_back(frame), frame
             if queued is not None:
                 cursor = tty.capture.screen.cursor
-                return conversation_body(frame, 80, (cursor.x, cursor.y), queued=queued, call=call, work=work)
-            return frame.rsplit("\n", 1)[0]
+                return conversation_body(frame, 80, (cursor.x, cursor.y), cells=tty.capture.completed_cells, queued=queued, call=call, work=work)
+            return "\n".join(plain_conversation_content(frame, tty.capture.completed_cells)[:-1])
 
         def reachable(shown, before, row, reply="REPLY-00000", form=omitted):
             # The transcript reaches the Message exactly once, after what
@@ -6314,7 +6450,7 @@ def renderer_cases():
                 run(home, "session", "stop", "--store", store, "--session", session, "--record", state / "many-stop.json", "--key", "many-stop")
                 tty.wait(predicate=lambda: "! Session stopped." in tty.capture.completed, timeout=30)
                 live = tty.capture.completed
-                rows = [untimed(row) for row in live.split("\n")]
+                rows = [untimed(row) for row in plain_conversation_content(live, tty.capture.completed_cells)]
                 order = [rows.index(f"› MANY-STOPPED-{index:02d}") for index in range(40)]
                 assert all(rows.count(f"› MANY-STOPPED-{index:02d}") == 1 for index in range(40)), live
                 assert order == sorted(order) and order[-1] < rows.index("! Session stopped."), live
