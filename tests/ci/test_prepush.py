@@ -40,14 +40,13 @@ class PrepushTest(unittest.TestCase):
                 self.file(path)
         return dict(prepush.checks(paths, AVAILABLE, "BASE"))
 
-    def test_docs_only_select_whitespace_and_scoped_sentence_checks(self):
-        commands = self.commands(["AGENTS.md", "docs/agents/landing.md", ".claude/skills/rui-ci-triage/SKILL.md"])
-        self.assertEqual(set(commands), {"whitespace", "markdown sentences"})
-        self.assertEqual(commands["markdown sentences"][2:], ["--check", "AGENTS.md", "docs/agents/landing.md"])
-
-    def test_sentence_checks_keep_the_existing_document_scope(self):
-        commands = self.commands(["research/results.md", "THIRD_PARTY_NOTICES.md", ".github/notes.md"])
-        self.assertEqual(set(commands), {"whitespace"})
+    def test_docs_only_select_whitespace_regardless_of_sentence_layout(self):
+        for path in ("README.md", "AGENTS.md", "docs/agents/landing.md", "research/results.md",
+                     "THIRD_PARTY_NOTICES.md", ".github/notes.md", ".claude/skills/rui-ci-triage/SKILL.md"):
+            with self.subTest(path=path):
+                self.file(path, "One sentence. Another sentence in the same paragraph.\n")
+                commands = dict(prepush.checks([path], AVAILABLE, "BASE"))
+                self.assertEqual(commands, {"whitespace": ["git", "diff", "--check", "BASE", "HEAD"]})
 
     def test_zig_change_formats_only_its_file_and_keeps_selected_builds(self):
         commands = self.commands(["src/request_encoding.zig"])
@@ -98,7 +97,7 @@ class PrepushTest(unittest.TestCase):
         self.commands(paths)
         commands = list(prepush.checks(paths + paths, AVAILABLE, "BASE"))
         self.assertEqual(len(commands), len(dict(commands)))
-        self.assertEqual(set(dict(commands)), SOURCE_CHECKS | {"whitespace", "markdown sentences", "zig fmt", "caller errors", "undefined Python names", "development selection", "macOS type check"})
+        self.assertEqual(set(dict(commands)), SOURCE_CHECKS | {"whitespace", "zig fmt", "caller errors", "undefined Python names", "development selection", "macOS type check"})
 
     def test_deleted_files_still_select_owner_checks_but_not_file_tools(self):
         commands = self.commands(["src/cli_args.zig", "tests/integration/activity_integration.py", "AGENTS.md"], deleted=["src/cli_args.zig", "tests/integration/activity_integration.py", "AGENTS.md"])
