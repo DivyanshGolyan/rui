@@ -925,6 +925,41 @@ fn quiesceUpgrade(self: *Self) !bool {
     return lender_ready and self.reader.thread == null and self.submission.task.thread == null;
 }
 
+/// Join a pre-cancellation borrower before considering another Upgrade or
+/// granting a fresh observation. Joining it does not establish compatibility.
+fn drainUpgradeReader(self: *Self) !bool {
+    if (!self.upgrade_reobserve_draining) return true;
+    if (self.reader.thread != null) {
+        if (!self.reader.completed()) return false;
+        // A joined inspection/copy/history may rewrite or clear the shared
+        // notice buffer. Keep the original quiescence failure and retain a
+        // short completed-read notice alongside it when both fit.
+        var primary: [notice_capacity]u8 = undefined;
+        const saved = if (self.upgrade_blocked) if (self.notice) |text| blk: {
+            if (!std.mem.startsWith(u8, text, "! Upgrade could not settle Client work:")) break :blk 0;
+            const len = @min(text.len, primary.len);
+            @memcpy(primary[0..len], text[0..len]);
+            break :blk len;
+        } else 0 else 0;
+        const inputs = self.terminal.screen.inputs;
+        defer if (saved != 0 and self.terminal.screen.inputs == inputs) {
+            var combined: [notice_capacity]u8 = undefined;
+            const previous = primary[0..saved];
+            const merged = if (self.notice) |current| if (!std.mem.eql(u8, current, previous))
+                std.fmt.bufPrint(&combined, "{s} {s}", .{ previous, current }) catch previous
+            else
+                previous else previous;
+            @memcpy(self.notice_buffer[0..merged.len], merged);
+            self.notice = self.notice_buffer[0..merged.len];
+        };
+        // The flag stays set while applyReader handles this old result.
+        try self.settleReader();
+        self.withdrawDecided();
+    }
+    self.upgrade_reobserve_draining = false;
+    return true;
+}
+
 /// Keep completed receipts for the restored terminal, even across retries.
 pub fn keepUpgrade(self: *Self) !void {
     if (!self.upgrade_job.started) return;
@@ -1029,6 +1064,8 @@ fn driveActive(self: *Self) !void {
                 self.upgrade_requested = false;
                 self.upgrade_blocked = true;
                 self.upgrade_reobserving = false;
+                self.upgrade_reobserve_draining = self.reader.thread != null;
+                if (self.upgrade_reobserve_draining and !self.inspection.command_running) self.reader.cancel();
                 var writer = std.Io.Writer.fixed(&self.notice_buffer);
                 try writer.print("! Upgrade could not settle Client work: {s}. Draft and original retained; /upgrade to retry.", .{@errorName(err)});
                 self.notice = writer.buffered();
@@ -1041,6 +1078,37 @@ fn driveActive(self: *Self) !void {
             _ = try self.step(16);
             continue;
         }
+        if (self.upgrade_reobserve_draining) {
+            const drained = self.drainUpgradeReader() catch |err| {
+                // settleReader joins before reporting an error. Keep protocol
+                // admission blocked; a joined old read is not a fresh scan.
+                self.upgrade_reobserve_draining = self.reader.thread != null;
+                if (err == error.CanonicalStoreFailure) return err;
+                self.upgrade_blocked = true;
+                self.upgrade_reobserving = false;
+                if (self.notice) |primary| {
+                    // Preserve an earlier quiescence failure while still
+                    // identifying the secondary old-reader failure.
+                    var combined: [notice_capacity]u8 = undefined;
+                    if (std.fmt.bufPrint(&combined, "{s} Old reader also failed ({s}).", .{ primary, @errorName(err) })) |text| {
+                        @memcpy(self.notice_buffer[0..text.len], text);
+                        self.notice = self.notice_buffer[0..text.len];
+                    } else |_| {}
+                } else {
+                    var writer = std.Io.Writer.fixed(&self.notice_buffer);
+                    try writer.print("! Reattach failed: {s}. Draft and original retained; /upgrade or reopen with selected Rui.", .{@errorName(err)});
+                    self.notice = writer.buffered();
+                }
+                self.dirty = true;
+                if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
+                continue;
+            };
+            if (!drained) {
+                if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
+                _ = try self.step(16);
+                continue;
+            }
+        }
         if (self.upgrade_blocked) {
             if (self.notice == null) self.notice = upgrade_recovery;
             if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
@@ -1049,10 +1117,7 @@ fn driveActive(self: *Self) !void {
         }
         if (self.upgrade_reobserving) {
             if (self.reader.thread != null and self.reader.completed()) {
-                const draining = self.upgrade_reobserve_draining;
-                var settled = true;
                 self.settleReader() catch |err| {
-                    settled = false;
                     if (err == error.CanonicalStoreFailure) return err;
                     self.upgrade_blocked = true;
                     self.upgrade_reobserving = false;
@@ -1061,8 +1126,6 @@ fn driveActive(self: *Self) !void {
                     self.notice = writer.buffered();
                     if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
                 };
-                self.upgrade_reobserve_draining = false;
-                if (draining and settled) self.upgrade_reobserving = true;
                 self.withdrawDecided();
             }
             if (self.upgrade_reobserving and self.reader.thread == null) try self.launch(self.freeze(.activity), reads.scan);
@@ -1786,6 +1849,7 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
                 self.upgrade_requested = false;
                 self.upgrade_reobserving = !self.upgrade_blocked;
                 self.upgrade_reobserve_draining = self.reader.thread != null;
+                if (self.upgrade_reobserve_draining and !self.inspection.command_running) self.reader.cancel();
                 self.poll_at = 0;
                 self.reading.prepared_action = null;
                 self.notice = "Upgrade cancelled; draft and original retained.";
@@ -2023,7 +2087,8 @@ fn settleReader(self: *Self) !void {
     const end = self.joinReader();
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     // A pending inspection supersedes a silent read it cancelled.
-    const mode: departure.Mode = if (self.upgrade_requested or self.input.queuedCommand() != null) .inspection else .active;
+    const owned_cancel = self.upgrade_reobserve_draining and self.reader.cancellation.stopped.load(.acquire);
+    const mode: departure.Mode = if (self.upgrade_requested or owned_cancel or self.input.queuedCommand() != null) .inspection else .active;
     // A fatal failure leaves command output for exit to print.
     if (end.failure(mode)) |err| return err;
     if (end != .complete and self.inspection.command_running) {
@@ -5336,7 +5401,161 @@ test "upgrade busy refusal keeps the exact incomplete suggestion" {
     try std.testing.expect(std.mem.indexOf(u8, held.self.notice.?, "still settling") != null);
 }
 
-test "upgrade retries wait for a real pre-cancel borrower to join" {
+test "failed quiescence retires its old reader before blocked retry" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const Workers = struct {
+        fn read(_: *anyopaque, _: *Task) !void {}
+        fn fail(_: *anyopaque, _: *Task) !void {
+            return error.SystemResources;
+        }
+        fn ready(frontend: *Self) bool {
+            return frontend.reader.completed() and frontend.submission.task.completed();
+        }
+    };
+    self.reading.phase = .activity;
+    self.job.result = .{ .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try self.reader.start(std.testing.io, self, Workers.read);
+    try self.submission.task.start(std.testing.io, self, Workers.fail);
+    defer {
+        if (self.reader.thread != null) self.reader.join() catch {};
+        if (self.submission.task.thread != null) self.submission.task.join() catch {};
+    }
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), self, Workers.ready);
+    try sendKeys(self, "/upgrade\r");
+    try std.testing.expect(self.upgrade_requested);
+    try held.hold("\x1b[27u");
+    try self.driveActive();
+    try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
+    try std.testing.expect(self.reader.cancellation.stopped.load(.acquire));
+    try std.testing.expect(!self.upgrade_reobserve_draining and !self.upgrade_reobserving);
+    try std.testing.expect(self.upgrade_blocked);
+    try std.testing.expectEqual(error.SystemResources, self.submission.last_error.?);
+    self.leaving = null;
+    try sendKeys(self, "/upgrade\r");
+    try std.testing.expect(self.upgrade_requested and self.upgrade_blocked);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+}
+
+test "old history inspection and copy preserve a quiescence failure notice" {
+    const Worker = struct {
+        fn complete(_: *anyopaque, _: *Task) !void {}
+        fn done(frontend: *Self) bool {
+            return frontend.reader.completed();
+        }
+    };
+    const primary = "! Upgrade could not settle Client work: SystemResources. Draft retained.";
+    for (0..3) |kind| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        const page = try held.tmp.dir.createFile(std.testing.io, "old-result", .{ .read = true });
+        defer page.close(std.testing.io);
+        try page.writePositionalAll(std.testing.io, "Saved defaults.\n", 0);
+        self.files = .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } };
+        self.upgrade_blocked = true;
+        self.upgrade_reobserve_draining = true;
+        self.reading.phase = if (kind == 0) .history else .inspection;
+        if (kind == 1) {
+            self.inspection.kind = .command;
+            self.inspection.command_running = true;
+        } else if (kind == 2) {
+            self.inspection.kind = .{ .copy = .file };
+            self.inspection.command_running = true;
+        }
+        self.job.result = .{};
+        if (kind == 2) self.job.result.copied = .saved;
+        @memcpy(self.notice_buffer[0..primary.len], primary);
+        self.notice = self.notice_buffer[0..primary.len];
+        try self.reader.start(std.testing.io, self, Worker.complete);
+        defer if (self.reader.thread != null) self.reader.join() catch {};
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), self, Worker.done);
+        try std.testing.expect(try self.drainUpgradeReader());
+        try std.testing.expect(std.mem.startsWith(u8, self.notice.?, primary));
+        if (kind == 1) try std.testing.expect(std.mem.indexOf(u8, self.notice.?, "Saved defaults.") != null);
+        if (kind == 2) try std.testing.expect(std.mem.indexOf(u8, self.notice.?, "Saved to ./") != null);
+        try std.testing.expect(self.reader.thread == null and self.upgrade_blocked and !self.upgrade_reobserving);
+        try std.testing.expect(!self.inspection.command_running);
+    }
+}
+
+test "pumped clipboard input does not resurrect a dismissed quiescence failure" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const Worker = struct {
+        fn complete(_: *anyopaque, _: *Task) !void {}
+        fn done(frontend: *Self) bool {
+            return frontend.reader.completed();
+        }
+    };
+    const page = try held.tmp.dir.createFile(std.testing.io, "clipboard", .{ .read = true });
+    defer page.close(std.testing.io);
+    try page.writePositionalAll(std.testing.io, "answer", 0);
+    self.files = .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } };
+    self.upgrade_blocked = true;
+    self.upgrade_reobserve_draining = true;
+    self.reading.phase = .inspection;
+    self.inspection.kind = .{ .copy = .answer };
+    self.inspection.command_running = true;
+    self.job.result = .{};
+    self.job.result.copied = .{ .clipboard = .{ .start = 0, .length = 6 } };
+    self.notice = "! Upgrade could not settle Client work: SystemResources. Draft retained.";
+    try self.reader.start(std.testing.io, self, Worker.complete);
+    defer if (self.reader.thread != null) self.reader.join() catch {};
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), self, Worker.done);
+    const inputs = held.screen.inputs;
+    try held.hold("x");
+    try std.testing.expect(try self.drainUpgradeReader());
+    try std.testing.expect(held.pumps != 0 and held.screen.inputs != inputs);
+    try std.testing.expectEqualStrings("x", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("Sent to clipboard", self.notice.?);
+    try std.testing.expect(self.upgrade_blocked and self.reader.thread == null);
+}
+
+test "old reader failure preserves the primary quiescence notice" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const Worker = struct {
+        fn fail(_: *anyopaque, _: *Task) !void {
+            return error.SystemResources;
+        }
+        fn done(frontend: *Self) bool {
+            return frontend.reader.completed();
+        }
+    };
+    const Credit = struct {
+        held: *HeldFrontend,
+        observed: bool = false,
+        fn step(raw: *anyopaque) !void {
+            const credit: *@This() = @ptrCast(@alignCast(raw));
+            const notice = credit.held.self.notice orelse return error.TestUnexpectedResult;
+            try std.testing.expect(std.mem.indexOf(u8, notice, "original failure") != null);
+            try std.testing.expect(std.mem.indexOf(u8, notice, "SystemResources") != null);
+            credit.observed = true;
+            try HeldFrontend.pumpHeld(credit.held);
+        }
+    };
+    self.upgrade_blocked = true;
+    self.upgrade_reobserve_draining = true;
+    self.notice = "original failure";
+    self.reading.phase = .activity;
+    self.job.result = .{};
+    try self.reader.start(std.testing.io, self, Worker.fail);
+    defer if (self.reader.thread != null) self.reader.join() catch {};
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), self, Worker.done);
+    var credit: Credit = .{ .held = held };
+    held.terminal.pump = .{ .context = &credit, .step = Credit.step };
+    try held.hold("\x1b[27u");
+    try self.driveActive();
+    try std.testing.expect(credit.observed);
+    try std.testing.expect(self.reader.thread == null and !self.upgrade_reobserve_draining);
+    try std.testing.expect(self.upgrade_blocked and !self.upgrade_reobserving);
+}
+
+test "blocked upgrade cancellation drains a real old reader in the active loop" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
@@ -5346,11 +5565,58 @@ test "upgrade retries wait for a real pre-cancel borrower to join" {
             const gate: *@This() = @ptrCast(@alignCast(raw));
             gate.release.waitUncancelable(task.io);
         }
+        fn completed(frontend: *Self) bool {
+            return frontend.reader.completed();
+        }
     };
     var gate: Gate = .{};
     defer {
         gate.release.set(std.testing.io);
         if (self.reader.thread != null) self.reader.join() catch unreachable;
+    }
+    self.upgrade_blocked = true;
+    self.reading.phase = .activity;
+    self.job.result = .{ .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try self.reader.start(std.testing.io, &gate, Gate.run);
+    try sendKeys(self, "/upgrade\r");
+    try std.testing.expect(self.upgrade_requested and self.upgrade_blocked);
+    try sendKeys(self, "\x03");
+    try std.testing.expect(!self.upgrade_requested and self.upgrade_blocked);
+    try std.testing.expect(self.upgrade_reobserve_draining and !self.upgrade_reobserving);
+    try std.testing.expect(self.reader.cancellation.stopped.load(.acquire));
+    try sendKeys(self, "/upgrade\r");
+    try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
+    try std.testing.expect(!self.upgrade_requested);
+    // Clear only this refused command so the driven loop can leave on Escape.
+    self.input.clear();
+    gate.release.set(std.testing.io);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), self, Gate.completed);
+    try held.hold("\x1b[27u");
+    try self.driveActive();
+    try std.testing.expect(self.reader.thread == null and !self.upgrade_reobserve_draining);
+    try std.testing.expect(self.upgrade_blocked and !self.upgrade_reobserving);
+    self.leaving = null;
+    try sendKeys(self, "/upgrade\r");
+    try std.testing.expect(self.upgrade_requested and self.upgrade_blocked);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+}
+
+test "upgrade retries wait for a real pre-cancel borrower to join" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const Gate = struct {
+        release: std.Io.Event = .unset,
+        fn run(raw: *anyopaque, task: *Task) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            gate.release.waitUncancelable(task.io);
+            if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
+        }
+    };
+    var gate: Gate = .{};
+    defer {
+        gate.release.set(std.testing.io);
+        if (self.reader.thread != null) self.reader.join() catch {};
     }
     try sendKeys(self, "/upgrade\r");
     try std.testing.expect(self.upgrade_requested);
@@ -5364,14 +5630,17 @@ test "upgrade retries wait for a real pre-cancel borrower to join" {
     try sendKeys(self, "\r");
     try std.testing.expect(!self.upgrade_requested and self.reader.thread != null);
     try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
-    gate.release.set(std.testing.io);
-    try self.reader.join();
-    // A fresh observation, not the old borrower's completion, reopens input.
+    // A joined old completion does not open admission; only a fresh result does.
     self.reading.phase = .activity;
     self.job.result = .{ .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
-    try self.applyReader(.complete);
-    try std.testing.expect(self.upgrade_reobserving);
-    self.upgrade_reobserve_draining = false;
+    gate.release.set(std.testing.io);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), self, struct {
+        fn done(frontend: *Self) bool {
+            return frontend.reader.completed();
+        }
+    }.done);
+    try std.testing.expect(try self.drainUpgradeReader());
+    try std.testing.expect(self.reader.thread == null and self.upgrade_reobserving);
     try self.applyReader(.complete);
     try std.testing.expect(!self.upgrade_reobserving);
     try sendKeys(self, "\r");
