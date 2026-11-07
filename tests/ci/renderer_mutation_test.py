@@ -190,6 +190,7 @@ class MutationGateTests(unittest.TestCase):
             (root / "owner").write_text("unchanged")
             with patch.object(gate, "tracked", return_value=[Path("owner")]), \
                  patch.object(gate.subprocess, "check_output", return_value="fixture"), \
+                 patch.object(gate.platform, "platform", return_value="fixture-platform"), \
                  patch.object(gate, "run_check") as execute:
                 def failure(check, directory, log, timeout, environment):
                     log.write_text("compile failure")
@@ -200,6 +201,7 @@ class MutationGateTests(unittest.TestCase):
                 self.assertEqual(execute.call_count, 1)
             report = json.loads((root / "evidence/report.json").read_text())
             self.assertTrue(report["tree_unchanged"])
+            self.assertEqual(report["platform"], "fixture-platform")
             self.assertEqual(report["mutations"], [])
 
     def test_duplicate_or_missing_anchor_is_not_a_kill(self):
