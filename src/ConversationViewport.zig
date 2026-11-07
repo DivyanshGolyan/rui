@@ -966,11 +966,21 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             // A row within one source unit is u16. Whole-line fallback keeps
             // a very long quote navigable rather than truncating its census.
             if (measured.overflow) return literal(self, first, offset, end, commit, colour, plain);
+            const markers = self.bytes[annotation.start..body_at];
+            if (std.mem.count(u8, markers, ">") != quote.depth) return literal(self, first, offset, end, commit, colour, plain);
             const rows = rowsUsed(measured);
             if (commit) {
                 _ = self.printRange(first.child(.{ .height = 1 }), offset, body_at, .none, false, true, colour, plain);
                 _ = self.printRange(first.child(.{ .x_off = cells }), body_at, end, .word, false, true, colour, plain);
                 const leading = cells - quote.bytes;
+                var rail_style = plain;
+                rail_style.dim = colour;
+                const first_visible = visible(first.child(.{ .height = rows }));
+                if (first_visible.start == 0 and first_visible.end > 0) {
+                    for (markers, 0..) |byte, col| if (byte == '>') {
+                        first.writeCell(leading + @as(u16, @intCast(col)), 0, .{ .char = .{ .grapheme = "│", .width = 1 }, .style = rail_style });
+                    };
+                }
                 const gutter = (draft_layout.Line{ .start = 0, .end = 0, .cells = 0, .continuation = .{ .cells = quote.bytes, .depth = quote.depth, .indent = quote.indent } }).gutter();
                 const style = self.segmentStyle(annotation.start, colour, plain);
                 const visible_rows = visible(first.child(.{ .height = rows }));
@@ -978,6 +988,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     const area = first.child(.{ .y_off = @intCast(index), .height = 1, .width = cells });
                     for (0..leading) |col| area.writeCell(@intCast(col), 0, .{ .style = style });
                     _ = area.child(.{ .x_off = leading }).print(&.{ .{ .text = gutter[0], .style = style }, .{ .text = gutter[1], .style = style }, .{ .text = gutter[2], .style = style } }, .{ .wrap = .none });
+                    for (0..quote.depth) |col| area.writeCell(leading + @as(u16, quote.indent) + @as(u16, @intCast(col)), 0, .{ .char = .{ .grapheme = "│", .width = 1 }, .style = rail_style });
                 }
             }
             return rows;
@@ -1079,8 +1090,18 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 const measurement = (Layout{ .width = widths[index], .method = window.screen.width_method }).measuring(&screen);
                 height = @max(height, rowsUsed(measurement.printIterator(source, .{ .wrap = .word, .commit = false })));
             }
+            if (unit.header and height == std.math.maxInt(u16)) return null;
+            const content_height = height;
+            height += @intFromBool(unit.header);
             if (!commit) return height;
             const scratch = paint.scratch orelse return error.PaintScratchRequired;
+            const grid = window.child(.{ .y_off = row, .height = height });
+            const shown_grid = visible(grid);
+            var line_style = plain;
+            line_style.dim = colour;
+            if (unit.header and content_height >= shown_grid.start and content_height < shown_grid.end) {
+                for (0..window.width) |x| grid.writeCell(@intCast(x), content_height, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = line_style });
+            }
             var column: u16 = 0;
             for (parsed.cells[0..parsed.count], 0..) |range, index| {
                 var source = preparedCell(raw[range.start..range.end], window.screen.width_method, paint.home, colour, &formatted).?;
@@ -1092,12 +1113,19 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     source.bytes = try scratch.dupe(u8, source.bytes);
                     source.styles = try scratch.dupe(u8, source.styles);
                 } else source.plain.bold = unit.header;
-                const area = window.child(.{ .x_off = column, .y_off = row, .width = widths[index], .height = height });
+                const area = window.child(.{ .x_off = column, .y_off = row, .width = widths[index], .height = content_height });
                 const shown = visible(area);
                 for (shown.start..shown.end) |y| for (0..area.width) |x| area.writeCell(@intCast(x), @intCast(y), .{ .style = plain, .default = true });
                 _ = area.printIterator(source, .{ .wrap = .word });
                 alignCell(area, block.data.table.alignment[index], plain);
-                column += widths[index] + @as(u16, @intFromBool(index + 1 < parsed.count));
+                column += widths[index];
+                if (index + 1 < parsed.count) {
+                    for (shown_grid.start..shown_grid.end) |y| {
+                        const glyph: []const u8 = if (unit.header and y == content_height) "┼" else "│";
+                        grid.writeCell(column, @intCast(y), .{ .char = .{ .grapheme = glyph, .width = 1 }, .style = line_style });
+                    }
+                    column += 1;
+                }
             }
             return height;
         }
@@ -2377,7 +2405,7 @@ test "typed opaque rewrite remains byte-exact beside expanding trusted prose and
     defer arena.deinit();
     _ = try text.draw(screen.window(40, 10), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
     var storage: [128]u8 = undefined;
-    try std.testing.expectEqualStrings("\\u202e               \\xff", screen.row(1, &storage));
+    try std.testing.expectEqualStrings("\\u202e              │\\xff", screen.row(2, &storage));
 }
 
 test "typed literal custody census cost stays linear for tiny rows and one oversized cluster" {
@@ -2436,6 +2464,9 @@ test "typed contiguous block identity survives canonical prepend origin rebasing
     try std.testing.expect(snapshot.blocks.items[0].data == .table);
     try std.testing.expectEqual(@as(u32, @intCast(snapshot.length)), snapshot.blocks.items[0].complete_end);
     try std.testing.expectEqualStrings("older\n" ++ header ++ suffix, snapshot.text());
+    const rows = TextRows.init(&snapshot, .{ .width = 20, .method = .unicode });
+    try std.testing.expectEqual(Position{ .offset = 6, .row = 1 }, rows.position(2));
+    try std.testing.expectEqual(Position{ .offset = 6 + header.len }, rows.position(3));
 }
 
 test "typed pending tail cannot outrun its complete admitted proof in one source window" {
@@ -2560,23 +2591,60 @@ test "typed consuming table units share alignment row mapping and lossless narro
     var screen: TestScreen = undefined;
     const layout: Layout = .{ .width = 13, .method = .wcwidth };
     const rows = TextRows.init(&document, layout);
-    try std.testing.expectEqual(@as(usize, 2), rows.total);
+    try std.testing.expectEqual(@as(usize, 3), rows.total);
     try std.testing.expectEqual(@as(?usize, delimiter_end), document.nextLine(0));
     try std.testing.expectEqual(@as(?usize, 0), document.previousLine(delimiter_end));
     try std.testing.expectEqual(@as(usize, 0), rows.row(.{ .offset = header_end }));
     for (0..rows.total) |index| try std.testing.expectEqual(index, rows.row(rows.position(index)));
     _ = try document.draw(screen.window(13, 4), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
     var storage: [128]u8 = undefined;
-    try std.testing.expectEqualStrings("L     M     R", screen.row(0, &storage));
-    try std.testing.expectEqualStrings("a     bb    c", screen.row(1, &storage));
+    try std.testing.expectEqualStrings("L   │ M  │  R", screen.row(0, &storage));
+    try std.testing.expectEqualStrings("a   │ bb │  c", screen.row(2, &storage));
     try std.testing.expect(screen.screen.readCell(6, 0).?.style.bold);
-    try std.testing.expect(!screen.screen.readCell(6, 1).?.style.bold);
+    try std.testing.expect(!screen.screen.readCell(6, 2).?.style.bold);
     const narrow: Layout = .{ .width = 4, .method = .wcwidth };
     try std.testing.expectEqual(@as(usize, 8), document.rowCount(narrow));
     for (0..8) |index| {
         const at = document.positionAtRow(narrow, index);
         try std.testing.expectEqual(index, document.rowOf(narrow, at));
         try std.testing.expectEqual(index, TextRows.init(&document, narrow).row(at));
+    }
+    try std.testing.expectEqualStrings(raw, document.text());
+}
+
+test "typed table header rule maps to its source unit across wraps and clipping" {
+    const header = "abc def|h\n";
+    const delimiter = "---|---\n";
+    const raw = header ++ delimiter ++ "a|b\n";
+    var document: Document = .{};
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = header.len, .delimiter_end = header.len + delimiter.len, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try document.appendPrepared(raw, 0, &span, &admission);
+    const layout: Layout = .{ .width = 7, .method = .wcwidth };
+    const rows = TextRows.init(&document, layout);
+    try std.testing.expectEqual(@as(usize, 4), rows.total);
+    try std.testing.expectEqual(Position{ .offset = 0, .row = 0 }, rows.position(0));
+    try std.testing.expectEqual(Position{ .offset = 0, .row = 1 }, rows.position(1));
+    try std.testing.expectEqual(Position{ .offset = 0, .row = 2 }, rows.position(2));
+    try std.testing.expectEqual(Position{ .offset = header.len + delimiter.len, .row = 0 }, rows.position(3));
+    for (0..rows.total) |index| try std.testing.expectEqual(index, rows.row(rows.position(index)));
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var screen: TestScreen = undefined;
+    var storage: [128]u8 = undefined;
+    for ([_]bool{ true, false }) |colour| {
+        _ = try document.draw(screen.window(7, 4), .{}, true, colour, .{}, .{ .scratch = arena.allocator() });
+        try std.testing.expectEqualStrings("abc│h", screen.row(0, &storage));
+        try std.testing.expectEqualStrings("def│", screen.row(1, &storage));
+        try std.testing.expectEqualStrings("───┼───", screen.row(2, &storage));
+        try std.testing.expectEqualStrings("a  │b", screen.row(3, &storage));
+        try std.testing.expectEqual(colour, screen.screen.readCell(3, 2).?.style.dim);
+        try std.testing.expectEqualStrings("", screen.screen.readCell(3, 2).?.link.uri);
+        _ = try document.draw(screen.window(7, 1), rows.position(2), true, colour, .{}, .{ .scratch = arena.allocator() });
+        try std.testing.expectEqualStrings("───┼───", screen.row(0, &storage));
+        _ = try document.draw(screen.window(7, 2), rows.position(1), true, colour, .{}, .{ .scratch = arena.allocator() });
+        try std.testing.expectEqualStrings("def│", screen.row(0, &storage));
+        try std.testing.expectEqualStrings("───┼───", screen.row(1, &storage));
     }
     try std.testing.expectEqualStrings(raw, document.text());
 }
@@ -2595,25 +2663,27 @@ test "typed table alignment preserves wide glyphs code spaces links neighbors an
     var screen: TestScreen = undefined;
     _ = try document.draw(screen.window(11, 4), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
     var storage: [128]u8 = undefined;
-    try std.testing.expectEqualStrings(" 界é      x", screen.row(1, &storage));
-    try std.testing.expectEqualStrings("  a", screen.row(2, &storage));
-    try std.testing.expectEqualStrings("https://example.test", screen.screen.readCell(10, 1).?.link.uri);
-    try std.testing.expectEqual(@as(u8, 2), screen.screen.readCell(1, 1).?.char.width);
-    try std.testing.expectEqualStrings("é", screen.screen.readCell(3, 1).?.char.grapheme);
-    try std.testing.expect(screen.screen.readCell(1, 2).?.style.ul_style != .off);
-    try std.testing.expect(screen.screen.readCell(3, 2).?.style.ul_style != .off);
-    const previous = document.positionAtRow(.{ .width = 11, .method = .wcwidth }, 1);
+    try std.testing.expectEqualStrings(" 界é │    x", screen.row(2, &storage));
+    try std.testing.expectEqualStrings("  a  │", screen.row(3, &storage));
+    try std.testing.expectEqualStrings("https://example.test", screen.screen.readCell(10, 2).?.link.uri);
+    try std.testing.expectEqualStrings("", screen.screen.readCell(5, 2).?.link.uri);
+    try std.testing.expectEqualStrings("", screen.screen.readCell(5, 1).?.link.uri);
+    try std.testing.expectEqual(@as(u8, 2), screen.screen.readCell(1, 2).?.char.width);
+    try std.testing.expectEqualStrings("é", screen.screen.readCell(3, 2).?.char.grapheme);
+    try std.testing.expect(screen.screen.readCell(1, 3).?.style.ul_style != .off);
+    try std.testing.expect(screen.screen.readCell(3, 3).?.style.ul_style != .off);
+    const previous = document.positionAtRow(.{ .width = 11, .method = .wcwidth }, 2);
     _ = try document.draw(screen.window(11, 1), previous, true, false, .{}, .{ .scratch = arena.allocator() });
-    try std.testing.expectEqualStrings(" 界é      x", screen.row(0, &storage));
+    try std.testing.expectEqualStrings(" 界é │    x", screen.row(0, &storage));
     try std.testing.expectEqualStrings(raw, document.text());
 }
 
 test "typed quote gutters use source markers fixed depth and whole-line fallback" {
     const cases = [_]struct { raw: []const u8, bytes: u8, depth: u4, width: u16, rows: []const []const u8 }{
-        .{ .raw = "> abcd efgh ijkl", .bytes = 2, .depth = 1, .width = 10, .rows = &.{ "> abcd", "> efgh", "> ijkl" } },
-        .{ .raw = "> > abcd efgh ijkl", .bytes = 4, .depth = 2, .width = 10, .rows = &.{ "> > abcd", ">>  efgh", ">>  ijkl" } },
-        .{ .raw = "> > abcd efgh", .bytes = 2, .depth = 1, .width = 10, .rows = &.{ "> > abcd", "> efgh" } },
-        .{ .raw = "> ", .bytes = 2, .depth = 1, .width = 10, .rows = &.{">"} },
+        .{ .raw = "> abcd efgh ijkl", .bytes = 2, .depth = 1, .width = 10, .rows = &.{ "│ abcd", "│ efgh", "│ ijkl" } },
+        .{ .raw = "> > abcd efgh ijkl", .bytes = 4, .depth = 2, .width = 10, .rows = &.{ "│ │ abcd", "││  efgh", "││  ijkl" } },
+        .{ .raw = "> > abcd efgh", .bytes = 2, .depth = 1, .width = 10, .rows = &.{ "│ > abcd", "│ efgh" } },
+        .{ .raw = "> ", .bytes = 2, .depth = 1, .width = 10, .rows = &.{"│"} },
         .{ .raw = "> ab cd", .bytes = 2, .depth = 1, .width = 3, .rows = &.{ "> a", "b c", "d" } },
         .{ .raw = "> \xcc\x81X", .bytes = 2, .depth = 1, .width = 5, .rows = &.{"> \xcc\x81X"} },
     };
@@ -2637,7 +2707,29 @@ test "typed quote gutters use source markers fixed depth and whole-line fallback
     }
 }
 
-test "typed byte-identical metadata changes row count and preserves logical anchors with same generation owner" {
+test "typed quote rails preserve nested markers literal glyphs and untrusted source" {
+    const raw = "  > > │ ▐ body";
+    var document: Document = .{};
+    var admission: Document.Admission = .{};
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .data = .{ .quote = .{ .bytes = 6, .depth = 2, .indent = 2 } } };
+    try document.appendPrepared(raw, 0, &span, &admission);
+    var screen: TestScreen = undefined;
+    var storage: [128]u8 = undefined;
+    for ([_]bool{ true, false }) |colour| {
+        _ = try document.draw(screen.window(20, 3), .{}, true, colour, .{}, .{});
+        try std.testing.expectEqualStrings("  │ │ │ ▐ body", screen.row(0, &storage));
+        try std.testing.expectEqual(colour, screen.screen.readCell(2, 0).?.style.dim);
+        try std.testing.expectEqual(colour, screen.screen.readCell(4, 0).?.style.dim);
+        try std.testing.expect(!screen.screen.readCell(6, 0).?.style.dim);
+    }
+    span.data = .literal_raw;
+    try document.appendPrepared("", raw.len, &span, &admission);
+    _ = try document.draw(screen.window(20, 3), .{}, true, true, .{}, .{});
+    try std.testing.expectEqualStrings(raw, screen.row(0, &storage));
+    try std.testing.expectEqualStrings(raw, document.text());
+}
+
+test "typed byte-identical metadata preserves logical anchors with same generation owner" {
     const raw = "h|x\n---|---\na|b\n";
     var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .data = .literal_raw };
     var pane: Pane = .{};
@@ -2655,7 +2747,7 @@ test "typed byte-identical metadata changes row count and preserves logical anch
     span.complete_end = raw.len;
     try pane.text.appendPrepared("", raw.len, &span, &admission);
     try std.testing.expect(pane.text.generation != generation);
-    try std.testing.expectEqual(@as(usize, 2), pane.projection(layout).total);
+    try std.testing.expectEqual(@as(usize, 3), pane.projection(layout).total);
     pane.restore(layout, anchor, 3, true);
     try std.testing.expectEqual(anchor, pane.anchor(layout));
     const promoted = pane.text.generation;
@@ -2693,7 +2785,7 @@ test "typed tiny-row rich census initial cost at retained capacity" {
     try document.appendPrepared("", source.len, &span, &admission);
     const rich_rows = document.rowCount(layout);
     const finish = std.Io.Clock.awake.now(std.testing.io);
-    try std.testing.expectEqual(literal_rows - 1, rich_rows);
+    try std.testing.expectEqual(literal_rows, rich_rows);
     std.debug.print("output cold census tiny rows 240KiB literal={d}ns rich={d}ns /1\n", .{ middle.nanoseconds - start.nanoseconds, finish.nanoseconds - middle.nanoseconds });
 }
 
@@ -2714,7 +2806,7 @@ test "typed table clipped paint clears shorter cells without touching separators
     const background: vaxis.Style = .{ .bg = .{ .index = 3 } };
     _ = try document.draw(area, .{ .offset = delimiter_end, .row = 1 }, true, true, background, .{ .scratch = arena.allocator() });
     var storage: [128]u8 = undefined;
-    try std.testing.expectEqualStrings("**bbb   *   two*****", screen.row(1, &storage));
+    try std.testing.expectEqualStrings("**bbb   │   two*****", screen.row(1, &storage));
     try std.testing.expectEqualStrings("********************", screen.row(0, &storage));
     document.clear();
     span.end = short.len;
@@ -2722,10 +2814,10 @@ test "typed table clipped paint clears shorter cells without touching separators
     admission = .{};
     try document.appendPrepared(short, 0, &span, &admission);
     _ = try document.draw(area, .{ .offset = delimiter_end }, true, true, background, .{ .scratch = arena.allocator() });
-    try std.testing.expectEqualStrings("**z     *     q*****", screen.row(1, &storage));
+    try std.testing.expectEqualStrings("**z     │     q*****", screen.row(1, &storage));
     try std.testing.expectEqual(@as(u8, 3), root.readCell(2, 1).?.style.bg.index);
     try std.testing.expectEqual(@as(u8, 3), root.readCell(4, 1).?.style.bg.index);
-    try std.testing.expectEqual(@as(u8, 4), root.readCell(8, 1).?.style.bg.index);
+    try std.testing.expectEqual(@as(u8, 3), root.readCell(8, 1).?.style.bg.index);
     try std.testing.expectEqualStrings("", root.readCell(14, 1).?.link.uri);
 }
 
@@ -2760,8 +2852,8 @@ test "typed raw cell layout uses the projection width method not retained prepar
     const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 10, .complete_end = raw.len, .data = .{ .table = .{ .count = 1, .alignment = @splat(.left) } } };
     var admission: Document.Admission = .{};
     try document.appendPrepared(raw, 0, &span, &admission);
-    try std.testing.expectEqual(@as(usize, 2), document.rowCount(.{ .width = 3, .method = .unicode }));
-    try std.testing.expectEqual(@as(usize, 17), document.rowCount(.{ .width = 3, .method = .wcwidth }));
+    try std.testing.expectEqual(@as(usize, 3), document.rowCount(.{ .width = 3, .method = .unicode }));
+    try std.testing.expectEqual(@as(usize, 18), document.rowCount(.{ .width = 3, .method = .wcwidth }));
     try std.testing.expectEqualStrings(raw, document.text());
 }
 
@@ -2779,7 +2871,9 @@ test "typed frozen suffix propagates pending promotion and byte-identical downgr
     try std.testing.expectEqual(raw.len - 4, frozen.text.appendRetained(&live, 4));
     try std.testing.expectEqual(@as(u6, 1), frozen.text.blocks.count);
     try std.testing.expect(frozen.text.blocks.items[0].data == .table);
-    try std.testing.expectEqual(@as(usize, 2), frozen.projection(layout).total);
+    try std.testing.expectEqual(@as(usize, 3), frozen.projection(layout).total);
+    try std.testing.expectEqual(Position{ .offset = 0, .row = 1 }, frozen.projection(layout).position(1));
+    try std.testing.expectEqual(Position{ .offset = 12 }, frozen.projection(layout).position(2));
     const generation = frozen.text.generation;
     span.data = .literal_raw;
     try live.appendPrepared("", raw.len, &span, &admission);
@@ -2791,7 +2885,7 @@ test "typed frozen suffix propagates pending promotion and byte-identical downgr
     try live.appendPrepared("", raw.len, &span, &admission);
     try std.testing.expectEqual(@as(usize, 0), frozen.text.appendRetained(&live, live.length));
     try std.testing.expect(frozen.text.blocks.items[0].data == .table);
-    try std.testing.expectEqual(@as(usize, 2), frozen.projection(layout).total);
+    try std.testing.expectEqual(@as(usize, 3), frozen.projection(layout).total);
     try std.testing.expectEqualStrings(raw, frozen.text.text());
 }
 
@@ -2806,8 +2900,8 @@ test "typed decorated quote and cell keep whitespace combining clusters through 
     const annotation: OutputBlocks.Span(u64) = .{ .start = 0, .end = quote.len, .data = .{ .quote = .{ .bytes = 2, .depth = 1, .indent = 0 } } };
     try document.appendPrepared(quote, 0, &annotation, &admission);
     _ = try document.draw(pixels.window(8, 4), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
-    try std.testing.expectEqualStrings("> a \u{301}bc", pixels.row(0, &storage));
-    try std.testing.expectEqualStrings("> def", pixels.row(1, &storage));
+    try std.testing.expectEqualStrings("│ a \u{301}bc", pixels.row(0, &storage));
+    try std.testing.expectEqualStrings("│ def", pixels.row(1, &storage));
     try std.testing.expectEqualStrings(quote, document.text());
     document.clear();
     admission = .{};
@@ -2815,8 +2909,8 @@ test "typed decorated quote and cell keep whitespace combining clusters through 
     const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = table.len, .header_end = 4, .delimiter_end = 10, .complete_end = table.len, .data = .{ .table = .{ .count = 1, .alignment = @splat(.left) } } };
     try document.appendPrepared(table, 0, &span, &admission);
     _ = try document.draw(pixels.window(5, 4), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
-    try std.testing.expectEqualStrings("a \u{301}bc", pixels.row(1, &storage));
-    try std.testing.expectEqualStrings("https://example.test", pixels.screen.readCell(1, 1).?.link.uri);
+    try std.testing.expectEqualStrings("a \u{301}bc", pixels.row(2, &storage));
+    try std.testing.expectEqualStrings("https://example.test", pixels.screen.readCell(1, 2).?.link.uri);
     try std.testing.expectEqualStrings(table, document.text());
 }
 
@@ -2853,7 +2947,7 @@ test "typed over-output-budget cell falls back losslessly without paint allocati
     var admission: Document.Admission = .{};
     try document.appendPrepared(&raw, 0, &span, &admission);
     const layout: Layout = .{ .width = 40, .method = .unicode };
-    try std.testing.expectEqual(@as(usize, 212), document.rowCount(layout));
+    try std.testing.expectEqual(@as(usize, 213), document.rowCount(layout));
     const at = Position{ .offset = header.len };
     var screen: TestScreen = undefined;
     _ = try document.draw(screen.window(40, 2), at, true, false, .{}, .{});
@@ -2910,13 +3004,13 @@ test "typed incomplete tail and ragged rows remain literal even beside complete 
         defer arena.deinit();
         _ = try document.draw(pixels.window(20, 3), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
         var storage: [128]u8 = undefined;
-        try std.testing.expectEqualStrings(std.mem.trimEnd(u8, tail, "\n"), pixels.row(1, &storage));
+        try std.testing.expectEqualStrings(std.mem.trimEnd(u8, tail, "\n"), pixels.row(2, &storage));
         try std.testing.expectEqualStrings(raw, document.text());
         if (span.complete_end != raw.len) {
             span.complete_end = raw.len; // Explicit canonical seal, not retention.
             try document.appendPrepared("", raw.len, &span, &admission);
             _ = try document.draw(pixels.window(20, 3), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
-            try std.testing.expectEqualStrings("a          b", pixels.row(1, &storage));
+            try std.testing.expectEqualStrings("a         │b", pixels.row(2, &storage));
         }
     }
 }
@@ -2949,7 +3043,7 @@ test "typed rich paint refuses horizontal clipping before any grid source or geo
     for (unsupported) |window| {
         const layout: Layout = .{ .width = window.width, .method = .unicode };
         const projection = TextRows.init(&document, layout);
-        try std.testing.expectEqual(@as(usize, 3), projection.total);
+        try std.testing.expectEqual(@as(usize, 4), projection.total);
         const measured = try document.draw(window, .{}, false, false, .{}, .{});
         try std.testing.expectEqual(projection.total, measured.rows);
         try std.testing.expectError(error.HorizontalRichPaintClipped, document.draw(window, .{}, true, false, .{}, .{ .scratch = arena.allocator() }));
@@ -2963,7 +3057,7 @@ test "typed rich paint refuses horizontal clipping before any grid source or geo
     // A fully visible translated window is supported. Its reported narrower
     // width, like an ordinary child clamp, is the shared source geometry.
     _ = try document.draw(root.child(.{ .x_off = 2, .width = 10 }), .{}, true, false, .{}, .{ .scratch = arena.allocator() });
-    try std.testing.expectEqualStrings("x", pixels.screen.readCell(11, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("x", pixels.screen.readCell(11, 3).?.char.grapheme);
     try std.testing.expectEqualStrings("*", pixels.screen.readCell(1, 2).?.char.grapheme);
     try std.testing.expectEqualStrings(prefix ++ raw, document.text());
 }
