@@ -19,7 +19,6 @@ init: std.process.Init,
 store: []const u8,
 allocator: std.mem.Allocator,
 terminal: *SessionTerminal,
-stream: *TerminalInput,
 interrupted: *client.Cancellation,
 screen: *SessionScreen,
 task: ClientTask = .{},
@@ -48,7 +47,7 @@ pub fn run(init: std.process.Init, store: []const u8, terminal: *SessionTerminal
     screen.view = .inspection;
     const saved_layout = original.suspendLayout();
     const pump_before = terminal.pump;
-    var self: Self = .{ .init = init, .store = store, .allocator = allocator, .terminal = terminal, .stream = &terminal.stream, .interrupted = interrupted, .screen = screen };
+    var self: Self = .{ .init = init, .store = store, .allocator = allocator, .terminal = terminal, .interrupted = interrupted, .screen = screen };
     defer self.dispose();
     terminal.screen = screen;
     terminal.pump = .{ .context = &self, .step = pump };
@@ -209,7 +208,7 @@ fn draw(self: *Self) !void {
     if (self.close) return;
     for (0..1024) |_| {
         if (!try self.step(0)) {
-            self.offered = self.installable() and !self.screen.stale() and self.stream.pending() == .none;
+            self.offered = self.installable() and !self.screen.stale() and self.terminal.stream.pending() == .none;
             break;
         }
         if (self.close) break;
@@ -241,14 +240,14 @@ fn pump(raw: *anyopaque) !void {
 fn step(self: *Self, wait: i32) !bool {
     const read = self.terminal.next(self.init.io, wait) catch |err| switch (err) {
         error.InputDeadline => {
-            try self.input(try self.stream.expire());
+            try self.input(try self.terminal.stream.expire());
             return true;
         },
         else => return err,
     };
     if (read) |byte| {
-        var decoded = self.stream.feed(byte.byte, byte.at);
-        while (decoded != .none) : (decoded = self.stream.next()) try self.input(decoded);
+        var decoded = self.terminal.stream.feed(byte.byte, byte.at);
+        while (decoded != .none) : (decoded = self.terminal.stream.next()) try self.input(decoded);
         return true;
     }
     return false;
@@ -306,7 +305,7 @@ test "upgrade panel Escape requests cancellation and waits for the joined outcom
     };
     for (std.enums.values(upgrade.Phase)) |phase| {
         var gate: Gate = .{};
-        var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = undefined, .phase = .init(phase) };
+        var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .phase = .init(phase) };
         try self.task.start(std.testing.io, &gate, Gate.run);
         defer {
             gate.release.set(std.testing.io);
@@ -374,7 +373,6 @@ test "upgrade panel owner wipes its private Host snapshot before freeing with or
             .store = "unused",
             .allocator = allocator,
             .terminal = undefined,
-            .stream = undefined,
             .interrupted = undefined,
             .screen = undefined,
             .checked = .{
@@ -427,7 +425,7 @@ test "upgrade panel accepts semantic Enter only when typed pressed offered and i
                     for ([_]bool{ false, true }) |eligible| {
                         var checked = test_checked;
                         if (!eligible) checked.selected = .ineligible;
-                        var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = undefined, .checked = checked, .offered = offered };
+                        var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .checked = checked, .offered = offered };
                         try self.input(.{ .event = .{ .event = if (released) .{ .key_release = case.key } else .{ .key_press = case.key }, .pasted = pasted } });
                         const accepted = case.accepts and !pasted and !released and offered and eligible;
                         try std.testing.expectEqual(accepted, self.install_requested);
@@ -442,15 +440,65 @@ test "upgrade panel accepts semantic Enter only when typed pressed offered and i
 test "upgrade panel accepts CR LF and exact Kitty ctrl-J through the terminal decoder without accepting preprompt input" {
     for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[106;5u" }) |sequence| {
         for ([_]bool{ false, true }) |offered| {
-            var stream: TerminalInput = .{};
-            var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = &stream, .interrupted = undefined, .screen = undefined, .checked = test_checked, .offered = offered };
+            var terminal: SessionTerminal = .{ .original = undefined, .flags = undefined, .screen = undefined };
+            var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = &terminal, .interrupted = undefined, .screen = undefined, .checked = test_checked, .offered = offered };
             for (sequence) |byte| {
-                var decoded = stream.feed(byte, 0);
-                while (decoded != .none) : (decoded = stream.next()) try self.input(decoded);
+                var decoded = terminal.stream.feed(byte, 0);
+                while (decoded != .none) : (decoded = terminal.stream.next()) try self.input(decoded);
             }
             try std.testing.expectEqual(offered, self.install_requested);
             try std.testing.expect(!self.offered);
         }
+    }
+}
+
+test "settled upgrade Escape retains the next arrow and paste in the invocation decoder" {
+    for ([_]struct { suffix: []const u8, key: u21, pasted: bool }{
+        .{ .suffix = "B", .key = vaxis.Key.down, .pasted = false },
+        .{ .suffix = "200~x\x1b[201~", .key = 'x', .pasted = true },
+    }) |case| {
+        var stage: usize = 0;
+        errdefer std.debug.print("upgrade handoff key={d} stage={d}\n", .{ case.key, stage });
+        var pipes: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipes));
+        defer _ = std.c.close(pipes[0]);
+        defer _ = std.c.close(pipes[1]);
+        const prefix = "\x1b\x1b[";
+        try std.testing.expectEqual(@as(isize, prefix.len), std.c.write(pipes[1], prefix.ptr, prefix.len));
+        var terminal: SessionTerminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = undefined, .input = pipes[0] };
+        var init: std.process.Init = undefined;
+        init.io = std.testing.io;
+        var panel: Self = .{ .init = init, .store = "unused", .allocator = std.testing.allocator, .terminal = &terminal, .interrupted = undefined, .screen = undefined };
+        for (0..prefix.len) |_| try std.testing.expect(try panel.step(0));
+        stage = 1;
+        try std.testing.expect(panel.close);
+        try std.testing.expectEqual(TerminalInput.Pending.incomplete, terminal.stream.pending());
+        stage = 2;
+        var seen = false;
+        var starts: usize = 0;
+        var ends: usize = 0;
+        for (case.suffix) |byte| {
+            var decoded = terminal.stream.feed(byte, std.Io.Clock.awake.now(std.testing.io).nanoseconds);
+            while (decoded != .none) : (decoded = terminal.stream.next()) {
+                try std.testing.expect(decoded == .event);
+                switch (decoded.event.event) {
+                    .paste_start => starts += 1,
+                    .paste_end => ends += 1,
+                    .key_press => |key| {
+                        try std.testing.expectEqual(case.key, key.codepoint);
+                        try std.testing.expectEqual(case.pasted, decoded.event.pasted);
+                        try std.testing.expect(!seen);
+                        seen = true;
+                    },
+                    else => return error.TestUnexpectedResult,
+                }
+            }
+        }
+        stage = 3;
+        try std.testing.expect(seen);
+        try std.testing.expectEqual(@as(usize, if (case.pasted) 1 else 0), starts);
+        try std.testing.expectEqual(starts, ends);
+        try std.testing.expectEqual(TerminalInput.Pending.none, terminal.stream.pending());
     }
 }
 
@@ -473,7 +521,7 @@ test "upgrade panel failing exits report the actual joined installation receipt 
         "Store: /synthetic/store\n" ++
         "Next: inspect rui host status --store $'/synthetic/store'. Do not restore/reset the Store or replay uncertain requests.\n";
     for (cases) |case| {
-        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = test_installed_result };
+        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = test_installed_result };
         var bytes: [2048]u8 = undefined;
         var writer = std.Io.Writer.fixed(&bytes);
         const finalized = self.finalize(case.restored, case.driven, case.joined, &writer);
@@ -488,7 +536,7 @@ test "upgrade panel failing exits report the actual joined installation receipt 
 }
 
 test "upgrade panel receipt rendering failure never replaces the primary terminal failure" {
-    const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = test_installed_result };
+    const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = test_installed_result };
     var writer = std.Io.Writer.fixed(&.{});
     const finalized = self.finalize({}, error.TerminalCleanupFailed, {}, &writer);
     try std.testing.expectError(error.TerminalCleanupFailed, finalized.outcome);
@@ -506,7 +554,7 @@ test "upgrade panel retains copied cleanup facts in its joined document and rest
     inline for (.{ .preparation, .publication, .disposal }) |phase| {
         screen.init(screen.backend);
         const primary: ?anyerror = if (phase == .disposal) null else error.ReleaseChecksumMismatch;
-        var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = screen, .operation = .install, .result = if (phase == .disposal) test_installed_result else null, .failure = primary };
+        var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = screen, .operation = .install, .result = if (phase == .disposal) test_installed_result else null, .failure = primary };
         var source_path = "/synthetic/retained-stage".*;
         const reporter = self.cleanup.reporter(phase);
         reporter.report(reporter.context, .{ .primary = primary, .secondary = error.AccessDenied, .retained_path = &source_path });
@@ -537,7 +585,7 @@ test "upgrade panel retains copied cleanup facts in its joined document and rest
 
 test "upgrade panel prepublication errors retain unchanged Host access while actual activation outcomes govern compatibility" {
     for ([_]anyerror{ error.ReleaseChecksumMismatch, error.Cancelled, error.AccessDenied }) |failure| {
-        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .failure = failure };
+        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .failure = failure };
         try std.testing.expectEqual(Outcome.unchanged, self.installationOutcome());
         var bytes: [1024]u8 = undefined;
         var writer = std.Io.Writer.fixed(&bytes);
@@ -558,7 +606,7 @@ test "upgrade panel prepublication errors retain unchanged Host access while act
     }) |case| {
         var result = test_installed_result;
         result.activation = case.activation;
-        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = result };
+        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = result };
         try std.testing.expectEqual(case.outcome, self.installationOutcome());
     }
 }
@@ -592,7 +640,7 @@ test "upgrade panel paints with the invocation backend and decoder before offeri
     }
     var terminal: SessionTerminal = .{ .original = undefined, .flags = .{ 0, 0 }, .input = keys[0], .output = output[1], .screen = panel };
     var cancellation: client.Cancellation = .{};
-    var self: Self = .{ .init = undefined, .store = "/synthetic/store", .allocator = std.testing.allocator, .terminal = &terminal, .stream = &terminal.stream, .interrupted = &cancellation, .screen = panel, .checked = test_checked };
+    var self: Self = .{ .init = undefined, .store = "/synthetic/store", .allocator = std.testing.allocator, .terminal = &terminal, .interrupted = &cancellation, .screen = panel, .checked = test_checked };
     self.init.io = std.testing.io;
     terminal.pump = .{ .context = &self, .step = pump };
     try self.document();
@@ -611,7 +659,7 @@ test "upgrade panel paints with the invocation backend and decoder before offeri
     terminal.pump = null;
     original.resumeLayout(saved);
     try std.testing.expect(original.backend == panel.backend and original.backend.idle());
-    try std.testing.expect(self.stream == &terminal.stream);
+    try std.testing.expect(&self.terminal.stream == &terminal.stream);
     try std.testing.expectEqual(TerminalInput.Pending.incomplete, terminal.stream.pending());
 }
 
@@ -648,7 +696,7 @@ const HeldPanel = struct {
         held.* = .{ .self = undefined, .screen = screen, .env = env, .pipes = pipes, .terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .input = pipes[0][0], .output = pipes[1][1], .screen = screen } };
         try SessionScreen.Test.init(screen, std.testing.io, &held.env, false);
         screen.view = .inspection;
-        held.self = .{ .init = undefined, .store = "/synthetic/store", .allocator = std.testing.allocator, .terminal = &held.terminal, .stream = &held.terminal.stream, .interrupted = &held.cancellation, .screen = screen, .checked = test_checked };
+        held.self = .{ .init = undefined, .store = "/synthetic/store", .allocator = std.testing.allocator, .terminal = &held.terminal, .interrupted = &held.cancellation, .screen = screen, .checked = test_checked };
         held.self.init.io = std.testing.io;
         return held;
     }
@@ -730,7 +778,7 @@ test "upgrade panel benign close finishes the frame before handing queued input 
     var credit: Credit = .{ .held = held };
     held.terminal.pump = .{ .context = &credit, .step = Credit.step };
     const backend = held.screen.backend;
-    const stream = held.self.stream;
+    const stream = &held.self.terminal.stream;
     try held.hold("\x1b[27u");
     try held.self.drive();
     try std.testing.expect(credit.credited and held.self.close);
