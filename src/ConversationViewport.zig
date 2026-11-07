@@ -973,11 +973,11 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 _ = self.printRange(first.child(.{ .height = 1 }), offset, body_at, .none, false, true, colour, plain);
                 _ = self.printRange(first.child(.{ .x_off = cells }), body_at, end, .word, false, true, colour, plain);
                 const leading = cells - quote.bytes;
-                var rail_style = plain;
-                rail_style.dim = colour;
                 const first_visible = visible(first.child(.{ .height = rows }));
                 if (first_visible.start == 0 and first_visible.end > 0) {
                     for (markers, 0..) |byte, col| if (byte == '>') {
+                        var rail_style = self.segmentStyle(annotation.start + col, colour, plain);
+                        rail_style.dim = rail_style.dim or colour;
                         first.writeCell(leading + @as(u16, @intCast(col)), 0, .{ .char = .{ .grapheme = "│", .width = 1 }, .style = rail_style });
                     };
                 }
@@ -988,7 +988,13 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                     const area = first.child(.{ .y_off = @intCast(index), .height = 1, .width = cells });
                     for (0..leading) |col| area.writeCell(@intCast(col), 0, .{ .style = style });
                     _ = area.child(.{ .x_off = leading }).print(&.{ .{ .text = gutter[0], .style = style }, .{ .text = gutter[1], .style = style }, .{ .text = gutter[2], .style = style } }, .{ .wrap = .none });
-                    for (0..quote.depth) |col| area.writeCell(leading + @as(u16, quote.indent) + @as(u16, @intCast(col)), 0, .{ .char = .{ .grapheme = "│", .width = 1 }, .style = rail_style });
+                    var depth: u16 = 0;
+                    for (markers, 0..) |byte, col| if (byte == '>') {
+                        var rail_style = self.segmentStyle(annotation.start + col, colour, plain);
+                        rail_style.dim = rail_style.dim or colour;
+                        area.writeCell(leading + @as(u16, quote.indent) + depth, 0, .{ .char = .{ .grapheme = "│", .width = 1 }, .style = rail_style });
+                        depth += 1;
+                    };
                 }
             }
             return rows;
@@ -2726,6 +2732,38 @@ test "typed quote rails preserve nested markers literal glyphs and untrusted sou
     try document.appendPrepared("", raw.len, &span, &admission);
     _ = try document.draw(screen.window(20, 3), .{}, true, true, .{}, .{});
     try std.testing.expectEqualStrings(raw, screen.row(0, &storage));
+    try std.testing.expectEqualStrings(raw, document.text());
+}
+
+test "typed quote rails retain each nested marker style and clear stale links" {
+    const raw = "> > abc def ghi";
+    var document: Document = .{};
+    var admission: Document.Admission = .{};
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .data = .{ .quote = .{ .bytes = 4, .depth = 2, .indent = 0 } } };
+    try document.appendPrepared(raw, 0, &span, &admission);
+    document.styles[0] = user_bit | (4 << 3);
+    document.styles[2] = 1 | 2;
+    var screen: TestScreen = undefined;
+    for ([_]bool{ true, false }) |colour| {
+        const window = screen.window(8, 4);
+        window.fill(.{ .link = .{ .uri = "https://stale.example" } });
+        _ = try document.draw(window, .{}, true, colour, .{}, .{});
+        for ([_]struct { x: u16, y: u16 }{ .{ .x = 0, .y = 0 }, .{ .x = 0, .y = 1 } }) |at| {
+            const cell = screen.screen.readCell(at.x, at.y).?;
+            try std.testing.expectEqualStrings("│", cell.char.grapheme);
+            try std.testing.expectEqual(colour, cell.style.dim);
+            try std.testing.expectEqual(colour, cell.style.italic);
+            try std.testing.expectEqual(if (colour) vaxis.Color{ .index = 12 } else vaxis.Color.default, cell.style.fg);
+            try std.testing.expectEqualStrings("", cell.link.uri);
+        }
+        for ([_]struct { x: u16, y: u16 }{ .{ .x = 2, .y = 0 }, .{ .x = 1, .y = 1 } }) |at| {
+            const cell = screen.screen.readCell(at.x, at.y).?;
+            try std.testing.expectEqualStrings("│", cell.char.grapheme);
+            try std.testing.expectEqual(colour, cell.style.dim);
+            try std.testing.expect(cell.style.bold and cell.style.italic);
+            try std.testing.expectEqualStrings("", cell.link.uri);
+        }
+    }
     try std.testing.expectEqualStrings(raw, document.text());
 }
 
