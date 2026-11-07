@@ -4111,3 +4111,44 @@ test "inline skills suggestion decoder owns bounded metadata and rejects path or
         prefix ++ "{\"name\":3,\"description\":\"A skill\"}]}",
     }) |wire| try std.testing.expectError(error.InvalidResponse, decodeSkillSuggestions(std.testing.allocator, wire));
 }
+
+test "legacy skill refusal binding stays exact for inline plain and tampered input" {
+    const omitted: protocol.ContentField = .{};
+    const targets = [_]MutationTarget{
+        .{ .message = .{ .bytes = omitted.length, .digest = omitted.digest, .invokes_skill = true } },
+        .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } },
+        .{ .message = .{ .bytes = 4, .digest = protocol.contentDigest("text"), .invokes_skill = true } },
+        .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest("") } },
+        .{ .message = .{ .bytes = 4, .digest = protocol.contentDigest("text") } },
+    };
+    var body: [1024]u8 = undefined;
+    for (targets) |target| {
+        for ([_]bool{ false, true }) |replayed| {
+            const candidates = [_]protocol.ActivityItem.Content{
+                .{ .length = target.message.bytes, .digest = target.message.digest },
+                .{ .length = omitted.length, .digest = omitted.digest },
+                .{ .length = 0, .digest = protocol.contentDigest("") },
+                .{ .length = target.message.bytes + 1, .digest = target.message.digest },
+                .{ .length = target.message.bytes, .digest = protocol.contentDigest("tampered") },
+            };
+            for (candidates) |candidate| {
+                const bytes = try std.fmt.bufPrint(&body, "{{\"version\":\"{s}\",\"type\":\"message_reply\",\"answer\":{{\"status\":\"rejected\",\"replayed\":{},\"session\":\"k7m2qx\",\"code\":\"unknown_skill\"}},\"input\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{ protocol.wire_version, replayed, candidate.length, std.fmt.bytesToHex(candidate.digest, .lower) });
+                const decoded = decodeMutationReply(.{ .status = 200, .body = bytes }, "k7m2qx", target);
+                if (candidate.length == target.message.bytes and std.mem.eql(u8, &candidate.digest, &target.message.digest)) {
+                    const answer = try decoded.answer;
+                    try std.testing.expect(answer.result.rejected.eql("unknown_skill"));
+                    try std.testing.expectEqual(replayed, answer.replayed);
+                    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(.{ .status = 200, .body = bytes }, "09azvw", target).answer);
+                } else try std.testing.expectError(error.RequestBindingMismatch, decoded.answer);
+            }
+        }
+    }
+    const expanded_text = "Skill file: full raw content";
+    const expanded = protocol.contentDigest(expanded_text);
+    for (targets[0..3]) |target| {
+        const bytes = try std.fmt.bufPrint(&body, "{{\"version\":\"{s}\",\"type\":\"message_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}},\"input\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{ protocol.wire_version, expanded_text.len, std.fmt.bytesToHex(expanded, .lower) });
+        const answer = try decodeMutationReply(.{ .status = 200, .body = bytes }, "k7m2qx", target).answer;
+        try std.testing.expectEqual(@as(u64, 7), answer.result.accepted.message.admission);
+        try std.testing.expectEqualSlices(u8, &expanded, &answer.input.?.digest);
+    }
+}

@@ -1509,7 +1509,10 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             if (fields.skill != null and fields.skills != null) return error.InvalidRequestRecord;
             if (fields.skill) |name| {
                 if (name.slice().len == 0 or fields.text != null or fields.configuration != null) return error.InvalidRequestRecord;
-                break :blk .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } };
+                // Exclusive legacy skills omit text; refusals echo that omitted
+                // identity, not the digest of a materialized empty text value.
+                const omitted: protocol.ContentField = .{};
+                break :blk .{ .message = .{ .bytes = omitted.length, .digest = omitted.digest, .invokes_skill = true } };
             }
             const text = fields.text orelse return error.InvalidRequestRecord;
             if (!text.state.eql("value")) return error.InvalidRequestRecord;
@@ -4855,6 +4858,9 @@ test "skills typed captures preserve invocation and invalid mixed reload intent"
     defer captured.close(io);
     const binding = try readCapturedBinding(io, &captured.file);
     try std.testing.expect(binding.target.message.invokes_skill);
+    const omitted: protocol.ContentField = .{};
+    try std.testing.expectEqual(omitted.length, binding.target.message.bytes);
+    try std.testing.expectEqualSlices(u8, &omitted.digest, &binding.target.message.digest);
     var bytes: [4096]u8 = undefined;
     var length = try captured.file.readPositionalAll(io, &bytes, 0);
     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
@@ -4979,5 +4985,76 @@ test "inline skills native recovery opens every old wire10 canonical command wit
         var actual: [2048]u8 = undefined;
         const count = try recovered.file.readPositionalAll(std.testing.io, &actual, 0);
         try std.testing.expectEqualStrings(body.written(), actual[0..count]);
+    }
+}
+
+fn testLegacySkillRefusalBinding(version: []const u8) !void {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const handle = "00000000-0000-4000-8000-000000000002";
+    var record: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer record.deinit();
+    try record.writer.print("{{\"version\":\"{s}\",\"kind\":\"message\",\"store\":", .{version});
+    try std.json.Stringify.encodeJsonString(root, .{}, &record.writer);
+    try record.writer.writeAll(",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\",\"skill\":\"missing\"}");
+    const file = try tmp.dir.createFile(io, handle ++ ".json", .{});
+    try file.writeStreamingAll(io, record.written());
+    file.close(io);
+    var captured = try openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } });
+    defer captured.close(io);
+    const omitted: protocol.ContentField = .{};
+    var reply_bytes: [1024]u8 = undefined;
+    for ([_]bool{ false, true }) |replayed| {
+        const reply = try std.fmt.bufPrint(&reply_bytes, "{{\"version\":\"{s}\",\"type\":\"message_reply\",\"answer\":{{\"status\":\"rejected\",\"replayed\":{},\"session\":\"k7m2qx\",\"code\":\"unknown_skill\"}},\"input\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{ protocol.wire_version, replayed, omitted.length, std.fmt.bytesToHex(omitted.digest, .lower) });
+        const answer = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = reply }, "k7m2qx", captured.target).answer;
+        try std.testing.expectEqual(replayed, answer.replayed);
+        try std.testing.expect(answer.result.rejected.eql("unknown_skill"));
+        try std.testing.expectEqual(omitted.length, answer.input.?.bytes);
+        try std.testing.expectEqualSlices(u8, &omitted.digest, &answer.input.?.digest);
+    }
+    var unchanged: [1024]u8 = undefined;
+    const count = try captured.file.readPositionalAll(io, &unchanged, 0);
+    try std.testing.expectEqualStrings(record.written(), unchanged[0..count]);
+}
+
+test "legacy skill omitted-content current-wire fresh and replayed refusal binding" {
+    try testLegacySkillRefusalBinding(protocol.wire_version);
+}
+
+test "legacy skill omitted-content wire10 fresh and replayed refusal binding" {
+    try testLegacySkillRefusalBinding(protocol.legacy_record_version);
+}
+
+test "legacy skill binding rejects mixed text plural and creating capture grammar" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    const handle = "00000000-0000-4000-8000-000000000003";
+    const tails = [_][]const u8{
+        ",\"skill\":\"demo\",\"text\":{\"state\":\"value\",\"value\":\"\"}}",
+        ",\"skill\":\"demo\",\"skills\":[\"demo\"]}",
+        ",\"skill\":\"demo\",\"configuration\":{}}",
+        ",\"skill\":\"\"}",
+    };
+    for ([_][]const u8{ protocol.wire_version, protocol.legacy_record_version }) |version| {
+        for (tails) |tail| {
+            var record: std.Io.Writer.Allocating = .init(std.testing.allocator);
+            defer record.deinit();
+            try record.writer.print("{{\"version\":\"{s}\",\"kind\":\"message\",\"store\":", .{version});
+            try std.json.Stringify.encodeJsonString(root, .{}, &record.writer);
+            try record.writer.writeAll(",\"key\":\"" ++ handle ++ "\",\"session\":\"k7m2qx\"");
+            try record.writer.writeAll(tail);
+            const file = try tmp.dir.createFile(io, handle ++ ".json", .{});
+            try file.writeStreamingAll(io, record.written());
+            file.close(io);
+            try std.testing.expectError(error.InvalidRequestRecord, openCaptured(io, .{ .generated = .{ .directory = root, .handle = handle } }));
+        }
     }
 }
