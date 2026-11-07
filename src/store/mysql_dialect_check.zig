@@ -167,6 +167,77 @@ fn setup(text: []const u8) !void {
     }
 }
 
+// Teardown shares setup's SQL-refusal report and adds transport failures to
+// the same test-failure boundary. A defer never replaces the body's error.
+fn restore(text: []const u8) void {
+    finishRestoration(setup(text), text, RestoreLog{});
+}
+
+const RestoreLog = struct {
+    fn failed(_: RestoreLog, text: []const u8, err: anyerror) void {
+        std.log.err("MySQL dialect check: restoration failed: {s}\n  {s}", .{ @errorName(err), text });
+    }
+};
+
+// The reporting seam permits expected failures to be asserted without hiding
+// err-level logs from the real Zig test runner (which must fail that test).
+fn finishRestoration(result: anyerror!void, text: []const u8, report: anytype) void {
+    result catch |err| {
+        state = .broken; // Neither a lost transport nor unrestored settings are reusable.
+        // setup already reported this SQL refusal at err level.
+        if (err != error.MysqlRefusedSetup) report.failed(text, err);
+    };
+}
+
+const TestRestoreReport = struct {
+    failures: usize = 0,
+    text: []const u8 = "",
+    cause: ?anyerror = null,
+
+    fn failed(self: *TestRestoreReport, text: []const u8, err: anyerror) void {
+        self.failures += 1;
+        self.text = text;
+        self.cause = err;
+    }
+
+    fn body(self: *TestRestoreReport, result: anyerror!void, restoration: anyerror!void) !void {
+        defer finishRestoration(restoration, "USE " ++ database, self);
+        return result;
+    }
+};
+
+test "MySQL restoration reports every transport failure and keeps a body failure primary" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    const saved = state;
+    defer state = saved;
+    // query and next errors share this boundary; none may become a green
+    // successful body or replace an earlier, unrelated assertion failure.
+    for ([_]anyerror{ error.ConnectionLost, error.DeadlineExceeded }) |transport_error| {
+        for ([_]bool{ false, true }) |body_failed| {
+            state = .open;
+            var report: TestRestoreReport = .{};
+            const outcome = report.body(if (body_failed) error.InjectedMigrationBodyFailure else {}, transport_error);
+            if (body_failed) try std.testing.expectError(error.InjectedMigrationBodyFailure, outcome) else try outcome;
+            try std.testing.expectEqual(@as(usize, 1), report.failures);
+            try std.testing.expectEqual(transport_error, report.cause.?);
+            try std.testing.expectEqualStrings("USE " ++ database, report.text);
+            try std.testing.expectEqual(State.broken, state);
+        }
+    }
+    var report: TestRestoreReport = .{};
+    state = .open;
+    try report.body({}, {});
+    try std.testing.expectEqual(@as(usize, 0), report.failures);
+    try std.testing.expectEqual(State.open, state);
+    // SQL refusal has already failed the test in setup. Do not log it twice,
+    // but still stop later tests from using an unrestored root connection.
+    finishRestoration(error.MysqlRefusedSetup, "SET FOREIGN_KEY_CHECKS=1", &report);
+    try std.testing.expectEqual(@as(usize, 0), report.failures);
+    try std.testing.expectEqual(State.broken, state);
+}
+
 fn ddl(name: []const u8, text: []const u8) !void {
     done.ddl += 1;
     if (try run(text)) |refused| {
@@ -347,7 +418,7 @@ const fresh_database = "rui_migration_fresh";
 fn load(comptime name: []const u8, text: []const u8, unchecked: bool) !void {
     try setup("USE " ++ name);
     if (unchecked) try setup("SET FOREIGN_KEY_CHECKS=0");
-    defer if (unchecked) setup("SET FOREIGN_KEY_CHECKS=1") catch {};
+    defer if (unchecked) restore("SET FOREIGN_KEY_CHECKS=1");
     if (try run(text)) |refused| {
         std.log.err("MySQL migration check: {s} refused: {f}", .{ name, refused });
         return error.MysqlRefusedMigration;
@@ -455,7 +526,7 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer setup("USE " ++ database) catch {};
+    defer restore("USE " ++ database);
     try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";DROP DATABASE IF EXISTS " ++ fresh_database ++
         ";CREATE DATABASE " ++ migrated_database ++ ";CREATE DATABASE " ++ fresh_database);
     try load(migrated_database, store_testing.baseline_mysql_ddl, false);
@@ -477,7 +548,7 @@ test "schema 55 migrates recovery index and wire 8 together to the current schem
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer setup("USE " ++ database) catch {};
+    defer restore("USE " ++ database);
     try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
     try load(migrated_database, store_testing.baseline_mysql_ddl, false);
     try load(migrated_database, store_testing.baseline_rows, true);
@@ -512,7 +583,7 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer setup("USE " ++ database) catch {};
+    defer restore("USE " ++ database);
     try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
     try load(migrated_database, store_testing.baseline_mysql_ddl, false);
     try load(migrated_database, store_testing.baseline_rows, true);
@@ -565,7 +636,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
     _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
-    defer setup("USE " ++ database) catch {};
+    defer restore("USE " ++ database);
     try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
     try load(migrated_database, store_testing.baseline_mysql_ddl, false);
     try load(migrated_database, store_testing.baseline_rows, true);

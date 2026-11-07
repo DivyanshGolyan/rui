@@ -63,12 +63,14 @@ class SkillsEndpoint(host_process.TestHTTPServer):
         outputs = [item for item in request["input"] if item.get("type") == "function_call_output"]
         if text == "invoke with the skill tool" and not any(item.get("call_id") == "skill-call" for item in outputs):
             return fixture.sse_tool_calls("skill-tool", [("skill", "skill-call", '{"operation":"invoke","name":"demo"}')])
+        if text == "invoke a FIFO with the skill tool" and not any(item.get("call_id") == "skill-fifo-call" for item in outputs):
+            return fixture.sse_tool_calls("skill-fifo-tool", [("skill", "skill-fifo-call", '{"operation":"invoke","name":"demo"}')])
         if text == "start the unique child" and not any(item.get("call_id") == "child-call" for item in outputs):
             arguments = {"task": CHILD_TASK, "attached": False, "spec": {
                 "model": "gpt-6-sol", "effort": "low", "compactAt": 100000, "permissionMode": "bypass",
                 "tools": ["skill"], "instructions": CHILD_INSTRUCTIONS, "outputSchema": CHILD_SCHEMA}}
             return fixture.sse_tool_calls("spawn-child", [("start_agent", "child-call", json.dumps(arguments))])
-        allowed = {"initial probe", "restricted initial message", "invoke with the skill tool",
+        allowed = {"initial probe", "restricted initial message", "invoke with the skill tool", "invoke a FIFO with the skill tool",
                    "after metadata reload", "start the unique child", CHILD_TASK}
         assert text in allowed or text.startswith("Skill file: "), text
         answer = '{"child":"ok"}' if text == CHILD_TASK else "skills checked"
@@ -277,6 +279,28 @@ def main():
         saved = invoke("session", "inspect", "--store", store, "--session", parent)["session"]
         assert "skill" in saved["tools"], saved
         assert endpoint.decoded() == [], "Configure must not schedule a model turn"
+        # Public parsing accepts bounded UTF-8 strings, so target syntax belongs
+        # to the shared mutation owner, after keyed replay classification.
+        targets = ("bad", "abcdefg", "ABCDEF", "iiiiii", "ab/cde", "ab\0cde", "éabcd", "absent", "")
+        target_refusals = []
+        before_targets = conversation(parent)
+        for index, target in enumerate(targets):
+            request = dict(reload(f"reload-target-{index}"), session=target)
+            if target == "":
+                # Creating syntax still needs the ordinary complete spec. A
+                # reload must reject it, never turn that spec into creation.
+                request["configuration"] = json.loads(create_capture)["configuration"]
+            expected = {"status": "rejected", "replayed": False, "session": target,
+                        "code": "invalid_session_reference" if index < len(targets) - 2 else "unknown_session"}
+            answer = post(request)["answer"]
+            assert answer == expected, (request, answer, expected)
+            assert post(request)["answer"] == {**expected, "replayed": True}
+            target_refusals.append((request, expected))
+        existing_reload = post(reload("target-existing"))["answer"]
+        assert existing_reload["status"] == "accepted" and existing_reload["skills"] == "unchanged", existing_reload
+        assert invoke("session", "inspect", "--store", store, "--session", parent)["session"] == saved
+        assert conversation(parent) == before_targets
+        assert endpoint.decoded() == [], "target validation or reload admitted model work"
         send("probe", "initial probe")
         first = endpoint.decoded()[-1]
         assert metadata(first, "Available skills") == [initial_catalog], first
@@ -325,6 +349,8 @@ def main():
         # file/catalog, including both independently allocated creation routes.
         host = start()
         count = len(endpoint.decoded())
+        for request, expected in target_refusals:
+            assert post(request)["answer"] == {**expected, "replayed": True}
         for original in (native, create_capture, initial_capture, reload("body-only")):
             replayed = post(original)["answer"]
             assert replayed["status"] == "accepted" and replayed["replayed"] is True, replayed
@@ -347,6 +373,44 @@ def main():
         assert output == expected_invocation, output
         assert raw.decode() not in "\n".join(messages(tool_request, "developer")), tool_request
 
+        # An advertised regular file can become a writerless FIFO. Both public
+        # invocation paths must refuse it without pinning a worker/engine in
+        # blocking open; raw_request's existing five-second deadline bounds the
+        # negative, and the ordinary Host disposer kills/reaps on assertion.
+        source = pathlib.Path(demo["path"])
+        source.unlink()
+        os.mkfifo(source, 0o600)
+        fifo_request = dict(native, key="fifo-file")
+        fifo_before = conversation(parent)
+        fifo_settings = invoke("session", "inspect", "--store", store, "--session", parent)["session"]
+        fifo_count = len(endpoint.decoded())
+        try:
+            try:
+                fifo_answer = post(fifo_request)["answer"]
+            except TimeoutError as error:
+                raise AssertionError("writerless FIFO invocation did not reach typed refusal within the socket deadline") from error
+            assert fifo_answer == {"status": "rejected", "replayed": False, "session": parent,
+                                   "code": "skill_file_unavailable"}, fifo_answer
+            fifo_result = fixture.read_result(store, "fifo-file")
+            assert b"InvalidSkillFile" in fifo_result, fifo_result
+            assert conversation(parent) == fifo_before
+            assert len(endpoint.decoded()) == fifo_count, "refused FIFO admitted model work"
+            assert invoke("session", "inspect", "--store", store, "--session", parent)["session"] == fifo_settings
+            send("fifo-tool", "invoke a FIFO with the skill tool")
+            fifo_tool_request = endpoint.decoded()[-1]
+            fifo_output = next(item["output"] for item in fifo_tool_request["input"]
+                               if item.get("type") == "function_call_output" and item.get("call_id") == "skill-fifo-call")
+            assert fifo_output.encode() == fifo_result, fifo_output
+            assert metadata(fifo_tool_request, "Available skills") == [initial_catalog]
+            assert not metadata(fifo_tool_request, "Skill catalog changes")
+            assert invoke("session", "inspect", "--store", store, "--session", parent)["session"] == fifo_settings
+        finally:
+            source.unlink()
+            source.write_bytes(raw)
+        assert post(fifo_request)["answer"] == {**fifo_answer, "replayed": True}
+        assert fixture.read_result(store, "fifo-file") == fifo_result
+        assert post(reload("fifo-repair"))["answer"]["skills"] == "unchanged"
+
         # An addition, a removal, a description change and a path-only winner
         # change produce one append-only system fact, never a full new listing.
         pathlib.Path(removed["path"]).unlink()
@@ -366,6 +430,8 @@ def main():
         stop_process(host)
         host = None
         host = start()
+        assert post(fifo_request)["answer"] == {**fifo_answer, "replayed": True}
+        assert fixture.read_result(store, "fifo-file") == fifo_result
         replayed = post(reload("metadata"))["answer"]
         assert replayed["replayed"] is True and replayed["skills"] == "reloaded", replayed
         # This refusal also survives restart and a now-readable skill file.

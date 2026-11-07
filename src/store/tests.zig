@@ -12352,3 +12352,77 @@ test "skills preserve archive intent until a fresh invocation is admitted" {
         }
     }.run);
 }
+
+test "skills native reload validates targets after replay without changing ordinary precedence" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var opened = true;
+            defer if (opened) storage.close() catch unreachable;
+            const session = try store_testing.configureTestSession(&storage, "reload-target-create");
+            const candidate: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{} } };
+            const targets = [_][]const u8{ "bad", "abcdefg", "ABCDEF", "iiiiii", "ab/cde", "ab\x00cde", "éabcd", "absent", "" };
+            for (targets, 0..) |target, index| {
+                var key: [64]u8 = undefined;
+                var command: protocol.ConfigureCommand = .{ .reload_skills = true };
+                try command.key.set(try std.fmt.bufPrint(&key, "reload-target-{d}", .{index}));
+                try command.session.set(target);
+                const expected: protocol.ConfigurationRejection = if (index < targets.len - 2) .invalid_session_reference else .unknown_session;
+                const answer = storage.configureWithCapturedSkills(&command, null, null, &candidate, .{});
+                try std.testing.expect(answer == .rejected);
+                try std.testing.expectEqual(expected, answer.rejected.code);
+                try std.testing.expect(!answer.rejected.replayed);
+                // Reopen before replay: the refusal must stay typed and saved,
+                // even without a capture and with the target still absent.
+                try storage.close();
+                opened = false;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                opened = true;
+                const replay = storage.configureWithCapturedSkills(&command, null, null, null, .{});
+                try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                try std.testing.expectEqual(expected, replay.rejected.code);
+                command.reload_skills = false;
+                try std.testing.expect(storage.configure(&command, .{}) == .conflict);
+            }
+            var existing: protocol.ConfigureCommand = .{ .session = session, .reload_skills = true };
+            try existing.key.set("reload-target-existing");
+            const accepted = storage.configureWithCapturedSkills(&existing, null, null, &candidate, .{});
+            try std.testing.expect(accepted == .accepted);
+            try std.testing.expectEqual(@as(u64, 1), accepted.accepted.revision);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry", .{}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "skills saved catalog read retains only decoded result metadata" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("catalog-read-retention", "", workspace, "model-a");
+            const session = storage.configureWithInitialSkills(&create, null, &skills_fixture_initial, .{}).accepted.session;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var requested = std.testing.FailingAllocator.init(arena.allocator(), .{});
+            const result = try storage.readSkills(requested.allocator(), session.slice());
+            try std.testing.expectEqual(@as(usize, 1), result.catalog.entries.len);
+            const entry = result.catalog.entries[0];
+            const owned_bytes = @sizeOf(Store.SkillsState) + @sizeOf(protocol.Bounded(protocol.max_workspace_bytes)) +
+                @sizeOf(@import("../skills.zig").Entry) + entry.name.len + entry.description.len + entry.path.len;
+            try std.testing.expectEqual(owned_bytes, requested.allocated_bytes);
+        }
+    }.run);
+}
