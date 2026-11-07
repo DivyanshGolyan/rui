@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Keep the shared Markdown documents at one sentence per line.
+"""Optional Markdown source formatting for cleaner diffs.
 
-Markdown renders a line break inside a paragraph as a space, so where a
-paragraph's lines break changes nothing a reader sees. It changes what git
-sees: two PRs that edit different sentences of one paragraph conflict when the
-paragraph is a single line, and merge cleanly when each sentence has its own.
+Putting each sentence on its own source line can reduce merge conflicts when
+PRs edit different sentences in the same paragraph. This is source formatting,
+not a prose quality rule or a required repository layout.
 
 A CommonMark parser finds the paragraphs, so tables, code, HTML and headings
 are never touched. A paragraph's line breaks at a sentence end only where the
@@ -94,7 +93,7 @@ def findings(paths):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--check", action="store_true", help="name each document to rewrite, and fail if any")
+    parser.add_argument("--check", action="store_true", help="report optional source-layout changes and fail if any")
     parser.add_argument("paths", nargs="*", type=Path, help="documents (default: the top-level ones and docs/)")
     args = parser.parse_args()
     paths = [path.resolve() for path in args.paths] or documents()

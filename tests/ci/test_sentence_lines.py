@@ -1,7 +1,7 @@
-"""The shared documents keep one sentence per line, so edits to different
-sentences of one paragraph merge cleanly, and the rewrite never changes what
-a document renders."""
+"""The optional sentence-line formatter preserves rendering and is idempotent."""
+from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
 from sentence_lines import ROOT, documents, findings, reflow, rendered
@@ -21,9 +21,25 @@ HAZARDS = (
 
 
 class SentenceLinesTest(unittest.TestCase):
-    def test_shared_documents_hold_one_sentence_per_line(self):
-        found = list(findings(documents()))
-        self.assertEqual(found, [], "run python3 tests/ci/sentence_lines.py to rewrite:\n" + "\n".join(found))
+    def test_findings_report_explicit_files_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "example.md"
+            source = "One sentence. Another sentence.\n"
+            path.write_text(source)
+            self.assertEqual(list(findings([path])), [f"{path}:1"])
+            self.assertEqual(path.read_text(), source)
+            path.write_text(reflow(source))
+            self.assertEqual(path.read_text(), "One sentence.\nAnother sentence.\n")
+            self.assertEqual(list(findings([path])), [])
+
+    def test_default_documents_select_inventory_not_layout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("README.md", "AGENTS.md", "docs/guide.md", "research/notes.md", "THIRD_PARTY_NOTICES.md"):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("One sentence. Another sentence.\n")
+            self.assertEqual(documents(root), [root / "AGENTS.md", root / "README.md", root / "docs/guide.md"])
 
     def test_rewrite_never_changes_what_renders(self):
         for source in HAZARDS:

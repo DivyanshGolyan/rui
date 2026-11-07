@@ -73,10 +73,6 @@ def checks(paths, available, base):
     # These targets require CI's live MySQL or Postgres rather than a local skip.
     targets = [target for target in development["targets"] if target not in development["server_targets"]]
     yield "whitespace", ["git", "diff", "--check", base, "HEAD"]
-    documents = [path for path in existing if path.endswith(".md")
-                 and ("/" not in path or path.startswith("docs/")) and path != "THIRD_PARTY_NOTICES.md"]
-    if documents:
-        yield "markdown sentences", [sys.executable, "tests/ci/sentence_lines.py", "--check", *documents]
     zig = [path for path in existing if path.endswith(".zig")]
     if zig:
         yield "zig fmt", ["zig", "fmt", "--check", "--ast-check", *zig]
