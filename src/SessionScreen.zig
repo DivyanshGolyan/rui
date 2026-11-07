@@ -3121,11 +3121,22 @@ test "typed saved-file loading preserves raw provenance through prepend Message 
     try std.testing.expectEqualStrings("│", rail.track_character.?.grapheme);
     const rail_column = cells.width - rail.character.width;
     try std.testing.expectEqual(@as(u16, 39), rail_column);
-    // Scrollbar.draw paints no thumb when all content fits in the body.
-    try std.testing.expect(projection.total +| screen.browsing.blank_tail <= screen.height);
-    try std.testing.expectEqual(@as(usize, 0), screen.browsing.scroll.scroll.y);
-    for (0..screen.height) |row| {
-        try std.testing.expectEqualStrings(rail.track_character.?.grapheme, cells.readCell(rail_column, @intCast(row)).?.char.grapheme);
+    // Scrollbar.draw uses retained rows plus pinned blank tail for its thumb.
+    const height: usize = screen.height;
+    const top = screen.browsing.scroll.scroll.y;
+    const total = projection.total +| screen.browsing.blank_tail;
+    try std.testing.expectEqual(@as(usize, 4), projection.total);
+    try std.testing.expectEqual(@as(usize, 12), screen.browsing.blank_tail);
+    try std.testing.expectEqual(@as(usize, 13), height);
+    try std.testing.expectEqual(@as(usize, 0), top);
+    try std.testing.expectEqual(@as(usize, 16), total);
+    const thumb_height = @max(try std.math.divCeil(usize, height * height, total), 1);
+    const thumb_top = top * height / total;
+    try std.testing.expectEqual(@as(usize, 11), thumb_height);
+    try std.testing.expectEqual(@as(usize, 0), thumb_top);
+    for (0..height) |row| {
+        const expected = if (row >= thumb_top and row < thumb_top + thumb_height) rail.character.grapheme else rail.track_character.?.grapheme;
+        try std.testing.expectEqualStrings(expected, cells.readCell(rail_column, @intCast(row)).?.char.grapheme);
     }
     // The retained raw SGR and invalid byte never produce a link in this frame.
     for (0..size.row) |row| for (0..size.col) |col| try std.testing.expectEqualStrings("", cells.readCell(@intCast(col), @intCast(row)).?.link.uri);
