@@ -1724,8 +1724,8 @@ test "prepared Action preserves selected inspection until explicit return" {
             const projection = screen.browsing.projection(screen.textLayout());
             std.debug.print("ACTION width={d} rows={d} scroll={d} source_prefix=[{s}] offered={} delivered={}\n", .{ screen.textLayout().width, projection.total, screen.browsing.scroll.scroll.y, screen.browsing.text.text()[0.."Run Bash: exact command\n".len], screen.offered() != null, screen.ticket.?.delivered });
             for (0..@min(projection.total, 5)) |index| {
-                const position = projection.position(index);
-                std.debug.print("ACTION position row={d} offset={d} subrow={d}\n", .{ index, position.offset, position.row });
+                const probe_position = projection.position(index);
+                std.debug.print("ACTION position row={d} offset={d} subrow={d}\n", .{ index, probe_position.offset, probe_position.row });
             }
             std.debug.print("ACTION row0=[{s}]\n", .{rowText(screen, 0, &row)});
             std.debug.print("ACTION row1=[{s}]\n", .{rowText(screen, 1, &row)});
