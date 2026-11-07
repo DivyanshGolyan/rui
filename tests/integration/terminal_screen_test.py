@@ -1,6 +1,8 @@
 """Focused, offline tests for the shared committed-screen observer."""
 import unittest
 
+import host_process
+
 from terminal_screen import ScreenCapture, SgrStream
 
 
@@ -73,4 +75,5 @@ class ScreenCaptureTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    host_process.enter()
     unittest.main()
