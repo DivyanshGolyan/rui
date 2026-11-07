@@ -2197,7 +2197,10 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
     if (!admitHostRequest(state)) {
         if (parsed) |result| switch (result) {
             .command => |command| switch (command.name) {
-                .upgrade => return effects.add(.upgrade),
+                .upgrade => {
+                    effects.add(.clear_draft);
+                    return effects.add(.upgrade);
+                },
                 .exit => return effects.add(.exit),
                 else => {},
             },
@@ -2243,6 +2246,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         .exit => effects.add(.exit),
         .upgrade => {
             state.upgrade_pending = true;
+            effects.add(.clear_draft);
             effects.add(.upgrade);
         },
         .model => {
@@ -4103,7 +4107,7 @@ test "a command the person did not see end is named on the way out" {
     }
 }
 
-test "upgrade emits only its local effect and preserves selection settings and unresolved handles" {
+test "upgrade consumes its local command and preserves selection settings and unresolved handles" {
     var state = try pickerState(Default.of("codex", "gpt-6-luna"));
     defer state.deinit();
     const selected = state.selected;
@@ -4114,11 +4118,13 @@ test "upgrade emits only its local effect and preserves selection settings and u
     state.answer(0, .unknown, "01234567-89ab-4cde-8012-0123456789ab");
     const request = state.requests[0];
     const draft = try typeText(&state, "/upgrade");
-    try expectEffects(&.{.upgrade}, try submit(&state, draft));
+    try expectEffects(&.{ .clear_draft, .upgrade }, try submit(&state, draft));
     try std.testing.expectEqual(selected, state.selected);
     try std.testing.expect(std.meta.eql(settings, state.settings));
     try std.testing.expectEqual(@as(usize, 1), state.request_count);
     try std.testing.expect(std.meta.eql(request, state.requests[0]));
+    // The pure view borrows the original draft; the clear effect belongs to
+    // the shell, and does not disturb selected settings or the request ledger.
     try std.testing.expectEqualStrings("/upgrade", draft.bytes);
     try std.testing.expect(state.command == null);
 }
@@ -4136,7 +4142,7 @@ test "upgrade protocol hold refuses starts opens stops and Host commands but per
     }
     try expectEffects(&.{}, try press(&state, try typeText(&state, "draft"), .stop));
     try std.testing.expectEqual(@as(usize, 0), state.request_count);
-    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{ .clear_draft, .upgrade }, try submit(&state, try typeText(&state, "/upgrade")));
     try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
 }
 
@@ -4508,7 +4514,7 @@ test "upgrade holds retain archive confirmation until admitted and allow local d
         try std.testing.expect(state.prompt == null);
         try expectEffects(&.{}, try step(&state, .{ .composed = .{ .draft = draft, .input = .{ .composer = .redraw } } }));
         // Existing local exit and recovery commands still bypass the hold.
-        try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+        try expectEffects(&.{ .clear_draft, .upgrade }, try submit(&state, try typeText(&state, "/upgrade")));
         try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
         state.prompt = prompt;
         state.upgrade_blocked = false;

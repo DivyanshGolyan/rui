@@ -657,7 +657,12 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         return;
     }
     switch (parsed) {
-        .upgrade => self.upgrade_requested = true,
+        .upgrade => {
+            self.upgrade_requested = true;
+            // This local command is accepted now, before quiescing or any
+            // asynchronous work. Never clear a later draft at completion.
+            self.input.clear();
+        },
         .archive => try self.perform(.archive),
         .unarchive => try self.converse(.unarchive),
         .exit => self.leaving = .detached,
@@ -4703,7 +4708,7 @@ test "an asynchronous older page joins only its transcript and preserves deliver
     try std.testing.expectEqual(@as(?u64, 7), self.transcript.older.?.end);
 }
 
-test "upgrade command stays local and preserves the actual draft cursor and original submission" {
+test "accepted upgrade consumes only its command and preserves the original submission" {
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
     const screen = try std.testing.allocator.create(Screen);
@@ -4719,13 +4724,13 @@ test "upgrade command stays local and preserves the actual draft cursor and orig
     const original = self.input.submitText("original indeterminate model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('K'), .retry = @splat('K') };
     _ = self.input.append("/upgrade");
-    const before = self.input.composition();
     const revision = self.input.revision;
-    try self.commandLine();
+    try self.draftEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }, null);
     try std.testing.expect(self.upgrade_requested);
-    try std.testing.expectEqualStrings(before.bytes, self.input.composition().bytes);
-    try std.testing.expectEqual(before.cursor, self.input.composition().cursor);
-    try std.testing.expectEqual(revision, self.input.revision);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 0), self.input.composition().cursor);
+    try std.testing.expect(self.input.revision != revision);
+    _ = self.input.append("new unsent draft");
     try std.testing.expect(self.input.queuedCommand() == null);
     try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
     try std.testing.expect(try self.quiesceUpgrade());
@@ -4733,7 +4738,35 @@ test "upgrade command stays local and preserves the actual draft cursor and orig
     try std.testing.expectEqualStrings("original indeterminate model input", try self.input.message(original));
     try std.testing.expectEqualStrings(&@as([36]u8, @splat('K')), &self.submission.view().?.key);
     try std.testing.expectEqual(Submission.State.unconfirmed, self.submission.view().?.state);
-    try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("new unsent draft", self.input.composition().bytes);
+}
+
+test "blocked local upgrade consumes its command while busy refusal retains it" {
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    var env = try std.testing.environ.createMap(std.testing.allocator);
+    defer env.deinit();
+    try Screen.Test.init(screen, std.testing.io, &env, false);
+    defer Screen.Test.deinit(screen);
+    var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
+    for ([_]bool{ false, true }) |busy| {
+        self.* = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .upgrade_blocked = true, .reading = .{ .opening = false } };
+        var stream: TerminalInput = .{};
+        self.input.init(&stream);
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        if (busy) self.input.queueCommand("/status");
+        _ = self.input.append("/upgrade");
+        try self.draftEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }, null);
+        try std.testing.expectEqual(!busy, self.upgrade_requested);
+        try std.testing.expectEqualStrings(if (busy) "/upgrade" else "", self.input.composition().bytes);
+        if (!busy) {
+            _ = self.input.append("later draft");
+            self.applyUpgrade(.incompatible);
+            try std.testing.expectEqualStrings("later draft", self.input.composition().bytes);
+        }
+    }
 }
 
 test "cancelling a quiescing upgrade keeps the draft without starting a worker" {

@@ -4217,6 +4217,26 @@ test "a pre-cancellation list cannot release upgrade admission" {
     try std.testing.expect(!overview.state.upgrade_pending);
 }
 
+test "overview consumes accepted upgrade before quiescing and keeps later draft" {
+    for ([_]bool{ false, true }) |blocked| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.state.upgrade_blocked = blocked;
+        try std.testing.expect(try rig.press("/upgrade\n") == null);
+        try std.testing.expect(overview.upgrade_requested);
+        try std.testing.expectEqualStrings("", overview.composerDraft().bytes);
+        try std.testing.expectEqual(@as(usize, 0), overview.composerDraft().cursor);
+        try std.testing.expect(try rig.press("new draft") == null);
+        try std.testing.expectEqualStrings("new draft", overview.composerDraft().bytes);
+        // Cancel before a worker can start; a later draft is not the command.
+        try std.testing.expect(try rig.press("\x03") == null);
+        try std.testing.expect(!overview.upgrade_requested);
+        try std.testing.expectEqualStrings("new draft", overview.composerDraft().bytes);
+    }
+}
+
 test "upgrade quiescence settles accepted queued and running archive mutations before releasing the panel" {
     const Gate = struct {
         var entered: std.atomic.Value(bool) = .init(false);

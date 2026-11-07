@@ -632,13 +632,18 @@ def terminal_check_cases(root, binary, releases, artifacts):
                 screen.send("/upgrade\r")
                 screen.until(gate.entered.is_set, "held metadata check")
                 screen.contains("Upgrade: checking")
+                empty_row = "Type a task to start a Session" if entry == "overview" else ""
+                wait_for(screen.observe, "accepted check consumed command before peer release",
+                         ready=lambda _: screen.capture.draft(empty_row, len(prompt), prompt=prompt))
+                assert not gate.release.is_set()
+                assert "install stable Rui; may restart this Store's Host" not in screen.capture.completed
                 screen.send("\x1b[?2027;3$y\x1b[200~XYZ\x1b[201~\x1b[DQ")
                 wait_for(screen.observe, "draft editing during held check",
-                         ready=lambda _: screen.capture.draft("/upgradeXYQZ", len(prompt) + 11, prompt=prompt))
+                         ready=lambda _: screen.capture.draft("XYQZ", len(prompt) + 3, prompt=prompt))
                 screen.send("\x1b")
                 screen.contains("Upgrade cancelled")
                 wait_for(screen.observe, "retained draft after check cancellation",
-                         ready=lambda _: screen.capture.draft("/upgradeXYQZ", len(prompt) + 11, prompt=prompt))
+                         ready=lambda _: screen.capture.draft("XYQZ", len(prompt) + 3, prompt=prompt))
                 # The arrow left Z after the caret; Ctrl-U alone only
                 # deletes to the line start. Move to the end before clearing.
                 screen.send("\x05\x15")
@@ -657,6 +662,43 @@ def terminal_check_cases(root, binary, releases, artifacts):
 
                 wait_for(screen.observe, "Unicode report survives check cancellation", ready=unicode_draft)
                 screen.save(artifacts, f"{entry}-held-check-cancelled")
+                c.assert_unchanged()
+                assert host.poll() is None and c.status()["instance"] == previous["instance"]
+                assert releases.archive_path not in releases.requests[request_start:]
+                assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+
+
+
+def terminal_check_failure_cases(root, binary, releases):
+    """A failed held read-only check never clears the subsequent draft."""
+    for entry in ("overview", "conversation"):
+        prompt = " › " if entry == "overview" else "› "
+        with case(root, binary, releases, f"terminal-check-failure-{entry}") as c:
+            c.old_selection()
+            host, previous = c.start_host()
+            session, credential = terminal_setup(c)
+            gate = releases.gates["/latest"] = Gate()
+            releases.status["/latest"] = 503
+            request_start = len(releases.requests)
+            args = ([str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-luna"]
+                    if entry == "overview" else [str(binary), "session", "resume", "--store", str(c.store), "--", session])
+            with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
+                screen = TerminalScreen(master, process)
+                screen.contains("›")
+                screen.send("/upgrade\r")
+                screen.until(gate.entered.is_set, "held failing metadata check")
+                screen.contains("Upgrade: checking")
+                empty_row = "Type a task to start a Session" if entry == "overview" else ""
+                wait_for(screen.observe, "accepted failing check consumed command",
+                         ready=lambda _: screen.capture.draft(empty_row, len(prompt), prompt=prompt))
+                assert not gate.release.is_set()
+                screen.send("later draft")
+                wait_for(screen.observe, "new draft while failing check held",
+                         ready=lambda _: screen.capture.draft("later draft", len(prompt) + len("later draft"), prompt=prompt))
+                gate.release.set()
+                screen.contains("Upgrade check failed")
+                wait_for(screen.observe, "new draft retained after check failure",
+                         ready=lambda _: screen.capture.draft("later draft", len(prompt) + len("later draft"), prompt=prompt))
                 c.assert_unchanged()
                 assert host.poll() is None and c.status()["instance"] == previous["instance"]
                 assert releases.archive_path not in releases.requests[request_start:]
@@ -684,11 +726,16 @@ def terminal_cases(root, binary, releases, artifacts):
                 screen.save(artifacts, f"{entry}-automatic-install")
                 assert c.link.resolve() == c.original and c.status()["instance"] == previous["instance"]
                 screen.contains("preparing")
+                empty_row = "Type a task to start a Session" if entry == "overview" else ""
+                wait_for(screen.observe, "accepted install consumed command before archive release",
+                         ready=lambda _: screen.capture.draft(empty_row, len(prompt), prompt=prompt))
+                assert not gate.release.is_set()
+                assert "install stable Rui; may restart this Store's Host" not in screen.capture.completed
                 # Terminal replies and editing stay in the same invocation
                 # while the command works; there is no temporary screen.
                 screen.send("\x1b[?2027;3$y\x1b[200~XYZ\x1b[201~\x1b[DQ")
                 wait_for(screen.observe, "draft edited during upgrade",
-                         ready=lambda _: screen.capture.draft("/upgradeXYQZ", len(prompt) + 11, prompt=prompt))
+                         ready=lambda _: screen.capture.draft("XYQZ", len(prompt) + 3, prompt=prompt))
                 # Escape must interrupt the running task, not send a Message or
                 # wait for the server to finish downloading the archive.
                 screen.send("\x1b")
@@ -700,7 +747,7 @@ def terminal_cases(root, binary, releases, artifacts):
                 # Retry explicitly; no automatic retry or uncertain replay.
                 screen.contains("›")
                 wait_for(screen.observe, "retained edited draft after cancellation",
-                         ready=lambda _: screen.capture.draft("/upgradeXYQZ", len(prompt) + 11, prompt=prompt))
+                         ready=lambda _: screen.capture.draft("XYQZ", len(prompt) + 3, prompt=prompt))
                 # The arrow left Z after the caret; Ctrl-U alone only
                 # deletes to the line start. Move to the end before clearing.
                 screen.send("\x05\x15")
@@ -722,13 +769,22 @@ def terminal_cases(root, binary, releases, artifacts):
                 screen.send("\x05\x15/upgrade")
                 wait_for(screen.observe, "exact retry command before submission",
                          ready=lambda _: screen.capture.draft("/upgrade", len(prompt) + 8, prompt=prompt))
+                gate = releases.gate_archive()
                 screen.send("\r")
+                screen.until(gate.entered.is_set, "retry accepted and held before archive")
+                wait_for(screen.observe, "accepted retry consumed before success",
+                         ready=lambda _: screen.capture.draft(empty_row, len(prompt), prompt=prompt))
+                assert not gate.release.is_set()
+                screen.send("later success draft")
+                wait_for(screen.observe, "new draft during retry",
+                         ready=lambda _: screen.capture.draft("later success draft", len(prompt) + len("later success draft"), prompt=prompt))
+                gate.release.set()
                 screen.contains("Upgrade installed; Host ready")
                 screen.save(artifacts, f"{entry}-installed")
                 proof_ready(c, previous, old_host)
                 screen.contains("›")
-                wait_for(screen.observe, "retained /upgrade draft after installation",
-                         ready=lambda _: screen.capture.draft("/upgrade", len(prompt) + 8, prompt=prompt))
+                wait_for(screen.observe, "new draft retained after successful installation",
+                         ready=lambda _: screen.capture.draft("later success draft", len(prompt) + len("later success draft"), prompt=prompt))
                 screen.send("\x15unsent fixture draft")
                 screen.contains("unsent fixture draft")
                 screen.save(artifacts, f"{entry}-returned")
@@ -1061,7 +1117,8 @@ def main():
         cancel_selected_version_check(root, binary, releases, artifacts)
         print("upgrade native: Escape and SIGINT reaped selected version probes before discovery", flush=True)
         terminal_check_cases(root, binary, releases, artifacts)
-        print("upgrade native: both held terminal checks preserved input without installation", flush=True)
+        terminal_check_failure_cases(root, binary, releases)
+        print("upgrade native: held terminal checks consumed commands and preserved newer drafts", flush=True)
         terminal_cases(root, binary, releases, artifacts)
         print("upgrade native: both terminal /upgrade entry points passed", flush=True)
         cancel_after_publication(root, binary, releases, artifacts)
