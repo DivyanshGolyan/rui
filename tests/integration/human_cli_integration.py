@@ -943,6 +943,7 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
 
 def permission_frame(capture, screen):
     """Project railed rows of this committed conversation, never full-width chrome."""
+    assert capture.generation > 0 and not capture.synchronized, "permission observer needs a complete frame"
     assert screen == capture.completed, "permission observer needs current committed frame"
     cells = capture.completed_cells
     columns = capture.screen.columns
@@ -986,6 +987,15 @@ def permission_adjacent(rows, railed, first, second):
     return adjacent[0]
 
 
+def permission_stale_approval_retired(rows, railed, first, second):
+    """The success is unique and adjacent; no approval survives from it onward."""
+    start = permission_adjacent(rows, railed, first, second)
+    successes = permission_matches(rows, railed, re.compile(re.escape("  ✓ " + second)))
+    assert successes == [start], ("duplicate success in permission scan", second, successes, rows)
+    assert f"? {second}" not in "\n".join(rows[start:]), ("stale approval outlived the next page", rows)
+    return start
+
+
 def permission_compact_group(rows, railed, expected):
     pattern = re.compile(r"  ✓ (Compact item [0-9]+|Wait for compact tail)")
     indices = permission_matches(rows, railed, pattern)
@@ -1009,6 +1019,21 @@ def permission_observer_oracles():
         except AssertionError:
             return
         raise AssertionError("corrupt permission observation accepted")
+    empty = ScreenCapture(100, 24)
+    refuse(lambda: permission_frame(empty, empty.completed))
+    rows, rails = draw(["  ✓ First", "  ✓ Second"])
+    assert permission_stale_approval_retired(rows, rails, "First", "Second") == 1
+    capture.feed(b"\x1b[?2026h")
+    refuse(lambda: permission_frame(capture, capture.completed))
+    capture.feed(b"\x1b[?2026l")
+    rows, rails = draw(["  ✓ Second", "  ? Second", "  ✓ First", "  ✓ Second"])
+    # The old adjacency-only check picked the later pair and missed the Action.
+    assert permission_adjacent(rows, rails, "First", "Second") == 3
+    refuse(lambda: permission_stale_approval_retired(rows, rails, "First", "Second"))
+    rows, rails = draw(["  ✓ Second", "  ✓ First", "  ✓ Second"])
+    refuse(lambda: permission_stale_approval_retired(rows, rails, "First", "Second"))
+    rows, rails = draw(["  ✓ First", "  ✓ Second", "  ? Second"])
+    refuse(lambda: permission_stale_approval_retired(rows, rails, "First", "Second"))
     rows, rails = draw(["literal ▐", "  • Wait for bypass café · 1s",
         "  ✓ Wait for bypass café", "  ✓ Wait for bypass café", "  ✓ Check final sibling"])
     assert rows[0] == "literal ▐" and permission_clock(rows, rails, "Wait for bypass café") == 1
@@ -4136,8 +4161,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                         # A notice is status only; neither it nor the stale
                         # page separates the two successes, and the next page
                         # retires the stale page's approval.
-                        start = permission_adjacent(shown_source, shown_rails, prior_label, label)
-                        assert "Allow once" not in shown and f"? {label}" not in "\n".join(shown_source[start:]), ("stale approval outlived the next page", shown)
+                        permission_stale_approval_retired(shown_source, shown_rails, prior_label, label)
+                        assert "Allow once" not in shown, ("stale approval outlived the next page", shown)
                         answer_release.set()
                         read_terminal(master, answer, composer=True)
                     finally:
