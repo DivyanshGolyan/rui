@@ -17,6 +17,13 @@ PLAIN_CONTROL = re.compile(r"\x1b\[[0-9;?$]*[A-Za-z~]|\x1b[()][A-Z0-9]|\r(?!\n)"
 RESTORE = "\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l"
 
 
+def cell_rows(cells, top, bottom, left, right):
+    """Text of an explicit physical-cell rectangle; no trimming or policy."""
+    assert 0 <= top <= bottom <= len(cells), (top, bottom, len(cells))
+    assert 0 <= left <= right and all(right <= len(row) for row in cells[top:bottom]), (left, right)
+    return ["".join(cell.data for cell in row[left:right]) for row in cells[top:bottom]]
+
+
 def shown(text, screen):
     """`text` appears on `screen` even where rows broke it: inside a long word
     the frame breaks between characters; at a space, word wrap drops it. A
