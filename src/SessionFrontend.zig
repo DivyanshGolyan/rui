@@ -5850,3 +5850,29 @@ test "upgrade reobservation retains a refused archive command from the completio
         try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
     }
 }
+
+test "diagnostic real Action submission status and notices" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const original = self.input.submitText("unconfirmed original");
+    self.submission.intent = .{ .message = original };
+    self.submission.state = .unconfirmed;
+    self.submission.key = @splat('K');
+    const action = try held.adopt(4);
+    defer action.close(std.testing.io);
+    for (0..3) |index| {
+        if (index == 1) self.line.archive_state = .archived;
+        if (index == 2) self.notice = "! Critical retained notice";
+        try self.drawFrame();
+        const cell_window = Screen.Test.window(held.screen);
+        std.debug.print("FRONT status index={d} action={} archive={s} submission={s} notice={s} ticket_shown={} delivered={} offered={}\n", .{ index, held.screen.actionVisible(), @tagName(self.line.archive_state), @tagName(self.submission.view().?.state), self.notice orelse "", held.screen.ticket.?.shown != null, held.screen.ticket.?.delivered, held.screen.offered() != null });
+        for (0..cell_window.height) |y| {
+            var bytes: [512]u8 = undefined;
+            var row = std.Io.Writer.fixed(&bytes);
+            for (0..cell_window.width) |x| try row.writeAll(cell_window.readCell(@intCast(x), @intCast(y)).?.char.grapheme);
+            const trimmed = std.mem.trimEnd(u8, row.buffered(), " ");
+            if (trimmed.len != 0) std.debug.print("FRONT row={d} [{s}]\n", .{ y, trimmed });
+        }
+    }
+}

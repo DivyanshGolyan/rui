@@ -660,7 +660,11 @@ test "complete approval and overflow survive short layouts or fail before render
     try std.testing.expectEqualStrings("+100 · /status", frame.heading.text());
     try std.testing.expectEqual(@as(u16, 2), frame.draft_top);
     input.height = 2;
-    try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
+    const overflow_result = frame.plan(&document, input);
+    if (overflow_result) |_| {
+        std.debug.print("FRAME branch=overflow unexpected-success height={d} status_height={d} source_rows={d}\n", .{ frame.height, frame.status_height, frame.document_rows });
+    } else |err| std.debug.print("FRAME branch=overflow error={s}\n", .{@errorName(err)});
+    try std.testing.expectError(error.TerminalTooSmall, overflow_result);
     // At the smallest geometry the input row is a waiting Action's choice;
     // a status that leaves the input no row fails before rendering.
     input = .{ .width = 8, .height = 2, .cursor = 0, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
@@ -668,7 +672,11 @@ test "complete approval and overflow survive short layouts or fail before render
     try std.testing.expectEqual(@as(u16, 1), frame.draft_top);
     try std.testing.expectEqual(@as(u16, 0), frame.line_height);
     input.status = "? Delete\n! Original retained";
-    try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
+    const status_result = frame.plan(&document, input);
+    if (status_result) |_| {
+        std.debug.print("FRAME branch=selected-status success essential={} status=[{s}] status_height={d} source_rows={d} height={d} draft_top={d}\n", .{ input.status_essential, frame.status.text(), frame.status_height, frame.document_rows, frame.height, frame.draft_top });
+    } else |err| std.debug.print("FRAME branch=selected-status error={s}\n", .{@errorName(err)});
+    try std.testing.expectError(error.TerminalTooSmall, status_result);
 }
 
 test "the choice fits every width, its labels shortening only when they must" {

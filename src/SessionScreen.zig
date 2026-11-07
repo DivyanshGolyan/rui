@@ -1361,13 +1361,23 @@ test "actual overflow yields wording before clipping required status" {
         try Test.init(failed, std.testing.io, &environ, false);
         defer Test.deinit(failed);
         if (!choice) {
-            try std.testing.expectError(error.TerminalTooSmall, Test.render(failed, &out.writer, .{ .row = 2, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle" }, &live));
+            const before_attempt = out.written().len;
+            const attempt = Test.render(failed, &out.writer, .{ .row = 2, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle" }, &live);
+            if (attempt) |delivery| std.debug.print("SCREEN branch=overflow success frame={d} notice={} output_delta={d} offer={}\n", .{ delivery.frame, delivery.notice, out.written().len - before_attempt, failed.offered() != null }) else |err| std.debug.print("SCREEN branch=overflow error={s} output_delta={d} offer={}\n", .{ @errorName(err), out.written().len - before_attempt, failed.offered() != null });
+            try std.testing.expectError(error.TerminalTooSmall, attempt);
         } else {
             // The choice's input row needs the same rows the draft does.
             var action = try ActionFixture.init(1);
             defer action.deinit();
             try failed.adopt(std.testing.io, action.file, 1, true);
-            try std.testing.expectError(error.TerminalTooSmall, Test.render(failed, &out.writer, .{ .row = 2, .col = 12, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .command = true, .status = "? Delete\n! Original retained" }, &.{}));
+            const before_attempt = out.written().len;
+            const attempt = Test.render(failed, &out.writer, .{ .row = 2, .col = 12, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .command = true, .status = "? Delete\n! Original retained" }, &.{});
+            if (attempt) |delivery| {
+                var row: [128]u8 = undefined;
+                std.debug.print("SCREEN branch=selected-status success frame={d} notice={} output_delta={d} offer={} ticket_shown={} source_rows={d} row0=[{s}]\n", .{ delivery.frame, delivery.notice, out.written().len - before_attempt, failed.offered() != null, failed.ticket.?.shown != null, failed.drawn.rows, rowText(failed, 0, &row) });
+                std.debug.print("SCREEN branch=selected-status row1=[{s}]\n", .{rowText(failed, 1, &row)});
+            } else |err| std.debug.print("SCREEN branch=selected-status error={s} output_delta={d} offer={}\n", .{ @errorName(err), out.written().len - before_attempt, failed.offered() != null });
+            try std.testing.expectError(error.TerminalTooSmall, attempt);
             try std.testing.expectEqual(ConsentPolicy.Row.selector, failed.selected.row);
         }
     }
@@ -1711,6 +1721,14 @@ test "prepared Action preserves selected inspection until explicit return" {
             // The cue occupies its reserved edge, not a source cell or
             // either choice or its highlight.
             var row: [32]u8 = undefined;
+            const projection = screen.browsing.projection(screen.textLayout());
+            std.debug.print("ACTION width={d} rows={d} scroll={d} source_prefix=[{s}] offered={} delivered={}\n", .{ screen.textLayout().width, projection.total, screen.browsing.scroll.scroll.y, screen.browsing.text.text()[0.."Run Bash: exact command\n".len], screen.offered() != null, screen.ticket.?.delivered });
+            for (0..@min(projection.total, 5)) |index| {
+                const position = projection.position(index);
+                std.debug.print("ACTION position row={d} offset={d} subrow={d}\n", .{ index, position.offset, position.row });
+            }
+            std.debug.print("ACTION row0=[{s}]\n", .{rowText(screen, 0, &row)});
+            std.debug.print("ACTION row1=[{s}]\n", .{rowText(screen, 1, &row)});
             try std.testing.expectEqualStrings("Run Bas…", rowText(screen, 0, &row));
             try std.testing.expectEqualStrings("› A   D", rowText(screen, 1, &row));
             try std.testing.expect(cells.readCell(0, 1).?.style.reverse);
@@ -3423,4 +3441,49 @@ test "borrowed layouts retain wrapped rows unless their own wrapping layout chan
             try std.testing.expectEqual(expected_transcript, screen.browsing.anchor(screen.textLayout()));
         }
     }
+}
+
+test "diagnostic compact Action actual source navigation" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const action = try tmp.dir.createFile(io, "action-diag", .{ .read = true });
+    defer action.close(io);
+    const source = "Run Bash: exact command\n";
+    try action.writePositionalAll(io, source, 0);
+    const block: [4096]u8 = @splat('x');
+    var offset: u64 = source.len;
+    while (offset <= Viewport.capacity) {
+        const count = @min(block.len, Viewport.capacity + 1 - offset);
+        try action.writePositionalAll(io, block[0..count], offset);
+        offset += count;
+    }
+    try screen.adopt(io, action, 5, true);
+    const tiny: std.posix.winsize = .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 };
+    for (0..4) |index| {
+        const delivered = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
+        const accepted = screen.presented(delivered);
+        const projection = screen.browsing.projection(screen.textLayout());
+        const position = projection.position(screen.browsing.scroll.scroll.y);
+        var row: [128]u8 = undefined;
+        std.debug.print("ACTION-NAV index={d} width={d} scroll={d} pos={d}:{d} rows={d} frame={d} accepted={} offered={} row0=[{s}]\n", .{ index, screen.textLayout().width, screen.browsing.scroll.scroll.y, position.offset, position.row, projection.total, delivered.frame, accepted, screen.offered() != null, rowText(screen, 0, &row) });
+        std.debug.print("ACTION-NAV row1=[{s}]\n", .{rowText(screen, 1, &row)});
+        _ = screen.browse(true, false);
+    }
+    const resized = try Test.render(screen, &out.writer, .{ .row = 2, .col = 10, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{});
+    const accepted = screen.presented(resized);
+    const position = screen.browsing.projection(screen.textLayout()).position(screen.browsing.scroll.scroll.y);
+    var row: [128]u8 = undefined;
+    std.debug.print("ACTION-NAV resized width={d} scroll={d} pos={d}:{d} frame={d} accepted={} row0=[{s}]\n", .{ screen.textLayout().width, screen.browsing.scroll.scroll.y, position.offset, position.row, resized.frame, accepted, rowText(screen, 0, &row) });
+    var raw: [source.len]u8 = undefined;
+    const read = try action.readPositionalAll(io, &raw, 0);
+    std.debug.print("ACTION-NAV file_prefix=[{s}] read={d}\n", .{ raw[0..read], read });
 }
