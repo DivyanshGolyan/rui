@@ -669,6 +669,53 @@ def terminal_check_cases(root, binary, releases, artifacts):
 
 
 
+
+def terminal_duplicate_upgrade_cases(root, binary, releases):
+    """A live check never swallows a duplicate or an early cancel retry."""
+    for entry in ("overview", "conversation"):
+        prompt = " › " if entry == "overview" else "› "
+        with case(root, binary, releases, f"terminal-duplicate-upgrade-{entry}") as c:
+            c.old_selection()
+            host, previous = c.start_host()
+            session, credential = terminal_setup(c)
+            gate = releases.gates["/latest"] = Gate()
+            request_start = len(releases.requests)
+            args = ([str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-luna"]
+                    if entry == "overview" else [str(binary), "session", "resume", "--store", str(c.store), "--", session])
+            with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
+                screen = TerminalScreen(master, process)
+                screen.contains("›")
+                screen.send("/upgrade\r")
+                screen.until(gate.entered.is_set, "first held duplicate check")
+                empty_row = "Type a task to start a Session" if entry == "overview" else ""
+                wait_for(screen.observe, "first upgrade consumed", ready=lambda _: screen.capture.draft(empty_row, len(prompt), prompt=prompt))
+                screen.send("/upgrade\r")
+                screen.contains("Upgrade still settling")
+                wait_for(screen.observe, "duplicate retained while checking", ready=lambda _: screen.capture.draft("/upgrade", len(prompt) + 8, prompt=prompt))
+                assert releases.requests[request_start:].count("/latest") == 1
+                # Keep the refused retry while explicitly cancelling the first
+                # check. The owner tests hold a real borrower across Escape to
+                # exercise retry before join without relying on scheduler timing.
+                screen.send("\x1b")
+                screen.contains("Upgrade cancelled")
+                wait_for(screen.observe, "refused retry retained after cancellation", ready=lambda _: screen.capture.draft("/upgrade", len(prompt) + 8, prompt=prompt))
+                assert releases.requests[request_start:].count("/latest") == 1
+                gate.release.set()
+                retry_gate = releases.gates["/latest"] = Gate()
+                screen.send("\r")
+                screen.until(retry_gate.entered.is_set, "explicit retry after old check joined")
+                wait_for(screen.observe, "accepted retry consumed", ready=lambda _: screen.capture.draft(empty_row, len(prompt), prompt=prompt))
+                screen.send("newer draft")
+                wait_for(screen.observe, "newer draft during retry", ready=lambda _: screen.capture.draft("newer draft", len(prompt) + len("newer draft"), prompt=prompt))
+                screen.send("\x1b")
+                screen.contains("Upgrade cancelled")
+                wait_for(screen.observe, "newer draft after retry cancel", ready=lambda _: screen.capture.draft("newer draft", len(prompt) + len("newer draft"), prompt=prompt))
+                assert releases.archive_path not in releases.requests[request_start:]
+                c.assert_unchanged()
+                assert host.poll() is None and c.status()["instance"] == previous["instance"]
+                assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+
+
 def terminal_check_failure_cases(root, binary, releases):
     """A failed held read-only check never clears the subsequent draft."""
     for entry in ("overview", "conversation"):
@@ -1118,6 +1165,7 @@ def main():
         print("upgrade native: Escape and SIGINT reaped selected version probes before discovery", flush=True)
         terminal_check_cases(root, binary, releases, artifacts)
         terminal_check_failure_cases(root, binary, releases)
+        terminal_duplicate_upgrade_cases(root, binary, releases)
         print("upgrade native: held terminal checks consumed commands and preserved newer drafts", flush=True)
         terminal_cases(root, binary, releases, artifacts)
         print("upgrade native: both terminal /upgrade entry points passed", flush=True)

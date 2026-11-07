@@ -855,6 +855,8 @@ pub const State = struct {
     now_ms: u64 = 0,
     upgrade_blocked: bool = false,
     upgrade_pending: bool = false,
+    /// A local upgrade or its cancelled borrower is still being joined.
+    upgrade_busy: bool = false,
     /// The terminal's own last successful `rui auth login`, Unix seconds.
     login_at: ?u64 = null,
 
@@ -2175,6 +2177,7 @@ fn select(state: *State, action: Action) void {
 }
 
 pub const upgrade_recovery = "! Host requests paused after Upgrade; draft retained. /upgrade or reopen with the selected Rui.";
+pub const upgrade_busy_notice = "! Upgrade still settling; retry /upgrade after it finishes. Draft retained.";
 
 /// Admission applies only to new Host intents, never to their completions.
 fn admitHostRequest(state: *State) bool {
@@ -2194,6 +2197,9 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         },
         else => {},
     };
+    if (state.upgrade_busy and parsed != null and parsed.? == .command and parsed.?.command.name == .upgrade) {
+        return state.say(.attention, upgrade_busy_notice, .{});
+    }
     if (!admitHostRequest(state)) {
         if (parsed) |result| switch (result) {
             .command => |command| switch (command.name) {
