@@ -1743,11 +1743,14 @@ test "conversation source edge and rail retain full physical width" {
             const size: std.posix.winsize = .{ .row = 12, .col = columns, .xpixel = 0, .ypixel = 0 };
             _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
             const cells = Test.window(screen);
+            var diagnostic: [512]u8 = undefined;
+            std.debug.print("EDGE live color={} cols={d} edge={s} geometry={d}x{d} scroll={d} height={d} row0=[{s}]\n", .{ colour, columns, edge, screen.backend.geometry().cols, screen.backend.geometry().rows, screen.live.scroll.scroll.y, screen.height, rowText(screen, 0, &diagnostic) });
             try std.testing.expectEqualStrings(edge, cells.readCell(columns - 2, 0).?.char.grapheme);
             const rail = cells.readCell(columns - 1, 0).?.char.grapheme;
             try std.testing.expect(std.mem.eql(u8, rail, "│") or std.mem.eql(u8, rail, "▐"));
             try screen.beginTranscript(0);
             _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+            std.debug.print("EDGE transcript color={} cols={d} edge={s} scroll={d} height={d} row0=[{s}]\n", .{ colour, columns, edge, screen.browsing.scroll.scroll.y, screen.height, rowText(screen, 0, &diagnostic) });
             try std.testing.expectEqualStrings(edge, cells.readCell(columns - 2, 0).?.char.grapheme);
             const transcript_rail = cells.readCell(columns - 1, 0).?.char.grapheme;
             try std.testing.expect(std.mem.eql(u8, transcript_rail, "│") or std.mem.eql(u8, transcript_rail, "▐"));
@@ -1905,6 +1908,12 @@ test "partial Action source glyphs survive edge and resize" {
         var row: [64]u8 = undefined;
         const tiny: std.posix.winsize = .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 };
         _ = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
+        std.debug.print("WIDE source={s} measured_width={d} scroll={d} row0=[{s}]\n", .{ case.source, screen.textLayout().width, screen.browsing.scroll.scroll.y, rowText(screen, 0, &row) });
+        const diagnostic_cells = Test.window(screen);
+        for (0..8) |column| {
+            const cell = diagnostic_cells.readCell(@intCast(column), 0).?;
+            std.debug.print("WIDE cell={d} glyph=[{s}] cell_width={d}\n", .{ column, cell.char.grapheme, cell.char.width });
+        }
         try std.testing.expectEqualStrings(case.first, rowText(screen, 0, &row));
         _ = screen.browse(true, false);
         _ = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
