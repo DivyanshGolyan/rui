@@ -3059,75 +3059,136 @@ test "quote draft screen fence opacity does not promote code markers" {
 }
 
 test "typed saved-file loading preserves raw provenance through prepend Message overlay and safe rich paint" {
+    var checkpoint: []const u8 = "start";
+    errdefer std.debug.print("D85 DIAGNOSTIC checkpoint={s}\n", .{checkpoint});
     const io = std.testing.io;
+    checkpoint = "01: var environ = try std.testing.environ.createMap(std.testing.allocator);";
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
+    checkpoint = "02: const screen = try std.testing.allocator.create(Self);";
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
+    checkpoint = "03: try Test.init(screen, io, &environ, false);";
     try Test.init(screen, io, &environ, false);
     defer Test.deinit(screen);
+    var frame_ready = false;
+    errdefer {
+        std.debug.print("D85 DIAGNOSTIC failing checkpoint={s}\n", .{checkpoint});
+        std.debug.print("D85 DIAGNOSTIC source={any} height={d} tail={d} scroll={d}\n", .{ screen.browsing.text.text(), screen.height, screen.browsing.blank_tail, screen.browsing.scroll.scroll.y });
+        if (frame_ready) {
+            const diagnostic_window = Test.window(screen);
+            var diagnostic_storage: [256]u8 = undefined;
+            for (0..diagnostic_window.height) |diagnostic_row| {
+                std.debug.print("D85 DIAGNOSTIC row={d} bytes={any}\n", .{ diagnostic_row, rowText(screen, @intCast(diagnostic_row), &diagnostic_storage) });
+                for (0..diagnostic_window.width) |diagnostic_col| {
+                    const cell = diagnostic_window.readCell(@intCast(diagnostic_col), @intCast(diagnostic_row)).?;
+                    if (!std.mem.eql(u8, cell.char.grapheme, " ") or cell.link.uri.len != 0) {
+                        std.debug.print("D85 DIAGNOSTIC cell=({d},{d}) glyph={any} style={any} link={any}\n", .{ diagnostic_col, diagnostic_row, cell.char.grapheme, cell.style, cell.link.uri });
+                    }
+                }
+            }
+        }
+    }
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    checkpoint = "04: const file = try tmp.dir.createFile(io, \"older\", .{ .read = true });";
     const file = try tmp.dir.createFile(io, "older", .{ .read = true });
     defer file.close(io);
     const raw = "h|x\n---|---\n\x1b[31m|\xff\n";
+    checkpoint = "05: try file.writePositionalAll(io, raw, 0);";
     try file.writePositionalAll(io, raw, 0);
     var marks: OutputBlocks.Capture = .{};
+    checkpoint = "06: try std.testing.expect(marks.reserve(.{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } }));";
     try std.testing.expect(marks.reserve(.{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } }));
+    checkpoint = "07: try screen.append(\"newer\\n\");";
     try screen.append("newer\n");
     const size: std.posix.winsize = .{ .row = 16, .col = 40, .xpixel = 0, .ypixel = 0 };
+    checkpoint = "08: _ = screen.presented(try Test.render(screen, &out.writer, size, \"\", 0, .{}, &.{}));";
     _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    frame_ready = true;
+    checkpoint = "09: try screen.beginTranscript(0);";
     try screen.beginTranscript(0);
+    checkpoint = "10: _ = try screen.prependPreparedFile(io, file, &marks);";
     _ = try screen.prependPreparedFile(io, file, &marks);
+    checkpoint = "11: try std.testing.expectEqual(@as(u6, 1), screen.browsing.text.blocks.count);";
     try std.testing.expectEqual(@as(u6, 1), screen.browsing.text.blocks.count);
+    checkpoint = "12: try std.testing.expectEqualStrings(raw ++ \"newer\\n\", screen.browsing.text.text());";
     try std.testing.expectEqualStrings(raw ++ "newer\n", screen.browsing.text.text());
+    checkpoint = "13: try std.testing.expectEqual(@as(u32, raw.len), screen.browsing.text.blocks.items[0].complete_end);";
     try std.testing.expectEqual(@as(u32, raw.len), screen.browsing.text.blocks.items[0].complete_end);
     const retained = screen.browsing.text.blocks.items[0];
     // An actual overlay borrows staging; the transcript underneath keeps its
     // independent provenance and source when the overlay is dismissed.
+    checkpoint = "14: const overlay = try tmp.dir.createFile(io, \"message\", .{ .read = true });";
     const overlay = try tmp.dir.createFile(io, "message", .{ .read = true });
     defer overlay.close(io);
+    checkpoint = "15: try overlay.writePositionalAll(io, \"Message body already escaped\\n\", 0);";
     try overlay.writePositionalAll(io, "Message body already escaped\n", 0);
+    checkpoint = "16: try screen.showMessage(io, overlay);";
     try screen.showMessage(io, overlay);
+    checkpoint = "17: try screen.leaveMessage();";
     try screen.leaveMessage();
+    checkpoint = "18: try std.testing.expectEqualDeep(retained, screen.browsing.text.blocks.items[0]);";
     try std.testing.expectEqualDeep(retained, screen.browsing.text.blocks.items[0]);
     screen.browsing.scroll.scroll.y = 0;
+    checkpoint = "19: _ = screen.presented(try Test.render(screen, &out.writer, size, \"\", 0, .{}, &.{}));";
     _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    frame_ready = true;
     var storage: [128]u8 = undefined;
     var escaped = false;
     for (0..screen.height) |row| if (std.mem.eql(u8, contentColumnsText(screen, @intCast(row), &storage), "\\x1b[31m           │\\xff")) {
         escaped = true;
     };
+    checkpoint = "20: try std.testing.expect(escaped);";
     try std.testing.expect(escaped);
     const cells = Test.window(screen);
+    checkpoint = "21: try std.testing.expectEqual(@as(u16, 40), cells.width);";
     try std.testing.expectEqual(@as(u16, 40), cells.width);
+    checkpoint = "22: try std.testing.expectEqual(@as(u16, 39), screen.textLayout().width);";
     try std.testing.expectEqual(@as(u16, 39), screen.textLayout().width);
     // Two 19-cell columns share one divider, independent of the viewport rail.
+    checkpoint = "23: try std.testing.expectEqualStrings(\"─\", cells.readCell(18, 1).?.char.grapheme);";
     try std.testing.expectEqualStrings("─", cells.readCell(18, 1).?.char.grapheme);
+    checkpoint = "24: try std.testing.expectEqualStrings(\"┼\", cells.readCell(19, 1).?.char.grapheme);";
     try std.testing.expectEqualStrings("┼", cells.readCell(19, 1).?.char.grapheme);
+    checkpoint = "25: try std.testing.expectEqualStrings(\"─\", cells.readCell(20, 1).?.char.grapheme);";
     try std.testing.expectEqualStrings("─", cells.readCell(20, 1).?.char.grapheme);
+    checkpoint = "26: try std.testing.expectEqualStrings(\" \", cells.readCell(18, 2).?.char.grapheme);";
     try std.testing.expectEqualStrings(" ", cells.readCell(18, 2).?.char.grapheme);
+    checkpoint = "27: try std.testing.expectEqualStrings(\"│\", cells.readCell(19, 2).?.char.grapheme);";
     try std.testing.expectEqualStrings("│", cells.readCell(19, 2).?.char.grapheme);
+    checkpoint = "28: try std.testing.expectEqualStrings(\"\\\\\", cells.readCell(20, 2).?.char.grapheme);";
     try std.testing.expectEqualStrings("\\", cells.readCell(20, 2).?.char.grapheme);
     const projection = screen.browsing.projection(screen.textLayout());
+    checkpoint = "29: try std.testing.expectEqual(Viewport.Position{ .offset = 0, .row = 1 }, projection.position(1));";
     try std.testing.expectEqual(Viewport.Position{ .offset = 0, .row = 1 }, projection.position(1));
+    checkpoint = "30: try std.testing.expectEqual(Viewport.Position{ .offset = 12 }, projection.position(2));";
     try std.testing.expectEqual(Viewport.Position{ .offset = 12 }, projection.position(2));
+    checkpoint = "31: try std.testing.expectEqualStrings(raw ++ \"newer\\n\", screen.browsing.text.text());";
     try std.testing.expectEqualStrings(raw ++ "newer\n", screen.browsing.text.text());
     const rail = screen.browsing.scroll.vertical_scrollbar.?;
+    checkpoint = "32: try std.testing.expectEqual(@as(u16, 1), rail.character.width);";
     try std.testing.expectEqual(@as(u16, 1), rail.character.width);
+    checkpoint = "33: try std.testing.expectEqualStrings(\"▐\", rail.character.grapheme);";
     try std.testing.expectEqualStrings("▐", rail.character.grapheme);
+    checkpoint = "34: try std.testing.expectEqualStrings(\"│\", rail.track_character.?.grapheme);";
     try std.testing.expectEqualStrings("│", rail.track_character.?.grapheme);
     const rail_column = cells.width - rail.character.width;
+    checkpoint = "35: try std.testing.expectEqual(@as(u16, 39), rail_column);";
     try std.testing.expectEqual(@as(u16, 39), rail_column);
     // Scrollbar.draw paints no thumb when all content fits in the body.
+    checkpoint = "36: try std.testing.expect(projection.total +| screen.browsing.blank_tail <= screen.height);";
     try std.testing.expect(projection.total +| screen.browsing.blank_tail <= screen.height);
+    checkpoint = "37: try std.testing.expectEqual(@as(usize, 0), screen.browsing.scroll.scroll.y);";
     try std.testing.expectEqual(@as(usize, 0), screen.browsing.scroll.scroll.y);
     for (0..screen.height) |row| {
+        checkpoint = "38: try std.testing.expectEqualStrings(rail.track_character.?.grapheme, cells.readCell(rail_column, @intCast(row)).?.char.grapheme);";
         try std.testing.expectEqualStrings(rail.track_character.?.grapheme, cells.readCell(rail_column, @intCast(row)).?.char.grapheme);
     }
     // The retained raw SGR and invalid byte never produce a link in this frame.
+    checkpoint = "39: for (0..size.row) |row| for (0..size.col) |col| try std.testing.expectEqualStrings(\"\", cells.readCell(@intCast(col), @intCast(row)).?.link.uri);";
     for (0..size.row) |row| for (0..size.col) |col| try std.testing.expectEqualStrings("", cells.readCell(@intCast(col), @intCast(row)).?.link.uri);
 }
 
