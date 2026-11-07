@@ -4231,12 +4231,58 @@ def incomplete_input_case(home, store, session, endpoint, host):
     print("incomplete input: all four native deadlines, delayed output, exact restoration and no dispatch passed", flush=True)
 
 
+def wait_for_listed_call(tty):
+    # A matching Bash projection supplies the unresolved row's clock. The
+    # command stays held until after traversal; a bare heading can precede claim.
+    running = re.compile(r"• Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
+    tty.wait(predicate=lambda: any(running.fullmatch(row) for row in tty.capture.completed.splitlines()), timeout=30)
+
+
+def listed_call_readiness_cases():
+    """A heading may precede claim; only the current running row is a barrier."""
+    from terminal_screen import ScreenCapture
+
+    class OfferedFrames:
+        def __init__(self, elapsed):
+            self.capture = ScreenCapture(80, 24)
+            self.frames = (
+                "• Held call\n• Queued · 0s",
+                "✓ Held call · 42s",
+                "• Other call · 42s",
+                "prefix • Held call · 42s",
+                "• Held call · 42s extra",
+                "• Held call · " + elapsed,
+            )
+            self.offered = None
+            # Accumulated output already contains a timed row: it is not current.
+            self.frame("• Held call · 99s")
+            self.frame(self.frames[0])
+
+        def frame(self, text):
+            self.capture.feed(("\x1b[?2026h\x1b[H\x1b[2J" + text.replace("\n", "\r\n") + "\x1b[?2026l").encode())
+
+        def wait(self, marker=None, *, predicate=None, timeout=15):
+            assert timeout == 30, timeout
+            for self.offered, frame in enumerate(self.frames):
+                self.frame(frame)
+                if (predicate() if predicate is not None else self.capture.reached(marker)):
+                    return self.capture.completed
+            raise AssertionError(("running listed call was not accepted", self.capture.completed))
+
+    for elapsed in ("0s", "2m 3s", "1h 2m"):
+        tty = OfferedFrames(elapsed)
+        wait_for_listed_call(tty)
+        assert tty.offered == len(tty.frames) - 1, ("listed call accepted before current running row", tty.capture.completed)
+
+
 def renderer_cases():
     """Full-screen geometry, input, consent and restoration through screen cells."""
     from contextlib import contextmanager, ExitStack
     from terminal_screen import ScreenCapture
     import canonical_failure_integration as canonical
     import resource
+
+    listed_call_readiness_cases()
 
     # Every-frame oracles see each synchronized commit, not just the newest one after a read.
     control, seen = ScreenCapture(), []
@@ -5944,7 +5990,7 @@ def renderer_cases():
                 queue_three(tty)
                 first_release.set()
                 tty.wait("LONG-04399", timeout=60)
-                tty.wait("Held call", timeout=30)
+                wait_for_listed_call(tty)
                 assert waiting(tty, "BIG-START", "3 queued"), tty.capture.completed
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and shown.count("DRIVER-QUESTION") == 1, shown
