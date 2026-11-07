@@ -44,6 +44,8 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
 RULES = (
+    (("build.zig", "build.zig.zon", "src/vaxis-parser.patch", "src/prepare_vaxis.sh", "tests/vaxis/*"),
+     ("test-vaxis",), ("test-vaxis",), "Patched dependency roots, not external-import discovery"),
     (INSTALLER_PATHS, ("installer-integration",), ("installer-integration",),
      "Installer: real publication and PATH boundary"),
     (UPGRADE_PATHS, ("upgrade-integration",), ("upgrade-integration",),
@@ -407,7 +409,9 @@ def select(paths, phase, available):
     if phase == "development":
         # Development does not replace final boundary/native acceptance, but
         # keeps each matched live rule's own targets (`LIVE_RULES`).
-        targets = ({"test-logic"} | live_targets |
+        # The dependency regression roots are not discovered by test-logic.
+        dependency_targets = targets & {"test-vaxis"}
+        targets = ({"test-logic"} | live_targets | dependency_targets |
                    ({"upgrade-integration"} if any(matches(path, UPGRADE_PATHS) for path in paths) else set()) |
                    ({"installer-integration"} if any(matches(path, INSTALLER_PATHS) for path in paths) else set())
                    if targets else set())

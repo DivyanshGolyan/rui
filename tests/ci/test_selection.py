@@ -88,6 +88,16 @@ class RuleMatchTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_vaxis_changes_execute_dependency_roots_in_both_phases(self):
+        for path in ("build.zig", "build.zig.zon", "src/vaxis-parser.patch",
+                     "src/prepare_vaxis.sh", "tests/vaxis/layout.zig"):
+            for phase in ("development", "review"):
+                with self.subTest(path=path, phase=phase):
+                    result = select([path], phase, AVAILABLE)
+                    self.assertIn("test-vaxis", result["targets"])
+                    if phase == "review":
+                        self.assertIn("test-vaxis", result["native_targets"])
+
     def test_upgrade_owners_select_standalone_fixture_in_both_phases(self):
         paths = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
                  "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
@@ -118,6 +128,30 @@ class SelectionTest(unittest.TestCase):
                     self.assertIn("installer-integration", result["targets"])
                     if phase == "review":
                         self.assertIn("installer-integration", result["native_targets"])
+                    else:
+                        self.assertEqual(result["native_targets"], [])
+
+    def test_dependency_upgrade_and_installer_roots_compose_without_losing_owners(self):
+        paths = ["src/vaxis-parser.patch", "src/UpgradePanel.zig", "release/install.sh"]
+        expected = {"test-vaxis", "upgrade-integration", "installer-integration"}
+        for phase in ("development", "review"):
+            with self.subTest(phase=phase):
+                result = select(paths, phase, AVAILABLE)
+                self.assertEqual(expected - set(result["targets"]), set())
+                if phase == "development":
+                    self.assertEqual(result["native_targets"], [])
+                else:
+                    self.assertEqual(expected - set(result["native_targets"]), set())
+
+    def test_release_publication_composes_with_dependency_and_panel_owners(self):
+        expected = {"test-vaxis", "upgrade-integration", "installer-integration"}
+        for publication in ("tests/ci/release_publication.py", "tests/ci/test_release_publication.py"):
+            for phase in ("development", "review"):
+                with self.subTest(publication=publication, phase=phase):
+                    result = select([publication, "src/vaxis-parser.patch", "src/UpgradePanel.zig"], phase, AVAILABLE)
+                    self.assertEqual(expected - set(result["targets"]), set())
+                    if phase == "review":
+                        self.assertEqual(expected - set(result["native_targets"]), set())
                     else:
                         self.assertEqual(result["native_targets"], [])
 

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from import_architecture import (check, cyclic_edges, production_imports, store_access_sources, store_boundary,
+from import_architecture import (TEST_ONLY_ROOTS, check, cyclic_edges, production_imports, store_access_sources, store_boundary,
                                  tests_reached,
                                  store_unit)
 
@@ -21,6 +21,22 @@ class ImportArchitectureTest(unittest.TestCase):
 
     def test_repository_tests_are_all_named_by_a_test(self):
         tests_reached(Path(__file__).resolve().parents[2])
+
+    def test_durable_layout_root_is_registered_without_a_production_import(self):
+        self.assertIn("tests/vaxis/layout.zig", TEST_ONLY_ROOTS)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "tests/vaxis").mkdir(parents=True)
+            (root / "src/tests.zig").write_text('test "unit root" {}')
+            (root / "tests/vaxis/layout.zig").write_text('test "durable layout root" {}')
+            (root / "build.zig").write_text('b.path("src/tests.zig"); b.path("tests/vaxis/layout.zig");')
+            tests_reached(root, ("src/tests.zig", "tests/vaxis/layout.zig"), ())
+            with self.assertRaisesRegex(ValueError, r"tests may never compile[^\n]*\n  tests/vaxis/layout\.zig$"):
+                tests_reached(root, ("src/tests.zig",), ())
+            (root / "build.zig").write_text('b.path("src/tests.zig");')
+            with self.assertRaisesRegex(ValueError, r"no longer builds test roots \['tests/vaxis/layout\.zig'\]"):
+                tests_reached(root, ("src/tests.zig", "tests/vaxis/layout.zig"), ())
 
     def test_a_production_import_alone_does_not_reach_a_files_tests(self):
         with tempfile.TemporaryDirectory() as directory:
