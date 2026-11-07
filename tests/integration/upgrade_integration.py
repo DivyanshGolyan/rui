@@ -563,6 +563,7 @@ class TerminalScreen:
             self.capture.feed(data)
             self.tail.extend(data)
             del self.tail[:-16384]
+        return bool(data)
 
     def observe(self):
         self.read_output()
@@ -936,6 +937,11 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
                     return process.poll() is not None
 
                 wait_for(exited, "restored primary and retained cleanup receipt after SIGINT")
+                # The child may exit after exited() reads but before it polls.
+                # Its slave remains open here: collect every queued raw byte
+                # before checking the restored receipt, stopping at EAGAIN.
+                while screen.read_output():
+                    pass
                 output = bytes(screen.tail)
                 restored = output.rfind(b"\x1b[?1049l")
                 assert restored >= 0, "dual-failure SIGINT did not restore the terminal"
