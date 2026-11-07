@@ -97,18 +97,7 @@ pub fn attachments(self: *const Self) []const Editor.Attachment {
 pub fn skillNames(self: *const Self, ticket: Ticket, allocator: std.mem.Allocator) ![]const []const u8 {
     const submitted = try self.checked(ticket);
     const editor = &self.editors[submitted.bank];
-    var names: std.ArrayList([]const u8) = .empty;
-    errdefer names.deinit(allocator);
-    for (editor.attachments()) |mark| {
-        const name = editor.buffer[mark.start + 1 .. mark.end];
-        var duplicate = false;
-        for (names.items) |prior| if (std.mem.eql(u8, prior, name)) {
-            duplicate = true;
-            break;
-        };
-        if (!duplicate) try names.append(allocator, name);
-    }
-    return names.toOwnedSlice(allocator);
+    return @import("skill_completion.zig").selectedNames(allocator, editor.buffer[0..editor.length], editor.attachments());
 }
 
 /// Only after all borrowers of either bank have retired.

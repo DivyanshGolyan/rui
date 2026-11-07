@@ -732,24 +732,11 @@ pub const StartRequest = struct {
         const original = self.original orelse self.text;
         const bytes = try gpa.alloc(u8, original.len + self.settings.used + provider.len + model.len);
         errdefer gpa.free(bytes);
-        const names = try gpa.alloc([]const u8, self.attachments.len);
-        errdefer gpa.free(names);
         var writer = std.Io.Writer.fixed(bytes);
         inline for (.{ original, self.settings.bytes[0..self.settings.used], provider, model }) |part| writer.writeAll(part) catch unreachable;
-        var count: usize = 0;
-        for (self.attachments) |range| {
-            const name = bytes[range.start + 1 .. range.end];
-            var duplicate = false;
-            for (names[0..count]) |previous| if (std.mem.eql(u8, previous, name)) {
-                duplicate = true;
-                break;
-            };
-            if (!duplicate) {
-                names[count] = name;
-                count += 1;
-            }
-        }
-        return .{ .bytes = bytes, .text_len = original.len, .text_offset = original.len - self.text.len, .names = names, .name_count = count, .held = self.settings.held, .provider_len = if (self.binding.provider) |name| name.len else null, .model_len = if (self.binding.model) |name| name.len else null };
+        const names = try skill_completion.selectedNames(gpa, bytes[0..original.len], self.attachments);
+        errdefer gpa.free(names);
+        return .{ .bytes = bytes, .text_len = original.len, .text_offset = original.len - self.text.len, .names = names, .held = self.settings.held, .provider_len = if (self.binding.provider) |name| name.len else null, .model_len = if (self.binding.model) |name| name.len else null };
     }
 };
 
@@ -760,7 +747,6 @@ pub const OwnedStart = struct {
     text_len: usize,
     text_offset: usize = 0,
     names: []const []const u8 = &.{},
-    name_count: usize = 0,
     held: [start_options.len]?StartSettings.Range,
     /// The binding's lengths, its bytes last: the provider, then the model.
     provider_len: ?usize = null,
@@ -775,7 +761,7 @@ pub const OwnedStart = struct {
     }
 
     pub fn skills(self: *const OwnedStart) []const []const u8 {
-        return self.names[0..self.name_count];
+        return self.names;
     }
 
     /// The provider and model the Session starts on.

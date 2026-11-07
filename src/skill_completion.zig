@@ -4,6 +4,23 @@ pub const Range = struct { start: usize, end: usize };
 
 pub const Candidate = struct { start: usize, end: usize, prefix: []const u8 };
 
+/// Projects validated editor ranges in first textual order. The caller owns
+/// the outer slice; names borrow the supplied original text.
+pub fn selectedNames(allocator: std.mem.Allocator, text: []const u8, ranges: []const Range) error{OutOfMemory}![]const []const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer names.deinit(allocator);
+    for (ranges) |range| {
+        const name = text[range.start + 1 .. range.end];
+        var duplicate = false;
+        for (names.items) |prior| if (std.mem.eql(u8, prior, name)) {
+            duplicate = true;
+            break;
+        };
+        if (!duplicate) try names.append(allocator, name);
+    }
+    return names.toOwnedSlice(allocator);
+}
+
 fn nameByte(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-';
 }
@@ -94,4 +111,18 @@ test "punctuation paths and code" {
     try expect("`code` /foo", 11, 7, 11, "foo");
     try expect("```\ncode\n```` /foo", 18, 14, 18, "foo");
     for (0.."/foo/bar".len + 1) |cursor| try std.testing.expect(candidate("/foo/bar", cursor) == null);
+}
+
+test "selected skill names preserve borrowed original coordinates and distinct order" {
+    var text = "//demo /other /demo".*;
+    const ranges = [_]Range{ .{ .start = 1, .end = 6 }, .{ .start = 7, .end = 13 }, .{ .start = 14, .end = 19 } };
+    const names = try selectedNames(std.testing.allocator, &text, &ranges);
+    defer std.testing.allocator.free(names);
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings("demo", names[0]);
+    try std.testing.expectEqualStrings("other", names[1]);
+    try std.testing.expectEqual(@intFromPtr(&text) + 2, @intFromPtr(names[0].ptr));
+    text[2] = 'D';
+    try std.testing.expectEqualStrings("Demo", names[0]);
+    try std.testing.expectEqualStrings("other", names[1]);
 }
