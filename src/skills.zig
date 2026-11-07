@@ -724,6 +724,49 @@ fn fixtureSkill(dir: std.Io.Dir, path: []const u8, name: []const u8, description
     try dir.writeFile(std.testing.io, .{ .sub_path = file_path, .data = raw });
 }
 
+test "skills discovery uses declared names through directory aliases in both roots" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try fixturePath(allocator, tmp.dir);
+    defer allocator.free(root);
+    try tmp.dir.createDirPath(io, ".git");
+    const home = try std.fs.path.join(allocator, &.{ root, "home" });
+    defer allocator.free(home);
+    const aliases = [_][]const u8{ "normal-alias", "Vendor_Mixed", "under_score", &@as([65]u8, @splat('a')), "技能" };
+    const roots = [_][]const u8{ ".agents/skills", "home/.agents/skills" };
+    for (roots, 0..) |directory, root_index| {
+        for (aliases, 0..) |alias, index| {
+            const path = try std.fs.path.join(allocator, &.{ directory, alias });
+            defer allocator.free(path);
+            const name = try std.fmt.allocPrint(allocator, "declared-{d}-{d}", .{ root_index, index });
+            defer allocator.free(name);
+            try fixtureSkill(tmp.dir, path, name, "alias metadata");
+        }
+    }
+    const catalog = try discover(allocator, io, root, home);
+    defer catalog.deinit(allocator);
+    try std.testing.expectEqual(roots.len * aliases.len, catalog.entries.len);
+    for (roots, 0..) |directory, root_index| {
+        for (aliases, 0..) |alias, index| {
+            const name = try std.fmt.allocPrint(allocator, "declared-{d}-{d}", .{ root_index, index });
+            defer allocator.free(name);
+            const entry = findEntry(catalog.entries, name) orelse return error.ExpectedDeclaredSkill;
+            try std.testing.expect(findEntry(catalog.entries, alias) == null);
+            try std.testing.expectEqualStrings("alias metadata", entry.description);
+            const path = try std.fs.path.join(allocator, &.{ root, directory, alias, "SKILL.md" });
+            defer allocator.free(path);
+            try std.testing.expectEqualStrings(path, entry.path);
+            const raw = try readSkill(allocator, io, entry);
+            defer allocator.free(raw);
+            const expected = try std.fmt.allocPrint(allocator, "---\nname: {s}\ndescription: alias metadata\n---\nfull body\n", .{name});
+            defer allocator.free(expected);
+            try std.testing.expectEqualStrings(expected, raw);
+        }
+    }
+}
+
 test "skills discovery chooses nearest repository and valid project winners over home" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
