@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import os
@@ -15,6 +16,33 @@ from qualification import split_build  # noqa: E402
 
 
 AVAILABLE = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (Path(__file__).parents[2] / "build.zig").read_text()))
+
+
+@contextmanager
+def committed_selection(path):
+    with tempfile.TemporaryDirectory() as scratch:
+        root = Path(scratch)
+
+        def git(*args):
+            return subprocess.check_output(["git", *args], cwd=root, text=True, stderr=subprocess.PIPE).strip()
+
+        def commit():
+            git("-c", "user.name=fixture", "-c", "user.email=fixture@example.test",
+                "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "fixture")
+            return git("rev-parse", "HEAD")
+
+        git("init", "-q")
+        base = commit()
+        changed = root / path
+        changed.parent.mkdir(parents=True, exist_ok=True)
+        changed.write_text("Changed fixture.\n")
+        git("add", "--", path)
+        head = commit()
+        paths = git("diff", "--name-only", base, head, "--").splitlines()
+        selection = select(paths, "review", AVAILABLE)
+        selection.update(base=base, head=head)
+        (root / "tests").symlink_to((Path(__file__).parents[1]).resolve(), target_is_directory=True)
+        yield root, selection
 
 
 class PlatformBoundaryTest(unittest.TestCase):
@@ -68,27 +96,28 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertIn("runs-on: ubuntu-", job)
         self.assertIn("zig build typecheck-macos", job)
         gate = re.search(r"(?ms)^  linux:\n(.*?)(?=^  [a-z_]+:|\Z)", workflow)[1]
-        self.assertIn("macos_typecheck", gate.split("\n", 2)[1])
+        needs = re.search(r"(?m)^    needs: \[(.*?)\]$", gate)[1]
+        self.assertIn("macos_typecheck", [name.strip() for name in needs.split(",")])
         self.assertIn('test "$TYPECHECK_RESULT" = success', gate)
 
-    def test_executed_plan_runs_mac_on_every_ready_pr_and_retains_platform_mapping(self):
+    def test_executed_plan_runs_mac_on_every_normal_ready_pr_and_retains_platform_mapping(self):
         workflow = (Path(__file__).parents[2] / ".github/workflows/check.yml").read_text()
         script = textwrap.dedent(re.search(r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", workflow)[1])
-        with tempfile.TemporaryDirectory() as scratch:
-            root = Path(scratch)
-            (root / "tests").symlink_to((Path(__file__).parents[1]).resolve(), target_is_directory=True)
-            cases = (("src/turn_policy.zig", "pull_request", True), ("src/os/socket.zig", "push", False),
-                     ("src/os/socket.zig", "pull_request", True), (".github/workflows/qualify-macos.yml", "pull_request", True))
-            for path, event, mac in cases:
-                with self.subTest(path=path, event=event):
-                    selection = select([path], "review", AVAILABLE)
+        cases = (("src/turn_policy.zig", "pull_request", True), ("src/os/socket.zig", "push", False),
+                 ("src/os/socket.zig", "pull_request", True), (".github/workflows/qualify-macos.yml", "pull_request", True),
+                 ("README.md", "pull_request", False), ("README.md", "workflow_dispatch", False))
+        for path, event, mac in cases:
+            with self.subTest(path=path, event=event):
+                with committed_selection(path) as (root, selection):
                     (root / "selection.json").write_text(json.dumps(selection))
                     (root / "output").write_text("")
                     subprocess.run([sys.executable, "-B", "-c", script], cwd=root, check=True,
                                    env=dict(os.environ, STABLE="false", EVENT_NAME=event, GITHUB_REF_NAME="branch",
-                                            CANDIDATE_REF="a" * 40,
+                                            CANDIDATE_REF=selection["head"],
                                             GITHUB_OUTPUT=str(root / "output"), GITHUB_STEP_SUMMARY=str(root / "summary")))
                     outputs = dict(line.split("=", 1) for line in (root / "output").read_text().splitlines())
+                    kind = "documentation" if path == "README.md" and event == "pull_request" else "normal"
+                    self.assertEqual(outputs["change_kind"], kind)
                     native = json.loads(outputs["native_targets"])
                     self.assertEqual(outputs["native"], str(mac).lower())
                     self.assertEqual(outputs["macos_split"], str(split_build(native)).lower())
@@ -105,26 +134,24 @@ class PlatformBoundaryTest(unittest.TestCase):
     def test_executed_plan_splits_the_final_native_selection(self):
         workflow = (Path(__file__).parents[2] / ".github/workflows/check.yml").read_text()
         script = textwrap.dedent(re.search(r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", workflow)[1])
-        with tempfile.TemporaryDirectory() as scratch:
-            root = Path(scratch)
-            (root / "tests").symlink_to((Path(__file__).parents[1]).resolve(), target_is_directory=True)
-            for native, mac_required, split in (
-                    ([], True, True),
-                    (["test"], True, True),
-                    (["check-full"], True, True),
-                    (["test-logic"], True, True),
-                    (["check"], False, True)):
-                with self.subTest(native=native, mac_required=mac_required):
-                    selection = select(["README.md"], "review", AVAILABLE)
+        for native, mac_required, split in (
+                ([], True, True),
+                (["test"], True, True),
+                (["check-full"], True, True),
+                (["test-logic"], True, True),
+                (["check"], False, True)):
+            with self.subTest(native=native, mac_required=mac_required):
+                with committed_selection(".github/workflows/check.yml") as (root, selection):
                     selection.update(native_targets=native, mac_required=mac_required)
                     (root / "selection.json").write_text(json.dumps(selection))
                     (root / "output").write_text("")
                     subprocess.run([sys.executable, "-B", "-c", script], cwd=root, check=True,
                                    env=dict(os.environ, EVENT_NAME="pull_request",
-                                            GITHUB_REF_NAME="main", CANDIDATE_REF="a" * 40,
+                                            GITHUB_REF_NAME="main", CANDIDATE_REF=selection["head"],
                                             GITHUB_OUTPUT=str(root / "output"),
                                             GITHUB_STEP_SUMMARY=str(root / "summary")))
                     outputs = dict(line.split("=", 1) for line in (root / "output").read_text().splitlines())
+                    self.assertEqual(outputs["change_kind"], "normal")
                     self.assertEqual(outputs["macos_split"], str(split).lower())
                     self.assertEqual(outputs["linux_split"], "false")
                     expected = (set(native) - CHECK_COVERS) | {"admission-debug-integration"}
