@@ -9,6 +9,8 @@ const store_id = @import("store_id.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "11";
+/// Historical saved-record grammar; never a live transport version.
+const legacy_record_version = "10";
 
 /// Host-owned lifecycle state of a Message request.
 pub const MessageRequestState = enum { queued, processing, waiting_for_permission, completed, failed, cancelled, rejected };
@@ -1848,8 +1850,8 @@ const Parser = struct {
                 .version => {
                     var version: Bounded(8) = .{};
                     try self.readSmallString(&version);
-                    if (!version.eql(wire_version) and !version.eql("10")) return error.WrongWireVersion;
-                    self.legacy_record = version.eql("10");
+                    if (!version.eql(wire_version) and !version.eql(legacy_record_version)) return error.WrongWireVersion;
+                    self.legacy_record = version.eql(legacy_record_version);
                 },
                 .kind => {
                     var text: Bounded(32) = .{};
@@ -5020,7 +5022,7 @@ test "inline skills ingress accepts ordered text references and rejects ambiguou
 }
 
 test "inline skills recover all wire10 canonical mutation shapes with pinned legacy digests" {
-    const head = "{\"version\":\"10\",\"store\":\"s\",\"key\":\"old\",";
+    const head = "{\"version\":\"" ++ legacy_record_version ++ "\",\"store\":\"s\",\"key\":\"old\",";
     const Case = struct { body: []const u8, digest: []const u8 };
     // Independent SHA-256 expectations over the pre-vector v1/v4 grammars.
     const cases = [_]Case{
@@ -5054,7 +5056,7 @@ test "inline skills recover all wire10 canonical mutation shapes with pinned leg
     // The exception is canonical mutations only, never old read requests or new
     // Message fields smuggled under the old grammar (including an empty vector).
     for ([_][]const u8{
-        "{\"version\":\"10\",\"kind\":\"host_info\",\"store\":\"s\"}",
+        "{\"version\":\"" ++ legacy_record_version ++ "\",\"kind\":\"host_info\",\"store\":\"s\"}",
         head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skills\":[],\"text\":{\"state\":\"value\",\"value\":\"\"}}",
     }, 0..) |body, index| {
         var source: MetadataSource = .{ .input = body };

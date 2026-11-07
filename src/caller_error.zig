@@ -300,7 +300,7 @@ fn mapped(err: anyerror) ?Code {
         error.InteractiveTerminalRequired => .terminal_required,
         error.IncompleteTerminalInput => .terminal_input_incomplete,
         error.EmptyMessageInput => .message_empty,
-        error.InvalidArguments => .invocation_invalid,
+        error.InvalidArguments, error.InvalidPrefix => .invocation_invalid,
         error.InvalidInvocation => .invocation_invalid,
         error.CallerFailure => .internal_unexpected,
         // Directory owners translate this to a contextual Store/preference
@@ -774,4 +774,9 @@ test "fresh CLI argument errors are distinct from saved tool refusals" {
     var out = std.Io.Writer.fixed(&bytes);
     try writeSavedLine(&out, .invalid_arguments, .{ .resource = "session", .operation = "send" });
     try std.testing.expectEqualStrings("rui session send: arguments: The tool arguments are invalid. Accepted: arguments satisfying the selected tool schema. Next: Correct the arguments to match the selected tool schema. This rejection was saved and replays as saved; a resend needs a new key. [invalid_arguments]\n", out.buffered());
+}
+
+// Prefixes are native read arguments, not saved tool rejections.
+test "inline skills invalid suggestion prefix has a mapped caller repair" {
+    try std.testing.expectEqual(Code.invocation_invalid, of(error.InvalidPrefix));
 }

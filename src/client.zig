@@ -4895,3 +4895,85 @@ test "inline skills native vector canonical capture retains authored bytes and s
         try std.testing.expectEqualStrings("demo", parsed.value.object.get("skills").?.array.items[0].string);
     }
 }
+
+test "inline skills native capture permits empty stdin only with explicit references" {
+    const Stdin = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_read_streaming and operation.file_read_streaming.file.handle == std.Io.File.stdin().handle) return .{ .file_read_streaming = error.EndOfStream };
+            return std.testing.io.vtable.operate(userdata, operation);
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.operate = Stdin.operate;
+    const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var captured = try captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "-", .skills = &.{"demo"} }, .{ .generated = root }).get();
+    defer captured.close(io);
+    try std.testing.expect(captured.target.message.invokes_skill);
+    try std.testing.expectEqual(@as(u64, 0), captured.target.message.bytes);
+    try std.testing.expectError(error.EmptyMessageInput, captureMessage(io, .{ .store = root, .session = "k7m2qx", .text_path = "-" }, .{ .generated = root }).get());
+}
+
+test "inline skills canonical binding streams maximum vector metadata without fixed stack expansion" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const storage = try std.testing.allocator.alloc([64]u8, 4096);
+    defer std.testing.allocator.free(storage);
+    const names = try std.testing.allocator.alloc([]const u8, storage.len);
+    defer std.testing.allocator.free(names);
+    for (storage, names, 0..) |*name, *slice, index| {
+        @memset(name, 'x');
+        _ = try std.fmt.bufPrint(name[59..], "{d:0>5}", .{index});
+        slice.* = name;
+    }
+    var captured = try captureMessage(std.testing.io, .{ .store = root, .session = "k7m2qx", .text_path = "unused", .text = "authored", .skills = names }, .{ .generated = root }).get();
+    defer captured.close(std.testing.io);
+    const binding = try readCapturedBinding(std.testing.io, &captured.file);
+    try std.testing.expect(binding.target.message.invokes_skill);
+    try std.testing.expectEqual(@as(u64, 8), binding.target.message.bytes);
+    try std.testing.expect(captured.length > 4096 * 64);
+    const identity = try readCapturedIdentity(std.testing.io, &captured.file, captured.saved.key.slice());
+    try std.testing.expect(identity.session.eql("k7m2qx"));
+}
+
+test "inline skills native recovery opens every old wire10 canonical command without rewrites" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const handle = "00000000-0000-4000-8000-000000000001";
+    const cases = [_]struct { kind: protocol.CommandKind, tail: []const u8 }{
+        .{ .kind = .configure, .tail = ",\"session\":\"k7m2qx\",\"configuration\":{}}" },
+        .{ .kind = .message, .tail = ",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"authored\"}}" },
+        .{ .kind = .message, .tail = ",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skill\":\"demo\"}" },
+        .{ .kind = .session_stop, .tail = ",\"session\":\"k7m2qx\"}" },
+        .{ .kind = .session_archive, .tail = ",\"session\":\"k7m2qx\",\"archived\":false}" },
+        .{ .kind = .model_interruption, .tail = ",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"7\",\"operation\":\"9\"}}" },
+        .{ .kind = .permission_decision, .tail = ",\"session\":\"k7m2qx\",\"action\":\"11\",\"decision\":\"deny\"}" },
+    };
+    for (cases) |case| {
+        var body: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer body.deinit();
+        try body.writer.print("{{\"version\":\"10\",\"kind\":\"{s}\",\"store\":", .{@tagName(case.kind)});
+        try std.json.Stringify.encodeJsonString(root, .{}, &body.writer);
+        try body.writer.writeAll(",\"key\":\"" ++ handle ++ "\"");
+        try body.writer.writeAll(case.tail);
+        const file = try tmp.dir.createFile(std.testing.io, handle ++ ".json", .{});
+        try file.writeStreamingAll(std.testing.io, body.written());
+        file.close(std.testing.io);
+        var recovered = try openCaptured(std.testing.io, .{ .generated = .{ .directory = root, .handle = handle } });
+        defer recovered.close(std.testing.io);
+        try std.testing.expectEqual(case.kind, recovered.saved.kind);
+        var actual: [2048]u8 = undefined;
+        const count = try recovered.file.readPositionalAll(std.testing.io, &actual, 0);
+        try std.testing.expectEqualStrings(body.written(), actual[0..count]);
+    }
+}
