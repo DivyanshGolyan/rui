@@ -1079,6 +1079,17 @@ def stop_tmux(base, env, server_pid):
         wait_for(retired, "exact tmux server retirement")
 
 
+def tmux_upgrade_composer(screen, cursor, entry, draft):
+    """Check the active tmux cursor and its complete ASCII draft row."""
+    x, y = cursor
+    rows = screen.splitlines()
+    if not 0 <= y < len(rows):
+        return False
+    prompt = " › " if entry == "overview" else "› "
+    content = draft or ("Type a task to start a Session" if entry == "overview" else "")
+    return x == len(prompt) + len(draft) and rows[y].rstrip() == (prompt + content).rstrip()
+
+
 def tmux_cases(root, binary, releases, artifacts):
     """Real tmux cells supplement, rather than replace, PTY process evidence."""
     tmux = shutil.which("tmux")
@@ -1125,11 +1136,25 @@ def tmux_cases(root, binary, releases, artifacts):
                 installed = reached("Upgrade installed; Host ready")
                 save("installed", installed)
                 proof_ready(c, previous, old_host)
-                reached("›")
-                assert "/upgrade" in reached("› /upgrade")
+                def empty_composer():
+                    text = capture()
+                    cursor = tuple(map(int, command("display-message", "-p", "-t", "upgrade:0.0",
+                                                    "#{cursor_x} #{cursor_y}").split()))
+                    return text, cursor
+
+                text, cursor = wait_for(empty_composer, "empty tmux composer after accepted upgrade",
+                                        timeout=15, ready=lambda observed: tmux_upgrade_composer(*observed, entry, ""))
+                # A retained command must fail even when the cursor is at the
+                # expected empty position. This guards the whole-row oracle.
+                rows = text.splitlines()
+                prompt = " › " if entry == "overview" else "› "
+                rows[cursor[1]] = prompt + "/upgrade"
+                assert not tmux_upgrade_composer("\n".join(rows), cursor, entry, "")
                 command("send-keys", "-t", "upgrade:0.0", "C-u")
                 command("send-keys", "-t", "upgrade:0.0", "-l", "unsent tmux draft")
-                save("returned", reached("unsent tmux draft"))
+                returned, _ = wait_for(empty_composer, "new tmux draft after upgrade",
+                                       timeout=15, ready=lambda observed: tmux_upgrade_composer(*observed, entry, "unsent tmux draft"))
+                save("returned", returned)
                 assert (c.home / ".config/rui/codex.json").read_bytes() == credential
             finally:
                 dispose_all(lambda: stop_tmux(base, c.env, server_pid))
