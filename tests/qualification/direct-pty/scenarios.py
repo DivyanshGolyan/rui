@@ -265,7 +265,8 @@ def navigation(fixture, row):
             tty.send(b"\x1b[6~")
             tty.marker(" Work", after=generation)
         tty.marker(" Work")
-        tty.marker("Idle")
+        # This fixture completed its seeded answer before opening /status.
+        tty.marker("Finished")
     else:
         tty.wait(lambda: lookback(tty.screen.completed),
                  label="navigation entered lookback", after=generation)
