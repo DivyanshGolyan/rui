@@ -4340,3 +4340,77 @@ test "upgrade quiescence cancels read jobs rather than granting them mutation cu
     try std.testing.expect(rig.overview.worker.thread == null);
     try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
 }
+
+
+test "upgrade duplicate Escape joins cancelled task and retires only its own refusal" {
+    const Gate = struct {
+        observed: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        fn work(raw: *anyopaque, task: *ClientTask) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &task.cancellation.stopped, test_poll.isSet);
+            gate.observed.store(true, .release);
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &gate.release, test_poll.isSet);
+            return error.Cancelled;
+        }
+        fn completed(job: *UpgradePanel) bool { return job.task.completed(); }
+    };
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    var gate: Gate = .{};
+    defer gate.release.store(true, .release);
+    try std.testing.expect(try rig.press("/upgrade\n") == null);
+    try std.testing.expect(overview.upgrade_requested);
+    overview.upgrade_job.started = true;
+    overview.upgrade_job.allocator = std.testing.allocator;
+    overview.upgrade_running = true;
+    try overview.upgrade_job.task.start(std.testing.io, &gate, Gate.work);
+    try std.testing.expect(try rig.press("/upgrade\n") == null);
+    try std.testing.expectEqualStrings("/upgrade", overview.composerDraft().bytes);
+    try std.testing.expectEqualStrings(view.upgrade_busy_notice, overview.state.notice.?.text());
+    // A single actual byte passes through the production deadline/decoder.
+    try std.testing.expect(try pressKey(rig, "\x1b") == null);
+    try std.testing.expectEqual(TerminalInput.Pending.none, overview.terminal.stream.pending());
+    try std.testing.expect(overview.upgrade_job.cancelling);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &gate.observed, test_poll.isSet);
+    try std.testing.expectEqualStrings("/upgrade", overview.composerDraft().bytes);
+    gate.release.store(true, .release);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &overview.upgrade_job, Gate.completed);
+    _ = try overview.turn();
+    try std.testing.expect(overview.upgrade_job.task.thread == null and !overview.upgrade_requested);
+    try std.testing.expectEqualStrings("/upgrade", overview.composerDraft().bytes);
+    try std.testing.expect(std.mem.startsWith(u8, overview.state.notice.?.text(), "Upgrade cancelled"));
+}
+
+
+test "upgrade Escape preserves unrelated safety notice and pending result priority" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try rig.press("/upgrade\n") == null);
+    var safety: view.Notice = .{ .colour = .attention };
+    const warning = "Existing safety notice";
+    @memcpy(safety.bytes[0..warning.len], warning);
+    safety.len = warning.len;
+    overview.state.notice = safety;
+    try std.testing.expect(try pressKey(rig, "\x1b") == null);
+    try std.testing.expectEqualStrings(warning, overview.state.notice.?.text());
+    const result = "Upgrade cancelled";
+    @memcpy(overview.upgrade_note[0..result.len], result);
+    overview.upgrade_note_len = result.len;
+    overview.upgrade_notice_pending = true;
+    overview.offerUpgradeNotice();
+    try std.testing.expectEqualStrings(warning, overview.state.notice.?.text());
+    try std.testing.expect(overview.upgrade_notice_pending);
+    overview.state.notice = null;
+    overview.state.prompt = .{ .stop = "k7m2qx".* };
+    overview.offerUpgradeNotice();
+    try std.testing.expect(overview.state.notice == null and overview.upgrade_notice_pending);
+    overview.state.prompt = null;
+    overview.offerUpgradeNotice();
+    try std.testing.expectEqualStrings(result, overview.state.notice.?.text());
+    try std.testing.expect(overview.upgrade_notice_pending); // credit only on delivered frame
+}

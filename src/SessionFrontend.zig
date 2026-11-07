@@ -5659,3 +5659,44 @@ test "upgrade reobservation retains a refused archive command from the completio
         try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
     }
 }
+
+
+test "conversation duplicate Escape joins cancelled task through real decoder" {
+    const Gate = struct {
+        observed: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        fn work(raw: *anyopaque, task: *@import("ClientTask.zig")) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &task.cancellation.stopped, test_poll.isSet);
+            gate.observed.store(true, .release);
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &gate.release, test_poll.isSet);
+            return error.Cancelled;
+        }
+        fn completed(job: *UpgradePanel) bool { return job.task.completed(); }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    var gate: Gate = .{};
+    defer { gate.release.store(true, .release); self.upgrade_job.deinit(); }
+    try stepKeys(held, "/upgrade\r");
+    try std.testing.expect(self.upgrade_requested);
+    self.upgrade_job.started = true;
+    self.upgrade_job.allocator = std.testing.allocator;
+    self.upgrade_running = true;
+    try self.upgrade_job.task.start(std.testing.io, &gate, Gate.work);
+    try stepKeys(held, "/upgrade\r");
+    try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("! Upgrade still settling; retry /upgrade after it finishes. Draft retained.", self.notice.?);
+    try stepKeys(held, "\x1b");
+    try std.testing.expectEqual(TerminalInput.Pending.none, held.terminal.stream.pending());
+    try std.testing.expect(self.upgrade_job.cancelling and self.notice == null);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &gate.observed, test_poll.isSet);
+    gate.release.store(true, .release);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &self.upgrade_job, Gate.completed);
+    try self.advanceUpgrade();
+    try std.testing.expect(self.upgrade_job.task.thread == null and !self.upgrade_requested);
+    try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
+    try std.testing.expect(std.mem.startsWith(u8, self.upgrade_note[0..self.upgrade_note_len], "Upgrade cancelled"));
+    try std.testing.expect(!self.upgrade_note_shown);
+}
