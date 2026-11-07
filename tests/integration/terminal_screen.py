@@ -8,7 +8,7 @@ import re
 import unicodedata
 
 import pyte
-from wcwidth import wcwidth
+from wcwidth import wcwidth, wcswidth
 
 
 LIMIT = 1024 * 1024
@@ -33,26 +33,53 @@ def shown(text, screen):
 
 
 class CombiningScreen(pyte.Screen):
-    """Normalize adjacent combining marks once, retaining pyte draw semantics."""
+    """Keep zero-width Unicode marks without dropping the following draw text."""
+    # A variation selector can widen a cell beyond its first scalar's width.
+    @property
+    def display(self):
+        rows = []
+        for y in range(self.lines):
+            parts = []
+            wide = False
+            for x in range(self.columns):
+                if wide:
+                    wide = False
+                    continue
+                data = self.buffer[y][x].data
+                width = wcswidth(data)
+                assert data and 1 <= width <= 2, "invalid terminal cell"
+                parts.append(data)
+                wide = width == 2
+            rows.append("".join(parts))
+        return rows
+
     def draw(self, data):
         translated = data.translate(self.g1_charset if self.charset else self.g0_charset)
         start = index = 0
         while index < len(translated):
             width = wcwidth(translated[index])
-            combining = width == 0 and unicodedata.combining(translated[index])
+            combining = width == 0 and unicodedata.category(translated[index]).startswith("M")
             if width <= 0 and not combining:
                 break  # Stock draw discards the suffix after an unprintable.
             if combining:
                 end = index + 1
-                while end < len(translated) and wcwidth(translated[end]) == 0 and unicodedata.combining(translated[end]):
+                while end < len(translated) and wcwidth(translated[end]) == 0 and unicodedata.category(translated[end]).startswith("M"):
                     end += 1
-                super().draw(data[start:index + 1])
+                super().draw(data[start:index])
                 if self.cursor.x or self.cursor.y:
                     row = self.cursor.y if self.cursor.x else self.cursor.y - 1
                     column = self.cursor.x - 1 if self.cursor.x else self.columns - 1
                     cell = self.buffer[row][column]
-                    self.buffer[row][column] = cell._replace(
-                        data=unicodedata.normalize("NFC", cell.data + translated[index + 1:end]))
+                    if not cell.data and column:
+                        column -= 1
+                        cell = self.buffer[row][column]
+                    combined = unicodedata.normalize("NFC", cell.data + translated[index:end])
+                    before, after = wcswidth(cell.data), wcswidth(combined)
+                    assert 1 <= before <= after <= 2 and column + after <= self.columns, "unsupported mark width"
+                    self.buffer[row][column] = cell._replace(data=combined)
+                    if after > before:
+                        self.buffer[row][column + 1] = cell._replace(data="")
+                        self.cursor.x = min(self.columns, self.cursor.x + after - before)
                 start = index = end
             else:
                 index += 1
