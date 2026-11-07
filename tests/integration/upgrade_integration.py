@@ -940,8 +940,11 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
                 # The child may exit after exited() reads but before it polls.
                 # Its slave remains open here: collect every queued raw byte
                 # before checking the restored receipt, stopping at EAGAIN.
-                while screen.read_output():
-                    pass
+                for _ in range(256):
+                    if not screen.read_output():
+                        break
+                else:
+                    raise AssertionError("terminal output did not drain after child exit")
                 output = bytes(screen.tail)
                 restored = output.rfind(b"\x1b[?1049l")
                 assert restored >= 0, "dual-failure SIGINT did not restore the terminal"
