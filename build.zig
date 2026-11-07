@@ -298,6 +298,7 @@ pub fn build(b: *std.Build) void {
     );
     for ([_][]const u8{
         "tests/qualification/direct-pty/test_driver.py",
+        "tests/integration/terminal_screen_test.py",
         "tests/integration/session_sequence_model_test.py",
         "tests/ci/renderer_mutation_test.py",
     }) |path| {
