@@ -4889,7 +4889,7 @@ def renderer_cases():
         def history_top(self):
             # Keep this owner's input writer and collection deadline; only
             # the current-frame acceptance fact is shared with direct PTYs.
-            return self.send("/history\n", predicate=lambda: history_selected(
+            return self.send(fixture_command("/history"), predicate=lambda: history_selected(
                 self.capture.completed, self.capture.screen.cursor.x, self.capture.screen.cursor.y))
 
         def observe_for(self, seconds):
@@ -5027,7 +5027,7 @@ def renderer_cases():
 
     def joined(tty):
         # A final answer frame is not proof that its reader has joined.
-        tty.send("/status\n", " Status · ")
+        tty.send(fixture_command("/status"), " Status · ")
         tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
 
     try:
@@ -5073,7 +5073,7 @@ def renderer_cases():
             assert tty.capture.draft("kept", 2), tty.capture.completed
             # Rejection leaves a usable editor, not a latent fatal redraw.
             tty.send("é", predicate=lambda: tty.capture.draft("ékept", 3))
-            assert os.write(tty.master, b"\x15\x0b/exit\n") == 8
+            assert os.write(tty.master, b"\x15\x0b" + fixture_command("/exit").encode()) == 9
             tty.finish()
         env = {**os.environ, "HOME": str(home)}
         rejected = subprocess.run([str(fixture.RUI), "session", "resume", "--store", str(store), geometry],
@@ -5123,7 +5123,7 @@ def renderer_cases():
             tty.send("\n", answer("multiline"))
             submitted(multiline)
             joined(tty)
-            os.write(tty.master, b"/exit\n")
+            os.write(tty.master, fixture_command("/exit").encode())
             tty.finish()
         print("renderer: wide5000X resize, long combining cells, tabs, multiline paste and exact submitted bytes passed", flush=True)
 
@@ -5184,7 +5184,7 @@ def renderer_cases():
             shown = tty.send("show invisible output\n", "output survived")
             assert all(value in shown for value in escaped), shown
             joined(tty)
-            shown = tty.send("/details\n", "joined é")
+            shown = tty.send(fixture_command("/details"), "joined é")
             # Both the saved Tool Result and answer use the same display sink.
             assert all(value in shown for value in escaped), shown
             tty.caller.send_signal(signal.SIGINT)
@@ -5328,12 +5328,12 @@ def renderer_cases():
                     assert pending not in shown, (decision, shown)
                 assert effect.exists() == (decision == "allow"), decision
                 requests = len(endpoint.requests)
-                shown = tty.send("status\r", predicate=lambda: " Status · " in tty.capture.completed or "› status" in tty.capture.completed)
+                shown = tty.send(fixture_command("status", "\r"), predicate=lambda: " Status · " in tty.capture.completed or "› status" in tty.capture.completed)
                 assert " Status · " in shown and "› status" not in shown, (decision, shown)
                 assert len(endpoint.requests) == requests, endpoint.requests
                 tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
                 # Paging and a /status round trip cannot bring the choice back.
-                tty.send("\x1b[6~/status\n", " Status · ")
+                tty.send("\x1b[6~" + fixture_command("/status"), " Status · ")
                 tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
                 assert "Allow once" not in tty.capture.completed and "Approval" not in tty.capture.completed, tty.capture.completed
                 tty.caller.send_signal(signal.SIGINT)
@@ -5363,7 +5363,7 @@ def renderer_cases():
                 records = set((home / ".config/rui/requests").glob("*.json"))
                 # The typed line outlives the first Action and its command, so
                 # the second waits beside it with no prompt until Esc.
-                tty.send("not-a-command\r", "! Unknown command /not-a-command · /help")
+                tty.send(fixture_command("not-a-command", "\r"), "! Unknown command /not-a-command · /help")
                 assert CHOICE not in tty.capture.completed, tty.capture.completed
                 tty.send("\x07", CHOICE)
                 assert [item["action"] for item in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]] == [second]
@@ -5404,7 +5404,7 @@ def renderer_cases():
                 proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_two_reads)
                 fixture.wait_for(tty.draining(held[0].is_set), "first held Activity page", timeout=5)
                 # The held read predates /status, so the next one opens it.
-                os.write(tty.master, b"/status\r")
+                os.write(tty.master, fixture_command("/status", "\r").encode())
                 time.sleep(0.1)
                 released[0].set()
                 fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=5)
@@ -5456,7 +5456,7 @@ def renderer_cases():
                     raise AssertionError("tall Action never became ready after paging")
                 assert tty.capture.draft("/", 3), tty.capture.completed
                 records = set((home / ".config/rui/requests").glob("*.json"))
-                tty.send("not-a-command\r", "! Unknown command /not-a-command · /help")
+                tty.send(fixture_command("not-a-command", "\r"), "! Unknown command /not-a-command · /help")
                 assert CHOICE not in tty.capture.completed, tty.capture.completed
                 tty.send("\x07", CHOICE)
                 assert set((home / ".config/rui/requests").glob("*.json")) == records
@@ -5499,7 +5499,7 @@ def renderer_cases():
         marker = answer("status follows")
         with terminal(session) as tty:
             tty.send("wait briefly\n", "• Wait briefly")
-            shown = tty.send("/status\n", " Status · ")
+            shown = tty.send(fixture_command("/status"), " Status · ")
             assert BYPASS_STATUS in shown, shown
             # The page is taller than the screen; Work ends it.
             shown = tty.send("\x1b[6~", predicate=lambda: "\n Work\n" in tty.capture.completed)
@@ -5611,7 +5611,7 @@ def renderer_cases():
             tty.send("propose three Actions\n", CHOICE)
             actions = [row["action"] for row in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]]
             assert len(actions) == 3, actions
-            tty.send("/status\n", " Status · ")
+            tty.send(fixture_command("/status"), " Status · ")
             # The update replaces the page in place: what the user scrolled
             # to and was told stays, and nothing returns to the top.
             # Thirteen rows: the rule above the input takes one of them.
@@ -5627,7 +5627,7 @@ def renderer_cases():
             assert " Status · " not in scrolled, scrolled
             for action in actions:
                 assert f"Action requiring attention: {action}" in scrolled, scrolled
-            tty.send("/foo\n", "! Unknown command /foo · /help")
+            tty.send(fixture_command("/foo"), "! Unknown command /foo · /help")
             frames = tty.every_frame()
             run(home, "action", "deny", "--store", store, "--session", session, "--action", actions[1])
             def updated():
@@ -5652,7 +5652,7 @@ def renderer_cases():
             # Typing while approval is paused draws no frame per byte, which
             # could fill a small terminal buffer before the line is read.
             frames = tty.every_frame()
-            os.write(tty.master, b"/result " + missing + b"\n")
+            os.write(tty.master, fixture_command("/result " + missing.decode()).encode())
             fixture.wait_for(tty.draining(reading.is_set), "the /result read was never held", timeout=10)
             tty.send("\x07", "Command running…")
             tty.send("/requests\n", "! Command still running.")
@@ -5740,7 +5740,7 @@ def renderer_cases():
             holding.set()
             fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "turn ended", timeout=20)
             frames = tty.every_frame()
-            os.write(tty.master, b"/status\n")
+            os.write(tty.master, fixture_command("/status").encode())
             time.sleep(1)
             release.set()
             tty.wait(" Status · ", timeout=20)
@@ -5776,12 +5776,12 @@ def renderer_cases():
             frames = tty.every_frame()
             holding.set()
             fixture.wait_for(tty.draining(held[0].is_set), "first held Activity page", timeout=10)
-            os.write(tty.master, b"/status\n")
+            os.write(tty.master, fixture_command("/status").encode())
             time.sleep(0.3)
             released[0].set()
             # The next read carries the /status request.
             fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=10)
-            os.write(tty.master, b"/details\n")
+            os.write(tty.master, fixture_command("/details").encode())
             time.sleep(0.3)
             released[1].set()
             tty.wait("Recent conversation — tool details", timeout=20)
@@ -5824,7 +5824,7 @@ def renderer_cases():
         with terminal(session) as tty:
             tty.send("propose paused\n", CHOICE)
             # `/` beside the Action moves to the draft, where commands run.
-            tty.send("/details\n", "Approval paused · Esc returns to Action")
+            tty.send(fixture_command("/details"), "Approval paused · Esc returns to Action")
             tty.send("next draft", predicate=lambda: tty.capture.draft("next draft", 12))
             tty.send("\r", "! Action needs a decision; Esc returns to it. Draft retained.")
             assert tty.capture.draft("next draft", 12), tty.capture.completed
@@ -6009,7 +6009,8 @@ def renderer_cases():
                 if route == "/v1/activity-page":
                     fixture.wait_for(tty.draining(held.is_set), "no scan reached the held page", timeout=5)
                 tty.send(command, predicate=lambda: tty.capture.draft(command, 2 + len(command)))
-                tty.send("\r", predicate=lambda: tty.capture.draft("", 2))
+                # This is the fixture page-command submit, not a completion.
+                tty.send("\x07\r", predicate=lambda: tty.capture.draft("", 2))
                 fixture.wait_for(tty.draining(held.is_set), (command, route, "the page was not held"), timeout=5)
                 marker = answer(f"stale {command} {route}")
                 tty.send("after page\n", predicate=lambda: "Sending…" in tty.capture.completed or "Sent" in tty.capture.completed)
