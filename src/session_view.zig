@@ -6,6 +6,7 @@ const Markdown = @import("markdown_prefix.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
+const caller_error = @import("caller_error.zig");
 const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
@@ -111,8 +112,8 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     try peerLine(&sink, .outbound, peer, std.math.maxInt(u64), &compact);
     try std.testing.expectEqualStrings("\n  " ++ S ++ "→ Messaged 9f8e7d" ++ R ++ "\n", sink.bytes[0..sink.length]);
     var failed: Sink = .{};
-    try sendFailed(&failed, peer, false, &compact);
-    try std.testing.expectEqualStrings("  !" ++ S ++ " → Messaged 9f8e7d — Failed" ++ R ++ "\n", failed.bytes[0..failed.length]);
+    try sendFailed(&failed, peer, "unknown_session", false, &compact);
+    try std.testing.expectEqualStrings("  !" ++ S ++ " → Messaged 9f8e7d — No Session with this ID exists in this Store." ++ R ++ "\n", failed.bytes[0..failed.length]);
     try std.testing.expect(compact);
     compact = false;
     // A named peer shows by its name, escaped as a label is, and rows in a
@@ -139,23 +140,24 @@ test "failed peer Messages preserve compact grouping and distinguish absent targ
     try peer.session.set("k7m2qx");
     var named = peer;
     try named.label.set("Review\x1b[2m the WAL");
-    const cases = [_]struct { target: ?protocol.NamedPeer, line: []const u8 }{
-        .{ .target = null, .line = " → Message rejected — No valid target reference" },
-        .{ .target = peer, .line = " → Messaged k7m2qx — Failed" },
-        .{ .target = named, .line = " → Messaged Review\\x1b[2m the WAL — Failed" },
+    const cases = [_]struct { target: ?protocol.NamedPeer, code: []const u8, line: []const u8 }{
+        .{ .target = null, .code = "unsupported_reasoning_effort", .line = " → Message rejected — The reasoning effort is unknown or unsupported by this model." },
+        .{ .target = peer, .code = "unknown_session", .line = " → Messaged k7m2qx — No Session with this ID exists in this Store." },
+        .{ .target = named, .code = "invalid_session_reference", .line = " → Messaged Review\\x1b[2m the WAL — That Session reference is malformed." },
+        .{ .target = null, .code = "future\x1bcode", .line = " → Message rejected — Rejected: future\\x1bcode" },
     };
     for (cases) |case| {
         for ([_]bool{ false, true }) |grouped| {
             var sink: Sink = .{};
             var compact = grouped;
-            try sendFailed(&sink, case.target, false, &compact);
+            try sendFailed(&sink, case.target, case.code, false, &compact);
             try std.testing.expect(compact);
             var expected: [1024]u8 = undefined;
             const line = try std.fmt.bufPrint(&expected, "{s}  !" ++ Mark.summary ++ "{s}" ++ Mark.reset ++ "\n", .{ if (grouped) "" else "\n", case.line });
             try std.testing.expectEqualStrings(line, sink.bytes[0..sink.length]);
             var coloured: Sink = .{};
             var coloured_group = grouped;
-            try sendFailed(&coloured, case.target, true, &coloured_group);
+            try sendFailed(&coloured, case.target, case.code, true, &coloured_group);
             var coloured_expected: [1024]u8 = undefined;
             const styled = try std.fmt.bufPrint(&coloured_expected, "{s}  \x1b[91m!\x1b[39m" ++ Mark.summary ++ "{s}" ++ Mark.reset ++ "\n", .{ if (grouped) "" else "\n", case.line });
             try std.testing.expectEqualStrings(styled, coloured.bytes[0..coloured.length]);
@@ -189,7 +191,7 @@ pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: prot
 }
 
 /// A rejected peer send is grouped with tool rows, with no Message body.
-pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer, colour: bool, compact: *bool) !void {
+pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer, code: []const u8, colour: bool, compact: *bool) !void {
     if (!compact.*) try sink.feed("\n");
     compact.* = true;
     try sink.feed("  ");
@@ -200,8 +202,19 @@ pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer, colour: bool, comp
     if (target) |peer| {
         try sink.feed(" → Messaged ");
         try peerName(sink, peer);
-        try sink.feed(" — Failed");
-    } else try sink.feed(" → Message rejected — No valid target reference");
+    } else try sink.feed(" → Message rejected");
+    try sink.feed(" — ");
+    const rejection = std.meta.stringToEnum(protocol.MessageRejection, code);
+    const known = if (rejection) |value| std.meta.stringToEnum(caller_error.Code, @tagName(value)) else null;
+    if (known) |value| {
+        try sink.feed(caller_error.facts(value).says);
+    } else {
+        // Future or unrecognized codes remain visible but cannot inject terminal control.
+        try sink.feed("Rejected: ");
+        var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
+        try escaped.feed(code);
+        try escaped.finish();
+    }
     try sink.feed(Mark.reset ++ "\n");
 }
 
@@ -1728,7 +1741,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             },
             .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at, compact_tools),
             .send_failed => |failed| {
-                try sendFailed(sink, failed.target, colour, compact_tools);
+                try sendFailed(sink, failed.target, failed.code.slice(), colour, compact_tools);
             },
             // The call's own line and the work status show the wait.
             .approval_requested, .session_changed, .compacted => {},

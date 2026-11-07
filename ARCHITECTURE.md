@@ -2733,7 +2733,7 @@ When all retained text fits and no older conversation exists, Up and PgUp do not
 Actual backward movement or a real request for older conversation freezes a transcript copy that starts at the first retained read boundary, pinning the exact first logical content from the delivered frame before applying the movement.
 Live and transcript share body width, calls, queued row, draft and status geometry; only genuine inspection, Message and Action pages have navigation headings.
 The conversation scrollbar uses the library's position and extent, with a distinct track and thumb even when colour is disabled; its reserved physical column is not transcript content.
-The existing footer quietly says `Looking back`, or `New output below` when the normalized live endpoint has advanced, with `Ctrl-G` as the return hint.
+The existing footer quietly says `Looking back`, or `New output below` when the normalized live endpoint has advanced, with `Ctrl-G` as the return hint. When the command list is visible, it says `Ctrl-G twice: latest`: the first closes the list and the second returns to latest. Ctrl-End continues to return directly.
 Notices take priority over approval hints, then looking-back state, then Session metadata; the rule keeps its independent hidden-draft-line labels.
 No unread count or history persists beyond this snapshot.
 New output leaves the anchored snapshot unchanged; downward input appends its still-retained contiguous normalized suffix, with styles, links and exact collapsed Message proofs, before moving toward the actual current end.
@@ -2900,7 +2900,7 @@ Only after trying those alternatives may genuine row pressure shorten the bounde
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
 If required instructions, overflow and input cannot fit, the renderer fails before emitting a clipped prompt and restores terminal configuration.
 
-Peer Messages show as one upright, indented quiet line each, never with `›`: `← Received message from NAME` for a Message from a peer, `→ Messaged NAME` for one this Session sent, and `! → Messaged NAME — Failed` for a send its target refused; only the failure glyph is red.
+Peer Messages show as one upright, indented quiet line each, never with `›`: `← Received message from NAME` for a Message from a peer, `→ Messaged NAME` for one this Session sent, and `! → Messaged NAME — REASON` for a rejected send; only the failure glyph is red.
 The Message's text never shows: the model reads it, and the person sees only who it came from or went to.
 NAME is the peer's label as the Store holds it when the page is read, so a rename shows on every row; a peer without one shows its ID (`k7m2qx`).
 The Store looks the label up once per peer row; it is not copied into the Message.
@@ -3286,7 +3286,7 @@ A refused send's `send_failed.target` is required and nullable: it names the can
 The Store derives that peer from the full saved target with the shared ID grammar, resolves a label only for a peer, and leaves the original command target, digest, refusal and replay identity unchanged.
 This read-time projection covers existing refusals as well as new ones; null does not distinguish refused creation from a malformed addressed send and never means that a Session was created or not created.
 Every non-null peer remains strictly validated; a missing target or malformed peer is not an alternative null encoding.
-The human row with no peer reads `! Message rejected — No valid target reference`; model transcript outlines use `(no valid target reference)` rather than a label or invalid attempted spelling.
+The human rejection row uses the saved rejection code’s concise caller-error reason, independently of whether a peer was resolved; an unrecognized code is shown escaped rather than guessed. Model transcript outlines use `(no valid target reference)` rather than a label or invalid attempted spelling.
 Calls retain historical rejected proposals and all three complete field references under the proposal contract above.
 Tool Results validate the complete group's accepted call/output-item and Session/Turn/attempt provenance before exposure; malformed sibling links fence even when the caller skips proposal rows.
 Outcome provenance is the terminal Turn's causing model Operation, not a later Session Operation.

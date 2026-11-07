@@ -3808,6 +3808,41 @@ test "a key before a new Session's first frame finds no list the previous Sessio
     try std.testing.expectEqualStrings("/help", self.input.composition().bytes);
 }
 
+test "lookback command list advertises its two-step close and Ctrl-End still reaches latest" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.settle();
+    try held.screen.append("retained\n");
+    try held.screen.beginTranscript(0);
+    held.self.dirty = true;
+    try held.settle();
+    try stepKeys(held, "/st");
+    try held.settle();
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+    var row: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("Looking back · Ctrl-G twice: latest", lastRow(held.screen, &row));
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expectEqual(Screen.ViewKind.transcript, held.screen.view);
+    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
+    try std.testing.expectEqualStrings("Looking back · Ctrl-G: latest", lastRow(held.screen, &row));
+    try stepKeys(held, "\x07");
+    try held.settle();
+    try std.testing.expectEqual(Screen.ViewKind.live, held.screen.view);
+    try std.testing.expectEqualStrings("/st", held.self.input.composition().bytes);
+
+    try held.screen.beginTranscript(0);
+    held.self.dirty = true;
+    try stepKeys(held, "x\x7f");
+    try held.settle();
+    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+    try std.testing.expectEqualStrings("Looking back · Ctrl-G twice: latest", lastRow(held.screen, &row));
+    try stepKeys(held, "\x1b[1;5F");
+    try held.settle();
+    try std.testing.expectEqual(Screen.ViewKind.live, held.screen.view);
+    try std.testing.expectEqualStrings("/st", held.self.input.composition().bytes);
+}
+
 test "Esc closes the command list first only when the latest frame drew it" {
     const held = try HeldFrontend.create();
     defer held.destroy();
