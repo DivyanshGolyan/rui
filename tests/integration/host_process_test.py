@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Failure-sensitive checks for bounded Host process startup."""
 
+import ast
 import http.client
 import http.server
 import json
@@ -82,6 +83,7 @@ def main():
     prove_one_reply()
     prove_terminal_stop_budget()
     prove_renderer_comparison_retention()
+    prove_held_owner_artifact()
     prove_execution_release_oracles()
     prove_bash_cleanup_population()
     prove_required_receipts()
@@ -1405,6 +1407,84 @@ def prove_control_disposal_oracle(dispose):
                     assert not failing_body and not broken
             assert closed == {"connection", "stop", "gate", "diagnostics", "release", "shutdown", "server", "join"}, closed
     print("Control disposal oracle: original assertion survives every cleanup failure; every owned resource still receives disposal")
+
+
+def prove_held_owner_artifact():
+    """Both entrypoints bind the artifact before fixture environment/cwd changes."""
+    with patch.object(sys, "argv", [sys.argv[0], "unused-rui"]):
+        import terminal_restoration_integration as terminal
+
+    scripts = [pathlib.Path(__file__).with_name(name) for name in
+        ("terminal_restoration_integration.py", "human_cli_integration.py")]
+    with tempfile.TemporaryDirectory(prefix="rui-owner-path-") as directory:
+        root = pathlib.Path(directory).resolve()
+        build, elsewhere = root / "build", root / "elsewhere"
+        build.mkdir()
+        elsewhere.mkdir()
+        binary = build / "owner"
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o700)
+        wrong_owner = elsewhere / "owner"
+        wrong_owner.write_text("not executable")
+        original = pathlib.Path.cwd()
+        try:
+            for script in scripts:
+                tree = ast.parse(script.read_text(), filename=str(script))
+                entry = next(node for node in tree.body if isinstance(node, ast.If)
+                    and isinstance(node.test, ast.Compare)
+                    and isinstance(node.test.left, ast.Name) and node.test.left.id == "__name__")
+                code = compile(ast.Module(body=[entry], type_ignores=[]), str(script), "exec")
+                for cwd, supplied, expected in ((build, "owner", str(binary)),
+                        (build, str(binary), str(binary)), (build, "", ""), (build, None, None),
+                        (build, "missing", str(build / "missing")), (elsewhere, "owner", str(wrong_owner))):
+                    os.chdir(cwd)
+                    main = MagicMock()
+                    environment = {} if supplied is None else {"RUI_TEST_HELD_OWNER": supplied}
+                    def enter():
+                        assert pathlib.Path.cwd() == cwd
+                        os.chdir(root)
+                        os.environ.clear()
+                    with patch.dict(os.environ, environment, clear=True), patch.object(sys, "argv", ["script", "rui"]):
+                        exec(code, {"__name__": "__main__", "os": os, "pathlib": pathlib,
+                            "host_process": SimpleNamespace(enter=enter), "sys": sys, "main": main})
+                    assert main.call_args.kwargs["held_owner"] == expected, (script, supplied, main.call_args)
+            # A same-named artifact in a different cwd cannot repair a path
+            # resolved at the wrong invocation boundary.
+            os.chdir(elsewhere)
+            with patch.object(terminal.fixture, "start_host", side_effect=AssertionError("host started")):
+                for invalid in (None, "", str(elsewhere / "missing"), str(elsewhere / "owner"), str(elsewhere)):
+                    try:
+                        terminal.held_history_owner_case(root, invalid)
+                    except AssertionError as error:
+                        assert "host started" not in str(error), (invalid, error)
+                    else:
+                        raise AssertionError(("invalid owner accepted", invalid))
+
+            # An executable must still produce exactly one hard-filter witness;
+            # validate cleanup on each success/failure without launching a Host.
+            marker = b"held-history-owner: real status completed"
+            for index, (returncode, output, succeeds) in enumerate(((0, marker, True),
+                    (0, b"", False), (0, marker * 2, False), (1, marker, False))):
+                state = root / f"case-{index}"
+                state.mkdir()
+                session = {"admission": {"answer": {"session": "abc123", "status": "accepted",
+                    "selection": {"turn": None}}, "completion": {"status": "completed"}}}
+                with patch.object(terminal.fixture, "start_host", return_value="private-host"), \
+                        patch.object(terminal.fixture, "stop_host") as stop, \
+                        patch.object(terminal.human, "admit", return_value=session), \
+                        patch.object(terminal.subprocess, "run", return_value=SimpleNamespace(
+                            returncode=returncode, stdout=b"", stderr=output)) as run:
+                    try:
+                        terminal.held_history_owner_case(state, str(binary))
+                    except AssertionError:
+                        assert not succeeds, (returncode, output)
+                    else:
+                        assert succeeds, (returncode, output)
+                    assert run.call_args.args[0] == [str(binary)]
+                    stop.assert_called_once_with("private-host")
+        finally:
+            os.chdir(original)
+    print("Held owner artifact: entry cwd, strict executable, filter marker, and Host cleanup passed")
 
 
 def prove_renderer_comparison_retention():

@@ -2663,7 +2663,7 @@ def held_history_owner_case(state, binary):
     """The filtered native owner test uses a private, provider-free real Host."""
     assert binary, "visible-stream requires RUI_TEST_HELD_OWNER"
     binary = pathlib.Path(binary).resolve()
-    assert binary.is_absolute() and binary.is_file(), ("invalid held owner artifact", binary)
+    assert binary.is_absolute() and binary.is_file() and os.access(binary, os.X_OK), ("invalid held owner artifact", binary)
     root = state / "held-history-owner"
     root.mkdir(mode=0o700)
     home, store = root / "home", root / "store"
@@ -3598,5 +3598,7 @@ def main(selected=None, *, held_owner=None):
 
 if __name__ == "__main__":
     held_owner = os.environ.get("RUI_TEST_HELD_OWNER")
+    if held_owner:
+        held_owner = str(pathlib.Path(held_owner).resolve())
     host_process.enter()
     main(sys.argv[2] if len(sys.argv) == 3 else None, held_owner=held_owner)
