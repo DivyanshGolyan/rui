@@ -261,7 +261,7 @@ test "upgrade panel owner wipes its private Host snapshot before freeing with or
                 .host = .{ .managed = .{ .observed = undefined, .launch = .{ .options = &.{} }, .version = .{ .schema = 99, .patch = 0 }, .snapshot = .{ .pid = 0, .started = 0, .executable = private[0..0], .argv = entries[0..0], .environment = entries, .storage = private, .entries = entries } } },
                 .home = try allocator.dupe(u8, "/synthetic/home"),
                 .store = try allocator.dupe(u8, "/synthetic/store"),
-                .running_executable = try allocator.dupe(u8, "/synthetic/rui"),
+                .running_executable = try allocator.dupeSentinel(u8, "/synthetic/rui", 0),
             },
         };
         if (installed) self.result = .{ .installation = .{ .unchanged = .{ .operation_build = try allocator.dupe(u8, "/synthetic/build"), .selected_after = try allocator.dupe(u8, "/synthetic/build") } }, .activation = .not_needed, .store = try allocator.dupe(u8, "/synthetic/store") };
