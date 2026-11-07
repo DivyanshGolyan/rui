@@ -545,6 +545,7 @@ fn turn(self: *Self) !?Next {
                 self.upgrade_note_revision +%= 1;
             }
             if (done) {
+                self.retireUpgradeRefusal();
                 const outcome = self.upgrade_job.outcome;
                 self.upgrade_running = false;
                 self.upgrade_requested = false;
@@ -587,6 +588,15 @@ fn turn(self: *Self) !?Next {
     }
     if (fds[0].revents != 0 or timeout == 0) return self.readInput(0, 4096);
     return null;
+}
+
+/// Only the duplicate-refusal notice belongs to this upgrade. Cancellation
+/// and settlement make it obsolete, without displacing a safety notice or
+/// changing the draft and without granting delivery credit to the result.
+fn retireUpgradeRefusal(self: *Self) void {
+    if (self.state.notice) |*notice| {
+        if (std.mem.eql(u8, notice.text(), view.upgrade_busy_notice)) self.state.notice = null;
+    }
 }
 
 /// Do not replace an approval, stop prompt or another notice. Keep the latest
@@ -1094,6 +1104,7 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
     if (self.upgrade_requested and decoded == .event and !decoded.event.pasted and decoded.event.event == .key_press) {
         const key = decoded.event.event.key_press;
         if (key.codepoint == vaxis.Key.escape or (key.mods.ctrl and key.codepoint == 'c') or key.codepoint == 3) {
+            self.retireUpgradeRefusal();
             if (self.upgrade_running) self.upgrade_job.cancel() else {
                 self.upgrade_requested = false;
                 self.upgrade_cancel_draining = true;
@@ -4427,4 +4438,36 @@ test "upgrade Escape preserves unrelated safety notice and pending result priori
     overview.offerUpgradeNotice();
     try std.testing.expectEqualStrings(result, overview.state.notice.?.text());
     try std.testing.expect(overview.upgrade_notice_pending); // credit only on delivered frame
+}
+
+
+test "settled upgrade retires its duplicate refusal without losing the draft" {
+    const Gate = struct {
+        release: std.atomic.Value(bool) = .init(false),
+        fn work(raw: *anyopaque, _: *ClientTask) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &gate.release, test_poll.isSet);
+        }
+        fn completed(job: *UpgradePanel) bool { return job.task.completed(); }
+    };
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    var gate: Gate = .{};
+    defer gate.release.store(true, .release);
+    try std.testing.expect(try rig.press("/upgrade\n") == null);
+    overview.upgrade_job.started = true;
+    overview.upgrade_job.allocator = std.testing.allocator;
+    overview.upgrade_running = true;
+    try overview.upgrade_job.task.start(std.testing.io, &gate, Gate.work);
+    try std.testing.expect(try rig.press("/upgrade\n") == null);
+    try std.testing.expectEqualStrings(view.upgrade_busy_notice, overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("/upgrade", overview.composerDraft().bytes);
+    gate.release.store(true, .release);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &overview.upgrade_job, Gate.completed);
+    _ = try overview.turn();
+    try std.testing.expect(overview.upgrade_job.task.thread == null and !overview.upgrade_requested);
+    try std.testing.expectEqualStrings("/upgrade", overview.composerDraft().bytes);
+    try std.testing.expect(std.mem.startsWith(u8, overview.state.notice.?.text(), "Upgrade ineligible"));
 }
