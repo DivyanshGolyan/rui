@@ -2087,8 +2087,11 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
             else => return store_core.fence(a.store, err),
         };
         if (request.selector == .authored) {
+            // The item already owns this validated Message. Borrow it through
+            // the authored-ID read rather than copying it onto a Queue holder's
+            // stack, which may drain a queued settlement before returning.
             const message = switch (item.value) {
-                .admission, .user, .received => |value| value,
+                .admission, .user, .received => |*value| value,
                 else => return error.ContentNotFound,
             };
             var row: authored_message.Result = undefined;

@@ -12518,3 +12518,61 @@ test "inline skills initial failure preserves all ordinary configuration refusal
         }
     }.run);
 }
+
+test "inline skills configuration validation borrows one Store-owned plan through content imports" {
+    const Ready = @FieldType(configuration_domain.ConfigurationValidation, "ready");
+    // The validation-only phase must not return another Settings value onto
+    // the Host's creation/import chain. This is an ownership API contract.
+    try std.testing.expect(Ready == *const configuration_domain.ValidatedConfiguration);
+    if (comptime Ready == *const configuration_domain.ValidatedConfiguration) {
+        try store_testing.forEachEngine(struct {
+            fn run(case: *store_testing.Case) !void {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "borrowed-plan-config");
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var update = try completeConfiguration("borrowed-plan-update", session.slice(), try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                update.configuration.instructions = try testingBytesContent(&tmp, "plan-instructions", "new retained plan instructions");
+                defer update.removeTemporaryContent(std.testing.io) catch unreachable;
+                update.configuration.label.state = .value;
+                try update.configuration.label.value.set("retained");
+                update.configuration.permission_mode.state = .value;
+                try update.configuration.permission_mode.value.set("ask");
+                {
+                    const entry = try store_core.enter(&storage, .none);
+                    defer entry.release();
+                    var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
+                    defer a.deinit();
+                    const reads = storage.configurationReads();
+                    reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+                    configuration_domain.prepareConfiguration(&a, session.slice(), &update.configuration, reads);
+                    try a.run();
+                    const checked = try configuration_domain.validateConfiguration(&a, storage.io, session.slice(), &update.configuration, null, reads);
+                    try std.testing.expect(checked == .ready);
+                    const plan = checked.ready;
+                    try std.testing.expect(plan == &reads.validated);
+                    const original_instructions = plan.before.?.instructions_id;
+                    try std.testing.expect(plan.before.?.label == null);
+                    const applied = try configuration_domain.applyValidatedConfiguration(&a, storage.io, session.slice(), &update.configuration, null, .{}, reads, plan);
+                    try std.testing.expect(applied == .accepted);
+                    try std.testing.expect(plan == &reads.validated);
+                    try std.testing.expectEqual(original_instructions, plan.before.?.instructions_id);
+                    try std.testing.expect(reads.next.instructions_id != original_instructions);
+                    try std.testing.expect(plan.before.?.label == null);
+                    try std.testing.expectEqualStrings("retained", reads.next.label.?.slice());
+                    const expected: std.EnumSet(protocol.SessionField) = .initMany(&.{ .instructions, .permission_mode, .label });
+                    try std.testing.expectEqual(expected, applied.accepted.changes);
+                    try a.run();
+                    try a.abandon(.{});
+                }
+                const saved = (try store_core.readSessionForTesting(&storage, session.slice())).?;
+                try std.testing.expectEqual(@as(u64, 1), saved.revision);
+                try std.testing.expect(saved.label == null);
+                try std.testing.expect(!storage.isFenced());
+            }
+        }.run);
+    }
+}

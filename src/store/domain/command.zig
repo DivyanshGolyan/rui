@@ -501,7 +501,7 @@ noinline fn submitCreating(
         if (captured.* == .failed) return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, captured.failed.rejection(protocol.MessageRejection), captured.failed, faults);
         try prepareMessageReads(a, command, reads, captured);
     }
-    switch (try configuration_domain.applyValidatedConfiguration(a, io, "", configuration, initial_skills, faults, creation, &plan)) {
+    switch (try configuration_domain.applyValidatedConfiguration(a, io, "", configuration, initial_skills, faults, creation, plan)) {
         .rejected => |code| rejection = std.meta.stringToEnum(protocol.MessageRejection, @tagName(code)).?,
         .accepted => |applied| {
             content_domain.lookup(a, &reads.text);
