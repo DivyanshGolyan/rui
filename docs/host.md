@@ -24,18 +24,34 @@ Rui installs no OS service and never restarts a crashed Host.
 
 ## Upgrade and activation
 
-`rui upgrade --check` is read-only and does not start a Host.
-`rui upgrade` updates an eligible released managed installation to the latest published stable release and restarts the selected Store's Host only if it was already running and can be safely activated.
-A selected source or unknown managed build is refused before installation; the standalone release installer can deliberately convert it to a release.
-An unmanaged or packaged destination belongs to its application or package manager.
-This restart affects all Sessions in that Store and may interrupt their work.
-With an eligible installation and no running Host, it only installs.
-Installation and activation are reported separately; an unsupported Host launch may be left running after a release was installed.
+Run `rui --version` to see the selected build.
+`rui upgrade --check` inspects the latest published stable release without installing it or starting a Host.
+`rui upgrade` updates an eligible released managed installation under `~/.local` to that release.
+It restarts the selected Store's Host only if that Host is already running and can be safely activated.
+With an eligible installation and no running Host, Upgrade only installs.
+The terminal's `/upgrade` panel offers Install and Cancel in both the overview and conversation.
+
+A selected source build or managed build with unknown release identity is refused before installation.
+The [standalone release installer](../README.md#install) can deliberately convert it to a release.
+An unmanaged, custom, or packaged destination belongs to its application or package manager.
+Manual source and release installers do not restart a Host.
+
+The Upgrade restart affects all Sessions in the selected Store and may interrupt their work.
+A running Host keeps its configured capacity through the restart.
+Installation and activation are reported separately.
+An unsupported or application-owned Host launch may remain running after a release is installed, with activation reported as incomplete.
 Automatic activation supports released managed `host serve` launches whose public settings can be preserved.
-Source, application-owned `--launch-frame`, hidden-option and relative configuration-path launches are not paused.
+Source, application-owned `--launch-frame`, hidden-option, and relative configuration-path launches are not paused.
 Private launch environment is observed only in memory and wiped after the operation.
 Upgrade waits for the observed Host's lease to retire and checks the pinned target's readiness before reporting activation.
-Manual source and release installers do not restart a Host.
+
+Updates keep saved work and sign-in.
+Retained earlier builds are not an unconditional rollback after a Store migration.
+The target build's schema determines compatibility, not version punctuation.
+At Host startup, Rui backs up and migrates supported SQLite formats.
+MySQL schema changes are operator-owned.
+If target compatibility facts are unavailable, compatibility is unknown until startup validates it.
+See [Store format and upgrades](../ARCHITECTURE.md#store-format-and-upgrades) for the contract.
 
 ### Capacity and file limits
 
