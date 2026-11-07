@@ -251,10 +251,6 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
         // The highlighted option: Allow once until an arrow moves it on an
         // offer.
         var picked: Consent.Choice = .allow_once;
-        // Input goes to the row the latest frame drew. The first frame of an
-        // Action precedes its read receipt, so it draws the unread row; any
-        // later frame of a whole Action draws it read.
-        var drawn_read = false;
         var submitted: usize = 0;
         var decision = false;
         // The Action a sent reason denies once its Message is accepted.
@@ -272,7 +268,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 for (0..100) |row| try fixture.action.writePositionalAll(std.testing.io, line, row * line.len);
             }
             try fixture.screen.adopt(std.testing.io, fixture.action, 913, !written);
-            // Seed 2 is an Action too large to approve here: export-only.
+            // Seed 2 is a truncated preview, still a confirmable Action.
             if (seed == 2) fixture.screen.consent.?.presentation = .preview;
             try ops.draw(front);
         }
@@ -284,11 +280,11 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 std.debug.print("TD1 focus seed={d} written={} sequence={d} prefix={d}\n", .{ seed, written, sequence, prefix + 1 });
                 printPrefix(Event, sequence, prefix + 1);
             }
-            const choosing = alive and visible and seed != 2 and !typing;
+            const choosing = alive and visible and !typing;
             // While a command runs, typing at the choice is ignored. A
             // scalar completes after checkText drew a frame; a paste does not.
-            const held = choosing and blocked and !unread and (drawn_read or event == .unicode);
-            const shown: ?[]const u8 = if (!choosing) null else if (unread) "  PgDn reads the rest" else if (blocked) "  Command running…" else choiceRow(picked);
+            const held = choosing and blocked;
+            const shown: ?[]const u8 = if (!choosing) null else if (blocked) "  Command running…" else choiceRow(picked);
             switch (event) {
                 .unicode => {
                     // Observe the incomplete UTF-8 prefix before completing it.
@@ -319,7 +315,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                     letter_refused = alive and visible and typing and letter;
                     try fixture.byte(13);
                     if (choosing) {
-                        if (fresh and !blocked and !unread) {
+                        if (fresh and !blocked) {
                             alive = false;
                             visible = false;
                             decision = true;
@@ -352,12 +348,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
                 },
                 .receipt => {
                     try ops.draw(front);
-                    drawn_read = true;
                     const service = try ops.step(front, 0);
                     _ = ops.receipt(front, service);
-                    // An Action taller than the view stays unread: no choice,
-                    // but the draft beside it is still a reason.
-                    if (alive and visible and seed != 2 and !blocked and (typing or !unread) and !(typing and letter_refused)) fresh = true;
+                    if (alive and visible and !blocked and !(typing and letter_refused)) fresh = true;
                 },
             }
             // Typing beside the Action moves the input row to the draft.
@@ -378,10 +371,9 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
             if (submitted != 0) try std.testing.expectEqualStrings(sealed.slice(), try front.input.message(front.submission.intent.?.ticket().?));
             try std.testing.expectEqual(fresh, fixture.screen.offered() != null);
             if (fixture.screen.consent) |pending| try std.testing.expectEqual(picked, pending.highlight);
-            const now_choosing = alive and visible and seed != 2 and !typing;
-            const now_shown: ?[]const u8 = if (!now_choosing) null else if (unread) "  PgDn reads the rest" else if (blocked) "  Command running…" else choiceRow(picked);
+            const now_choosing = alive and visible and !typing;
+            const now_shown: ?[]const u8 = if (!now_choosing) null else if (blocked) "  Command running…" else choiceRow(picked);
             try fixture.checkText(&draft, now_shown);
-            drawn_read = true;
         }
     };
 }
@@ -718,18 +710,13 @@ fn publication(comptime Frontend: type, comptime ops: anytype) !void {
             // Success is distinct from both failed invocations and still
             // requires a post-write empty-input observation.
             try ops.draw(fixture.front);
-            try std.testing.expect(fixture.screen.actionRead());
             try std.testing.expect(fixture.screen.offered() == null);
-            // Reading completed after that frame; the decision prompt is the
-            // next one, and only its delivery can make the offer.
-            try std.testing.expect(!fixture.screen.awaitsOffer());
-            try ops.draw(fixture.front);
-            try std.testing.expect(fixture.screen.offered() == null);
+            // Delivery is necessary, and empty input service offers it.
+            try std.testing.expect(fixture.screen.awaitsOffer());
             try std.testing.expect(fixture.screen.promptCompleted(try ops.step(fixture.front, 0), false, false));
             try std.testing.expect(fixture.screen.offered() != null);
             continue;
         }
-        const before = fixture.screen.action_seen;
         var empty: [0]u8 = .{};
         if (mode == 0) {
             var output = std.Io.Writer.fixed(&empty);
@@ -741,8 +728,7 @@ fn publication(comptime Frontend: type, comptime ops: anytype) !void {
             try std.testing.expectError(error.WriteFailed, Screen.Test.render(fixture.screen, &output.writer, fixture.front.terminal.geometry(), "", 0, .{}, &.{}));
             try std.testing.expect(output.accepted > 0 and output.flushed);
         }
-        try std.testing.expectEqual(before, fixture.screen.action_seen);
-        try std.testing.expect(!fixture.screen.actionRead());
+        try std.testing.expect(!fixture.screen.awaitsOffer());
         try std.testing.expect(fixture.screen.offered() == null);
     }
 }

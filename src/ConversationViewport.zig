@@ -1487,11 +1487,10 @@ pub const Pane = struct {
         self.scroll.scroll.y = @min(rows.row(at), rows.total -| 1);
         self.blank_tail = if (pin) (self.scroll.scroll.y +| height) -| rows.total else 0;
     }
-    pub fn move(self: *Pane, layout: Layout, down: bool, count: usize, height: usize, unseen: ?Position) void {
+    pub fn move(self: *Pane, layout: Layout, down: bool, count: usize, height: usize) void {
         const rows = self.projection(layout);
         if (down) {
             self.scroll.scroll.y +|= count;
-            if (unseen) |at| self.scroll.scroll.y = @min(self.scroll.scroll.y, rows.row(at));
         } else {
             self.scroll.scroll.y -|= count;
             self.blank_tail = @min(self.blank_tail, (self.scroll.scroll.y +| height) -| rows.total);
@@ -2004,12 +2003,12 @@ test "the library row owner preserves a pinned short canvas without downward ove
     pane.restore(layout, .{ .offset = 15 }, 10, true);
     try std.testing.expectEqual(@as(usize, 3), pane.scroll.scroll.y);
     try std.testing.expectEqual(@as(usize, 3), pane.blank_tail);
-    pane.move(layout, true, 100, 10, null);
+    pane.move(layout, true, 100, 10);
     try std.testing.expectEqual(@as(usize, 3), pane.scroll.scroll.y);
-    pane.move(layout, false, 1, 10, null);
+    pane.move(layout, false, 1, 10);
     try std.testing.expectEqual(@as(usize, 2), pane.scroll.scroll.y);
     try std.testing.expectEqual(@as(usize, 2), pane.blank_tail);
-    pane.move(layout, true, 100, 10, null);
+    pane.move(layout, true, 100, 10);
     try std.testing.expectEqual(@as(usize, 2), pane.scroll.scroll.y);
     const anchor = pane.anchor(layout);
     try pane.text.append("new\nnew\nnew\n");
@@ -2017,7 +2016,7 @@ test "the library row owner preserves a pinned short canvas without downward ove
     pane.restore(layout, anchor, 10, true);
     try std.testing.expectEqual(@as(usize, 2), pane.scroll.scroll.y);
     try std.testing.expectEqual(@as(usize, 0), pane.blank_tail);
-    pane.move(layout, true, 1, 10, null);
+    pane.move(layout, true, 1, 10);
     try std.testing.expectEqual(@as(usize, 3), pane.scroll.scroll.y);
 }
 

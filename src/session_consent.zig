@@ -35,21 +35,17 @@ pub const Pending = struct {
 /// `held`: a command holds a read Action; the frame shows no decision prompt.
 /// `reason`: the draft beside the shown Action, whose Enter sends it as the
 /// reason and denies the Action.
-pub const Approval = enum { absent, paused, preview, reading, held, choice, reason };
+pub const Approval = enum { absent, paused, held, choice, reason };
 pub const Projection = struct { row: Row = .draft, approval: Approval = .absent };
 
-/// What the presentation owner shows of the adopted Action, sampled at
-/// selection. `read` means delivered rows reached the end in this layout.
-pub const Shown = struct { action_page: bool, read: bool };
+/// Whether the adopted Action is the page currently shown.
+pub const Shown = struct { action_page: bool };
 
 /// Closed selection: callers never assemble a row and approval pair.
 pub fn project(consent: ?Pending, shown: Shown, command_blocked: bool) Projection {
     const pending = consent orelse return .{};
-    if (pending.presentation == .preview) return .{ .approval = .preview };
     if (!shown.action_page) return .{ .approval = .paused };
-    // A reason needs no reading: denying runs nothing.
     if (pending.row == .draft) return .{ .approval = if (command_blocked) .paused else .reason };
-    if (!shown.read) return .{ .row = .selector, .approval = .reading };
     if (command_blocked) return .{ .row = .selector, .approval = .held };
     return .{ .row = .selector, .approval = .choice };
 }
@@ -87,32 +83,20 @@ pub fn messageAllowed(consent: ?Pending, reason: bool, blockers: Blockers) bool 
     return (consent == null or reason) and !blockers.opening and !blockers.permission_preparing and !blockers.command and blockers.original != .decision;
 }
 
-test "projection selects the selector beside a whole visible Action nobody is typing at, and a reason beside one they are" {
-    const Case = struct { adopted: bool = true, preview: bool = false, page: bool = true, read: bool = true, typing: bool = false, command: bool = false, expected: Projection };
+test "projection offers the same choice for complete and previewed Actions" {
+    const Case = struct { page: bool = true, typing: bool = false, command: bool = false, expected: Projection };
+    try std.testing.expectEqual(Projection{}, project(null, .{ .action_page = true }, false));
     for ([_]Case{
-        .{ .adopted = false, .expected = .{} },
-        // A hidden Action keeps the draft; Enter explains the pending decision.
-        .{ .page = false, .read = false, .expected = .{ .approval = .paused } },
         .{ .page = false, .expected = .{ .approval = .paused } },
-        // The draft row beside the Action is a reason at any stage of
-        // reading; a command running pauses it.
         .{ .typing = true, .expected = .{ .approval = .reason } },
-        .{ .typing = true, .read = false, .expected = .{ .approval = .reason } },
         .{ .typing = true, .command = true, .expected = .{ .approval = .paused } },
         .{ .typing = true, .page = false, .expected = .{ .approval = .paused } },
-        // An oversized proposal is decided only in the shell, visible or not.
-        .{ .preview = true, .expected = .{ .approval = .preview } },
-        .{ .preview = true, .page = false, .expected = .{ .approval = .preview } },
-        .{ .preview = true, .typing = true, .expected = .{ .approval = .preview } },
-        .{ .read = false, .expected = .{ .row = .selector, .approval = .reading } },
         .{ .command = true, .expected = .{ .row = .selector, .approval = .held } },
-        .{ .command = true, .read = false, .expected = .{ .row = .selector, .approval = .reading } },
         .{ .expected = .{ .row = .selector, .approval = .choice } },
-    }) |case| {
-        const consent: ?Pending = if (case.adopted) .{ .action = 7, .presentation = if (case.preview) .preview else .complete, .row = if (case.typing) .draft else .selector } else null;
-        const shown: Shown = .{ .action_page = case.page, .read = case.read };
-        try std.testing.expectEqual(case.expected, project(consent, shown, case.command));
-    }
+    }) |case| for ([_]Presentation{ .complete, .preview }) |presentation| {
+        const consent: Pending = .{ .action = 7, .presentation = presentation, .row = if (case.typing) .draft else .selector };
+        try std.testing.expectEqual(case.expected, project(consent, .{ .action_page = case.page }, case.command));
+    };
 }
 
 test "a Message probe blocks on every live owner fact independently" {
@@ -135,8 +119,6 @@ test "a frame offers the highlighted option at the choice, Deny for a reason, an
     const cases = [_]struct { Approval, ?Choice, ?Choice }{
         .{ .absent, null, null },
         .{ .paused, null, null },
-        .{ .preview, null, null },
-        .{ .reading, null, null },
         .{ .held, null, null },
         .{ .choice, .allow_once, .deny },
         .{ .reason, .deny, .deny },

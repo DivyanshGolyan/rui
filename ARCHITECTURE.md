@@ -2776,7 +2776,7 @@ The conversation reserves a stable one-column library scrollbar rail from its fi
 A transcript alone may keep bounded trailing blank canvas to pin short text through prepend or geometry changes; Down never grows it, Up shrinks it, and added text absorbs it.
 `TerminalFrame` budgets regions without moving the scroll owner and observes only real text rows after final layout; blank canvas cannot credit an Action.
 One invocation-owned `RenderBackend` owns libvaxis grids, page-charged allocations, URI retention and frozen encoded bytes; detail Sessions and upgrade panels borrow it rather than reinitialize it.
-A nested panel keeps the original screen's active and hidden transcript source coordinates on the stack and reflows them on return; live output still follows, Action reading restarts, and a poisoned backend cannot be revived.
+A nested panel keeps the original screen's active and hidden transcript source coordinates on the stack and reflows them on return; live output still follows, the Action offer retires, and a poisoned backend cannot be revived.
 `SessionScreen` owns only its conversation projection, reflow coordinates and exact per-frame consent tickets/Delivered receipts; `SessionTerminal` alone owns terminal modes, output deadlines, waiting-report acknowledgment and the persistent byte decoder.
 Preparation captures the old source anchor before backend resize; waiting prefixes are staged before paint borrows cells, and generated helper labels live in charged frame scratch through encode.
 Encoding finishes before output can pump, then the screen issues its ticket and returns Delivered only after every byte and final flush succeed, including a zero-byte unchanged frame.
@@ -2821,17 +2821,15 @@ The page is text rendered from those facts and the selected row, so moving `›`
 Up and Down move `›` over the rows that can change from the page (the Session's model, Store and instructions cannot), while the draft is empty and no list shows; Page Up and Page Down still scroll, and each `/status` starts at the first row.
 Enter on an empty draft puts the row's own command in the draft: `/configure` or `/setup` with the option, whose list then offers a fixed choice (the compaction trigger and headroom offer `default` and take a typed number, so Enter resolves the chosen client default into an explicit token count), or with the current value to edit.
 The page has no second way to change a setting; the command runs as typed over the page, which stays shown: a saved change replies in one line as a notice, and the page's next read shows the new value with `›` on the same row, while a longer reply, such as a failure with its usage, opens as any command's does.
-Complete Action inspection is staged in an independent unlinked file before choice readiness.
-Approval requires every Action row to have been displayed since adoption or the last resize or width-mode change.
-A tall Action pages from its top and shows `Action continues · PgDn`, and the input row reads `PgDn reads the rest` in place of the choice, until that condition holds.
-Repeated paging, line scrolling or wheel input between frames cannot move past the first unseen row; only rows a delivered frame drew count.
+Action presentation is staged in an independent unlinked file before its choice is shown.
+A tall Action pages from its top, but scrolling or displaying every row is not a prerequisite to an explicit decision.
+A preview beyond the 256 KiB viewport is labeled truncated and remains confirmable; `/inspect-action` binds the displayed Action's identity, and `/copy` on that inspection page explicitly sends its exact shell-quoted inspect command using the existing clipboard owner.
+A stale or unavailable Action never silently changes the inspection target to its successor.
 While approval is paused the input row is the draft, not the choice: typing edits the retained draft, inspection commands remain available, Enter explains that the Action needs a decision and keeps the draft, and returning to the Action requires fresh input.
 Nothing typed while paused can authorize.
-Reading the final page requires fresh input after the completed prompt.
-A preview over 256 KiB cannot authorize an Action in this UI; exact one-shot inspection and decision commands remain available, including in the restored main-screen detach or fatal-renderer notice.
 Marked paste never grants permission.
 `/configure`, `/setup`, `/result KEY` and `/inspect-action` run on the reader worker once the current read finishes; editing continues, but a Message waits for the command.
-Their unchanged CLI owners write complete stdout and stderr to the inspection scratch file.
+CLI owners write complete stdout and stderr to the inspection scratch file; an Action-bound inspection instead names its captured ID and checks availability.
 Output of up to two lines becomes a notice under the input without the CLI's `Rui: ` prefix, with `rui: ` diagnostics marked `!`; longer output opens as an inspection page under the `Browsing · Esc returns` heading.
 The Session screen stays in place and no command reads terminal input.
 `/discard`, `/recover KEY`, `/wait` and `/login` answer with a notice; an unknown command shows `! Unknown command /NAME · /help`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
@@ -2877,6 +2875,7 @@ A command that could not start says `! /NAME unavailable.`, as a conversation sa
 They have the same checks and the same messages, except that a line that does not parse shows the usage of the command typed.
 Once the Session accepts `/effort LEVEL`, LEVEL is also saved as the effort new Sessions start at, as `rui defaults configure --reasoning-effort` saves it.
 
+On the Action inspection page, `/copy` sends only that Action's exact shell command after checking its captured identity; an unavailable or replaced Action copies nothing.
 `/copy` sends the last answer, as its Markdown, to the terminal's clipboard through OSC 52 and `/copy code` sends that answer's last complete fenced block without its final line ending, both streamed with no extra memory; `/copy file` is the fallback, and `Sent to clipboard` shows under the input until the next key (Divyansh approved this on 2026-10-31, front-end plan PR 6a).
 Each reads the newest assistant answer after the current read, like `/details`.
 The reader stages its exact bytes, bound to their length and digest, in the frontend's unlinked scratch file; the UI then writes `ESC ] 52 ; c ;`, the base64 of those bytes a 3 KiB window at a time, and `ESC \`, between frames, so no frame splits the sequence and neither the answer nor its base64 is ever whole in memory.
@@ -3062,9 +3061,9 @@ Bash displays `? <description>`, then the decoded `$` command through terminal e
 MCP displays `? <rui_call_description>` (at most 200 decoded bytes), `Tool`, `Server` and the original `Arguments` JSON.
 A missing, non-string or oversized description falls back to the tool name with those arguments, not a Bash parse.
 The client extracts the label with bounded streaming scratch; it does not interpret the server's schema.
-`/inspect-action` shares this MCP presentation; raw one-shot inspection stays exact.
+`/inspect-action` offers exact one-shot inspection bound to the displayed Action; without a displayed Action its existing current-snapshot behavior remains distinct.
 A whole Action ends right above the rule; a taller one pages from its top.
-Bash and MCP use the same 256 KiB viewport bound: an oversized Action file is a preview and cannot be approved.
+Bash and MCP use the same 256 KiB viewport bound: an oversized Action file is a labeled truncated preview, with optional exact inspection.
 The description is the model's label, never a substitute for the command or MCP arguments.
 Every later line of the command, and every line of stdin, starts with the content mark `│`, and every row such a line, the `?` line or the `$` line wraps onto starts with `┆`, so description, command or stdin text can never pass for the `$`, `Time limit` or `stdin:` lines and a wrapped row never reads as a new line.
 Every line of MCP arguments starts with the same content mark and uses terminal escaping, so JSON cannot impersonate the Tool or Server labels.
@@ -3079,7 +3078,7 @@ Every input spends the offer first, whatever it does.
 Left, Right and Enter act only when the offer they spent still stands and the option it showed is the Action's current decision; Enter in the draft acts only when that frame showed the draft as the reason and said Enter denies.
 So Enter never confirms an option that is not on screen: a frame that shows another decision, or none, retires the offer even before it is delivered, and after an arrow Enter waits for a frame that shows the move.
 An arrow or Enter that cannot act says why, as does a refused key; a key the choice has no use for, such as Tab, Home, Backspace, Delete or Ctrl-X, does nothing and says nothing.
-A page, resize, width change, completed reading, or a withdrawn, successor or re-adopted Action spends nothing but retires the offer: no Enter decides until a frame drawn after that change is delivered and input is then serviced empty.
+A page, resize, width change, or a withdrawn, successor or re-adopted Action spends nothing but retires the offer: no Enter decides until a frame drawn after that change is delivered and input is then serviced empty.
 The run loop does that for every frame it draws, so a quick second Enter after a refused one may decide.
 Spending never revokes or forces a frame, so a paste costs no frame per byte.
 There are no letter shortcuts.

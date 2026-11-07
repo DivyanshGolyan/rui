@@ -3717,14 +3717,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 while next_frame(master, 0.5) is not None:
                     pass
                 narrow = current_screen(master)
-                shown = " ".join(narrow.split())  # Word wrap consumes the breaking space.
-                # The choice keeps the last row, or the row over the line
-                # under it. A clipped Action never offers it: it says to read on.
+                # The decision is available without requiring the entire Action
+                # to fit; no resized frame itself authorizes anything.
                 inputs = narrow.split("\n")[-2:]
-                choice = any("› A" in row for row in inputs)
-                assert len(narrow.split("\n")) == rows and (choice or any(row.startswith("  PgDn") for row in inputs)), narrow
-                if choice:
-                    assert f"$ {json.loads(arguments)['cmd']}" in shown, ("choice offered for an unread Action", narrow)
+                assert len(narrow.split("\n")) == rows and any("› A" in row for row in inputs), narrow
                 assert caller.poll() is None and not (state / "effect-count").exists(), narrow
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
             os.write(master, b"\x01")
@@ -5451,29 +5447,18 @@ def renderer_cases():
             with terminal(consent_session, ready_write) as tty:
                 tty.send("propose renderer action\n\x1b[200~a\x1b[201~", predicate=lambda: tty.capture.draft("a", 3))
                 release.set()
-                opened = tty.wait("Action continues · PgDn")
-                # The Action arrived beside the pasted draft, which keeps the
-                # input row until Ctrl-G returns to the Action's own row. The
-                # line under it says Enter denies, so that frame is offered.
-                assert "Allow once" not in opened and "PgDn reads the rest" not in opened, opened
+                opened = tty.wait("Action · PgUp/PgDn")
+                # The preexisting pasted draft remains a draft; a fresh Ctrl-G
+                # returns to the immediately available choice without paging.
+                assert "Allow once" not in opened, opened
                 tty.ready(ready_read)
-                shown = tty.send("\x07", "PgDn reads the rest")
+                shown = tty.send("\x07", CHOICE)
                 assert "printf approved > renderer-effect" not in shown, shown
                 records = set((home / ".config/rui/requests").glob("*.json"))
-                # An unread Action offers no choice: its input row says to read
-                # on, and Enter there authorizes nothing.
-                assert "\n  PgDn reads the rest\n" in shown and "Allow once" not in shown, shown
-                tty.send("\n", "Read the whole Action first")
-                assert not (workspace / "renderer-effect").exists(), "unseen Action tail was approved"
-                for _ in range(8):
-                    tty.send("\x1b[6~" * 6, predicate=lambda: "Action read" in tty.capture.completed or "Action continues" in tty.capture.completed)
-                    if "Action read" in tty.capture.completed:
-                        break
-                else:
-                    raise AssertionError("complete Action never became ready after paging")
+                assert not (workspace / "renderer-effect").exists()
+                # Navigation is optional; the exact tail remains inspectable.
+                shown = tty.send("\x1b[6~" * 6, predicate=lambda: "printf approved > renderer-effect" in tty.capture.completed)
                 tty.ready(ready_read)
-                shown = tty.wait(CHOICE)
-                assert "printf approved > renderer-effect" in shown, shown
                 # Paging hid the Action's ? row, so the choice keeps what it is
                 # for right above the rule; the opening frame showed that row.
                 rows = shown.split("\n")
@@ -5531,23 +5516,76 @@ def renderer_cases():
         proxy.close()
         proxy = None
         oversized_session = configure("ask")
-        command = "#" + "x" * (256 * 1024) + "\nprintf forbidden > renderer-oversized-effect"
+        wrong_session = configure("ask")
+        command = "#" + "x" * (256 * 1024) + "\n# unique-tail-é\nprintf forbidden > renderer-oversized-effect"
         arguments = json.dumps({"cmd": command, "description": "Oversized proposal", "timeout_ms": None})
         endpoint.responses.append(fixture.sse_tool_calls("renderer-oversized", [("bash", "renderer-oversized-call", arguments)]))
-        with terminal(oversized_session) as tty:
-            tty.send("propose oversized action\n", "Approval disabled")
-            current = fixture.command("session", "inspect", "--store", store, "--session", oversized_session)
-            action = current["actionable_permissions"][0]["action"]
-            records = set((home / ".config/rui/requests").glob("*.json"))
-            # A typed decision stays a draft, and the notice names the only way to decide.
-            tty.send("a\n", predicate=lambda: "! Approval disabled · /help for exact shell commands. Draft retained." in tty.capture.completed and tty.capture.draft("a", 3))
-            tty.caller.send_signal(signal.SIGINT)
-            detached = tty.finish()[0].decode()
-            for name in ("inspect", "allow", "deny"):
-                assert f"rui action {name} --store $'{store}' --session {oversized_session} --action {action}" in detached, detached
-            assert set((home / ".config/rui/requests").glob("*.json")) == records
-            assert not (workspace / "renderer-oversized-effect").exists()
-        print("renderer: oversized Action cannot approve; exact shell commands survive alternate-screen exit", flush=True)
+        marker = answer("oversized denial")
+        ready_read, ready_write = os.pipe()
+        try:
+            with terminal(oversized_session, ready_write) as tty:
+                tty.send("propose oversized action\n", CHOICE)
+                assert "truncated" in tty.capture.completed.lower(), tty.capture.completed
+                action = fixture.command("session", "inspect", "--store", store, "--session", oversized_session)["actionable_permissions"][0]["action"]
+                records = set((home / ".config/rui/requests").glob("*.json"))
+                tty.ready(ready_read)
+                assert not (workspace / "renderer-oversized-effect").exists()
+                assert not tty.capture.clipboard, "opening an Action must not copy automatically"
+                tty.send("/inspect-action\n", "Exact Action inspection in your shell:")
+                assert not tty.capture.clipboard, "inspection must not copy automatically"
+                before = len(tty.capture.clipboard)
+                tty.send("/copy\n", "Sent to clipboard")
+                assert len(tty.capture.clipboard) == before + 1
+                expected = f"rui action inspect --store $'{store}' --session {oversized_session} --action {action}"
+                assert tty.capture.clipboard[-1] == "\x1b]52;c;" + base64.b64encode(expected.encode()).decode() + "\x1b\\"
+                bindir = state / "action-inspect-bin"
+                bindir.mkdir(exist_ok=True)
+                (bindir / "rui").symlink_to(fixture.RUI)
+                result = subprocess.run(["bash", "-c", "exec " + expected], env={**os.environ, "HOME": str(home), "PATH": str(bindir) + os.pathsep + os.environ["PATH"]}, capture_output=True, text=True, timeout=20)
+                assert result.returncode == 0, (result.stdout, result.stderr)
+                exact = json.loads(result.stdout)
+                assert exact["action"] == action and exact["call_id"] == "renderer-oversized-call" and exact["arguments"] == arguments
+                run(home, "action", "inspect", "--store", store, "--session", oversized_session, "--action", "9223372036854775807", success=False)
+                run(home, "action", "inspect", "--store", store, "--session", wrong_session, "--action", action, success=False)
+                assert set((home / ".config/rui/requests").glob("*.json")) == records
+                assert not (workspace / "renderer-oversized-effect").exists()
+                tty.send("\x07", CHOICE)
+                tty.ready(ready_read)
+                tty.send("\x1b[C", "› Deny")
+                tty.ready(ready_read)
+                tty.send("\r", marker)
+                decisions = [json.loads(path.read_text()) for path in set((home / ".config/rui/requests").glob("*.json")) - records]
+                assert len(decisions) == 1 and decisions[0]["action"] == action and decisions[0]["decision"] == "deny", decisions
+                assert not (workspace / "renderer-oversized-effect").exists()
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+        finally:
+            dispose_all(lambda: os.close(ready_read), lambda: os.close(ready_write))
+        # Export is optional: another oversized Action is denied directly from
+        # its first delivered choice, with neither inspection nor paging.
+        direct_session = configure("ask")
+        endpoint.responses.append(fixture.sse_tool_calls("renderer-direct", [("bash", "renderer-direct-call", arguments)]))
+        direct_marker = answer("oversized direct denial")
+        ready_read, ready_write = os.pipe()
+        try:
+            with terminal(direct_session, ready_write) as tty:
+                tty.send("propose direct oversized action\n", CHOICE)
+                assert "truncated" in tty.capture.completed.lower(), tty.capture.completed
+                direct_action = fixture.command("session", "inspect", "--store", store, "--session", direct_session)["actionable_permissions"][0]["action"]
+                records = set((home / ".config/rui/requests").glob("*.json"))
+                assert not tty.capture.clipboard
+                tty.ready(ready_read)
+                tty.send("\x1b[C", "› Deny")
+                tty.ready(ready_read)
+                tty.send("\r", direct_marker)
+                decisions = [json.loads(path.read_text()) for path in set((home / ".config/rui/requests").glob("*.json")) - records]
+                assert len(decisions) == 1 and decisions[0]["action"] == direct_action and decisions[0]["decision"] == "deny", decisions
+                assert not tty.capture.clipboard and not (workspace / "renderer-oversized-effect").exists()
+                tty.caller.send_signal(signal.SIGINT)
+                tty.finish()
+        finally:
+            dispose_all(lambda: os.close(ready_read), lambda: os.close(ready_write))
+        print("renderer: truncated Action permits choice and exact optional export", flush=True)
 
         # Another client decides: the choice must leave on its own, with the
         # outcome and answer shown, never an Action that still looks pending.
@@ -5688,15 +5726,9 @@ def renderer_cases():
         ready_read, ready_write = os.pipe()
         try:
             with terminal(session, ready_write) as tty:
-                # An unread Action draws no decision prompt, so no readiness.
-                tty.send("propose a tall Action\n", "PgDn reads the rest")
+                tty.send("propose a tall Action\n", CHOICE)
                 tty.send("/", predicate=lambda: tty.capture.draft("/", 3))
-                for _ in range(8):
-                    tty.send("\x1b[6~" * 6, predicate=lambda: "Action read" in tty.capture.completed or "Action continues" in tty.capture.completed)
-                    if "Action read" in tty.capture.completed:
-                        break
-                else:
-                    raise AssertionError("tall Action never became ready after paging")
+                tty.send("\x1b[6~" * 6, predicate=lambda: "printf allowed > renderer-reading-effect" in tty.capture.completed)
                 assert tty.capture.draft("/", 3), tty.capture.completed
                 records = set((home / ".config/rui/requests").glob("*.json"))
                 tty.send("not-a-command\r", "! Unknown command /not-a-command · /help")

@@ -40,11 +40,11 @@ pub const Inspection = union(enum) { status, requests, help, command, copy: Copy
 
 /// What a /copy sends: the last answer or its last code block to the
 /// clipboard, or the last answer to a file.
-pub const Copy = slash_commands.Copy;
+pub const Copy = enum { answer, code, file, action };
 
 /// What a /copy read found. The clipboard takes its range of the scratch
 /// file after the UI joins the read.
-pub const Copied = union(enum) { no_answer, no_code, too_large, clipboard: AnswerRenderer.LastCode.Range, saved };
+pub const Copied = union(enum) { no_answer, no_code, no_action, too_large, clipboard: AnswerRenderer.LastCode.Range, saved };
 
 pub const copy_name_bytes = "rui--answer.md".len + protocol.session_id_bytes;
 
@@ -197,6 +197,9 @@ pub const Target = union(enum) {
     message: View.Collapsed,
 };
 
+/// Action identity frozen when the inspection command is admitted.
+pub const ActionTarget = union(enum) { none, stale, captured: u64 };
+
 pub const Job = struct {
     init: std.process.Init = undefined,
     /// Borrowed from the frontend until this read joins.
@@ -230,7 +233,7 @@ pub const Job = struct {
     command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
     command_text_length: usize = 0,
     inspection_submission: ?Submission.View = null,
-    inspection_action: ?u64 = null,
+    action_target: ActionTarget = .none,
     // A scan takes /status from its own Current capture: when the user
     // asks for it, or while the page shows `status_shown`, into
     // `status_taken`, listing its Actions in `status_actions`.
@@ -288,6 +291,7 @@ pub const Job = struct {
         rendering: bool = false,
         // Only confirmed stderr restoration permits exit to replay this page.
         command_stderr_restored: bool = false,
+        inspected_action: ?u64 = null,
         action: ?u64 = null,
         summary: View.ActionSummary = .{},
         // Bytes of live output staged in the inspection scratch file.
@@ -390,11 +394,54 @@ const RecallStaging = struct {
     }
 };
 
+/// The exact command exported from an Action inspection. All selectors come
+/// from the admitted command's frozen context, never display labels.
+fn writeActionInspectCommand(out: *std.Io.Writer, store: []const u8, session: []const u8, action: u64) !void {
+    try out.writeAll("rui action inspect --store ");
+    try TerminalText.writeShellWord(out, store);
+    try TerminalText.writeShellSession(out, session, false);
+    try out.print(" --action {d}", .{action});
+}
+
+test "Action inspect command quotes the original Store and binds the Action" {
+    var bytes: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try writeActionInspectCommand(&out, "/tmp/a'\\\n", "09azvw", 913);
+    try std.testing.expectEqualStrings("rui action inspect --store $'/tmp/a\\'\\\\\\012' --session 09azvw --action 913", out.buffered());
+}
+
 /// Host commands keep their one-shot output owners. Their complete stdout and
 /// stderr become an inspection page while the Session screen keeps drawing
 /// through its own descriptor. No command reads terminal input.
 pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
+    if (job.action_target != .none) {
+        const target: ?u64 = switch (job.action_target) {
+            .none => unreachable,
+            .stale => null,
+            .captured => |action| if (try View.actionTool(task.requests(), job.store, job.session, action, job.files.scratch) != null) action else null,
+        };
+        try job.files.inspection.setLength(task.io, 0);
+        try task.io.vtable.fileSeekTo(task.io.userdata, job.files.inspection, 0);
+        var buffer: [1024]u8 = undefined;
+        var out = job.files.inspection.writerStreaming(task.io, &buffer);
+        if (target) |action| {
+            try out.interface.writeAll("Exact Action inspection in your shell:\n");
+            try writeActionInspectCommand(&out.interface, job.store, job.session, action);
+            try out.interface.writeAll("\n/copy copies this command; inspection sends no decision.\n");
+            for ([_][]const u8{ "allow", "deny" }, [_][]const u8{ "Allow once: ", "Deny: " }) |decision, label| {
+                try out.interface.print("{s}rui action {s} --store ", .{ label, decision });
+                try TerminalText.writeShellWord(&out.interface, job.store);
+                try TerminalText.writeShellSession(&out.interface, job.session, false);
+                try out.interface.print(" --action {d}\n", .{action});
+            }
+            job.result.inspected_action = action;
+        } else try out.interface.writeAll("Action no longer available; no successor selected and no decision sent.\n");
+        try out.flush();
+        job.result.rendering = true;
+        job.result.command_stderr_restored = true;
+        return;
+    }
     const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = .{ .io = task.io, .cancellation = job.interrupted }, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length] };
     const ended = run.into(job.files.inspection);
     job.result.rendering = ended.rendering;
@@ -1537,6 +1584,28 @@ const MessagePage = struct {
 pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
+    if (job.inspection_kind.copy == .action) {
+        const action = switch (job.action_target) {
+            .captured => |id| id,
+            else => {
+                job.result.copied = .no_action;
+                return;
+            },
+        };
+        if (try View.actionTool(requests, job.store, job.session, action, job.files.scratch) == null) {
+            job.result.copied = .no_action;
+            return;
+        }
+        try job.files.scratch.setLength(task.io, 0);
+        try task.io.vtable.fileSeekTo(task.io.userdata, job.files.scratch, 0);
+        var buffer: [1024]u8 = undefined;
+        var out = job.files.scratch.writerStreaming(task.io, &buffer);
+        try writeActionInspectCommand(&out.interface, job.store, job.session, action);
+        try out.flush();
+        const length = (try job.files.scratch.stat(task.io)).size;
+        job.result.copied = if (length > Terminal.clipboard_limit) .too_large else .{ .clipboard = .{ .start = 0, .length = length } };
+        return;
+    }
     const answer = (try lastAnswer(requests, job.store, job.session)) orelse return;
     const Sink = struct {
         io: std.Io,
@@ -1613,16 +1682,6 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     var buffer: [4096]u8 = undefined;
     var output = job.files.inspection.writerStreaming(task.io, &buffer);
     if (job.inspection_kind == .help) {
-        if (job.inspection_action) |action| {
-            try output.interface.writeAll("This Action exceeds the in-app preview. Approval here is disabled.\nDetach with Ctrl-C, inspect the complete exact Action, then decide in your shell:\n");
-            for ([_][]const u8{ "inspect", "allow", "deny" }) |command| {
-                try output.interface.print("rui action {s} --store ", .{command});
-                try TerminalText.writeShellWord(&output.interface, job.store);
-                try TerminalText.writeShellSession(&output.interface, job.session, false);
-                try output.interface.print(" --action {d}\n", .{action});
-            }
-            try output.interface.writeAll("\n");
-        }
         try output.interface.writeAll("Enter sends · Shift-Enter or Alt-J adds a line\nPgUp/PgDn, arrows or the wheel scroll · Esc or Ctrl-G returns to latest or the pending Action\nIn tmux with mouse on, the wheel enters copy mode; use PgUp or arrows\nIn tmux, Shift-Enter can arrive as Enter and send; Alt-J adds a line\nUnder the input: Session · model · effort · context left\nThat line ends with asks before Bash/MCP when Bash or MCP asks first\nand with ctrl+x stop while there is work: Ctrl-X twice stops the Session\nAt an Action, Left/Right choose Allow once or Deny · Enter decides\nCtrl-O shows the lowest collapsed message in full · Esc, Ctrl-G or Ctrl-O returns\nCtrl-R retries the exact original request, retaining the draft\nCtrl-P on an empty draft recalls your sent messages · Ctrl-N goes forward\nTyping / lists the commands, then their choices · Up/Down highlight one · Tab or Enter takes it\nOn /status, Up/Down choose a setting · Enter starts its change\n\n" ++ slash_commands.conversation.help ++ "\nIn tmux, /copy needs set-clipboard on\nLogin: ");
         try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
     } else {
