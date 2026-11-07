@@ -59,10 +59,99 @@ class CombiningScreen(pyte.Screen):
         super().draw(data[start:])
 
 
+class SgrStream:
+    """Translate only supported colon-form SGR for pyte, without changing raw input.
+
+    CSI and control-string state survives feed boundaries. OSC/DCS payloads
+    pass unchanged; in particular a URI or clipboard payload is never parsed
+    as terminal output. Bounds prevent an unterminated CSI growing indefinitely.
+    """
+    MAX_CSI = 256
+
+    def __init__(self):
+        self.state = "text"
+        self.csi = ""
+
+    @staticmethod
+    def sgr(sequence):
+        prefix = "\x1b[" if sequence.startswith("\x1b[") else "\x9b"
+        params = sequence[len(prefix):-1].split(";")
+        converted = []
+        for param in params:
+            if ":" not in param:
+                if param and (not param.isascii() or not param.isdigit()):
+                    return sequence
+                converted.append(param)
+                continue
+            parts = param.split(":")
+            if len(parts) == 6 and parts[1:3] == ["2", ""]:
+                parts.pop(2)  # ISO 8613-6 default color-space identifier.
+            if parts[0] not in ("38", "48") or not (
+                len(parts) == 3 and parts[1] == "5" or
+                len(parts) == 5 and parts[1] == "2"
+            ):
+                return sequence
+            if any(not value.isascii() or not value.isdigit() or int(value) > 255
+                   for value in parts[2:]):
+                return sequence
+            converted.extend(parts)
+        return prefix + ";".join(converted) + "m"
+
+    def feed(self, text):
+        output = []
+        for char in text:
+            if self.state == "text":
+                if char == "\x1b":
+                    self.state = "escape"
+                elif char == "\x9b":
+                    self.csi, self.state = char, "csi"
+                elif char in ("\x9d", "\x90", "\x98", "\x9e", "\x9f"):
+                    output.append(char)
+                    self.state = "string"
+                else:
+                    output.append(char)
+            elif self.state == "escape":
+                if char == "\x1b":
+                    output.append(char)
+                elif char == "[":
+                    self.csi, self.state = "\x1b[", "csi"
+                elif char in "]P_X^":
+                    output.append("\x1b" + char)
+                    self.state = "string"
+                else:
+                    output.append("\x1b" + char)
+                    self.state = "text"
+            elif self.state == "csi":
+                if char == "\x1b":
+                    output.append(self.csi)
+                    self.csi, self.state = "", "escape"
+                else:
+                    self.csi += char
+                    assert len(self.csi) <= self.MAX_CSI, "unbounded terminal CSI"
+                    if "@" <= char <= "~":
+                        output.append(self.sgr(self.csi) if char == "m" else self.csi)
+                        self.csi, self.state = "", "text"
+            elif self.state == "string":
+                output.append(char)
+                if char in ("\x07", "\x9c"):
+                    self.state = "text"
+                elif char == "\x1b":
+                    self.state = "string_escape"
+            else:
+                assert self.state == "string_escape"
+                output.append(char)
+                if char == "\\":
+                    self.state = "text"
+                elif char != "\x1b":
+                    self.state = "string"
+        return "".join(output)
+
+
 class ScreenCapture:
     def __init__(self, columns=80, rows=24):
         self.screen = CombiningScreen(columns, rows)
         self.stream = pyte.Stream(self.screen)
+        self.sgr = SgrStream()
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.pending = self.frame = self.completed = ""
         # Cells of the latest committed frame, for style oracles.
@@ -102,7 +191,7 @@ class ScreenCapture:
                 elif part == "\x1b[?1049l":
                     self.alternate = False
                 else:
-                    self.stream.feed(part)
+                    self.stream.feed(self.sgr.feed(part))
                     if not self.alternate:
                         # Main-screen text (before entry or after restoration),
                         # such as diagnostics and detach notices, is a stream.
