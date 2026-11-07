@@ -9,9 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from driver import DirectPty, ScreenCapture
+from driver import DirectPty, ScreenCapture, history_rows
 from matrix import run_one
-from scenarios import history_rows
 import host_process
 
 

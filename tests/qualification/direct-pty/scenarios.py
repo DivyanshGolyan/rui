@@ -8,8 +8,7 @@ import tempfile
 import threading
 import time
 
-from driver import DirectPty, defer_signals
-from terminal_screen import cell_rows
+from driver import DirectPty, defer_signals, history_rows
 from host_process import canonical_fixture_root, dispose_all
 import model_fixture as model
 import codex_integration as codex
@@ -203,14 +202,6 @@ def recovery(fixture, row):
     assert_submitted(fixture.endpoint.requests, ["original éZ", "next cafXYé!"])
     tty.send(b"/exit\r")
     tty.finish()
-
-
-def history_rows(capture):
-    """History lines in the committed source rectangle."""
-    cells = capture.completed_cells
-    assert cells, "history requires a committed screen"
-    rows = cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)
-    return [line.strip() for line in rows if line.strip().startswith("History line ")]
 
 
 def navigation(fixture, row):
