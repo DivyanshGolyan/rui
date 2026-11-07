@@ -4,6 +4,7 @@ import base64
 import errno
 import json
 import fcntl
+import hashlib
 import os
 import pathlib
 import pty
@@ -20,11 +21,62 @@ import sys
 import tempfile
 import termios
 import threading
+import traceback
 import time
 
 import host_process
 from terminal_screen import cell_rows
 from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process
+
+
+# One opt-in, private fixture capture; removed from the environment at entry.
+PERMISSION_EVIDENCE = None
+
+
+class PermissionEvidence:
+    def __init__(self, directory, capture):
+        self.path = pathlib.Path(directory)
+        st = self.path.lstat()
+        assert self.path.is_dir() and not self.path.is_symlink()
+        assert st.st_uid == os.getuid() and st.st_mode & 0o777 == 0o700
+        fd = os.open(self.path / "wire.bin", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        self.wire = os.fdopen(fd, "wb", buffering=0)
+        self.hash = hashlib.sha256()
+        self.offset = 0
+        self.chunks = []
+        self.capture = capture
+        self.feed = capture.feed
+        capture.feed = self.record
+
+    def record(self, data):
+        view = memoryview(data)
+        while view:
+            n = self.wire.write(view)
+            if not n:
+                raise OSError("evidence write made no progress")
+            view = view[n:]
+        self.chunks.append({"offset": self.offset, "length": len(data),
+            "columns": self.capture.screen.columns, "rows": self.capture.screen.lines})
+        self.offset += len(data)
+        self.hash.update(data)
+        self.feed(data)
+
+    def finish(self, failure):
+        capture = self.capture
+        self.capture.feed = self.feed
+        self.wire.close()
+        value = {"wire_bytes": self.offset, "wire_sha256": self.hash.hexdigest(),
+            "chunks": self.chunks, "failure": failure,
+            "columns": capture.screen.columns, "rows": capture.screen.lines,
+            "live_cursor": {"x": capture.screen.cursor.x, "y": capture.screen.cursor.y},
+            "generation": capture.generation, "synchronized": capture.synchronized,
+            "completed": capture.completed,
+            "cells": [[{"x": x, "y": y, **cell._asdict()} for x, cell in enumerate(row)]
+                      for y, row in enumerate(capture.completed_cells)]}
+        fd = os.open(self.path / "capture.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(value, out, ensure_ascii=True, indent=2)
+            out.write("\n")
 
 
 # From 60 columns a user Message's first row ends with its admission time.
@@ -3601,6 +3653,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
     thread.start()
     host = caller = proxy = None
     master = slave = None
+    evidence = None
     arguments_release = threading.Event()
     arguments_held = threading.Event()
     ready_read, ready_write = os.pipe()
@@ -3612,6 +3665,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "ask")
         master, slave = open_pty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
+        if PERMISSION_EVIDENCE:
+            evidence = PermissionEvidence(PERMISSION_EVIDENCE, terminal_capture(master))
         original = termios.tcgetattr(slave)
         caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", reference], env={**os.environ, "HOME": str(home),
@@ -4246,6 +4301,12 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         completed = True
         print(f"persistent permission: inline {decision}, lost={lost_reply}, fragmented={fragmented_paste}, quiet outcome, retained cursor, label-only opening and TERM cleanup passed", flush=True)
     finally:
+        if evidence:
+            failure = traceback.format_exc() if sys.exc_info()[0] else None
+            try:
+                evidence.finish(failure)
+            except Exception:
+                traceback.print_exc()  # Keep the original assertion and cleanup.
         if sys.exc_info()[0] is not None:
             preserve_failure_metadata(state / "pty-failure.json", lambda: {
                 "case": "persistent_permission", "decision": decision,
@@ -6974,7 +7035,7 @@ def main(selected="all", *, held_owner=None):
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "persistent-opening", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications", "command-entry"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "persistent-permission-evidence", "persistent-opening", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications", "command-entry"), selected
     if selected == "command-entry":
         command_entry_cases()
         return
@@ -7025,6 +7086,9 @@ def main(selected="all", *, held_owner=None):
         scroll_return_case()
         persistent_pending_case()
         persistent_input_cases()
+    if selected == "persistent-permission-evidence":
+        persistent_permission_case("allow-action", stdin="`literal` $(data) 'single' \"double\"\nsecond line\n")
+        return
     if selected in ("all", "persistent-permission"):
         persistent_permission_case(stdin="`literal` $(data) 'single' \"double\"\nsecond line\n")
         persistent_permission_case("allow-action", stdin="`literal` $(data) 'single' \"double\"\nsecond line\n")
@@ -8532,6 +8596,7 @@ def main(selected="all", *, held_owner=None):
 
 
 if __name__ == "__main__":
+    PERMISSION_EVIDENCE = os.environ.get("RUI_PERMISSION_EVIDENCE")
     held_owner = os.environ.get("RUI_TEST_HELD_OWNER")
     if held_owner:
         held_owner = str(pathlib.Path(held_owner).resolve())
