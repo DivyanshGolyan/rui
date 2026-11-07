@@ -1508,7 +1508,10 @@ test "a queued Message keeps its row and status while looking back" {
     const footer: Footer = .{ .status = "Sent", .queued = .{ .waiting = .{ .line = "also check the history scratch cache", .count = 2 }, .status = "" } };
     _ = try Test.render(screen, &out.writer, size, "", 0, footer, &calls);
     var buffer: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("row39", rowText(screen, 7, &buffer));
+    // This is a source row, not the queued overlay below it; the
+    // scrollbar thumb owns the separate final physical cell.
+    try std.testing.expectEqualStrings("row39", contentColumnsText(screen, 7, &buffer));
+    try std.testing.expectEqualStrings("▐", Test.window(screen).readCell(39, 7).?.char.grapheme);
     try std.testing.expectEqualStrings("› also check the history scrat… 2 queued", rowText(screen, 8, &buffer));
     try std.testing.expect(!screenHas(screen, "Sent", &buffer));
     for ([_]u16{ 0, 32 }) |column| try std.testing.expectEqual(screen.style(.quiet).fg, Test.window(screen).readCell(column, 8).?.style.fg);
