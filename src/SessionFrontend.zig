@@ -5904,7 +5904,7 @@ test "delayed permission queued inspection and Message input retain separate aut
             }
         }
 
-        fn accept(listener: *std.Io.net.Server, route: []const u8) !std.Io.net.Stream {
+        fn accept(listener: *std.Io.net.Server, route: []const u8, expected_body: ?[]const u8) !std.Io.net.Stream {
             const deadline = test_poll.after(std.testing.io, .fromSeconds(5));
             try ready(listener.socket.handle, std.posix.POLL.IN, deadline);
             const peer = try listener.accept(std.testing.io);
@@ -5915,6 +5915,10 @@ test "delayed permission queued inspection and Message input retain separate aut
             var prefix: [128]u8 = undefined;
             try std.testing.expectStringStartsWith(received, try std.fmt.bufPrint(&prefix, "POST {s} HTTP/1.1\r\n", .{route}));
             try std.testing.expect(std.mem.indexOf(u8, received, "\"session\":\"k7m2qx\"") != null);
+            if (expected_body) |expected| {
+                const body_at = (std.mem.indexOf(u8, received, "\r\n\r\n") orelse return error.InvalidRequest) + 4;
+                try std.testing.expectEqualStrings(expected, received[body_at..]);
+            }
             return peer;
         }
         fn reply(peer: std.Io.net.Stream, body: []const u8, content_type: []const u8) !void {
@@ -5955,6 +5959,12 @@ test "delayed permission queued inspection and Message input retain separate aut
     self.init.gpa = std.testing.allocator;
     self.init.environ_map = &held.environ;
     self.poll_at = std.math.maxInt(i96);
+    // Both borrowers must release their socket and file loans before the
+    // fixture tears down the listener, lease, Action files and private Store.
+    defer {
+        self.submission.cancel();
+        _ = self.submission.join();
+    }
     defer {
         self.reader.cancel();
         self.reader.join() catch {};
@@ -5967,19 +5977,23 @@ test "delayed permission queued inspection and Message input retain separate aut
     var page = std.Io.Writer.fixed(&page_bytes);
     try facts.writeJson(&page);
     {
-        const peer = try Host.accept(&listener, "/v1/activity-page");
+        const peer = try Host.accept(&listener, "/v1/activity-page", null);
         defer peer.close(io);
         try Host.reply(peer, page.buffered(), "application/json");
     }
     const reference = "{\"type\":\"text\",\"bytes\":\"13\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
     const current = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"10\",\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"1\",\"unresolved\":[{\"action\":\"10\",\"parent_operation\":\"19\",\"call_ordinal\":\"0\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":" ++ reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":\"Run parser tests\",\"code\":\"pending_permission\",\"publication_position\":null}}],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[{\"action\":\"10\",\"permission_revision\":\"23\"}],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    var current_request: protocol.RequestBuffer = .{};
+    try current_request.appendShape(protocol.inspect_session_request.current, .{ paths.store.slice(), self.session });
+    var arguments_request: protocol.RequestBuffer = .{};
+    try arguments_request.appendShape(protocol.read_action_arguments_request, .{ paths.store.slice(), self.session, @as(u64, 10) });
     {
-        const peer = try Host.accept(&listener, "/v1/inspect-session");
+        const peer = try Host.accept(&listener, "/v1/inspect-session", current_request.slice());
         defer peer.close(io);
         try Host.reply(peer, current, "application/json");
     }
     {
-        const peer = try Host.accept(&listener, "/v1/read-action-arguments");
+        const peer = try Host.accept(&listener, "/v1/read-action-arguments", arguments_request.slice());
         defer peer.close(io);
         // The real permission borrower is blocked on its exact arguments. Queue
         // the inspection through the public terminal stream, before completing it.
