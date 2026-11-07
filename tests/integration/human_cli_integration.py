@@ -712,11 +712,16 @@ def shown(text, screen):
 def fixture_command(command, end="\n"):
     """Submit fixture control, not a completion/decoder input vector.
 
-    Dismiss pending inline metadata immediately before its one submit key;
-    never retry an Enter deliberately held by the production menu barrier.
-    An empty end still types a partial command without dismissing its menu.
+    Dismiss pending inline metadata at the command word, before arguments
+    move the cursor out of that token. Ctrl-G after arguments could instead
+    return to an Action choice. Never retry a held Enter. An empty end still
+    types a partial command without dismissing its menu.
     """
-    return command + ("\x07" if end else "") + end
+    if not end:
+        return command
+    separator = re.search(r"[ \t]", command)
+    boundary = separator.start() if separator else len(command)
+    return command[:boundary] + "\x07" + command[boundary:] + end
 
 
 def command_frame(master, command, accept, timeout=15, *, end="\n"):
@@ -1080,6 +1085,8 @@ def terminal_wait_oracles():
     assert fixture_command("/status") == "/status\x07\n"
     assert fixture_command("/exit", "\r") == "/exit\x07\r"
     assert fixture_command("/effort ", "") == "/effort "
+    assert fixture_command("/configure --model m") == "/configure\x07 --model m\n"
+    assert fixture_command("/result\t  key", "\r") == "/result\x07\t  key\r"
     # The command writer: a queued composer cannot acknowledge a command.
     for command, marker in (("/configure --model gpt-6-sol", "Configured."), ("/status", "Status · example"),
                             ("literal /status café", "Message accepted"), ("//literal", "Literal slash accepted")):
@@ -1098,8 +1105,9 @@ def terminal_wait_oracles():
                     assert failure.args[0] == ("terminal closed before command result", command), failure
                 else:
                     assert suffix == terminal_frame([marker, "›"], (2, 3)), (command, output)
-                suffix = "\x07\n" if command in ("/configure --model gpt-6-sol", "/status") else "\n"
-                assert peer.recv(4096) == (command + suffix).encode()
+                expected = {"/configure --model gpt-6-sol": b"/configure\x07 --model gpt-6-sol\n",
+                            "/status": b"/status\x07\n"}.get(command, (command + "\n").encode())
+                assert peer.recv(4096) == expected
                 forget_terminal(reader.fileno())
     # Command results: identity, readiness and absence describe one fresh
     # committed frame, not readiness or a Session borrowed from earlier ones.
@@ -1118,7 +1126,9 @@ def terminal_wait_oracles():
                 assert failure.args[0][0] == "terminal closed before command result", failure
                 return None
             finally:
-                assert peer.recv(4096) == (typed or command + "\x07\n").encode()
+                expected = {"/status": "/status\x07\n", "/configure --model m": "/configure\x07 --model m\n",
+                            "/requests": "/requests\x07\n"}
+                assert peer.recv(4096) == (typed or expected[command]).encode()
                 forget_terminal(reader.fileno())
     status = lambda fd: status_frame(fd, session)
     configured = lambda fd: configured_frame(fd, "/configure --model m")
@@ -1132,7 +1142,7 @@ def terminal_wait_oracles():
     assert frame_after("/configure --model m", [terminal_frame(live, (2, 1))], configured) is None
     over_page = terminal_frame(["Browsing · Esc returns"] + live, (4, 3))
     # Over the page, the reply is the result only once Esc returns to the conversation.
-    assert frame_after("/configure --model m", [over_page], configured, "/configure --model m\x07\n\x1b") is None
+    assert frame_after("/configure --model m", [over_page], configured, "/configure\x07 --model m\n\x1b") is None
     reader, peer = socket.socketpair()
     with reader, peer:
         forget_terminal(reader.fileno())
@@ -1149,7 +1159,7 @@ def terminal_wait_oracles():
         finally:
             answering.join()
             forget_terminal(reader.fileno())
-        assert keys == [b"/configure --model m\x07\n", b"\x1b"] and shown.startswith("Browsing · Esc returns\n"), (keys, shown)
+        assert keys == [b"/configure\x07 --model m\n", b"\x1b"] and shown.startswith("Browsing · Esc returns\n"), (keys, shown)
     assert frame_after("/configure --model m", [terminal_frame(live, (3, 3))], configured) is not None
     # Every command step with a composer check binds marker and readiness to
     # one frame: a marker frame that is not ready, then a ready frame without
