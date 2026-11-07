@@ -1,5 +1,6 @@
 //! Atomic bounded Conversation preparation, distinct from one-pass opening.
 const std = @import("std");
+const OutputBlocks = @import("output_blocks.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
@@ -26,6 +27,10 @@ pub const Prepared = struct {
     pub const Mode = enum { transcript, details };
 
     pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, mode: Mode, colour: bool, home: []const u8) !void {
+        return self.renderBlocks(io, scratch, store, session, sink, mode, colour, home, null);
+    }
+
+    pub fn renderBlocks(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, mode: Mode, colour: bool, home: []const u8, blocks: ?OutputBlocks.Sink) !void {
         var window: [protocol.content_window_bytes]u8 = undefined;
         var compact = false;
         for (0..self.page.count) |reverse| {
@@ -99,14 +104,14 @@ pub const Prepared = struct {
                 .user => {
                     try View.userPrefix(sink, colour, item.admitted_at.?);
                     var body: View.UserBody(@TypeOf(sink)) = undefined;
-                    try body.init(sink, item.content.bytes, mode == .details);
+                    try body.initBlocks(sink, item.content.bytes, mode == .details, if (mode == .transcript) blocks else null);
                     try staged.read(&body);
                     if (try body.finish()) try View.noteCollapsed(sink, collapsed(item));
                 },
                 .assistant => {
                     try sink.feed("\n");
                     var answer: View.Answer(@TypeOf(sink)) = undefined;
-                    answer.init(sink, home);
+                    answer.initBlocks(sink, home, if (mode == .transcript) blocks else null);
                     try staged.read(&answer);
                     try answer.finish();
                 },
@@ -420,7 +425,7 @@ test "history reopened transcript keeps only the failed numeric header" {
     const prepared = try stagePage(io, page, scratch, Bytes{});
     var sink: Sink = .{};
     try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "");
-    try std.testing.expectEqualStrings("\n! Run check — Failed (exit 7)\n", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("\n  ! Run check — Failed (exit 7)\n", sink.bytes[0..sink.length]);
 }
 
 test "history preparation binds wire and staged bytes before exposure" {
@@ -711,7 +716,7 @@ test "history tool suffix authenticates discarded prefixes through the productio
                     var retained: [8192]u8 = undefined;
                     try std.testing.expectEqual(item_bytes, try scratch.readPositionalAll(io, &retained, 0));
                     try std.testing.expectEqualSlices(u8, body[body.len - item_bytes ..], &retained);
-                } else try std.testing.expectEqualStrings("\n! Tool call — Failed\n", sink.bytes[0..sink.length]);
+                } else try std.testing.expectEqualStrings("\n  ! Tool call — Failed\n", sink.bytes[0..sink.length]);
             } else {
                 try std.testing.expectEqual(@as(usize, 0), sink.length);
                 try std.testing.expectError(switch (mode) {
@@ -870,7 +875,7 @@ test "history tool raw suffix boundary stays exact while details escape controls
     var sink: Sink = .{};
     try prepared.render(io, scratch, "store", "09azvw", &sink, .details, false, "");
     const output = sink.bytes[0..sink.length];
-    const prefix = "\n✓ Tool call\n  Earlier output omitted\n  \\xa9\\x00\\x1b\\u202e";
+    const prefix = "\n  ✓ Tool call\n  Earlier output omitted\n  \\xa9\\x00\\x1b\\u202e";
     try std.testing.expect(std.mem.startsWith(u8, output, prefix));
     try std.testing.expectEqualStrings(body[14..], output[prefix.len..][0 .. body.len - 14]);
     try std.testing.expectEqualStrings("\n  Raw export: rui session read-conversation --store-hex 73746f7265 --session 09azvw --position 1 --ordinal 0\n", output[prefix.len + body.len - 14 ..]);

@@ -6,6 +6,7 @@ const core_boundary = @import("core_boundary.zig");
 /// each one listed here and runs its tests, and selector tests require each
 /// to select test-logic.
 const cores = .{
+    .{ "RenderGeometry.zig", @import("RenderGeometry.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
     .{ "word_search.zig", @import("word_search.zig") },
     .{ "attempt.zig", @import("attempt.zig") },
@@ -36,6 +37,7 @@ const cores = .{
     .{ "json_ascii.zig", @import("json_ascii.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
     .{ "keymap.zig", @import("keymap.zig") },
+    .{ "markdown_prefix.zig", @import("markdown_prefix.zig") },
     .{ "mcp/arguments.zig", @import("mcp/arguments.zig") },
     .{ "mcp/document.zig", @import("mcp/document.zig") },
     .{ "mcp/EventStream.zig", @import("mcp/EventStream.zig") },
@@ -49,6 +51,7 @@ const cores = .{
     .{ "model_list.zig", @import("model_list.zig") },
     .{ "model_picker.zig", @import("model_picker.zig") },
     .{ "models_dev.zig", @import("models_dev.zig") },
+    .{ "output_blocks.zig", @import("output_blocks.zig") },
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },
@@ -67,6 +70,7 @@ const cores = .{
     .{ "status_page.zig", @import("status_page.zig") },
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
+    .{ "table_row.zig", @import("table_row.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
@@ -118,7 +122,7 @@ test "functional cores stay within the core boundary" {
 /// Every core as `importer` spells its import: relative within its own
 /// directory, else up to `src/` and down.
 fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(20_000);
     const directory = importer[0..if (std.mem.lastIndexOfScalar(u8, importer, '/')) |slash| slash + 1 else 0];
     var up: []const u8 = "";
     for (0..std.mem.count(u8, directory, "/")) |_| up = up ++ "../";

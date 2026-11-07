@@ -120,7 +120,8 @@ await rui.close();
 
 ## Archive and restore
 
-Archive metadata is independent of work state. `archiveState` is `active`, `archiving` or `archived` in Session summaries and status.
+Archive metadata is independent of work state.
+`archiveState` is `active`, `archiving` or `archived` in Session summaries and status.
 
 ```ts
 const result = await session.archive({ idempotencyKey: "archive:1" });

@@ -29,6 +29,12 @@ Tool outcomes in normal conversation show only their description and outcome, wi
 `/details` escapes the retained tool bytes safely and marks shortened results with `Earlier output omitted`.
 Its raw export command reads the full unchanged saved result.
 
+Assistant answers and saved transcripts show simple pipe tables with up to eight columns, including left/center/right alignment and inline emphasis, code and links.
+Very narrow or oversized rows stay readable as literal, safely escaped source instead of losing cells.
+Quoted lines retain their original first-row markers and continue with an ASCII `>` gutter when they wrap; fenced code stays literal.
+Your submitted Messages get quote gutters too, but their Markdown emphasis and tables stay literal.
+Copy/export still uses the original saved bytes, not the visual columns or generated gutters.
+
 Upgrade installs the latest published stable release and restarts the selected Store's Host only if it is already running and its launch is supported.
 Restart affects all Sessions in that Store and may interrupt work; no running Host means install only.
 The panel retains your draft, selected Session and unresolved capture handles without replaying uncertain effects.

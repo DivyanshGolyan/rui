@@ -126,6 +126,17 @@ pub fn append(self: *Self, bytes: []const u8) !void {
     try self.live.text.append(bytes);
 }
 
+pub fn appendPrepared(self: *Self, bytes: []const u8, offset: u64, span: ?*const OutputBlocks.Span(u64), admission: *Document.Admission) !void {
+    return self.live.text.appendPrepared(bytes, offset, span, admission);
+}
+
+/// Absolute live offsets: bytes before `origin` left the retained view.
+/// Preparing escapes oversized and invisible clusters, which changes the
+/// length of text not yet prepared, so the end is taken after preparing.
+/// Escaped text never changes again, and the next item begins a new
+/// cluster, so the offset names the same text until it leaves the view.
+/// Both ends are taken after preparing: escaping can also grow text and
+/// move the origin past offsets recorded earlier.
 pub fn liveEnd(self: *Self) !u64 {
     try self.live.text.prepare();
     return self.live.text.origin + self.live.text.length;
@@ -508,6 +519,35 @@ pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !Prepended {
     return self.prependPreparedFile(io, file, null);
 }
 
+pub fn prependPreparedFile(self: *Self, io: std.Io, file: std.Io.File, marks: ?*const OutputBlocks.Capture) !Prepended {
+    std.debug.assert(self.view == .transcript);
+    try self.load(&self.staging.text, io, file, false, marks);
+    if (self.staging.text.origin != 0) {
+        // A page larger than the view cannot join its older neighbour without
+        // a gap. Keep its newest whole lines and say so at the gap.
+        const text = "Rui: Earlier rows of this saved page exceed the view.\n";
+        const retained = self.staging.text.bytes[0..self.staging.text.length];
+        const cut = std.mem.indexOfScalarPos(u8, retained, text.len, '\n') orelse retained.len - 1;
+        self.staging.text.discardFront(self.staging.text.origin + cut + 1);
+        var marker: Viewport.Sized(128, true) = .{ .width_method = self.staging.text.width_method };
+        try marker.append(View.Style.quiet.code(self.colour));
+        try marker.append(text);
+        try marker.append(View.Style.normal.code(self.colour));
+        _ = try self.staging.text.prepend(&marker);
+    }
+    const before = self.browsing.text.collapsed(0, self.browsing.text.text().len).count;
+    const older = self.staging.text.collapsed(0, self.staging.text.text().len).count;
+    var anchor = self.browsing.anchor(self.textLayout());
+    if (try self.browsing.text.prepend(&self.staging.text)) self.tail = .gap;
+    anchor.offset +|= self.staging.text.length;
+    self.browsing.restore(self.textLayout(), anchor, self.height, true);
+    self.browsing.move(self.textLayout(), false, self.overscroll, self.height, null);
+    self.overscroll = 0;
+    return .{ .older = older, .trimmed = before + older - self.browsing.text.collapsed(0, self.browsing.text.text().len).count };
+}
+
+/// Collapsed blocks an older page kept, its newest, and those newer rows
+/// lost from the transcript's end.
 pub const Prepended = struct { older: usize, trimmed: usize };
 
 /// Collapsed blocks in the transcript.
@@ -594,21 +634,24 @@ pub fn latest(self: *Self) !void {
 
 /// Inspection and Action files show their prefix; an older page keeps its
 /// newest text, which adjoins the transcript.
-fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix: bool) !void {
+fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix: bool, marks: ?*const OutputBlocks.Capture) !void {
     const length = (try file.stat(io)).size;
     const end = if (prefix) @min(Viewport.capacity, length) else length;
     document.clear();
     document.sidenotes = false;
     document.quotes = false;
     var buffer: [4096]u8 = undefined;
+    var cursor: OutputBlocks.Cursor = .{ .marks = marks };
+    var admission: Document.Admission = .{};
     var offset: u64 = 0;
     while (offset < end) {
-        const wanted: usize = @intCast(@min(buffer.len, end - offset));
+        const part = cursor.part(offset, end);
+        const wanted: usize = @intCast(@min(buffer.len, part.end - offset));
         if (try file.readPositionalAll(io, buffer[0..wanted], offset) != wanted) return error.TruncatedDisplayScratch;
-        try document.append(buffer[0..wanted]);
+        try document.appendPrepared(buffer[0..wanted], offset, part.span, &admission);
         offset += wanted;
     }
-    document.width_method = self.vx.caps.unicode;
+    document.width_method = self.backend.widthMethod();
     try document.prepare();
 }
 
@@ -2740,6 +2783,209 @@ test "quote draft screen fence opacity does not promote code markers" {
     _ = try Test.render(screen, &out.writer, size, nested, nested.len, .{}, &.{});
     try std.testing.expectEqualStrings("  >>  kl", rowText(screen, 21, &storage));
     try std.testing.expectEqualStrings("  >>", rowText(screen, 22, &storage));
+}
+
+test "typed saved-file loading preserves raw provenance through prepend Message overlay and safe rich paint" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "older", .{ .read = true });
+    defer file.close(io);
+    const raw = "h|x\n---|---\n\x1b[31m|\xff\n";
+    try file.writePositionalAll(io, raw, 0);
+    var marks: OutputBlocks.Capture = .{};
+    try std.testing.expect(marks.reserve(.{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } }));
+    try screen.append("newer\n");
+    const size: std.posix.winsize = .{ .row = 16, .col = 40, .xpixel = 0, .ypixel = 0 };
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(0);
+    _ = try screen.prependPreparedFile(io, file, &marks);
+    try std.testing.expectEqual(@as(u6, 1), screen.browsing.text.blocks.count);
+    try std.testing.expectEqualStrings(raw ++ "newer\n", screen.browsing.text.text());
+    try std.testing.expectEqual(@as(u32, raw.len), screen.browsing.text.blocks.items[0].complete_end);
+    const retained = screen.browsing.text.blocks.items[0];
+    // An actual overlay borrows staging; the transcript underneath keeps its
+    // independent provenance and source when the overlay is dismissed.
+    const overlay = try tmp.dir.createFile(io, "message", .{ .read = true });
+    defer overlay.close(io);
+    try overlay.writePositionalAll(io, "Message body already escaped\n", 0);
+    try screen.showMessage(io, overlay);
+    try screen.leaveMessage();
+    try std.testing.expectEqualDeep(retained, screen.browsing.text.blocks.items[0]);
+    screen.browsing.scroll.scroll.y = 0;
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    var storage: [128]u8 = undefined;
+    var escaped = false;
+    for (0..size.row) |row| if (std.mem.eql(u8, rowText(screen, @intCast(row), &storage), "\\x1b[31m            \\xff")) {
+        escaped = true;
+    };
+    try std.testing.expect(escaped);
+    // No raw source SGR/OSC becomes a style/link in the selected frame.
+    const cells = Test.window(screen);
+    for (0..size.row) |row| for (0..size.col) |col| try std.testing.expectEqualStrings("", cells.readCell(@intCast(col), @intCast(row)).?.link.uri);
+}
+
+test "typed frozen pending header catches up metadata across Message resize without moving first source" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const overlay = try tmp.dir.createFile(io, "message", .{ .read = true });
+    defer overlay.close(io);
+    try overlay.writePositionalAll(io, "Message body\n", 0);
+    const raw = "h|x\n---|---\na|b\n";
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try screen.appendPrepared(raw[0..4], 0, &span, &admission);
+    const size: std.posix.winsize = .{ .row = 12, .col = 20, .xpixel = 0, .ypixel = 0 };
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(0);
+    const first = screen.browsing.anchor(screen.textLayout());
+    try screen.showMessage(io, overlay);
+    try screen.appendPrepared(raw[4..], 4, &span, &admission);
+    const wide: std.posix.winsize = .{ .row = 14, .col = 40, .xpixel = 0, .ypixel = 0 };
+    _ = try Test.render(screen, &out.writer, wide, "", 0, .{}, &.{});
+    try screen.leaveMessage();
+    try std.testing.expectEqual(first, screen.browsing.anchor(screen.textLayout()));
+    try std.testing.expectEqual(@as(usize, 0), try screen.catchUp());
+    try std.testing.expectEqual(@as(usize, 2), screen.browsing.projection(screen.textLayout()).total);
+    try std.testing.expectEqual(first, screen.browsing.anchor(screen.textLayout()));
+    try std.testing.expectEqual(@as(u6, 1), screen.browsing.text.blocks.count);
+    const collapsed = screen.transcriptCollapsed();
+    span.data = .literal_raw;
+    try screen.appendPrepared("", raw.len, &span, &admission);
+    const before = screen.browsing.text.generation;
+    _ = try screen.catchUp();
+    try std.testing.expect(before != screen.browsing.text.generation);
+    try std.testing.expectEqual(@as(usize, 3), screen.browsing.projection(screen.textLayout()).total);
+    try std.testing.expectEqual(first, screen.browsing.anchor(screen.textLayout()));
+    const unchanged = screen.browsing.text.generation;
+    const live_generation = screen.live.text.generation;
+    try screen.appendPrepared("", raw.len, &span, &admission);
+    _ = try screen.catchUp();
+    try std.testing.expectEqual(unchanged, screen.browsing.text.generation);
+    try std.testing.expectEqual(live_generation, screen.live.text.generation);
+    try std.testing.expectEqual(collapsed, screen.transcriptCollapsed());
+    try std.testing.expectEqualStrings(raw, screen.browsing.text.text());
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+    try std.testing.expectEqual(first, screen.browsing.anchor(screen.textLayout()));
+}
+
+test "typed rich output actual frame owns generated links through encode under shared budget" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const raw = "left|right\n:---:|---:\n" ++ "[界e\u{301}](https://example.test/a)|` a `\n";
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 11, .delimiter_end = 22, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = .{ .center, .right, .left, .left, .left, .left, .left, .left } } } };
+    var admission: Document.Admission = .{};
+    try screen.appendPrepared(raw, 0, &span, &admission);
+    const size: std.posix.winsize = .{ .row = 20, .col = 40, .xpixel = 0, .ypixel = 0 };
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    // Encoding already consumed generated scratch; retained backend links own
+    // their copies and must survive the next frame's arena disposal too.
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "https://example.test/a") != null);
+    out.clearRetainingCapacity();
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    try std.testing.expectEqualStrings(raw, screen.live.text.text());
+    try std.testing.expect(screen.backend.usage().peak <= Backend.memory_limit);
+    std.debug.print("output actual frame peak={d}B used={d}B Screen={d}B budget={d}B\n", .{ screen.backend.usage().peak, screen.backend.usage().used, @sizeOf(Self), Backend.memory_limit });
+}
+
+test "typed tiny-row actual cold warm scroll and invalidation frame costs" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var raw: [240 * 1024]u8 = undefined;
+    const header = "h|x\n---|---\n";
+    @memcpy(raw[0..header.len], header);
+    var length: usize = header.len;
+    while (length + 4 <= raw.len) : (length += 4) @memcpy(raw[length..][0..4], "a|b\n");
+    var span: OutputBlocks.Span(u64) = .{ .start = 0, .end = length, .header_end = 4, .delimiter_end = 12, .complete_end = length, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try screen.appendPrepared(raw[0..length], 0, &span, &admission);
+    const size: std.posix.winsize = .{ .row = 16, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const before = std.Io.Clock.awake.now(io);
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    const cold = std.Io.Clock.awake.now(io);
+    for (0..10) |_| {
+        out.clearRetainingCapacity();
+        _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    }
+    const warm = std.Io.Clock.awake.now(io);
+    try screen.beginTranscript(screen.live.text.origin);
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+    const detached = std.Io.Clock.awake.now(io);
+    for (0..10) |_| {
+        _ = screen.browse(false, false);
+        out.clearRetainingCapacity();
+        _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    }
+    const scrolled = std.Io.Clock.awake.now(io);
+    // Width and metadata invalidation both reuse the SAME scalar generation/
+    // layout owner; neither a warm tail sample nor a second cache hides them.
+    const resized: std.posix.winsize = .{ .row = 16, .col = 30, .xpixel = 0, .ypixel = 0 };
+    _ = try Test.render(screen, &out.writer, resized, "", 0, .{}, &.{});
+    const reflow = std.Io.Clock.awake.now(io);
+    span.data = .literal_raw;
+    try screen.appendPrepared("", length, &span, &admission);
+    _ = try screen.catchUp();
+    _ = try Test.render(screen, &out.writer, resized, "", 0, .{}, &.{});
+    const metadata = std.Io.Clock.awake.now(io);
+    std.debug.print("output tiny-row actual {d}B coldFrame={d}ns warmTail10={d}ns scrollKeyFrames10={d}ns widthReflow={d}ns metadataCatchupReflow={d}ns chargedPeak={d}B\n", .{ length, cold.nanoseconds - before.nanoseconds, warm.nanoseconds - cold.nanoseconds, scrolled.nanoseconds - detached.nanoseconds, reflow.nanoseconds - scrolled.nanoseconds, metadata.nanoseconds - reflow.nanoseconds, screen.backend.usage().peak });
+    try std.testing.expectEqualStrings(raw[0..length], screen.browsing.text.text());
+    try std.testing.expect(screen.backend.usage().peak <= Backend.memory_limit);
+}
+
+test "typed rich cell scratch refusal cannot select fallback geometry or grant frame authority" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    const raw = "h|x\n---|---\na|[界](https://example.test)\n";
+    const span: OutputBlocks.Span(u64) = .{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } };
+    var admission: Document.Admission = .{};
+    try screen.appendPrepared(raw, 0, &span, &admission);
+    const layout: Viewport.Layout = .{ .width = 39, .method = .unicode };
+    const rows = screen.live.text.rowCount(layout);
+    try std.testing.expectEqual(@as(usize, 2), rows);
+    try screen.backend.begin(.{ .rows = 20, .cols = 40, .x_pixel = 0, .y_pixel = 0 });
+    screen.backend.memory.fault = .{ .after = 0 };
+    try std.testing.expectError(error.OutOfMemory, screen.live.text.draw(screen.backend.window().child(.{ .width = 39 }), .{}, true, false, .{}, .{ .scratch = screen.backend.scratch() }));
+    try std.testing.expectEqual(rows, screen.live.text.rowCount(layout));
+    try std.testing.expectError(error.RenderBackendPoisoned, screen.backend.encode());
+    try std.testing.expect(screen.backend.usage().peak <= Backend.memory_limit);
+    try std.testing.expect(screen.offer == null);
+    std.debug.print("output generated-cell refusal chargedPeak={d}B; source geometry remains {d} rows, no encoded receipt\n", .{ screen.backend.usage().peak, rows });
 }
 
 test "a borrowed layout keeps live following and never restores Action offers or read credit" {

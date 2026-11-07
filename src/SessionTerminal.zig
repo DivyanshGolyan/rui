@@ -784,6 +784,10 @@ pub fn permanent(self: *Self, bytes: []const u8) !void {
     return self.screen.append(bytes);
 }
 
+pub fn prepared(self: *Self, bytes: []const u8, offset: u64, span: ?*const OutputBlocks.Span(u64), admission: *@import("ConversationViewport.zig").Document.Admission) !void {
+    return self.screen.appendPrepared(bytes, offset, span, admission);
+}
+
 /// Writes the screen's selected frame. The receipt exists only after every
 /// byte and the final flush succeeded; a failure returns no receipt.
 pub fn redraw(self: *Self, bytes: []const u8, cursor: usize, footer: Screen.Footer, live: *const View.Live) !Screen.Delivered {

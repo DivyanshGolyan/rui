@@ -2268,7 +2268,12 @@ The overview paints its own look; the conversation and the shell keep the termin
 `overview_view` holds the two Khadi skins as data, one palette table each; `OverviewPaint.draw` names roles (text colours and grounds) and writes directly through libvaxis `Window.printSegment` into the same charged grid a conversation borrows.
 The shell asks the terminal for its background with OSC 11, followed by DA1 so that a terminal without OSC 11 ends the wait, and waits at most 200 ms before the first frame; an answer that comes later still applies.
 The core chooses night unless the answer is light.
-Each frame clears every line to the skin's ground, draws its spans in 24-bit colour under `COLORTERM=truecolor` or `24bit` and in the nearest 256-colour entries otherwise, and ends in an SGR reset, so no exit path has colours to restore.
+Each paint fills the current grid with the skin's ground and writes only bounded visible rows in 24-bit colour under `COLORTERM=truecolor` or `24bit`, or in the domain's nearest 256-colour entries otherwise.
+There is no overview Screen, Span list, frame-byte buffer, ANSI encoder or retained diff: libvaxis owns the one retained cell reference, and healthy overview/detail handoffs do not invalidate it.
+All generated labels and cleaned graphemes live in the backend's charged frame scratch through encoding; the painter returns only the composer anchor, shown-command facts and whether animation is needed.
+Waiting terminal reports precede paint in the backend prefix writer; frozen bytes, including any resize controls, are written completely before the existing report acknowledgement or captured handoff.
+Every nonempty frame ends with OSC 8 close and SGR reset; an unchanged frame emits nothing.
+A partial output failure poisons the invocation before any normal-leave conversion.
 `NO_COLOR` frames carry no colour at all: the band and the selection are reverse video.
 
 Typing in the overview's composer and pressing Enter starts a new Session with that text as its first Message, through one captured `session start` command: atomic configuration plus Message admission with the full Workspace, exact provider/model, Bash and `bypass` unless the composer's `/configure` start settings select otherwise.
@@ -2683,7 +2688,7 @@ Call rows keep their places, in issue order.
 While the work is a running Bash call, that call's own row carries the clock, `• Run zig build test-store · 42s`, found by the call's Operation and ordinal, never by its text.
 Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Waiting · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
 The time counts from the state's `since`, against the terminal's clock.
-A browsed page or transcript keeps the line under its shown text, so above the status when the page is full.
+An inspection page keeps the work line under its shown text, so above the status when the page is full; a transcript keeps the live call tray and work line in their existing places.
 The line takes a row after the input, status and overflow rows and before call rows, which the overflow row then counts; with no row left it is dropped rather than refusing the terminal.
 While a permission prompt is open the Action's instructions speak instead.
 An overview row whose work needs the person or explains a wait (approval, a retry, a running command, stopping) says the same words beside its own age column, so it adds only a retry's countdown, and takes its tone; one functional core, `work_line`, holds the wording and tone for both.
@@ -2694,8 +2699,8 @@ A Message a person or script sends while work is under way waits dimmed right ab
 Divyansh approved that row and those labels on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 The Host reports how many wait and the newest on each Activity page (`queued`), and the row reads that Message's first line at its Admission position, which holds that Admission alone, never by text; it keeps the line with that Message's admission ID and shows it only while the Host names that Message newest.
 A Message sent when the work does not hold the queue and no older one waits is taken next, so live output shows it at once as its Admission, and never its row again, however long a pending Session takes to start it (as after Ctrl-R recovery).
-Any other waits in the row, which shows only in the latest view, whenever the Host reports a Message waiting that live output has not shown, whatever the work is doing, and counts only those; live output shows a waiting Message only when it is the oldest, so at most that one is left out; until its row, its stop or the queued row shows it, the send reads `Sent`.
-It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or a browsed page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
+Any other waits in the row, which shows in both latest and transcript views, whenever the Host reports a Message waiting that live output has not shown, whatever the work is doing, and counts only those; live output shows a waiting Message only when it is the oldest, so at most that one is left out; until its row, its stop or the queued row shows it, the send reads `Sent`.
+It is the first row dropped when rows run short, before any draft row, and the frame that drops it, or an inspection page, says `Sent` instead; it leaves in the frame that shows the Message as its row or at its stop; `queued_line` fits the row.
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
@@ -2706,6 +2711,8 @@ Wire version 8 dropped the `proposal_page`, `proposal_field` and `person_message
 Normal desktop widths are the design target; narrower terminals wrap the same interface, never omit an approval command or decision label.
 Opening adds no configuration banner or command tutorial.
 Bash bypass mode retains its safety warning.
+Routine tool labels, including successful calls, are quiet and indented beneath assistant prose in both saved conversation and the live call tray; indentation keeps that hierarchy visible without colour.
+The whole tool label carries its state style, reset before assistant prose; failures and approval keep their prominent state styles, compact grouping and output summaries remain, and labels and links keep their existing escaping.
 Routine capture, reserved keys, proposal fields, resize notices and repeated attention prose stay out of the transcript.
 Unconfirmed or rejected submissions retain actionable notices.
 Explicit `/status` keeps the current reserved recovery key under the page, even before publication, and `/requests` lists recovery handles; reservation does not prove capture or acceptance.
@@ -2713,8 +2720,9 @@ Explicit `/status` keeps the current reserved recovery key under the page, even 
 The interface preserves the shell's previous screen; conversation output does not enter native scrollback or remain after exit, so terminal search covers only the shell.
 This trade-off is accepted for one library-owned renderer.
 It retains a bounded latest view (256 KiB each for live text and a selected inspection).
-PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines and the mouse wheel scroll it; Esc, Ctrl-G, End on an empty draft or scrolling past the end returns to the latest view, or to a pending Action.
-At the latest view, Esc, Ctrl-G or End on an empty draft returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view, running command or unresolved submission; a draft keeps the conversation open, and the status line says to clear it first.
+PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines and the mouse wheel scroll it; Ctrl-End, End on an empty draft, or scrolling down to the actual current end resumes the latest view, or a pending Action, without needing Escape.
+Esc and Ctrl-G retain their existing page-return navigation.
+At the latest view, Esc or Ctrl-G on an empty draft returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view, running command or unresolved submission; a draft keeps the conversation open, and the status line says to clear it first.
 Sending a Message returns to the latest view, where it and its reply appear, and a page asked for before it no longer opens over it.
 When all retained text fits and no older conversation exists, Up and PgUp do nothing, including before the opening read knows the predecessor.
 `/history` can deliberately reveal `Start of conversation`; ordinary detachment does not insert that label into the shown short text.
@@ -2777,9 +2785,16 @@ The renderer neither enables that mode nor requires Kitty graphics, mouse report
 The interface supports at most 49,152 terminal cells, including 24 × 2048 and 192 × 256.
 It checks geometry before allocating grids.
 Larger startup or resize geometry reports `TerminalTooLarge`, restores terminal configuration and gives shrink guidance.
-Cells, retained grapheme allocations and frame bytes share 32 MiB, raised from the extraction's initial 16-MiB limit to accommodate dense Unicode and per-cell SGR at that geometry.
+Backend cells, retained graphemes and URIs, generated frame scratch, waiting prefix and encoded frame bytes share one page-charged 32 MiB, raised from the extraction's initial 16-MiB limit to accommodate dense Unicode and per-cell SGR at that geometry.
 Resize retires old grids before allocating replacements; the native allocation high-water includes transient frame and resize allocations and platform page rounding.
 Content that exceeds the budget fails explicitly without changing saved work.
+Link parameters are unsupported at the shared encode boundary; per-frame URI retention is capped at 128 KiB and retained URI storage recycles before exceeding 512 KiB.
+The domain chooses appearance roles and day/night palettes; the backend enforces explicit width and none/indexed/direct colour policy without inventing colour conversions.
+NO_COLOR rejects chromatic cells but preserves domain-selected noncolour attributes, including Markdown italic and underline.
+During a blocked write, the first overview open or settled detail Escape return is held in its existing semantic target until the entire frozen frame is delivered.
+Later complete interactive events are discarded, except typed urgent exit; reports still update facts, partial CSI/SS3/paste stays in the same decoder, and width changes invalidate consent immediately but mutate backend policy only when idle.
+No replay queue is kept.
+Bounded input/output/signal polling permits urgent cancellation under zero credit; restoration independently attempts CAN, OSC8 close, sync/SGR resets and every owned mode within its existing shared deadline.
 Standalone zero-width output clusters, clusters wider than eight cells and clusters longer than 64 bytes become visible Unicode escapes in the display copy; a run of one repeated scalar is escaped once with its count.
 Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
 Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.
@@ -2962,6 +2977,48 @@ Bare links omit trailing sentence punctuation, including `;` and unmatched final
 Other link targets (including Markdown file targets), links inside code or emphasis, Markdown link titles and complete addresses longer than 2,048 bytes after local expansion and encoding stay literal, and `/copy` still sends the original Markdown with every address.
 The conversation view keeps each address in its text as bytes it never draws, just before the text it links, so the address moves with that text through escaping, older pages and eviction.
 A frame links at most 128 KiB of address bytes across its cells, because the terminal grid copies the address into every cell of a link; text past that bound, or whose address left the view, stays underlined but opens nothing.
+Live activity, saved transcript preparation and both seam-listing routes explicitly inject the same typed capture capability.
+The untyped wrappers remain the default for CLI, inspection and other consumers; syntax-looking bytes alone never grant authority.
+`AnswerRenderer` owns its single pre-inline quote/fence opacity and table admission traversal; the existing 4,096-byte held storage is shared with legacy links and fences, not duplicated.
+The opacity context never expands strict legacy delimiter stripping or LastCode/copy-code credit; while legacy fence effects still own bytes, prose/table admission remains ineligible even if a broader opacity closer was recognized.
+Only a shared backtick candidate may reach the strict legacy opener owner; opacity-only tilde opener info remains safe literal source.
+An accepted quote scope settles pending renderer prefix, inline/link and terminal-text bytes before its synchronous end callback, including short canonical EOF lines.
+A candidate can hold one header and its delimiter within the same 4,096-source-byte credit; rejection and overflow replay through the existing inline engine with a monotone value cursor that cannot overwrite unread held bytes.
+Only assistant preparation and original UserBody quote annotations receive this capability; UserBody continues through terminal escaping and collapse, without assistant inline parsing.
+Tool, peer, inspection, Action and ordinary CLI paths have no semantic authority.
+
+`output_blocks` carries at most 32 sorted shared table, literal-raw or trusted-prose quote spans: capture uses u64 offsets, and checked retained coordinates use u32.
+The synchronous bridge flushes trusted presentation before each event, borrows unchanged payload only through return, reserves block credit before raw writes, and propagates original failures rather than treating partial I/O as rejection.
+The same prepared-span cursor routes actual live staged windows and saved-history file loading, alongside the existing Message cuts; a cut or retention endpoint is never canonical EOF.
+Document edits carry bytes, styles and clipped/rebased marks through normalization, discard, suffix catch-up, prepend, clear and pane copies.
+Header loss downgrades surviving raw source in its existing slot; tail loss keeps only the last actual complete boundary, while a clipped quote marker loses annotation but retains escaped prose and links.
+Opaque bytes never enter the trusted ANSI parser or global Unicode normalization; their literal measurement and paint use the same replayable safety projection, borrowing retained clusters or immutable TerminalText escape spellings through encoding.
+Metadata-only promotion or downgrade advances the existing Document generation, not a separate cache key; identical semantic updates do not invalidate the scalar census.
+Frozen suffix catch-up checks its complete prior byte/style prefix, then applies the current source proof in the same slot, including pending-header promotion and byte-identical downgrade at an unchanged endpoint.
+Retained append and prepend plan descriptor plus pending credit before subtracting source room; retries strictly reduce copied bytes, and pinned append never evicts its existing prefix.
+Prepend trims newer text at complete line boundaries or refuses an unaffordable pending reservation before copying, preserving the existing retention fact.
+Each body's logical credit is source bytes plus used descriptors and pending reservation within 256 KiB; physically resident arrays, worker/rewrite stack and the backend's separate 32 MiB charged budget are accounted independently.
+One local monotone consuming-unit cursor owns forward/reverse traversal, census, source-position projection and paint.
+A table header and delimiter consume one unit even when narrow geometry requires literal fallback; there is no row/cell index or new cache.
+The same pure `table_row` parser supplies at most eight transient ranges.
+Columns share available width equally (earlier columns receive any remainder), with one blank cell between columns and source-declared left/center/right alignment.
+The existing assistant inline engine has an explicit cell-only entry, without block recognition.
+Window owns grapheme/word placement in both measurement and paint; standalone whitespace behavior does not split whitespace-plus-combining clusters.
+A complete row uses rich columns only when every cell fits its column's cluster width and the total normalized payload stays within 8,192 bytes.
+Narrow, malformed, incomplete or over-output-limit units use the same lossless terminal-safe literal projection; allocator pressure instead fails the frame, never changes geometry.
+Committed generated cell bytes/styles live in charged backend scratch through encoding.
+ASCII alphanumeric/space-only identity cells borrow immutable source; other cells use the same bounded inline/normalization owner.
+Alignment only shifts already-painted complete cells within a cleared cell rectangle, never determines source positions, extent or retention from grid contents.
+Committed typed rich paint requires a horizontally whole Window: nonnegative global and ancestor x offsets, with its full reported width inside the global screen.
+Both paint entries refuse unsupported horizontal clipping before any source unit or prefix is painted; measurement and source geometry do not change or select a different commit-only fallback.
+Current public conversation panes are x=0 with a fitting rail and only y translation; vertical clipping remains supported.
+Authoritative quote annotations retain original first-row markers and trusted styles/links, with a static ASCII gutter on soft continuations.
+The whole logical line falls back when its prefix bisects a grapheme, lacks two body cells, or any body cluster is wider than the body.
+Sidenotes and collapsed user summaries keep their existing geometry.
+UserBody never enters assistant inline formatting.
+No canonical source, copy/export or submission bytes change.
+Cold rich census costs are distinct from cached redraw and scroll-key costs; width and semantic metadata changes invalidate the existing single scalar census.
+
 Normal tool presentation shows only the canonical outcome heading, including an optional numeric failed exit.
 A fixed 64-byte first-line scan derives the exit from a complete matching Bash outcome line; it retains no output excerpt, warnings or hints.
 The full stream still drains and authenticates before the heading is shown.
