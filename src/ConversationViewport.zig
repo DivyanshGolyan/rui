@@ -2876,13 +2876,19 @@ test "typed literal mixed prefixes preserve hidden URI authority and escape only
     try std.testing.expectEqualStrings("label h|x", screen.row(0, &storage));
     try std.testing.expectEqualStrings("---|---", screen.row(1, &storage));
     try std.testing.expectEqualStrings("\\x1b[31m            │\\xff", screen.row(2, &storage));
+    try std.testing.expectEqualStrings(" ", screen.screen.readCell(19, 2).?.char.grapheme);
     try std.testing.expectEqualStrings("│", screen.screen.readCell(20, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("\\", screen.screen.readCell(21, 2).?.char.grapheme);
     try std.testing.expectEqualStrings("", screen.screen.readCell(20, 2).?.link.uri);
     try std.testing.expectEqualStrings("", screen.screen.readCell(21, 2).?.link.uri);
     try std.testing.expectEqualStrings(uri, screen.screen.readCell(0, 0).?.link.uri);
     try std.testing.expectEqualStrings("", screen.screen.readCell(6, 0).?.link.uri);
     const layout: Layout = .{ .width = 40, .method = .wcwidth };
     const rows = TextRows.init(&document, layout);
+    try std.testing.expectEqual(@as(usize, 3), rows.total);
+    try std.testing.expectEqual(Position{ .offset = 0 }, rows.position(0));
+    try std.testing.expectEqual(Position{ .offset = 0, .row = 1 }, rows.position(1));
+    try std.testing.expectEqual(Position{ .offset = uri.len + "label ".len + 12 }, rows.position(2));
     for (0..rows.total) |row| try std.testing.expectEqual(row, rows.row(rows.position(row)));
     try std.testing.expectEqualStrings(uri ++ "label " ++ raw, document.text());
 }
