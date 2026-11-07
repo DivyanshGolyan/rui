@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from driver import DirectPty, ScreenCapture
 from matrix import run_one
+from scenarios import history_rows
 import host_process
 
 
@@ -43,6 +44,14 @@ finally:
             self.assertIn(payload.hex().encode(), (pathlib.Path(directory) / "output.bin").read_bytes())
             events = [json.loads(line) for line in (pathlib.Path(directory) / "events.jsonl").read_text().splitlines()]
             self.assertEqual([event["event"] for event in events], ["launch", "observed", "input", "retired"])
+
+    def test_history_projection_excludes_only_the_physical_rail_cell(self):
+        screen = ScreenCapture(20, 2)
+        screen.feed("\x1b[?2026h\x1b[1;1HHistory line 080\x1b[1;20H▐"
+                    "\x1b[2;1HHistory line 081\x1b[2;19H▐▐\x1b[?2026l".encode())
+        self.assertEqual(history_rows(screen), ["History line 080", "History line 081  ▐"])
+        self.assertNotEqual(history_rows(screen), ["History line 080", "History line 081"])
+        self.assertNotEqual(history_rows(screen), ["History line 081", "History line 080  ▐"])
 
     def test_open_or_erased_frame_does_not_establish_readiness(self):
         screen = ScreenCapture()

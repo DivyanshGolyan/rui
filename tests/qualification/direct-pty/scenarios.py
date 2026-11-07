@@ -9,6 +9,7 @@ import threading
 import time
 
 from driver import DirectPty, defer_signals
+from terminal_screen import cell_rows
 from host_process import canonical_fixture_root, dispose_all
 import model_fixture as model
 import codex_integration as codex
@@ -204,6 +205,14 @@ def recovery(fixture, row):
     tty.finish()
 
 
+def history_rows(capture):
+    """History lines in the committed source rectangle."""
+    cells = capture.completed_cells
+    assert cells, "history requires a committed screen"
+    rows = cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)
+    return [line.strip() for line in rows if line.strip().startswith("History line ")]
+
+
 def navigation(fixture, row):
     # A real completed answer supplies enough history for page and wheel input
     # to move the viewport; an empty Session cannot distinguish ignored keys.
@@ -225,8 +234,7 @@ def navigation(fixture, row):
         # Session line leave 20 history rows. These literal fixture anchors
         # are independent of Rui's viewport.
         expected = [f"History line {number:03d}" for number in range(first, first + 20)]
-        actual = [line.strip() for line in tty.screen.completed.splitlines()
-                  if line.strip().startswith("History line ")]
+        actual = history_rows(tty.screen)
         assert actual == expected, ("navigation history anchor/distance", actual, expected)
         tty.send(b"\x15")
         tty.draft("", 2)
