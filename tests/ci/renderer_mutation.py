@@ -102,8 +102,8 @@ MUTATIONS = (
              logic("an interrupted OSC keeps the following sequence and key")),
     Mutation("approval-contiguity", "only contiguous delivered Action rows permit approval", "4d5cf8ba",
              "src/TerminalFrame.zig",
-             "if (self.first.order(input.action_seen) != .gt and shown.next.order(input.action_seen) == .gt)",
-             "if (shown.next.order(input.action_seen) == .gt)",
+             "if (self.first.order(input.action_seen) != .gt and next.order(input.action_seen) == .gt)",
+             "if (next.order(input.action_seen) == .gt)",
              logic("Action approval requires contiguous displayed rows and resets after resize")),
     Mutation("consent-freshness", "a pending decoder never grants fresh permission input", "771a8de5",
              "src/SessionScreen.zig", "service != .empty or decoder_pending or blocked",
@@ -173,12 +173,12 @@ MUTATIONS = (
              "if (false and !shown.read) return .{ .row = .selector, .approval = .reading };",
              model("focus")),
     Mutation("frame-publication", "failed frame output cannot advance inspected rows or approval", "4d5cf8ba",
-             "src/SessionScreen.zig", "    try out.writeAll(frame.written());",
-             "    self.action_seen = layout.action_seen;\n    try out.writeAll(frame.written());",
+             "src/SessionScreen.zig", "    try out.writeAll(encoded);",
+             "    self.action_seen = layout.action_seen;\n    try out.writeAll(encoded);",
              model("publication")),
     Mutation("frame-flush-publication", "accepted writes without successful flush cannot certify a frame", "4d5cf8ba",
-             "src/SessionScreen.zig", "    try out.writeAll(frame.written());\n    try out.flush();",
-             "    try out.writeAll(frame.written());\n    self.action_seen = layout.action_seen;\n    try out.flush();",
+             "src/SessionScreen.zig", "    try out.writeAll(encoded);\n    try out.flush();",
+             "    try out.writeAll(encoded);\n    self.action_seen = layout.action_seen;\n    try out.flush();",
              model("publication")),
 )
 
@@ -258,7 +258,7 @@ def run_check(check, root, log, timeout, environment):
         try:
             receipt = json.loads(receipt_path.read_text())
             binary = Path(receipt["binary"])
-            valid = (receipt["source"] == str(root) and
+            valid = (root.samefile(receipt["source"]) and
                      receipt["selector"] == check.name.removeprefix("TD1 sequence model ") and
                      receipt["source_unchanged"] is True and
                      receipt["overlay_unchanged"] is True and

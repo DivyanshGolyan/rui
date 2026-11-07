@@ -225,22 +225,35 @@ static int command_return_signal(int fd, const void *bytes, size_t count) {
     return 0;
 }
 
+/* One bounded accepted-byte observer, independent of attempted write sizes. */
+struct consent_frame { size_t choice, end; int saw_choice; };
+static int consent_frame_accepted(struct consent_frame *frame, const void *bytes, size_t count) {
+    const char *choice = "Allow";
+    const char *end = "\033[?2026l\033]8;;\033\\\033[m";
+    for (size_t i = 0; i < count; ++i) {
+        char byte = ((const char *)bytes)[i];
+        if (!frame->saw_choice) {
+            frame->choice = byte == choice[frame->choice] ? frame->choice + 1 : (byte == choice[0] ? 1 : 0);
+            if (!choice[frame->choice]) frame->saw_choice = 1;
+        } else {
+            if (!end[frame->end]) frame->end = 0;
+            frame->end = byte == end[frame->end] ? frame->end + 1 : (byte == end[0] ? 1 : 0);
+        }
+    }
+    return frame->saw_choice && !end[frame->end];
+}
+
 static void consent_hold(int fd, const void *bytes, size_t count, int last) {
     const int screen = screen_fd(fd);
     const char *fault = getenv("RUI_TERMINAL_FAULT");
-    static int choice = 0, choice_held = 0;
+    static int choice_held = 0;
+    static struct consent_frame frame;
     if (screen != 1 || !fault || strncmp(fault, "consent-", 8)) return;
-    /* The renderer writes only changed cells; "Allow" starts the choice's
-       highlighted option ("Allow once"). Hold after the frame that draws
-       it completes. */
-    static size_t matched = 0;  /* Writes may split the word. */
-    for (size_t i = 0; !choice && i < count; ++i) {
-        char byte = ((const char *)bytes)[i];
-        matched = byte == "Allow"[matched] ? matched + 1 : (byte == 'A' ? 1 : 0);
-        if (matched == 5) choice = 1;
-    }
-    if (last && choice && !choice_held && count >= 8 &&
-        !memcmp((const char *)bytes + count - 8, "\033[?2026l", 8)) {
+    /* Pixel visibility ends at sync-reset, but full delivery includes the
+       OSC8-close and SGR postlude. Hold before the final native write returns:
+       no delivered receipt exists yet, even though every byte was accepted. */
+    int complete = consent_frame_accepted(&frame, bytes, count);
+    if (last && complete && !choice_held) {
         choice_held = 1;
         record("choice-output-complete\n");
         while (access(getenv("RUI_TERMINAL_CHOICE_RELEASE"), F_OK)) usleep(1000);
@@ -278,11 +291,14 @@ static ssize_t probe_writev(int fd, const struct iovec *iov, int count) {
         }
     }
     ssize_t written = real_writev(fd, iov, count);
-    size_t total = 0;
-    for (int i = 0; i < count; ++i) total += iov[i].iov_len;
-    if (written >= 0 && (size_t)written == total) {
+    if (written > 0) {
         int saved = errno;
-        for (int i = 0; i < count; ++i) consent_hold(fd, iov[i].iov_base, iov[i].iov_len, i == count - 1);
+        size_t left = (size_t)written;
+        for (int i = 0; i < count && left; ++i) {
+            size_t accepted = left < iov[i].iov_len ? left : iov[i].iov_len;
+            left -= accepted;
+            consent_hold(fd, iov[i].iov_base, accepted, left == 0);
+        }
         errno = saved;
     }
     return written;
@@ -397,6 +413,8 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
     const char *marker = "VISIBLE-CANCEL-PREFIX";
     /* Hold only after the frame carrying the marker closes: a terminal
        shows a synchronized frame only once its end arrives. */
+    /* This is pixel visibility, deliberately earlier than full-frame consent
+       delivery: do not substitute the neutral postlude used by consent_hold. */
     const char *frame_end = "\033[?2026l";
     static size_t matched = 0, ended = 0;
     static int visible = 0, shown = 0, stream_held = 0;
@@ -442,7 +460,7 @@ static ssize_t probe_write(int fd, const void *bytes, size_t count) {
             }
         }
     }
-    if (result == (ssize_t)count) consent_hold(fd, bytes, count, 1);
+    if (result > 0) consent_hold(fd, bytes, (size_t)result, 1);
     static int blocked = 0, progressed = 0;
     if (screen == 1 && pressure_stopped && result < 0 && saved_errno == EAGAIN && !blocked) {
         blocked = 1;
@@ -903,6 +921,54 @@ int main(int argc, char **argv) {
     return 0;
 }
 """
+
+
+def check_consent_frame_boundary(state):
+    """Compile the actual tiny observer; feed independently specified boundaries."""
+    observer = PROBE[PROBE.index("struct consent_frame {"):PROBE.index("static void consent_hold(")]
+    driver = r"""
+#include <assert.h>
+#include <stddef.h>
+#include <string.h>
+OBSERVER
+int main(void) {
+    const char frame[] = "cells Allow once\033[?2026l\033]8;;\033\\\033[m";
+    const size_t n = sizeof(frame) - 1;
+    /* Every split across syscalls/iovecs, including one accepted byte at a time. */
+    for (size_t split = 0; split < n; ++split) {
+        struct consent_frame state = {0};
+        assert(!consent_frame_accepted(&state, frame, split));
+        assert(consent_frame_accepted(&state, frame + split, n - split));
+    }
+    struct consent_frame partial = {0};
+    for (size_t at = 0; at < n - 1; ++at)
+        assert(!consent_frame_accepted(&partial, frame + at, 1));
+    /* Attempted final byte is NOT accepted: completion must stay false. */
+    assert(!consent_frame_accepted(&partial, frame + n - 1, 0));
+    assert(consent_frame_accepted(&partial, frame + n - 1, 1));
+    const char inner[] = "Allow once\033]8;;\033\\\033[m";
+    struct consent_frame not_end = {0};
+    assert(!consent_frame_accepted(&not_end, inner, sizeof(inner) - 1));
+    const char end[] = "\033[?2026l\033]8;;\033\\\033[m";
+    assert(consent_frame_accepted(&not_end, end, sizeof(end) - 1));
+    struct consent_frame no_choice = {0};
+    assert(!consent_frame_accepted(&no_choice, end, sizeof(end) - 1));
+    /* Each missing postlude byte is independently insufficient. */
+    for (size_t drop = n - (sizeof(end) - 1); drop < n; ++drop) {
+        char missing[sizeof(frame)];
+        memcpy(missing, frame, drop);
+        memcpy(missing + drop, frame + drop + 1, n - drop - 1);
+        struct consent_frame state = {0};
+        assert(!consent_frame_accepted(&state, missing, n - 1));
+    }
+    return 0;
+}
+""".replace("OBSERVER", observer)
+    source, executable = state / "frame-boundary.c", state / "frame-boundary"
+    source.write_text(driver)
+    subprocess.run(["cc", str(source), "-o", str(executable)], check=True)
+    subprocess.run([str(executable)], check=True)
+    print("frame-boundary: accepted split/partial postlude oracle passed", flush=True)
 
 
 def check_forwarding(state, library):
@@ -2411,13 +2477,69 @@ def startup_reporting_cases(state, library):
             )
 
 
+def visible_stream_hook_boundary(state, library):
+    """Exercise the real interposer with pre-arm, partial and committed frames."""
+    source, executable = state / "visible-hook.c", state / "visible-hook"
+    arm, log = state / "visible-hook-arm", state / "visible-hook.log"
+    source.write_text(r"""
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+#define SEND(s) do { const char *p = (s); if (write(1, p, strlen(p)) != (ssize_t)strlen(p)) return __LINE__; } while (0)
+int main(int argc, char **argv) {
+    if (argc != 2) return 1;
+    SEND("\033[?2026h\033[H\033[2JVISIBLE-CANCEL-PREFIX\033[?2026l");
+    int fd = open(argv[1], O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0 || close(fd)) return 2;
+    /* The unchanged pre-arm marker remains on screen, but no marker bytes
+       were accepted after arming. An unrelated complete frame also passes. */
+    SEND("\033[?2026h\033[?2026l");
+    SEND("\033[?2026h\033[H\033[2Jno marker\033[?2026l");
+    SEND("\033[?2026h\033[H\033[2JVISIBLE-");
+    SEND("CANCEL-");
+    SEND("PREFIX");
+    /* Split accepted writes must match, but not hold an unclosed frame. */
+    SEND(" progress");
+    SEND("\033[?20");
+    SEND("26l");
+    errno = 0;
+    if (write(1, "blocked", 7) != -1 || errno != EAGAIN) return 3;
+    return 0;
+}
+""")
+    subprocess.run(["cc", str(source), "-o", str(executable)], check=True)
+    master, slave = open_pty()
+    caller = None
+    try:
+        caller = subprocess.Popen([str(executable), str(arm)], stdin=slave, stdout=slave,
+            stderr=subprocess.PIPE, env={**os.environ, os_semantics.PRELOAD: str(library),
+                "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "visible-stream",
+                "RUI_TERMINAL_STREAM_ARM": str(arm)})
+        result = caller.wait(timeout=5)
+        assert result == 0, (result, caller.stderr.read())
+        capture = human.terminal_capture(master, fresh=True)
+        frames = []
+        capture.listener = lambda frame, x, y: frames.append(frame)
+        while select.select([master], [], [], 0)[0]:
+            capture.feed(os.read(master, 65536))
+        assert len(frames) == 4, frames
+        assert "VISIBLE-CANCEL-PREFIX" in frames[0] and "VISIBLE-CANCEL-PREFIX" in frames[1], frames
+        assert "no marker" in frames[2] and "VISIBLE-CANCEL-PREFIX progress" in frames[3], frames
+        assert log.read_text().splitlines() == ["visible-prefix-written", "visible-frame-closed", "visible-stream-held"]
+        print("visible stream hook: pre-arm, unclosed-frame and held-write controls passed", flush=True)
+    finally:
+        dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
+            lambda: human.forget_terminal(master), lambda: os.close(master), lambda: os.close(slave))
+
+
 def visible_stream_handoff_cases(state, library):
     """A command during held visible output waits, then runs once."""
     marker = "VISIBLE-CANCEL-PREFIX"
-    # The marker opens and closes the content: views from the top (history,
-    # details) and from the end (opening, live) both draw it first.
+    # The marker opens and closes the content: views from the top (details)
+    # and from the end (opening, live) both draw it first.
     long = marker + "\n" + "complete saved content\n" * 240 + marker + "\nVISIBLE-END"
-    for phase in ("opening", "activity", "history", "details", "interrupt", "completion", "permission"):
+    for phase in ("opening", "activity", "details", "interrupt", "completion", "permission"):
         root = state / f"visible-{phase}"
         root.mkdir()
         home, store = root / "home", root / "store"
@@ -2425,8 +2547,6 @@ def visible_stream_handoff_cases(state, library):
         text = json.dumps({"cmd": "echo " + marker + " # " + "x" * 6000, "timeout_ms": 1000, "description": "Print visible permission marker"})
         responses = [fixture.sse_tool_calls("visible", [("bash", "visible-call", text)])] if phase == "permission" else [
             fixture.sse_answer("visible", "visible-r", "visible-m", long)[0]]
-        if phase == "history":
-            responses += [fixture.sse_answer(f"short-{i}", f"short-{i}-r", f"short-{i}-m", "OPENING-READY")[0] for i in range(8)]
         endpoint = fixture.SuccessEndpoint(responses)
         thread = threading.Thread(target=endpoint.serve_forever)
         thread.start()
@@ -2450,10 +2570,10 @@ def visible_stream_handoff_cases(state, library):
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "visible-stream", "RUI_TERMINAL_STREAM_ARM": str(arm)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             if phase != "opening":
-                ready = "VISIBLE-END" if phase == "details" else "OPENING-READY" if phase == "history" else "› "
+                ready = "VISIBLE-END" if phase == "details" else "› "
                 human.read_terminal(master, ready, composer=True)
                 arm.touch()
-                os.write(master, (f"/{phase}\n" if phase in ("history", "details") else "produce content\n").encode())
+                os.write(master, (f"/{phase}\n" if phase == "details" else "produce content\n").encode())
             human.read_terminal(master, marker)
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             if phase == "completion":
@@ -2528,6 +2648,197 @@ def visible_stream_handoff_cases(state, library):
                 lambda: stop_process(caller, timeout=5) if caller is not None else None,
                 lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
                 lambda: os.close(master), lambda: os.close(slave),
+                lambda: fixture.stop_host(host) if host is not None else None,
+                endpoint.shutdown, endpoint.server_close, join_endpoint,
+            )
+
+
+def held_history_owner_case(state, binary):
+    """The filtered native owner test uses a private, provider-free real Host."""
+    assert binary, "visible-stream requires RUI_TEST_HELD_OWNER"
+    binary = pathlib.Path(binary)
+    assert binary.is_absolute() and binary.is_file(), ("invalid held owner artifact", binary)
+    root = state / "held-history-owner"
+    root.mkdir(mode=0o700)
+    home, store = root / "home", root / "store"
+    home.mkdir(mode=0o700)
+    host = fixture.start_host(store, None)
+    try:
+        session = human.admit(home, "session", "configure", "--store", store,
+            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
+        # An idle stop is a canonical, provider-free activity record. It
+        # gives the real history reader something to show without launching a model.
+        seed = human.admit(home, "session", "stop", "--store", store, "--session", session)["admission"]
+        assert seed["answer"]["status"] == "accepted", seed
+        assert seed["answer"]["selection"]["turn"] is None, seed
+        assert seed["completion"]["status"] == "completed", seed
+        result = subprocess.run([str(binary)], env={**os.environ, "HOME": str(home),
+            "RUI_TEST_HELD_STORE": str(store), "RUI_TEST_HELD_SESSION": session,
+            "RUI_TEST_HELD_HOME": str(home)}, capture_output=True, timeout=60)
+        output = result.stdout + result.stderr
+        assert result.returncode == 0, (result.returncode, output[-8192:])
+        assert output.count(b"held-history-owner: real status completed") == 1, output[-8192:]
+        print("held history owner: real Host status dispatch and input custody passed", flush=True)
+    finally:
+        fixture.stop_host(host)
+
+
+def visible_history_backpressure_cases(state, library):
+    """Committed oldest history precedes actual PTY EAGAIN, not a marker hook."""
+    for blocked in (True, False):
+        root = state / ("visible-history-blocked" if blocked else "visible-history-unblocked")
+        root.mkdir(mode=0o700)
+        home, store = root / "home", root / "store"
+        home.mkdir(mode=0o700)
+        marker = "HISTORY-OLDEST-ONLY-2741"
+        responses = [fixture.sse_answer(f"history-{i}", f"history-{i}-r", f"history-{i}-m",
+            marker if i == 0 else f"compact history answer {i}")[0] for i in range(8)]
+        endpoint = fixture.SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever)
+        thread.start()
+        host = caller = None
+        master, slave = open_pty(rows=24)
+        output_master, output_slave = open_pty(rows=24)
+        original = termios.tcgetattr(slave)
+        flags = {fd: fcntl.fcntl(fd, fcntl.F_GETFL) for fd in (slave, output_slave)}
+        arm, log = root / "arm", root / "probe.log"
+        capture = human.terminal_capture(output_master)
+        raw = bytearray()
+        phase = "seed history"
+
+        def feed(chunk):
+            raw.extend(chunk)
+            del raw[:-65536]
+            capture.feed(chunk)
+
+        def probe():
+            if not log.exists():
+                return b""
+            with log.open("rb") as source:
+                return source.read(4096)
+
+        def wait_screen(predicate, description):
+            nonlocal phase
+            phase = description
+            fixture.wait_for(human.draining(output_master, predicate, feed=feed), description, timeout=15)
+
+        def history_ready():
+            return (not capture.synchronized and human.history_selected(capture.completed,
+                capture.screen.cursor.x, capture.screen.cursor.y))
+
+        def oldest_ready():
+            return history_ready() and human.exact_railed_row(capture, marker)
+
+        def records():
+            return {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
+
+        def permission():
+            return fixture.command("session", "inspect", "--store", store,
+                "--session", session)["session"]["permission_mode"]
+
+        try:
+            host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+            session = human.admit(home, "session", "configure", "--store", store,
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol",
+                "--permission-mode", "ask")["admission"]["answer"]["session"]
+            for i in range(8):
+                admission = human.admit(home, "session", "send", "--store", store,
+                    "--to", session, input=f"saved history input {i}")
+                fixture.wait_for(lambda: fixture.completed_observation(store, admission["request"]),
+                    "saved compact history answer")
+            assert len(endpoint.requests) == 8
+            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+                "--", session], stdin=slave, stdout=output_slave, stderr=subprocess.PIPE,
+                env={**os.environ, "HOME": str(home), "TERM": "xterm-256color",
+                    os_semantics.PRELOAD: str(library), "RUI_TERMINAL_FAULT": "renderer-backpressure",
+                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_BACKPRESSURE_ARM": str(arm)})
+            wait_screen(lambda: capture.draft("", 2), "history opening composer")
+            assert not human.exact_railed_row(capture, marker), ("oldest answer already in opening", capture.completed)
+            generation = capture.generation
+            os.write(master, b"/history\n")
+            wait_screen(lambda: capture.generation > generation and history_ready(), "real history command committed")
+            for page in range(24):
+                if oldest_ready():
+                    break
+                generation = capture.generation
+                previous = capture.completed
+                os.write(master, b"\x1b[5~")
+                wait_screen(lambda: capture.generation > generation and capture.completed != previous and history_ready(),
+                    f"history PgUp {page + 1} committed")
+            assert oldest_ready(), capture.completed
+            before = records()
+            assert permission() == "ask"
+            if blocked:
+                arm.touch()
+            generation = capture.generation
+            assert os.write(master, b"x") == 1  # Force a real redraw of this history frame.
+            if blocked:
+                phase = "history redraw actual kernel EAGAIN"
+                fixture.wait_for(lambda: b"output-blocked\n" in probe(), phase)
+            else:
+                wait_screen(lambda: capture.generation > generation and capture.draft("x", 3) and
+                    human.looking_back(capture.completed) and human.exact_railed_row(capture, marker),
+                    "unblocked history draft redraw")
+                assert b"output-blocked\n" not in probe(), probe()
+            command = b"\x15/configure --permission-mode bypass\n"
+            phase = "queued Configure while history output held" if blocked else "unblocked Configure"
+            assert os.write(master, command) == len(command)
+            if blocked:
+                # Canonical reads happen with credit still withheld. The independent
+                # owner test proves dispatch/input custody, without a timing claim here.
+                assert permission() == "ask"
+                assert records() == before, "held history captured a pending command"
+                assert len(endpoint.requests) == 8, "held history restarted provider work"
+                assert caller.poll() is None and probe().count(b"output-blocked\n") == 1
+                assert capture.generation == generation, "blocked history redraw committed"
+                termios.tcflow(output_slave, termios.TCOON)
+            wait_screen(lambda: "Configured." in capture.completed.split("\n") and capture.draft("", 2),
+                "Configure accepted notice after history")
+            assert permission() == "bypass"
+            after = records()
+            assert all(after.get(path) == content for path, content in before.items())
+            added = set(after) - set(before)
+            assert len(added) == 1, ("Configure capture count", added)
+            captured, = added
+            record = json.loads(after[captured])
+            assert record["kind"] == "configure", record
+            observed = fixture.command("request", "inspect", "--store", store, "--key", record["key"])
+            assert observed["observation"]["status"] == "accepted", observed
+            assert observed["observation"]["revision"] == "2", observed
+            assert len(endpoint.requests) == 8, "history Configure restarted provider work"
+            phase = "exit history terminal"
+            os.write(master, b"\x03")
+            tail, errors = human.terminal_exit(caller, output_master)
+            feed(tail)
+            assert caller.returncode == 0 and not errors, (caller.returncode, errors[-4096:])
+            assert records() == after, "history Configure captured more than once"
+            assert len(endpoint.requests) == 8, "history exit restarted provider work"
+            assert probe().count(b"output-blocked\n") == int(blocked), probe()
+            assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
+            for fd, expected in flags.items():
+                assert_file_flags(fcntl.fcntl(fd, fcntl.F_GETFL), expected)
+            print("visible history: " + ("actual kernel EAGAIN defers Configure until TCOON" if blocked
+                else "unblocked negative runs Configure without output credit release") +
+                "; one accepted capture, no provider rerun", flush=True)
+        finally:
+            if sys.exception() is not None:
+                preserve_failure_metadata(root / "history-failure.json", lambda: {
+                    "phase": phase, "blocked": blocked, "raw_hex": bytes(raw).hex(),
+                    "screen": capture.completed, "generation": capture.generation,
+                    "probe": probe().decode(errors="replace"),
+                    "returncode": caller.poll() if caller is not None else None})
+
+            def join_endpoint():
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+
+            dispose_all(
+                lambda: termios.tcflow(output_slave, termios.TCOON),
+                lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                lambda: termios.tcflush(output_slave, termios.TCOFLUSH),
+                lambda: termios.tcflush(slave, termios.TCIFLUSH),
+                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
+                *(lambda fd=fd: os.close(fd) for fd in (master, slave, output_master, output_slave)),
                 lambda: fixture.stop_host(host) if host is not None else None,
                 endpoint.shutdown, endpoint.server_close, join_endpoint,
             )
@@ -3166,7 +3477,7 @@ def native_notice_cases(state):
             dispose_all(lambda: os.close(reader), lambda: os.close(writer))
 
 
-def main(selected=None):
+def main(selected=None, *, held_owner=None):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
     home.mkdir()
@@ -3187,6 +3498,10 @@ def main(selected=None):
         source, library = state / "probe.c", state / "probe.so"
         source.write_text(PROBE)
         subprocess.run(os_semantics.shared_library_command(source, library), check=True)
+        check_consent_frame_boundary(state)
+        if selected == "frame-boundary":
+            completed = True
+            return
         check_forwarding(state, library)
         if selected == "forwarding":
             completed = True
@@ -3243,8 +3558,15 @@ def main(selected=None):
         if selected == "startup":
             completed = True
             return
+        if selected == "held-history-owner":
+            held_history_owner_case(state, held_owner)
+            completed = True
+            return
         if selected in (None, "visible-stream"):
+            visible_stream_hook_boundary(state, library)
             visible_stream_handoff_cases(state, library)
+            visible_history_backpressure_cases(state, library)
+            held_history_owner_case(state, held_owner)
         if selected == "visible-stream":
             completed = True
             return
@@ -3269,5 +3591,6 @@ def main(selected=None):
 
 
 if __name__ == "__main__":
+    held_owner = os.environ.get("RUI_TEST_HELD_OWNER")
     host_process.enter()
-    main(sys.argv[2] if len(sys.argv) == 3 else None)
+    main(sys.argv[2] if len(sys.argv) == 3 else None, held_owner=held_owner)

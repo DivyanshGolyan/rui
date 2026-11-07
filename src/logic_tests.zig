@@ -6,6 +6,7 @@ const core_boundary = @import("core_boundary.zig");
 /// each one listed here and runs its tests, and selector tests require each
 /// to select test-logic.
 const cores = .{
+    .{ "RenderGeometry.zig", @import("RenderGeometry.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
     .{ "word_search.zig", @import("word_search.zig") },
     .{ "attempt.zig", @import("attempt.zig") },
@@ -36,6 +37,7 @@ const cores = .{
     .{ "json_ascii.zig", @import("json_ascii.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
     .{ "keymap.zig", @import("keymap.zig") },
+    .{ "markdown_prefix.zig", @import("markdown_prefix.zig") },
     .{ "mcp/arguments.zig", @import("mcp/arguments.zig") },
     .{ "mcp/document.zig", @import("mcp/document.zig") },
     .{ "mcp/EventStream.zig", @import("mcp/EventStream.zig") },
@@ -49,6 +51,7 @@ const cores = .{
     .{ "model_list.zig", @import("model_list.zig") },
     .{ "model_picker.zig", @import("model_picker.zig") },
     .{ "models_dev.zig", @import("models_dev.zig") },
+    .{ "output_blocks.zig", @import("output_blocks.zig") },
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },
@@ -67,6 +70,7 @@ const cores = .{
     .{ "status_page.zig", @import("status_page.zig") },
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
+    .{ "table_row.zig", @import("table_row.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "transport_policy.zig", @import("transport_policy.zig") },
     .{ "turn_policy.zig", @import("turn_policy.zig") },
@@ -118,7 +122,7 @@ test "functional cores stay within the core boundary" {
 /// Every core as `importer` spells its import: relative within its own
 /// directory, else up to `src/` and down.
 fn importNames(comptime importer: []const u8) [cores.len][]const u8 {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(20_000);
     const directory = importer[0..if (std.mem.lastIndexOfScalar(u8, importer, '/')) |slash| slash + 1 else 0];
     var up: []const u8 = "";
     for (0..std.mem.count(u8, directory, "/")) |_| up = up ++ "../";
@@ -296,7 +300,7 @@ fn nanosecondsNow() u64 {
     return @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds);
 }
 
-test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 over it" {
+test "overview benchmark: merging a 10,000-row listing and computing its layout" {
     const total = 10_000;
     const runs = 5;
     const now_s = 1_792_937_000;
@@ -304,9 +308,9 @@ test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 ove
     defer std.testing.allocator.free(rows);
     var merge_ns: [runs]u64 = undefined;
     var listing_ns: [runs]u64 = undefined;
-    var render_ns: [runs]u64 = undefined;
+    var layout_ns: [runs]u64 = undefined;
     var merge_allocations: usize = 0;
-    var render_allocations: usize = 0;
+    var layout_allocations: usize = 0;
     for (0..runs) |run| {
         var counting: CountingAllocator = .{ .child = std.heap.smp_allocator };
         var state: overview_view.State = undefined;
@@ -327,16 +331,16 @@ test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 ove
 
         _ = try overview_view.step(&state, .{ .resized = .{ .width = 200, .height = 60 } });
         counting.count = 0;
-        const render_start = nanosecondsNow();
-        var screen = try overview_view.render(counting.allocator(), &state, .{}, .{}, 0);
-        render_ns[run] = nanosecondsNow() - render_start;
-        render_allocations = @max(render_allocations, counting.count);
-        screen.deinit();
+        const layout_start = nanosecondsNow();
+        const layout = overview_view.layout(&state, 1, 0);
+        try std.testing.expect(layout.list.len() != 0);
+        layout_ns[run] = nanosecondsNow() - layout_start;
+        layout_allocations = @max(layout_allocations, counting.count);
     }
     std.mem.sortUnstable(u64, &merge_ns, {}, std.sort.asc(u64));
     std.mem.sortUnstable(u64, &listing_ns, {}, std.sort.asc(u64));
-    std.mem.sortUnstable(u64, &render_ns, {}, std.sort.asc(u64));
-    std.debug.print("overview benchmark, {d} rows: merging step {d}us median ({d}-{d}); whole listing {d}us median ({d}-{d}), {d} allocations; render 200x60 {d}us median ({d}-{d}), {d} allocations\n", .{
+    std.mem.sortUnstable(u64, &layout_ns, {}, std.sort.asc(u64));
+    std.debug.print("overview benchmark, {d} rows: merging step {d}us median ({d}-{d}); whole listing {d}us median ({d}-{d}), {d} allocations; layout 200x60 {d}us median ({d}-{d}), {d} allocations\n", .{
         total,
         merge_ns[runs / 2] / 1000,
         merge_ns[0] / 1000,
@@ -345,11 +349,31 @@ test "overview benchmark: merging a 10,000-row listing, and rendering 200x60 ove
         listing_ns[0] / 1000,
         listing_ns[runs - 1] / 1000,
         merge_allocations,
-        render_ns[runs / 2] / 1000,
-        render_ns[0] / 1000,
-        render_ns[runs - 1] / 1000,
-        render_allocations,
+        layout_ns[runs / 2] / 1000,
+        layout_ns[0] / 1000,
+        layout_ns[runs - 1] / 1000,
+        layout_allocations,
     });
     try std.testing.expect(merge_allocations <= total);
-    try std.testing.expect(render_allocations <= total);
+    try std.testing.expect(layout_allocations <= total);
+}
+
+test "markdown opacity bounded head cost without a renderer caller" {
+    const prefix = @import("markdown_prefix.zig");
+    const raw = try std.testing.allocator.alloc(u8, prefix.head_limit);
+    defer std.testing.allocator.free(raw);
+    @memset(raw, '`');
+    const Context = prefix.Context;
+    const start = nanosecondsNow();
+    for (0..10_000) |_| std.mem.doNotOptimizeAway(Context.step(.plain, "ordinary", .pending));
+    const ordinary = nanosecondsNow();
+    for (0..10_000) |_| std.mem.doNotOptimizeAway(Context.step(.plain, raw, .limit_cut));
+    const complete = nanosecondsNow();
+    for (0..1000) |_| {
+        for (1..prefix.head_limit + 1) |at| {
+            std.mem.doNotOptimizeAway(Context.step(.plain, raw[0..at], .pending));
+        }
+    }
+    const fragmented = nanosecondsNow();
+    std.debug.print("opacity pure cost: ordinary={d}ns/10000 complete128={d}ns/10000 bytewise128={d}ns/1000 (8256 supplied head bytes/candidate, not render CPU)\n", .{ ordinary - start, complete - ordinary, fragmented - complete });
 }

@@ -21,9 +21,45 @@ INTEGRATION = pathlib.Path(__file__).resolve().parents[2] / "integration"
 sys.path.insert(0, str(INTEGRATION))
 from host_process import dispose_all, stop_process
 from terminal_process import open_pty
-from terminal_screen import ScreenCapture
+from terminal_screen import ScreenCapture, cell_rows
 
 LIMIT = 1024 * 1024
+
+
+def history_rows(capture):
+    """History lines in the committed source rectangle."""
+    cells = capture.completed_cells
+    assert cells, "history requires a committed screen"
+    rows = cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)
+    return [line.strip() for line in rows if line.strip().startswith("History line ")]
+
+
+def lookback(screen):
+    """A transcript has a footer; a selected inspection has a heading."""
+    lines = screen.splitlines()
+    return bool(lines and lines[-1].startswith("Looking back · ")
+                and lines[-1].endswith("Ctrl-End: latest"))
+
+
+def inspection(screen, session):
+    lines = screen.splitlines()
+    return bool(lines and lines[0].startswith("Browsing · ")
+                and f" Status · {session}" in screen)
+
+
+def assert_history_anchor(capture, first, browsing):
+    assert lookback(capture.completed) == browsing, "navigation view changed before ordered marker"
+    assert not capture.completed.startswith("Browsing"), "inspection replaced conversation"
+    # At 80x24 the rule, composer and footer take three rows. In live the
+    # 21st source row is the fixture's final answer marker, not a History line.
+    count = 21 if browsing else 20
+    expected = [f"History line {number:03d}" for number in range(first, first + count)]
+    actual = history_rows(capture)
+    assert actual == expected, ("navigation history anchor/distance", actual, expected)
+    cells = capture.completed_cells
+    source = cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)
+    ending = sum(line.strip() == "TD4 history end" for line in source)
+    assert ending == (0 if browsing else 1), ("navigation end marker", ending)
 
 
 def assert_file_flags(actual, expected):

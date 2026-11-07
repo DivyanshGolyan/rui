@@ -1,6 +1,8 @@
 //! Bounded public Activity presentation with one forward-only content pass.
 //! A failed stream may leave a visible prefix; the terminal owner must not retry it.
 const std = @import("std");
+const OutputBlocks = @import("output_blocks.zig");
+const Markdown = @import("markdown_prefix.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
@@ -365,9 +367,17 @@ pub fn UserBody(comptime Sink: type) type {
         line_blank: bool = true,
         shown: usize = 0,
         nonblank: u64 = 0,
+        blocks: ?OutputBlocks.Sink = null,
+        quote_context: Markdown.Context = .plain,
+        quote_head: u8 = 0,
+        quote_stream: bool = false,
+        quote_active: bool = false,
 
         pub fn init(self: *Self, sink: Sink, length: u64, whole: bool) !void {
-            self.* = .{ .out = .{ .sink = sink }, .escaped = undefined, .length = length, .whole = whole };
+            return self.initBlocks(sink, length, whole, null);
+        }
+        pub fn initBlocks(self: *Self, sink: Sink, length: u64, whole: bool, blocks: ?OutputBlocks.Sink) !void {
+            self.* = .{ .out = .{ .sink = sink }, .escaped = undefined, .length = length, .whole = whole, .blocks = blocks };
             self.escaped = .{ .sink = &self.out, .text = .{ .mode = .multiline } };
             try self.out.feed(Mark.body);
         }
@@ -375,7 +385,7 @@ pub fn UserBody(comptime Sink: type) type {
         pub fn feed(self: *Self, bytes: []const u8) anyerror!void {
             self.received += bytes.len;
             if (self.received > self.length) return error.ContentLengthMismatch;
-            if (self.whole) return self.escaped.feed(bytes);
+            if (self.whole) return self.quoteFeed(bytes);
             if (self.length <= collapse_bytes) {
                 @memcpy(self.small[self.received - bytes.len ..][0..bytes.len], bytes);
                 return;
@@ -388,13 +398,14 @@ pub fn UserBody(comptime Sink: type) type {
             if (self.received != self.length) return error.ContentLengthMismatch;
             var collapsed = false;
             if (self.whole) {
-                try self.escaped.finish();
+                try self.quoteFinish(.canonical_eof);
             } else if (self.length <= collapse_bytes and !collapses(self.small[0..self.length])) {
-                try self.escaped.feed(self.small[0..beforeBlankLines(self.small[0..self.length])]);
-                try self.escaped.finish();
+                const end = beforeBlankLines(self.small[0..self.length]);
+                try self.quoteFeed(self.small[0..end]);
+                try self.quoteFinish(if (end < self.length and self.small[end] == '\n') .line_feed else .canonical_eof);
             } else {
                 if (self.length <= collapse_bytes) try self.scan(self.small[0..self.length]);
-                try self.endLine();
+                try self.endLine(.canonical_eof);
                 if (self.shown != 0) try self.out.feed("\n");
                 try self.out.feed(Mark.summary);
                 var count: [32]u8 = undefined;
@@ -411,10 +422,64 @@ pub fn UserBody(comptime Sink: type) type {
             return collapsed;
         }
 
+        fn beginQuote(self: *Self, quote: ?Markdown.Quote) !void {
+            const capability = self.blocks orelse return;
+            if (quote) |value| {
+                try self.escaped.finish();
+                // Emit the existing user indentation before the annotation;
+                // raw quote coordinates then begin at the actual marker.
+                if (self.out.line_start) try self.out.feed(Mark.body);
+                self.quote_active = try capability.send(.{ .quote = value });
+            }
+        }
+        fn endQuote(self: *Self) !void {
+            if (self.quote_active) {
+                try self.escaped.finish();
+                _ = try self.blocks.?.send(.{ .quote = null });
+                self.quote_active = false;
+            }
+        }
+        fn resolveQuote(self: *Self, line_ending: Markdown.HeadEnding) !bool {
+            const decision = switch (self.quote_context.step(self.line[0..self.quote_head], line_ending)) {
+                .need_more => return false,
+                .resolved => |value| value,
+            };
+            self.quote_context = decision.next;
+            try self.beginQuote(decision.projection.quote);
+            try self.escaped.feed(self.line[0..self.quote_head]);
+            self.quote_head = 0;
+            self.quote_stream = true;
+            return true;
+        }
+        fn quoteFeed(self: *Self, bytes: []const u8) !void {
+            if (self.blocks == null) return self.escaped.feed(bytes);
+            for (bytes) |byte| {
+                if (!self.quote_stream) {
+                    if (byte != '\n') {
+                        self.line[self.quote_head] = byte;
+                        self.quote_head += 1;
+                        if (!try self.resolveQuote(if (self.quote_head == Markdown.head_limit) .limit_cut else .pending)) continue;
+                        continue;
+                    }
+                    _ = try self.resolveQuote(.line_feed);
+                }
+                try self.escaped.feed(&.{byte});
+                if (byte == '\n') {
+                    try self.endQuote();
+                    self.quote_stream = false;
+                }
+            }
+        }
+        fn quoteFinish(self: *Self, line_ending: Markdown.HeadEnding) !void {
+            if (!self.quote_stream and self.quote_head != 0) _ = try self.resolveQuote(line_ending);
+            try self.escaped.finish();
+            try self.endQuote();
+        }
+
         fn scan(self: *Self, bytes: []const u8) !void {
             for (bytes) |byte| {
                 if (byte == '\n') {
-                    try self.endLine();
+                    try self.endLine(.line_feed);
                     continue;
                 }
                 if (!blank(byte)) self.line_blank = false;
@@ -423,11 +488,13 @@ pub fn UserBody(comptime Sink: type) type {
             }
         }
 
-        fn endLine(self: *Self) !void {
+        fn endLine(self: *Self, line_ending: Markdown.HeadEnding) !void {
             defer {
                 self.line_bytes = 0;
                 self.line_blank = true;
             }
+            const projection = if (self.blocks != null) self.quote_context.step(self.line[0..@intCast(@min(self.line_bytes, Markdown.head_limit))], if (self.line_bytes >= Markdown.head_limit) .limit_cut else line_ending).resolved else null;
+            if (projection) |value| self.quote_context = value.next;
             if (self.line_blank) return;
             self.nonblank += 1;
             if (self.shown == preview_lines) return;
@@ -435,8 +502,10 @@ pub fn UserBody(comptime Sink: type) type {
             self.shown += 1;
             const kept = self.line[0..@intCast(@min(self.line_bytes, self.line.len))];
             const cut = if (self.line_bytes <= preview_bytes) kept.len else graphemeCut(kept, preview_bytes);
+            if (projection) |value| try self.beginQuote(value.projection.quote);
             try self.escaped.feed(kept[0..cut]);
             try self.escaped.finish();
+            try self.endQuote();
             if (cut != kept.len) try self.out.feed(Mark.reset ++ Mark.summary ++ "…" ++ Mark.reset ++ Mark.body);
         }
     };
@@ -598,7 +667,7 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
     return switch (code) {
         .unresolved => .{ .glyph = "•", .suffix = "", .style = .quiet },
         .pending_permission => .{ .glyph = "?", .suffix = "", .style = .attention },
-        .succeeded => .{ .glyph = "✓", .suffix = "", .style = .normal },
+        .succeeded => .{ .glyph = "✓", .suffix = "", .style = .quiet },
         .denied => .{ .glyph = "•", .suffix = " — Denied", .style = .normal },
         .unknown_tool => .{ .glyph = "•", .suffix = " — Rejected: unknown tool", .style = .normal },
         .invalid_arguments => .{ .glyph = "•", .suffix = " — Rejected: invalid arguments", .style = .normal },
@@ -620,11 +689,11 @@ pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colou
 fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool, exit: []const u8) !void {
     const state = toolState(presentation.code);
     if (separate) try sink.feed("\n");
+    try sink.feed("  ");
     try sink.feed(state.style.code(colour));
     try sink.feed(state.glyph);
-    try sink.feed(Style.normal.code(colour));
     try sink.feed(" ");
-    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink };
+    var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .prefix = "    " };
     var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .label } };
     try escaped.feed(if (presentation.description) |label| label.slice() else "Tool call");
     try escaped.finish();
@@ -635,6 +704,7 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
         try indented.feed(")");
     }
     try indented.finish();
+    try sink.feed(Style.normal.code(colour));
     try sink.feed("\n");
 }
 
@@ -662,7 +732,7 @@ pub const Live = struct {
         const entry = self.entries[index];
         const state = toolState(entry.presentation.code);
         var writer = std.Io.Writer.fixed(buffer);
-        try writer.print("{s} ", .{state.glyph});
+        try writer.print("  {s} ", .{state.glyph});
         var text: Text = .{ .mode = .label };
         try text.feed(&writer, if (entry.presentation.description) |label| label.slice() else "Tool call");
         try text.finish(&writer);
@@ -675,6 +745,54 @@ pub const Live = struct {
         return toolState(self.entries[index].presentation.code).style;
     }
 };
+
+test "routine tools stay subordinate in every state without colouring assistant prose" {
+    const Viewport = @import("ConversationViewport.zig");
+    const vaxis = @import("vaxis");
+    const Sink = struct {
+        bytes: [2048]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    for (std.enums.values(protocol.ToolPresentation.Code)) |code| {
+        const expected: Style = switch (code) {
+            .unresolved, .succeeded => .quiet,
+            .pending_permission => .attention,
+            .denied, .unknown_tool, .invalid_arguments => .normal,
+            .failed, .timed_out, .indeterminate, .storage_failed, .spawn_failed, .cancelled, .infrastructure_shutdown => .failure,
+        };
+        var live: Live = .{ .count = 1, .total = 1 };
+        live.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .code = code, .description = .{}, .publication_position = null } };
+        try live.entries[0].presentation.description.?.set("Inspect\x1b[2J");
+        try std.testing.expectEqual(expected, live.style(0));
+        var line: [Live.line_bytes]u8 = undefined;
+        const tray = try live.line(0, &line, "");
+        try std.testing.expect(std.mem.startsWith(u8, tray, "  "));
+        try std.testing.expect(std.mem.indexOf(u8, tray, "Inspect\\x1b[2J") != null);
+        for ([_]bool{ false, true }) |colour| {
+            var sink: Sink = .{};
+            try toolHeading(live.entries[0].presentation, &sink, colour, false);
+            if (colour) {
+                try std.testing.expect(std.mem.startsWith(u8, sink.bytes[0..sink.length], "  "));
+                try std.testing.expectEqualStrings(expected.code(true), sink.bytes[2..][0..expected.code(true).len]);
+                try std.testing.expect(std.mem.endsWith(u8, sink.bytes[0..sink.length], "\x1b[39m\n"));
+            } else try std.testing.expectEqualStrings(tray, std.mem.trimEnd(u8, sink.bytes[0..sink.length], "\n"));
+            try sink.feed("Assistant answer\n");
+            var doc: Viewport.Sized(2048, true) = .{};
+            try doc.append(sink.bytes[0..sink.length]);
+            try doc.prepare();
+            var cells: [160]vaxis.Cell = @splat(.{});
+            var screen: vaxis.Screen = .{ .width = 80, .height = 2, .width_method = .unicode, .buf = &cells };
+            _ = try doc.draw(.{ .screen = &screen, .width = 80, .height = 2, .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0 }, .{}, true, colour, .{}, .{});
+            try std.testing.expectEqualStrings("A", screen.readCell(0, 1).?.char.grapheme);
+            try std.testing.expectEqual(vaxis.Color.default, screen.readCell(0, 1).?.style.fg);
+            try std.testing.expect(!screen.readCell(0, 1).?.style.bold);
+        }
+    }
+}
 
 /// Live conversation and inspection share hanging indentation. Input is already
 /// escaped or rendered; cell layout owns wrapping in the alternate screen.
@@ -1084,10 +1202,22 @@ pub fn Answer(comptime Sink: type) type {
         writer: std.Io.Writer,
         renderer: Renderer,
         failure: ?anyerror = null,
+        capability: ?OutputBlocks.Sink = null,
         pub fn init(self: *@This(), sink: Sink, home: []const u8) void {
-            self.* = .{ .sink = sink, .writer = undefined, .renderer = undefined };
+            self.initBlocks(sink, home, null);
+        }
+        pub fn initBlocks(self: *@This(), sink: Sink, home: []const u8, capability: ?OutputBlocks.Sink) void {
+            self.* = .{ .sink = sink, .writer = undefined, .renderer = undefined, .capability = capability };
             self.writer = .{ .vtable = &.{ .drain = drain }, .buffer = &self.storage };
-            self.renderer = .{ .out = &self.writer, .home = home };
+            self.renderer = .{ .out = &self.writer, .home = home, .blocks = if (capability != null) .{ .context = self, .event = blockEvent } else null };
+        }
+        fn blockEvent(raw: *anyopaque, event: OutputBlocks.Request) anyerror!bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.writer.flush() catch |err| return self.failure orelse err;
+            return self.capability.?.send(event) catch |err| {
+                self.failure = err;
+                return err;
+            };
         }
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
             if (self.failure) |err| return err;
@@ -1127,49 +1257,36 @@ fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
     try sink.feed(try std.fmt.bufPrint(&storage, format, args));
 }
 
-/// Which Message states a read labels. Live output labels none: its next
-/// pages show what became of each Message. A read that stays on screen
-/// labels a stop's exclusion, which lasts, and a queued Message only while
-/// work under way holds the queue (`WorkState.holdsQueue`). A pending
-/// Session acts at once, so that label would be stale at the next frame.
+/// Live output labels none; lasting reads retain only a stop's actionable
+/// exclusion warning. Queue custody is shown elsewhere, not per Message.
 pub const Labels = enum {
     none,
     excluded,
-    excluded_and_queued,
-
-    pub fn lasting(held: bool) Labels {
-        return if (held) .excluded_and_queued else .excluded;
-    }
 };
 
-/// What a Message's state was when read. Only a stop's exclusion asks
-/// something of the person, so only it carries the mark.
+/// Only a stop's exclusion asks something of the person.
 pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state"), labels: Labels) ?[]const u8 {
     if (labels == .none) return null;
     return switch (state) {
-        .applied => null,
-        .queued => if (labels == .excluded_and_queued) "Queued" else null,
+        .applied, .queued => null,
         .excluded => "! Stopped before it ran · send it again to run it",
     };
 }
 
-test "a queued Message is labelled only while work under way holds it" {
-    const working: protocol.WorkState = .{ .working = .{ .since = 1 } };
-    // Opened between admission and the model request that reads it: the
-    // Session is pending, so a label would be stale by the next frame.
-    const starting: protocol.WorkState = .{ .pending = .{ .since = 1 } };
-    try std.testing.expect(messageLabel(.queued, .lasting(starting.holdsQueue())) == null);
-    try std.testing.expectEqualStrings("Queued", messageLabel(.queued, .lasting(working.holdsQueue())).?);
-    // A stop's exclusion asks the person to act whatever the work is doing.
-    try std.testing.expectEqualStrings("! Stopped before it ran · send it again to run it", messageLabel(.excluded, .lasting(false)).?);
-    try std.testing.expect(messageLabel(.applied, .excluded_and_queued) == null);
-    // Live output's next pages say what became of each Message.
+test "only excluded Messages have an actionable lasting label" {
+    try std.testing.expect(messageLabel(.queued, .excluded) == null);
+    try std.testing.expect(messageLabel(.applied, .excluded) == null);
+    try std.testing.expectEqualStrings("! Stopped before it ran · send it again to run it", messageLabel(.excluded, .excluded).?);
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
 }
 
-/// One Message in full, labelled unless applied: live, in the opening and in
-/// a transcript's listing alike.
+/// One Message in full: live, in the opening and in a transcript listing.
+/// Only a lasting stop exclusion carries a per-Message warning.
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool, compact: *bool) !void {
+    return messageBlocks(requests, store, session, item, value, labels, sink, colour, compact, null);
+}
+
+pub fn messageBlocks(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool, compact: *bool, blocks: ?OutputBlocks.Sink) !void {
     if (messageLabel(value.state, labels)) |text| {
         compact.* = false;
         try print(sink, "\n{s}", .{text});
@@ -1179,7 +1296,7 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     compact.* = false;
     try userPrefix(sink, colour, value.admitted_at);
     var body: UserBody(@TypeOf(sink)) = undefined;
-    try body.init(sink, value.content.length, false);
+    try body.initBlocks(sink, value.content.length, false, blocks);
     try content(requests, store, session, item, value.content, &body);
     if (try body.finish()) try noteCollapsed(sink, block);
     try sink.feed("\n");
@@ -1273,17 +1390,15 @@ test "tool header hides all body lines for every outcome and first-line split" {
                 var compact = false;
                 try toolResult(.{ .description = null, .code = case[0], .publication_position = null }, scan.facts(case[0]), &sink, colour, &compact);
                 var expected: Sink = .{};
-                try expected.feed("\n");
-                const glyph_end = std.mem.indexOfScalar(u8, case[1], ' ').?;
+                try expected.feed("\n  ");
                 if (colour) try expected.feed(switch (case[0]) {
-                    .unresolved => "\x1b[90m",
+                    .unresolved, .succeeded => "\x1b[90m",
+                    .denied, .unknown_tool, .invalid_arguments => "\x1b[39m",
                     .pending_permission => "\x1b[33m",
-                    .succeeded, .denied, .unknown_tool, .invalid_arguments => "\x1b[39m",
                     else => "\x1b[91m",
                 });
-                try expected.feed(case[1][0..glyph_end]);
+                try expected.feed(case[1]);
                 if (colour) try expected.feed("\x1b[39m");
-                try expected.feed(case[1][glyph_end..]);
                 try expected.feed("\n");
                 try std.testing.expectEqualStrings(expected.bytes[0..expected.length], sink.bytes[0..sink.length]);
                 try std.testing.expectEqual(case[0] == .succeeded, compact);
@@ -1475,6 +1590,7 @@ pub const Taking = struct {
     /// The newest such Message shown while it waited, at its Admission: its
     /// row never shows live.
     drawn: queued_line.Drawn,
+    blocks: ?OutputBlocks.Sink = null,
     /// A position before the Admission of every such Message that waits at
     /// the page's start, where a stop's search for those it excluded begins;
     /// null when none waits.
@@ -1522,7 +1638,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
         if (!historical and item.value == .stop) {
             compact_tools.* = false;
-            if (from) |position| try excludedAtStop(requests, store, session, item, position, sink, colour);
+            if (from) |position| try excludedAtStop(requests, store, session, item, position, sink, colour, taking.blocks);
         }
         // The sink learns which item its next bytes belong to: some items
         // render nothing, and a read boundary must name the first that does.
@@ -1541,19 +1657,19 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     drawn = .{ .admission = value.admission, .position = item.position };
                     sink.drew(drawn.admission);
                 }
-                try message(requests, store, session, item, value, if (historical) .lasting(page.facts.work.work.state.holdsQueue()) else .none, sink, colour, compact_tools);
+                try messageBlocks(requests, store, session, item, value, if (historical) .excluded else .none, sink, colour, compact_tools, taking.blocks);
             },
             .user => |value| {
                 // Live, another Session's Message showed as its Admission,
                 // and one shown while it waited never shows again.
                 if (!historical and (value.sender != null or value.admission <= drawn.admission)) continue;
-                try message(requests, store, session, item, value, .none, sink, colour, compact_tools);
+                try messageBlocks(requests, store, session, item, value, .none, sink, colour, compact_tools, taking.blocks);
             },
             .assistant => |assistant| {
                 compact_tools.* = false;
                 try sink.feed("\n");
                 var answer: Answer(@TypeOf(sink)) = undefined;
-                answer.init(sink, home);
+                answer.initBlocks(sink, home, taking.blocks);
                 try content(requests, store, session, item, assistant.content, &answer);
                 try answer.finish();
                 try sink.feed("\n");
@@ -1607,7 +1723,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
 /// waiting just before it, at or below its cutoff and admitted after `from`.
 /// One shown while it waited is labelled here too: the stop is what asks the
 /// person to send it again. Their bytes belong to no item.
-fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, from: u64, sink: anytype, colour: bool) !void {
+fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, from: u64, sink: anytype, colour: bool, blocks: ?OutputBlocks.Sink) !void {
     var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .position = from, .kinds = .initOne(.admission) };
     var first = true;
     while (true) {
@@ -1622,7 +1738,7 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
             first = false;
             value.state = .excluded;
             var compact = false;
-            try message(requests, store, session, item, value, .lasting(false), sink, colour, &compact);
+            try messageBlocks(requests, store, session, item, value, .excluded, sink, colour, &compact, blocks);
         }
         cursor = page.continuation() orelse return;
     }
@@ -1650,7 +1766,7 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
         try toolResult(.{ .description = description, .code = call[1], .publication_position = 1 }, .{}, &sink, false, &compact);
     }
     try std.testing.expectEqualStrings(
-        "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n! Find “Io” in ziglang.org/x — Failed\n\n✓ Search the web\n",
+        "\n  ✓ Search “zig 0.17”\n  ✓ Open ziglang.org/x\n\n  ! Find “Io” in ziglang.org/x — Failed\n\n  ✓ Search the web\n",
         sink.bytes[0..sink.length],
     );
 }
@@ -1662,8 +1778,8 @@ test "MCP approval renders object arguments and adopts the same Allow once and D
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Screen);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Screen.Test.init(screen, std.testing.io, &environ, false);
+    defer Screen.Test.deinit(screen);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
@@ -1721,8 +1837,8 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Screen);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Screen.Test.init(screen, std.testing.io, &environ, false);
+    defer Screen.Test.deinit(screen);
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
@@ -1762,4 +1878,48 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     const projection = Consent.project(screen.consent, .{ .action_page = true, .read = true }, false);
     try std.testing.expect(projection.approval == .preview);
     try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
+}
+
+test "queued received Messages retain sources and time without repeated labels; exclusion keeps its warning" {
+    const Sink = struct {
+        bytes: [2048]u8 = undefined,
+        length: usize = 0,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    var source: protocol.NamedPeer = .{ .session = .{} };
+    try source.session.set("9f8e7d");
+    try source.label.set("Review peer");
+    var value: protocol.ActivityItem.Message = .{
+        .admission = 12,
+        .key = .{},
+        .turn = null,
+        .state = .queued,
+        .content = .{ .length = 19, .digest = @splat(0) },
+        .admitted_at = 1_800_000_000,
+        .sender = source,
+    };
+    var item: protocol.ActivityItem = .{ .position = 30, .at = value.admitted_at, .value = .{ .received = value } };
+    var sink: Sink = .{};
+    var compact = false;
+    // The same renderer receives live, opening, listing and echo policies.
+    for ([_]Labels{ .none, .excluded, .excluded, .excluded }) |labels| {
+        try messageBlocks(undefined, "unused", "unused", item, value, labels, &sink, false, &compact, null);
+    }
+    value.state = .excluded;
+    item.value = .{ .received = value };
+    try messageBlocks(undefined, "unused", "unused", item, value, .excluded, &sink, false, &compact, null);
+    const actual = sink.bytes[0..sink.length];
+    var time_buffer: [5]u8 = undefined;
+    const time = clock(value.admitted_at, &time_buffer).?;
+    var row_buffer: [128]u8 = undefined;
+    const row = try std.fmt.bufPrint(&row_buffer, Mark.summary ++ "← Received message from Review peer" ++ Mark.sidenote ++ "{s}" ++ Mark.reset ++ "\n", .{time});
+    var expected: [1024]u8 = undefined;
+    const all = try std.fmt.bufPrint(&expected, "\n{s}{s}{s}{s}\n! Stopped before it ran · send it again to run it\n{s}", .{ row, row, row, row, row });
+    try std.testing.expectEqualStrings(all, actual);
+    try std.testing.expectEqual(@as(usize, 5), std.mem.count(u8, actual, "← Received message from Review peer"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, actual, "! Stopped before it ran"));
+    try std.testing.expect(std.mem.indexOf(u8, actual, "Queued") == null);
 }

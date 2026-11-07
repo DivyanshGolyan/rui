@@ -20,9 +20,20 @@ Enter these at the `›` prompt.
 | `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
+Drafts keep typed `>` quote markers literal.
+When a quoted line wraps, an ASCII quote gutter continues its indentation and depth; very narrow lines wrap literally instead.
+Fenced code does not acquire quote gutters from `>` in its code.
+These display-only continuations never change the text you send.
+
 Tool outcomes in normal conversation show only their description and outcome, with a numeric failed exit when available.
 `/details` escapes the retained tool bytes safely and marks shortened results with `Earlier output omitted`.
 Its raw export command reads the full unchanged saved result.
+
+Assistant answers and saved transcripts show simple pipe tables with up to eight columns, including left/center/right alignment and inline emphasis, code and links.
+Very narrow or oversized rows stay readable as literal, safely escaped source instead of losing cells.
+Quoted lines retain their original first-row markers and continue with an ASCII `>` gutter when they wrap; fenced code stays literal.
+Your submitted Messages get quote gutters too, but their Markdown emphasis and tables stay literal.
+Copy/export still uses the original saved bytes, not the visual columns or generated gutters.
 
 Upgrade installs the latest published stable release and restarts the selected Store's Host only if it is already running and its launch is supported.
 Restart affects all Sessions in that Store and may interrupt work; no running Host means install only.
@@ -57,10 +68,17 @@ If a submission is uncertain, Ctrl-R retries that same request instead of creati
 ## Screen and scrolling
 
 The conversation uses the full terminal screen.
+Assistant text is primary; routine tools are quieter and indented, even without colour, while failures and approval remain prominent.
 When you exit, your shell's screen returns as it was, and conversation text does not stay in your terminal's scrollback.
 
 Scroll with PgUp, PgDn, the arrow keys or the mouse wheel.
 Keep scrolling up to read older conversation.
+Short conversations stay top-aligned; scrolling up does nothing when everything fits and nothing older exists.
+Scrolling back keeps the same tool and queued-message rows, with a quiet `Looking back` footer instead of a history-mode heading.
+The fixed rail shows position within the loaded conversation, not all saved history.
+New output does not move what you are reading; the footer says `New output below`.
+Scroll down to catch up contiguously and resume following at the actual current end.
+If the bounded view cannot join the newer rows, `More output below` names the view limit, while `Retention gap below` names a missing retained interval; Ctrl-End always shows latest.
 Esc or Ctrl-G returns to the latest messages, and from there to the overview.
 Ctrl-End, or End on an empty draft, returns to the latest messages and stays in the conversation.
 

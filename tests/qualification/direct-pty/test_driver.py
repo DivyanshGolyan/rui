@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from driver import DirectPty, ScreenCapture
-from matrix import run_one
+from driver import DirectPty, ScreenCapture, assert_history_anchor, history_rows, inspection, lookback
+from matrix import inventory, run_one
 import host_process
 
 
@@ -43,6 +43,70 @@ finally:
             self.assertIn(payload.hex().encode(), (pathlib.Path(directory) / "output.bin").read_bytes())
             events = [json.loads(line) for line in (pathlib.Path(directory) / "events.jsonl").read_text().splitlines()]
             self.assertEqual([event["event"] for event in events], ["launch", "observed", "input", "retired"])
+
+    def test_history_projection_excludes_only_the_physical_rail_cell(self):
+        screen = ScreenCapture(20, 2)
+        screen.feed("\x1b[?2026h\x1b[1;1HHistory line 080\x1b[1;20H▐"
+                    "\x1b[2;1HHistory line 081\x1b[2;19H▐▐\x1b[?2026l".encode())
+        self.assertEqual(history_rows(screen), ["History line 080", "History line 081  ▐"])
+        self.assertNotEqual(history_rows(screen), ["History line 080", "History line 081"])
+        self.assertNotEqual(history_rows(screen), ["History line 081", "History line 080  ▐"])
+
+    def test_navigation_oracle_distinguishes_views_and_exact_source(self):
+        self.assertTrue(lookback("History line 059\nLooking back · Ctrl-End: latest"))
+        self.assertTrue(lookback("History line 059\nLooking back · More output below · Ctrl-End: latest"))
+        self.assertFalse(lookback("Looking back · Ctrl-End: latest\nordinary footer"))
+        self.assertFalse(lookback("Browsing · Esc returns\n Status · k7m2qx"))
+        self.assertTrue(inspection("Browsing · Esc returns\n Status · k7m2qx", "k7m2qx"))
+        self.assertFalse(inspection("Browsing · Esc returns\n Status · other", "k7m2qx"))
+        self.assertFalse(inspection("Looking back · Ctrl-End: latest\n Status · k7m2qx", "k7m2qx"))
+
+        def frame(first, last, *, browsing, ending=False, wrong=None):
+            screen = ScreenCapture(80, 24)
+            lines = [f"History line {number:03d}" for number in range(first, last + 1)]
+            if wrong is not None:
+                lines[wrong] = "History line 999"
+            if ending:
+                lines.append("TD4 history end")
+            parts = ["\x1b[?2026h"]
+            for index, line in enumerate(lines):
+                parts.append(f"\x1b[{index + 1};1H{line}\x1b[{index + 1};80H▐")
+            parts.append("\x1b[24;1H" + ("Looking back · Ctrl-End: latest" if browsing else "Session · model"))
+            parts.append("\x1b[?2026l")
+            screen.feed("".join(parts).encode())
+            return screen
+
+        live = frame(80, 99, browsing=False, ending=True)
+        assert_history_anchor(live, 80, False)
+        page = frame(59, 79, browsing=True)
+        assert_history_anchor(page, 59, True)
+        with self.assertRaisesRegex(AssertionError, "anchor/distance"):
+            assert_history_anchor(page, 60, True)
+        with self.assertRaisesRegex(AssertionError, "anchor/distance"):
+            assert_history_anchor(frame(59, 79, browsing=True, wrong=9), 59, True)
+        with self.assertRaisesRegex(AssertionError, "navigation end marker"):
+            assert_history_anchor(frame(80, 99, browsing=False), 80, False)
+        with self.assertRaisesRegex(AssertionError, "view changed"):
+            assert_history_anchor(page, 59, False)
+        # These are the seven mutations run by controls.py: a wrong key,
+        # direction, distance or overshoot must reach the anchor assertion.
+        for actual, expected in ((59, 79), (17, 77), (76, 78), (37, 59),
+                                 (78, 79), (74, 77), (38, 59)):
+            with self.subTest(actual=actual, expected=expected):
+                with self.assertRaisesRegex(AssertionError, "anchor/distance"):
+                    assert_history_anchor(frame(actual, actual + 20, browsing=True), expected, True)
+
+    def test_navigation_oracle_vectors_keep_exact_page_and_wheel_distances(self):
+        rows = {row["name"]: row for row in inventory()}
+        for name, first in {
+            "key-pgup": 59, "key-pgdn": 38, "key-shift-pgup": 59,
+            "key-up-csi": 79, "key-up-ss3": 79, "key-end-csi-f": 59,
+            "key-end-ss3-f": 59, "key-end-csi-4": 59, "key-esc": 59,
+            "wheel-alt-scroll": 77,
+        }.items():
+            self.assertEqual(first, rows[name]["first_history"], name)
+        self.assertEqual([59], [step["first_history"] for step in rows["key-pgdn"]["middle"]])
+        self.assertEqual([78, 79], [step["first_history"] for step in rows["wheel-alt-scroll"]["middle"]])
 
     def test_open_or_erased_frame_does_not_establish_readiness(self):
         screen = ScreenCapture()

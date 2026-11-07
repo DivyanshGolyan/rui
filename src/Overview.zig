@@ -3,7 +3,8 @@
 //!
 //! It owns the terminal and one loop. Keys, ticks at `State.wakeAt` and the
 //! worker's replies enter `overview_view.step` as events; the loop runs the
-//! effects `step` returns and draws `overview_view.render`. It branches only
+//! effects `step` returns and paints `OverviewPaint.draw` into the shared backend.
+//! It branches only
 //! on which effect to run, so every screen decision stays in the core. One
 //! worker runs the client requests in order, so one list read is in flight
 //! at a time, and the core only ever hears list replies for the listing it
@@ -20,12 +21,14 @@ const model_picker = @import("model_picker.zig");
 const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
+const OverviewPaint = @import("OverviewPaint.zig");
 const ClientTask = @import("ClientTask.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
 const SessionInput = @import("SessionInput.zig");
 const SessionScreen = @import("SessionScreen.zig");
+const RenderBackend = @import("RenderBackend.zig");
 const SessionTerminal = @import("SessionTerminal.zig");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalInput = @import("TerminalInput.zig");
@@ -322,6 +325,7 @@ upgrade_note_len: usize = 0,
 upgrade_displayed: [768]u8 = undefined,
 upgrade_displayed_len: usize = 0,
 upgrade_notice_pending: bool = false,
+upgrade_note_revision: u64 = 0,
 upgrade_report: ?std.Io.Writer.Allocating = null,
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
@@ -342,10 +346,9 @@ command_page: ?std.Io.File = null,
 /// What the last command printed, as far as the core takes it.
 output: Output = .{},
 
-/// The screen the terminal shows, so a frame writes only what changed;
-/// null when the terminal's contents are unknown.
-shown: ?view.Screen = null,
-frame: std.ArrayList(u8) = .empty,
+/// Whether the current semantic rows need another animation tick. The
+/// backend, not the overview, owns the retained cells and diff reference.
+spins: bool = false,
 /// What a key read while output waited asks of the loop.
 pumped: ?Next = null,
 /// The Session a conversation borrows, in stable storage.
@@ -358,10 +361,6 @@ lent_failed: bool = false,
 /// The Session the last accepted start made, for guidance if its
 /// conversation fails.
 started: ?view.Reference = null,
-/// The screen holds no Session's state, so a conversation may use it as is.
-screen_fresh: bool = true,
-/// The screen is initialized, so `run` disposes of it.
-screen_ready: bool = false,
 /// The terminal has not yet answered the DA1 that follows the background
 /// question.
 asking: bool = false,
@@ -392,13 +391,18 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
     defer self.destroy();
     const screen = try init.gpa.create(SessionScreen);
     defer init.gpa.destroy(screen);
+    var backend: RenderBackend = .{};
+    defer backend.deinit();
     const prepared: anyerror!void = prepare: {
+        backend.init(init.io, init.environ_map, .{ .width = self.caps.width, .depth = switch (self.caps.depth) {
+            .none => .none,
+            .indexed => .indexed,
+            .direct => .direct,
+        } }) catch |err| break :prepare err;
+        screen.init(&backend);
         self.scratch = hooks.scratch(init) catch |err| break :prepare err;
-        self.initScreen(screen) catch |err| break :prepare err;
-        self.caps.width = screen.vx.caps.unicode;
     };
     prepared catch |err| return self.failed(err, options.open);
-    defer if (self.screen_ready) screen.deinit();
     Signals.cancellation.stopped.store(false, .release);
     Signals.wake = self.signalled[1];
     Signals.install(true);
@@ -409,12 +413,6 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
     self.terminal = &terminal;
     const ended = self.loop();
     return self.finish(ended);
-}
-
-fn initScreen(self: *Self, screen: *SessionScreen) !void {
-    const no_colour: []const u8 = self.init.environ_map.get("NO_COLOR") orelse "";
-    try screen.init(self.init.io, self.init.environ_map, no_colour.len == 0);
-    self.screen_ready = true;
 }
 
 fn failed(self: *const Self, err: anyerror, session: ?view.Reference) anyerror {
@@ -492,8 +490,6 @@ fn destroy(self: *Self) void {
     if (self.scratch) |file| file.close(self.init.io);
     if (self.command_page) |file| file.close(self.init.io);
     self.closePipes();
-    self.forget();
-    self.frame.deinit(self.init.gpa);
     self.state.deinit();
     self.menu.deinit(self.init.gpa);
     self.init.gpa.destroy(self);
@@ -508,7 +504,7 @@ const Next = union(enum) { leave, open: view.Reference };
 /// Runs until the person leaves the overview or a conversation, or a signal
 /// stops it. The terminal is still begun when it returns.
 fn loop(self: *Self) !Ending {
-    if (try self.resize()) |value| if (self.proceed(value)) |ending| return ending;
+    if (try self.resize(self.terminal.geometry())) |value| if (self.proceed(value)) |ending| return ending;
     if (self.options.open) |reference| if (try self.event(.{ .open = reference })) |value| if (self.proceed(value)) |ending| return ending;
     // After the open: keys typed during the wait act on the overview.
     var next = try self.askBackground();
@@ -546,6 +542,7 @@ fn turn(self: *Self) !?Next {
                 const summary = out.buffered();
                 self.upgrade_note_len = std.mem.indexOfScalar(u8, summary, '\n') orelse summary.len;
                 self.upgrade_notice_pending = true;
+                self.upgrade_note_revision +%= 1;
             }
             if (done) {
                 const outcome = self.upgrade_job.outcome;
@@ -570,12 +567,7 @@ fn turn(self: *Self) !?Next {
     const awake_ms: u64 = @intCast(@max(@divFloor(awake_ns, std.time.ns_per_ms), 0));
     self.offerUpgradeNotice();
     if (try self.draw(awake_ms / view.spin_interval_ms)) |next| return next;
-    if (self.upgrade_notice_pending) if (self.shown) |*frame| {
-        if (frame.notice_visible) if (self.state.notice) |*notice| if (std.mem.eql(u8, notice.text(), self.upgrade_note[0..self.upgrade_note_len])) {
-            self.upgrade_notice_pending = false;
-        };
-    };
-    const spins = if (self.shown) |*held| held.spins else false;
+    const spins = self.spins;
     const timeout = switch (self.terminal.stream.wait(awake_ns, self.budget(now_ms, awake_ms, spins))) {
         .expire => 0,
         .poll => |milliseconds| milliseconds,
@@ -608,7 +600,6 @@ fn offerUpgradeNotice(self: *Self) void {
     @memcpy(self.upgrade_displayed[0..notice.len], notice.bytes[0..notice.len]);
     self.upgrade_displayed_len = notice.len;
     self.state.notice = notice;
-    self.forget();
 }
 
 /// Leaves, or lends the terminal to a Session until the person returns.
@@ -617,9 +608,9 @@ fn proceed(self: *Self, next: Next) ?Ending {
         .leave => return .overview,
         .open => |reference| {
             self.opened = reference;
+            // Both views paint the SAME retained grid; changing the borrower
+            // is not a reason to discard a healthy libvaxis diff reference.
             if (self.ops.converse(self, self.opened)) |left| return .{ .conversation = left };
-            // The conversation drew over the overview.
-            self.forget();
             return null;
         },
     }
@@ -681,6 +672,9 @@ fn event(self: *Self, value: view.Event) !?Next {
 fn sendStatuses(self: *Self) void {
     const terminal = self.terminal;
     if (terminal.program_status != .supported) return;
+    // Keep the semantic receipt for writeWaiting's frozen batch until wrote.
+    // Pumped facts may change wanted records, never replace that receipt.
+    if (terminal.writing) return;
     const sending = &self.sending;
     if (sending.batch) |batch| if (terminal.statusesTaken(batch)) {
         if (sending.clears) self.state.statusesCleared() else for (sending.taken[0..sending.len]) |taken| self.state.statusTaken(taken);
@@ -1026,7 +1020,7 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
             },
             .report => |report| switch (report) {
                 .width => |method| {
-                    self.terminal.screen.setWidth(method);
+                    self.terminal.widthReported(method);
                     self.caps.width = method;
                 },
                 .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
@@ -1063,7 +1057,15 @@ fn askBackground(self: *Self) !?Next {
         self.terminal.pump = .{ .context = self, .step = pump };
         defer self.terminal.pump = null;
         self.pumped = null;
-        self.terminal.write(ask) catch |err| return self.pumped orelse err;
+        self.terminal.write(ask) catch |err| {
+            self.terminal.screen.backend.poison();
+            if (err == error.InteractiveInterrupted) return .leave;
+            return err;
+        };
+        if (self.pumped) |next| {
+            self.pumped = null;
+            return next;
+        }
     }
     self.asking = true;
     // The wait ends here; a late answer still applies when it comes.
@@ -1082,6 +1084,12 @@ fn askBackground(self: *Self) !?Next {
 /// Every input takes one route, the one the core's input mode names, then
 /// one core step, whether or not anything changed.
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
+    // Once a target was accepted, keep decoding but discard complete ordinary
+    // interactive events. No draft/command/approval mutation and no replay.
+    if (self.terminal.writing and self.pumped != null) {
+        if (TerminalEditor.frozenAction(view.keys, decoded) == .exit) return .leave;
+        return null;
+    }
     if (self.upgrade_requested and decoded == .event and !decoded.event.pasted and decoded.event.event == .key_press) {
         const key = decoded.event.event.key_press;
         if (key.codepoint == vaxis.Key.escape or (key.mods.ctrl and key.codepoint == 'c') or key.codepoint == 3) {
@@ -1141,55 +1149,62 @@ fn route(mode: view.InputMode, composer: *TerminalEditor, decoded: TerminalInput
     };
 }
 
-/// Draws the core's screen at `frame`, writing only what the terminal does
-/// not already show. The shown screen says whether it changes with the
-/// next frame.
+/// Paints semantic rows at animation `frame`; libvaxis alone diffs its grid.
+/// Encoded bytes remain frozen until the existing pumped write completes.
 fn draw(self: *Self, frame: u64) !?Next {
-    if (try self.resize()) |next| return next;
-    var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), self.caps, frame);
-    errdefer screen.deinit();
-    self.draft_anchor = screen.draft_anchor;
-    self.state.commands = screen.commands;
-    self.frame.clearRetainingCapacity();
-    var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
-    // Waiting reports and a notification go first, through the frame's
-    // pumped write.
-    self.terminal.writeWaiting(&bytes.writer) catch return error.OutOfMemory;
-    screen.writeFrame(if (self.shown) |*held| held else null, &bytes.writer) catch return error.OutOfMemory;
-    self.frame = bytes.toArrayList();
-    // The terminal already shows it; keep the new screen, whose spinner is
-    // current.
-    if (self.frame.items.len == 0) {
-        self.forget();
-        self.shown = screen;
-        return null;
+    // Domain and grid must share one snapshot, even during a terminal resize.
+    return self.drawFrame(frame, self.terminal.geometry());
+}
+
+fn drawFrame(self: *Self, frame: u64, size: std.posix.winsize) !?Next {
+    if (try self.resize(size)) |next| return next;
+    self.terminal.applyReports();
+    const backend = self.terminal.screen.backend;
+    _ = backend.setPolicy(.{ .width = self.caps.width, .depth = switch (self.caps.depth) {
+        .none => .none,
+        .indexed => .indexed,
+        .direct => .direct,
+    } });
+    try backend.begin(.{ .cols = size.col, .rows = size.row, .x_pixel = size.xpixel, .y_pixel = size.ypixel });
+    defer {
+        backend.end();
+        self.terminal.applyReports();
     }
+    errdefer backend.poison();
+    // Waiting reports go first, while this is still only allocating memory.
+    self.terminal.writeWaiting(backend.prefixWriter()) catch return error.OutOfMemory;
+    const drawn = try OverviewPaint.draw(backend.window(), backend.scratch(), &self.state, self.composerDraft(), self.caps, frame);
+    const notice_revision = self.upgrade_note_revision;
+    self.draft_anchor = drawn.draft_anchor;
+    self.state.commands = drawn.commands;
+    self.spins = drawn.spins;
+    const bytes = try backend.encode();
     self.terminal.pump = .{ .context = self, .step = pump };
     defer self.terminal.pump = null;
-    // A failed write leaves the screen unknown: the next frame draws whole.
-    self.forget();
     self.pumped = null;
-    self.terminal.write(self.frame.items) catch |err| {
-        const next = self.pumped orelse return err;
-        screen.deinit();
-        return next;
+    defer self.pumped = null;
+    self.terminal.write(bytes) catch |err| {
+        // A normal leave is still a failed frozen frame: poison BEFORE the
+        // catch converts the I/O interruption into the loop's normal result.
+        backend.poison();
+        if (err == error.InteractiveInterrupted) return .leave;
+        return err;
     };
+    // Also the existing acknowledgement point for a genuinely empty frame.
     self.terminal.wrote();
-    self.shown = screen;
-    return null;
+    if (self.upgrade_notice_pending and drawn.notice_visible and notice_revision == self.upgrade_note_revision) {
+        if (self.state.notice) |*notice| if (std.mem.eql(u8, notice.text(), self.upgrade_note[0..self.upgrade_note_len])) {
+            self.upgrade_notice_pending = false;
+        };
+    }
+    return self.pumped;
 }
 
 /// Steps the terminal's size when it changed, so the frame drawn next and
 /// the keys read until the one after act on one layout.
-fn resize(self: *Self) !?Next {
-    const size = self.terminal.geometry();
+fn resize(self: *Self, size: std.posix.winsize) !?Next {
     if (size.col == self.state.size.width and size.row == self.state.size.height) return null;
     return self.event(.{ .resized = .{ .width = size.col, .height = size.row } });
-}
-
-fn forget(self: *Self) void {
-    if (self.shown) |*held| held.deinit();
-    self.shown = null;
 }
 
 /// How long the loop may wait, in milliseconds, -1 for ever: until the
@@ -1202,14 +1217,16 @@ fn budget(self: *const Self, now_ms: u64, awake_ms: u64, spins: bool) i32 {
     return if (tick < 0) frame else @min(tick, frame);
 }
 
-/// While the terminal takes no output, reads input as the loop does, as the
-/// conversation's pump does. A key that leaves or opens a Session cuts the
-/// stale frame short, and a signal ends the wait.
+/// Complete the frozen bytes before an ordinary view transition. The first
+/// accepted target stays immutable; only urgent typed exit/signals may abort.
 fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-    self.pumped = try self.readInput(16, 4096);
-    if (self.pumped != null) return error.InteractiveInterrupted;
+    const next = try self.readInput(0, 4096) orelse return;
+    if (next == .leave) return error.InteractiveInterrupted;
+    std.debug.assert(self.pumped == null);
+    self.pumped = next;
+    self.terminal.screen.invalidateScope();
 }
 
 /// Lends the terminal to the Session's conversation until the person
@@ -1218,19 +1235,8 @@ fn converse(self: *Self, session: view.Reference) ?Left {
     var left: Left = .{ .session = session, .frontend = null, .files = null, .ended = error.OutOfMemory };
     const io = self.init.io;
     const screen = self.terminal.screen;
-    if (!self.screen_fresh) {
-        // Each Session draws on a fresh screen in the terminal's width mode.
-        const method = screen.vx.caps.unicode;
-        screen.deinit();
-        self.screen_ready = false;
-        self.initScreen(screen) catch |err| {
-            left.ended = err;
-            return left;
-        };
-        screen.setWidth(method);
-    }
-    self.screen_fresh = false;
-    screen.vx.queueRefresh();
+    // Fresh domain state borrows the SAME invocation grids and decoder.
+    screen.init(screen.backend);
     var opened: [6]std.Io.File = undefined;
     for (&opened, 0..) |*file, count| file.* = self.hooks.scratch(self.init) catch |err| {
         for (opened[0..count]) |done| done.close(io);
@@ -1246,7 +1252,7 @@ fn converse(self: *Self, session: view.Reference) ?Left {
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeHandoff };
     var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted, lender);
     // The conversation may have read the terminal's width report.
-    self.caps.width = screen.vx.caps.unicode;
+    self.caps.width = screen.backend.widthMethod();
     const returned = if (ended) |outcome| outcome == .returned else |_| false;
     if (returned) ended = frontend.back() orelse {
         frontend.keepUpgrade() catch |err| return .{ .session = session, .frontend = frontend, .files = files, .ended = err };
@@ -1749,8 +1755,8 @@ const Rig = struct {
         rig.init.environ_map = &rig.environ;
         rig.screen = try std.testing.allocator.create(SessionScreen);
         errdefer std.testing.allocator.destroy(rig.screen);
-        try rig.screen.init(std.testing.io, &rig.environ, true);
-        errdefer rig.screen.deinit();
+        try SessionScreen.Test.init(rig.screen, std.testing.io, &rig.environ, true);
+        errdefer SessionScreen.Test.deinit(rig.screen);
         errdefer for (rig.keys ++ rig.output) |fd| if (fd >= 0) {
             _ = std.c.close(fd);
         };
@@ -1760,7 +1766,7 @@ const Rig = struct {
         rig.overview = try create(rig.init, options, undefined, ops, interrupted);
         rig.overview.terminal = &rig.terminal;
         // As the loop does before it reads a key.
-        _ = try rig.overview.resize();
+        _ = try rig.overview.resize(rig.terminal.geometry());
         return rig;
     }
 
@@ -1769,7 +1775,7 @@ const Rig = struct {
         if (rig.overview.worker.thread != null) rig.overview.worker.join() catch {};
         rig.overview.destroy();
         for (rig.keys ++ rig.output) |fd| _ = std.c.close(fd);
-        rig.screen.deinit();
+        SessionScreen.Test.deinit(rig.screen);
         std.testing.allocator.destroy(rig.screen);
         rig.environ.deinit();
         std.testing.allocator.destroy(rig);
@@ -1814,11 +1820,183 @@ const Rig = struct {
         return error.TestUnexpectedResult;
     }
 
+    /// A full output pipe forces the real pump to consume the queued key
+    /// before this reader grants credit. Never wait for draw to return before
+    /// granting credit: benign navigation now completes the frozen write.
+    fn completeAfterKey(rig: *Rig, comptime operation: enum { frame, background }, buffer: []u8, padding: usize) !struct { next: ?Next, written: []const u8 } {
+        const Reading = struct {
+            rig: *Rig,
+            bytes: []u8,
+            len: usize = 0,
+            padding: usize,
+            done: std.atomic.Value(bool) = .init(false),
+            failed: bool = false,
+            fn keyTaken(self: *@This()) !bool {
+                var fds = [_]std.posix.pollfd{.{ .fd = self.rig.keys[0], .events = std.posix.POLL.IN, .revents = 0 }};
+                return try std.posix.poll(&fds, 0) == 0;
+            }
+            fn drained(self: *@This()) bool {
+                var bytes: [4096]u8 = undefined;
+                while (true) {
+                    const n = std.c.read(self.rig.output[0], &bytes, bytes.len);
+                    if (n <= 0) return self.done.load(.acquire);
+                    const skip = @min(self.padding, @as(usize, @intCast(n)));
+                    self.padding -= skip;
+                    const count: usize = @as(usize, @intCast(n)) - skip;
+                    if (count > self.bytes.len - self.len) {
+                        self.failed = true;
+                    } else {
+                        @memcpy(self.bytes[self.len..][0..count], bytes[skip..][0..count]);
+                        self.len += count;
+                    }
+                }
+            }
+            fn run(self: *@This()) void {
+                test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), self, keyTaken) catch {
+                    self.failed = true;
+                };
+                test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), self, drained) catch {
+                    self.failed = true;
+                };
+            }
+        };
+        var reading: Reading = .{ .rig = rig, .bytes = buffer, .padding = padding };
+        const thread = try std.Thread.spawn(.{}, Reading.run, .{&reading});
+        const next = switch (operation) {
+            .frame => rig.overview.draw(0),
+            .background => rig.overview.askBackground(),
+        };
+        reading.done.store(true, .release);
+        thread.join();
+        errdefer std.debug.print("credit reader failed={any} bytes={d}\n", .{ reading.failed, reading.len });
+        try std.testing.expect(!reading.failed and reading.padding == 0);
+        return .{ .next = try next, .written = buffer[0..reading.len] };
+    }
+
     fn drawn(rig: *Rig, buffer: []u8) []const u8 {
         const count = std.c.read(rig.output[0], buffer.ptr, buffer.len);
         return if (count > 0) buffer[0..@intCast(count)] else "";
     }
 };
+
+test "the first pumped overview target is frozen while reports and split input retain their meaning" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    const first = shownRow(rig, 0);
+    const backend = rig.screen.backend;
+    const stream = &rig.terminal.stream;
+    const Gate = struct {
+        rig: *Rig,
+        first: view.Reference,
+        captured: bool = false,
+        credited: bool = false,
+        fn step(raw: *anyopaque) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            try pump(gate.rig.overview);
+            try std.testing.expect(!gate.rig.screen.backend.idle());
+            try std.testing.expectEqual(vaxis.gwidth.Method.wcwidth, gate.rig.screen.backend.widthMethod());
+            if (gate.rig.overview.pumped) |next| {
+                try std.testing.expect(next == .open);
+                try std.testing.expectEqualStrings(&gate.first, &next.open);
+                if (!gate.captured) {
+                    gate.captured = true;
+                    // A second target, command, pasted Ctrl-C and ordinary
+                    // text cannot overwrite the first target or mutate draft.
+                    const tail = "\x1b[B\r/status\r\x1b[200~\x03\x1b[201~\x1b[?2027;3$y\x1b[";
+                    try std.testing.expect(std.c.write(gate.rig.keys[1], tail, tail.len) == tail.len);
+                }
+            }
+            var fds = [_]std.posix.pollfd{.{ .fd = gate.rig.keys[0], .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 0) != 0) return;
+            try std.testing.expect(gate.captured);
+            try std.testing.expectEqualStrings("", gate.rig.overview.composerDraft().bytes);
+            try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+            try std.testing.expectEqual(TerminalInput.Pending.incomplete, gate.rig.terminal.stream.pending());
+            gate.credited = true;
+            var sink: [65536]u8 = undefined;
+            while (std.c.read(gate.rig.output[0], &sink, sink.len) > 0) {}
+        }
+    };
+    var gate: Gate = .{ .rig = rig, .first = first };
+    rig.terminal.pump = .{ .context = &gate, .step = Gate.step };
+    defer rig.terminal.pump = null;
+    const filler: [4096]u8 = @splat('x');
+    while (std.c.write(rig.output[1], &filler, filler.len) > 0) {}
+    while (std.c.write(rig.output[1], &filler, 1) > 0) {}
+    try std.testing.expect(std.c.write(rig.keys[1], "\r", 1) == 1);
+    {
+        try backend.begin(.{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
+        defer backend.end();
+        errdefer backend.poison();
+        const bytes = try backend.encode();
+        const hash = std.hash.Wyhash.hash(0, bytes);
+        try rig.terminal.write(bytes);
+        try std.testing.expectEqual(hash, std.hash.Wyhash.hash(0, bytes));
+        try std.testing.expect(gate.captured and gate.credited);
+        try std.testing.expectEqual(vaxis.gwidth.Method.wcwidth, backend.widthMethod());
+        try std.testing.expectEqual(vaxis.gwidth.Method.unicode, overview.caps.width);
+    }
+    rig.terminal.applyReports();
+    try std.testing.expectEqual(vaxis.gwidth.Method.unicode, backend.widthMethod());
+    try std.testing.expect(overview.proceed(overview.pumped.?) == null);
+    try std.testing.expectEqualStrings(&first, &Seen.now.conversed);
+    try std.testing.expect(rig.screen.backend == backend and &rig.terminal.stream == stream);
+    const decoded = stream.feed('A', std.Io.Clock.awake.now(std.testing.io).nanoseconds);
+    try std.testing.expect(decoded == .event and decoded.event.event.key_press.matchExact(vaxis.Key.up, .{}));
+    try std.testing.expect(stream.next() == .none and stream.pending() == .none);
+}
+
+test "urgent overview exit and signal poison output before returning a normal leave" {
+    for ([_]bool{ false, true }) |background| for ([_]bool{ false, true }) |signal| {
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        rig.overview.caps.depth = .indexed;
+        rig.terminal.program_status = .supported;
+        const batch = rig.terminal.beginStatuses();
+        try std.testing.expect(rig.terminal.reportStatus("k7m2qx", "Frozen", .done));
+        const filler: [4096]u8 = @splat('x');
+        while (std.c.write(rig.output[1], &filler, filler.len) > 0) {}
+        while (std.c.write(rig.output[1], &filler, 1) > 0) {}
+        if (signal) cancellation.stopped.store(true, .release) else try std.testing.expect(std.c.write(rig.keys[1], "\r\x03", 2) == 2);
+        const started = std.Io.Clock.awake.now(std.testing.io);
+        const next = if (background) try rig.overview.askBackground() else try rig.overview.draw(0);
+        try std.testing.expect(next.? == .leave);
+        try std.testing.expect(std.Io.Clock.awake.now(std.testing.io).nanoseconds - started.nanoseconds < std.time.ns_per_s);
+        try std.testing.expect(!rig.terminal.statusesTaken(batch));
+        try std.testing.expectError(error.RenderBackendPoisoned, rig.screen.backend.begin(.{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 }));
+    };
+}
+
+test "a background query completes its captured open before waiting for reports" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    rig.overview.caps.depth = .indexed;
+    const filler: [4096]u8 = @splat('x');
+    var padding: usize = 0;
+    while (true) {
+        const n = std.c.write(rig.output[1], &filler, filler.len);
+        if (n <= 0) break;
+        padding += @intCast(n);
+    }
+    while (std.c.write(rig.output[1], &filler, 1) > 0) padding += 1;
+    try std.testing.expect(std.c.write(rig.keys[1], "\r", 1) == 1);
+    var bytes: [256]u8 = undefined;
+    const completed = try rig.completeAfterKey(.background, &bytes, padding);
+    try std.testing.expect(completed.next.? == .open);
+    try std.testing.expectEqualStrings(&shownRow(rig, 0), &completed.next.?.open);
+    try std.testing.expectEqualStrings("\x1b]11;?\x1b\\\x1b[c", completed.written);
+    try std.testing.expect(!rig.overview.asking and rig.overview.pumped == null);
+}
 
 test "each effect runs its client operation and each result reaches the core" {
     var cancellation: client.Cancellation = .{};
@@ -2242,8 +2420,9 @@ test "the loop opens the resumed Session first, lists on its tick, draws once an
     const question = "\x1b]11;?\x1b\\\x1b[c";
     try std.testing.expect(std.mem.startsWith(u8, written, question));
     const frame = written[question.len..];
-    try std.testing.expect(std.mem.startsWith(u8, frame, "\x1b[?2026h"));
-    try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[?2026l"));
+    // The backend may stage resize controls before its synchronized render.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, frame, "\x1b[?2026h"));
+    try std.testing.expect(std.mem.endsWith(u8, frame, "\x1b[?2026l" ++ vaxis.ctlseqs.osc8_clear ++ vaxis.ctlseqs.sgr_reset));
     // The terminal already shows an unchanged screen. The Host read may
     // have answered after that frame, so draw what it changed first.
     try std.testing.expect(try rig.overview.draw(0) == null);
@@ -2263,17 +2442,19 @@ test "each frame rewrites your working Session's spinner alone, and without colo
     try std.testing.expect(try overview.event(.{ .tick = (test_now_s - 10) * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     var buffer: [64 * 1024]u8 = undefined;
-    try std.testing.expect(try overview.draw(2) == null and overview.shown.?.spins);
-    try std.testing.expect(std.mem.count(u8, rig.drawn(&buffer), "\x1b[2K") == 24);
-    try std.testing.expect(try overview.draw(2) == null and overview.shown.?.spins);
+    try std.testing.expect(try overview.draw(2) == null and overview.spins);
+    const first = rig.drawn(&buffer);
+    const first_len = first.len;
+    try std.testing.expect(first_len != 0);
+    try std.testing.expect(try overview.draw(2) == null and overview.spins);
     try std.testing.expectEqualStrings("", rig.drawn(&buffer));
-    try std.testing.expect(try overview.draw(3) == null and overview.shown.?.spins);
+    try std.testing.expect(try overview.draw(3) == null and overview.spins);
     const turned = rig.drawn(&buffer);
     try std.testing.expect(std.mem.indexOf(u8, turned, view.spinner[3]) != null);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, turned, "H\x1b[0"));
-    try std.testing.expect(std.mem.indexOf(u8, turned, "\x1b[2K") == null);
+    try std.testing.expect(turned.len < first_len);
+    try std.testing.expect(std.mem.indexOf(u8, turned, "Type a task") == null);
     overview.caps = .{ .depth = .none };
-    try std.testing.expect(try overview.draw(4) == null and !overview.shown.?.spins);
+    try std.testing.expect(try overview.draw(4) == null and !overview.spins);
 }
 
 test "the loop waits for the core's next tick, and while the screen spins no later than its next frame" {
@@ -2770,7 +2951,7 @@ test "a Session's record takes its new name when only its Label changes" {
     try std.testing.expect(std.mem.startsWith(u8, rig.drawn(&buffer), by_line));
 }
 
-test "records a frame cut short may not have written are set again" {
+test "opening during a blocked frame completes and acknowledges its records before handoff" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2802,23 +2983,30 @@ test "records a frame cut short may not have written are set again" {
     try std.testing.expect(try overview.draw(0) == null);
     try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "\x1b]7501;state=working:id=rui/b4n8wd:") != null);
     // Both finish; the terminal takes no output, and Enter opens one
-    // before the frame with their records is written.
+    // while the frozen frame with their records waits for output credit.
     Listing.finished = true;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     const filler: [4096]u8 = @splat('x');
-    while (std.c.write(rig.output[1], &filler, filler.len) > 0) {}
-    while (std.c.write(rig.output[1], &filler, 1) > 0) {}
+    var padding: usize = 0;
+    while (true) {
+        const n = std.c.write(rig.output[1], &filler, filler.len);
+        if (n <= 0) break;
+        padding += @intCast(n);
+    }
+    while (std.c.write(rig.output[1], &filler, 1) > 0) padding += 1;
     try std.testing.expect(std.c.write(rig.keys[1], "\r", 1) == 1);
-    const next = (try overview.draw(0)).?;
-    while (rig.drawn(&buffer).len != 0) {}
+    const completed = try rig.completeAfterKey(.frame, &buffer, padding);
+    const next = completed.next.?;
+    try std.testing.expect(rig.terminal.statusesTaken(overview.sending.batch.?));
+    try std.testing.expect(std.mem.indexOf(u8, completed.written, "\x1b]7501;state=done:id=rui/") != null);
     try std.testing.expect(overview.proceed(next) == null);
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 61_000 }) == null);
     try std.testing.expect(try overview.draw(0) == null);
     const written = rig.drawn(&buffer);
     const other = if (std.mem.eql(u8, &next.open, "k7m2qx")) "b4n8wd" else "k7m2qx";
     var record: [64]u8 = undefined;
-    try std.testing.expect(std.mem.indexOf(u8, written, try std.fmt.bufPrint(&record, "\x1b]7501;state=done:id=rui/{s}:", .{other})) != null);
+    try std.testing.expect(std.mem.indexOf(u8, written, try std.fmt.bufPrint(&record, "\x1b]7501;state=done:id=rui/{s}:", .{other})) == null);
     try std.testing.expect(std.mem.indexOf(u8, written, try std.fmt.bufPrint(&record, "\x1b]7501;state=idle:id=rui/{s}:", .{&next.open})) != null);
 }
 
@@ -2882,7 +3070,7 @@ test "each later finish, and each later wait, is a record again though no listin
     }
 }
 
-test "a clear a frame cut short may not have written goes with the next frame" {
+test "opening during a blocked clear acknowledges it once before handoff" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2899,21 +3087,27 @@ test "a clear a frame cut short may not have written goes with the next frame" {
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try overview.draw(0) == null);
     try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "\x1b]7501;state=working:id=rui/k7m2qx:") != null);
-    // Turned off; the terminal takes no output, and Enter cuts the frame
-    // that carries the clear.
+    // Turned off; Enter captures a target while the clear waits for credit.
     _ = try preferences.update(home, .{ .notifications = false }, &preferences.Readinesses.initFill(.missing));
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 1_000 }) == null);
     const filler: [4096]u8 = @splat('x');
-    while (std.c.write(rig.output[1], &filler, filler.len) > 0) {}
-    while (std.c.write(rig.output[1], &filler, 1) > 0) {}
+    var padding: usize = 0;
+    while (true) {
+        const n = std.c.write(rig.output[1], &filler, filler.len);
+        if (n <= 0) break;
+        padding += @intCast(n);
+    }
+    while (std.c.write(rig.output[1], &filler, 1) > 0) padding += 1;
     try std.testing.expect(std.c.write(rig.keys[1], "\r", 1) == 1);
-    const next = (try overview.draw(0)).?;
-    while (rig.drawn(&buffer).len != 0) {}
+    const completed = try rig.completeAfterKey(.frame, &buffer, padding);
+    const next = completed.next.?;
+    try std.testing.expect(rig.terminal.statusesTaken(overview.sending.batch.?));
+    try std.testing.expect(std.mem.indexOf(u8, completed.written, "\x1b]7501;state=clear:id=rui\x1b\\") != null);
     try std.testing.expect(overview.proceed(next) == null);
-    // Output resumes, and the clear goes.
+    // The complete frozen frame already carried the clear; no retry.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 2_000 }) == null);
     try std.testing.expect(try overview.draw(0) == null);
-    try std.testing.expect(std.mem.startsWith(u8, rig.drawn(&buffer), "\x1b]7501;state=clear:id=rui\x1b\\"));
+    try std.testing.expect(std.mem.indexOf(u8, rig.drawn(&buffer), "\x1b]7501;state=clear:id=rui\x1b\\") == null);
     // Nothing more goes while they stay off.
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
@@ -3035,7 +3229,10 @@ test "a terminal that answers device attributes before the probe keeps the notif
     var buffer: [64 * 1024]u8 = undefined;
     try std.testing.expect(try overview.draw(0) == null);
     const written = rig.drawn(&buffer);
-    try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]9;Rui: Fix the flaky test finished\x07\x1b[?2026h"));
+    const notice = "\x1b]9;Rui: Fix the flaky test finished\x07";
+    try std.testing.expect(std.mem.startsWith(u8, written, notice));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, written[notice.len..], "\x1b[?2026h"));
+    try std.testing.expect(std.mem.endsWith(u8, written, vaxis.ctlseqs.osc8_clear ++ vaxis.ctlseqs.sgr_reset));
     try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]7501;") == null);
     // The background question's device attributes answer still ends its
     // wait.
@@ -3575,7 +3772,7 @@ test "the terminal's width report sets how the core measures text" {
     try std.testing.expectEqual(vaxis.gwidth.Method.wcwidth, rig.overview.caps.width);
     try std.testing.expect(try rig.press("\x1b[?2027;3$y") == null);
     try std.testing.expectEqual(vaxis.gwidth.Method.unicode, rig.overview.caps.width);
-    try std.testing.expectEqual(vaxis.gwidth.Method.unicode, rig.screen.vx.caps.unicode);
+    try std.testing.expectEqual(vaxis.gwidth.Method.unicode, rig.screen.backend.widthMethod());
 }
 
 /// The CLI's command hook as a test gives it: it records what it ran and
@@ -3746,6 +3943,91 @@ test "a command that fails while it runs is the failure reported, even when taki
     try std.testing.expect(failing.has_induced_failure);
 }
 
+test "one captured overview frame geometry sizes the domain and backend through shrink and grow" {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    const selected = overview.state.selected.?;
+    const backend = rig.screen.backend;
+    const decoder = &rig.terminal.stream;
+    const fallback = rig.terminal.geometry();
+    const captured = [_]std.posix.winsize{
+        .{ .col = 60, .row = 20, .xpixel = 600, .ypixel = 400 },
+        .{ .col = 120, .row = 40, .xpixel = 1200, .ypixel = 800 },
+        .{ .col = 100, .row = 30, .xpixel = 1000, .ypixel = 600 },
+        .{ .col = 132, .row = 44, .xpixel = 1320, .ypixel = 880 },
+    };
+    var buffer: [64 * 1024]u8 = undefined;
+    for (captured) |size| {
+        // The real frame consumes its snapshot, not another terminal read.
+        try std.testing.expect(size.col != fallback.col and size.row != fallback.row);
+        try std.testing.expect(try overview.drawFrame(0, size) == null);
+        try std.testing.expectEqual(size.col, overview.state.size.width);
+        try std.testing.expectEqual(size.row, overview.state.size.height);
+        const actual = backend.geometry();
+        try std.testing.expectEqual(size.col, actual.cols);
+        try std.testing.expectEqual(size.row, actual.rows);
+        try std.testing.expectEqual(size.xpixel, actual.x_pixel);
+        try std.testing.expectEqual(size.ypixel, actual.y_pixel);
+        try std.testing.expectEqualStrings(&selected, &overview.state.selected.?);
+        try std.testing.expect(rig.screen.backend == backend and &rig.terminal.stream == decoder);
+        try std.testing.expect(backend.idle());
+        try std.testing.expect(rig.drawn(&buffer).len != 0);
+        try std.testing.expect(try overview.drawFrame(0, size) == null);
+        try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+    }
+}
+
+test "overview detail overview paints one healthy backend and retains the invocation decoder" {
+    var phase: []const u8 = "setup";
+    errdefer std.debug.print("roundtrip phase={s}\n", .{phase});
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.caps = .{ .depth = .indexed };
+    Seen.now.listed = 3;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    const backend = rig.screen.backend;
+    const decoder = &rig.terminal.stream;
+    overview.state.selected = shownRow(rig, 1);
+    const selected = overview.state.selected.?;
+    var buffer: [64 * 1024]u8 = undefined;
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(rig.drawn(&buffer).len != 0);
+    // A borrower that changes no cell needs no cache retirement at either boundary.
+    phase = "healthy empty borrower";
+    try std.testing.expect(overview.proceed(.{ .open = selected }) == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+    // Carry an unfinished CSI across actual overview/detail/overview painting.
+    phase = "split prefix";
+    try std.testing.expect(try rig.press("\x1b[") == null);
+    rig.screen.init(backend);
+    try rig.screen.append("A detail answer\n");
+    phase = "detail redraw";
+    const delivered = try rig.terminal.redraw("detail draft", 12, .{}, &.{});
+    phase = "detail receipt";
+    try std.testing.expect(!rig.screen.ticket.?.delivered);
+    _ = rig.screen.presented(delivered);
+    try std.testing.expect(rig.screen.ticket.?.delivered);
+    try std.testing.expect(rig.drawn(&buffer).len != 0);
+    phase = "return to overview";
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(rig.drawn(&buffer).len != 0);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+    try std.testing.expect(rig.screen.backend == backend and &rig.terminal.stream == decoder);
+    try std.testing.expectEqualStrings(&selected, &overview.state.selected.?);
+    phase = "split tail";
+    try std.testing.expectEqual(@as(@import("TerminalInput.zig").Pending, .incomplete), decoder.pending());
+    try std.testing.expect(try rig.press("B") == null);
+    try std.testing.expectEqual(@as(@import("TerminalInput.zig").Pending, .none), decoder.pending());
+    try std.testing.expect(!std.mem.eql(u8, &selected, &overview.state.selected.?));
+    try std.testing.expectEqualStrings("", overview.composerDraft().bytes);
+}
+
 test "overview archive effects preserve server filter, pending visibility, and restore intent" {
     const Listing = struct {
         var archive_state: protocol.SessionArchiveState = .active;
@@ -3888,7 +4170,6 @@ test "upgrade result waits behind an existing notice and stop prompt" {
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
     self.* = undefined;
-    self.shown = null;
     self.upgrade_notice_pending = true;
     self.upgrade_displayed_len = 0;
     const result = "Upgrade installed; Host ready";

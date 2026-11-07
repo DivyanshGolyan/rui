@@ -23,6 +23,7 @@ import threading
 import time
 
 import host_process
+from terminal_screen import cell_rows
 from host_process import canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process
 
 
@@ -38,7 +39,7 @@ def untimed(row):
 # What work under way says: the running call's row, "• Run tests · 42s", or
 # the conversation's last line, "• Waiting · 12s",
 # "! Rate limited · retry 2 in 18s", "Stopping…".
-LIVE_LINE = re.compile(r"^(?:[•!?] .+ · (?:\d|retry )|Stopping…)", re.M)
+LIVE_LINE = re.compile(r"^(?:(?:  )?[•!?] .+ · (?:\d|retry )|Stopping…)", re.M)
 # A waiting Action's input row while its choice is offered, and the key
 # that decides it: Enter confirms the highlighted option, Allow once at first.
 CHOICE = "› Allow once"
@@ -703,6 +704,18 @@ def current_screen(master):
     return terminal_capture(master).completed
 
 
+def exact_railed_row(capture, text):
+    """Find an exact source row only in the current committed cell grid."""
+    cells = capture.completed_cells
+    columns = capture.screen.columns
+    assert cells and columns > 1 and all(len(row) == columns for row in cells), "invalid frame geometry"
+    for row in cells:
+        if cell_rows([row], 0, 1, 0, columns - 1)[0].rstrip(" ") == text:
+            assert row[-1].data == "▐", "missing physical transcript rail"
+            return True
+    return False
+
+
 def shown(text, screen):
     from terminal_screen import shown as wrapped
     return wrapped(text, screen)
@@ -777,8 +790,11 @@ def keyed_frame(master, keys, accept, timeout=15):
     now counts."""
     capture = terminal_capture(master)
     found = []
+    previous = capture.listener
 
     def observe(screen, x, y):
+        if previous is not None:
+            previous(screen, x, y)
         if not found and accept(screen, x, y):
             found.append(screen)
 
@@ -797,8 +813,19 @@ def keyed_frame(master, keys, accept, timeout=15):
             assert chunk, ("terminal closed before keyed frame", keys)
             capture.feed(chunk)
     finally:
-        capture.listener = None
+        capture.listener = previous
     return found[0]
+
+
+def history_selected(frame, x, y):
+    """The original command selected a transcript; future prepends may be above it."""
+    return (x == 2 and looking_back(frame) and composer_ready(frame, x, y) and
+            frame.split("\n")[y] in ("›", ">"))
+
+
+def history_top(master, keys=b"/history\n"):
+    """Jump to the CURRENT transcript top, not a later page's Start label."""
+    return keyed_frame(master, keys, history_selected)
 
 
 def overview_title(frame):
@@ -967,6 +994,7 @@ def terminal_frame(lines, cursor=None):
 
 def terminal_wait_oracles():
     """Committed frames are evidence; partial frames and diagnostics are not."""
+    raw_export_oracles()
     def collect(frames, marker, *, composer=False, error=None, close_output=False, initial=b""):
         reader, writer = os.pipe()
         forget_terminal(reader)
@@ -1250,12 +1278,13 @@ USER_COLOUR = {"brightblue", "5c5cff"}
 ATTENTION_COLOUR = {"brown", "cdcd00"}
 
 
-def next_frame(master, timeout=3):
+def next_frame(master, timeout=3, *, capture=None):
     """Wait for the next committed frame; return it, or None if none came.
 
     An unchanged frame writes nothing, so a quiet wait is an answer here.
     """
-    capture = terminal_capture(master)
+    if capture is None:
+        capture = terminal_capture(master)
     generation = capture.generation
     deadline = time.monotonic() + timeout
     while capture.generation == generation or capture.synchronized:
@@ -1273,20 +1302,29 @@ def next_frame(master, timeout=3):
     return capture.completed
 
 
-def scroll_until(master, key, marker, *, presses=40):
+def observe_for(master, seconds, *, capture):
+    """Collect the existing observation window, including frames showing no cue."""
+    deadline = time.monotonic() + seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        next_frame(master, remaining, capture=capture)
+
+
+def scroll_until(master, key, marker, *, presses=40, capture=None):
     """Press `key` until the committed screen shows `marker`; return frames.
 
     A press that moves nothing at an edge draws nothing, and a page load can
     draw several frames, so each press drains frames until output is quiet.
     """
+    if capture is None:
+        capture = terminal_capture(master)
     seen = []
     for _ in range(presses):
-        if marker in current_screen(master):
+        if marker in capture.completed:
             return "\n".join(seen)
         os.write(master, key)
-        while (frame := next_frame(master, 1)) is not None:
+        while (frame := next_frame(master, 1, capture=capture)) is not None:
             seen.append(frame)
-    assert marker in current_screen(master), ("scroll did not reach marker", key, marker, current_screen(master))
+    assert marker in capture.completed, ("scroll did not reach marker", key, marker, capture.completed)
     return "\n".join(seen)
 
 
@@ -1301,6 +1339,457 @@ def await_screen(master, marker, *, composer=False, timeout=15):
     return read_terminal(master, marker, timeout, composer=composer)
 
 
+# Only the LAST row owns conversation state. Inspection/Action headings keep
+# their separate Browsing vocabulary; a prose row can literally name a footer.
+LOOKBACK_LABELS = frozenset((
+    "Looking back · Ctrl-End: latest", "Looking back", "Back",
+    "Looking back · New output below · Ctrl-End: latest", "New output below · Ctrl-End",
+    "New output below", "New below", "New",
+    "Looking back · More output below · Ctrl-End: latest", "More output below · Ctrl-End",
+    "More output below", "More below", "More",
+    "Looking back · Retention gap below · Ctrl-End: latest", "Retention gap below · Ctrl-End",
+    "Retention gap below", "Gap below", "Gap",
+))
+
+
+def looking_back(frame):
+    return frame.split("\n")[-1] in LOOKBACK_LABELS
+
+
+def live_conversation(frame):
+    # Use at settled response boundaries: a notice can intentionally outrank
+    # lookback, so absence of its label alone is NOT a latest-content proof.
+    return not frame.startswith("Browsing") and not looking_back(frame)
+
+
+def assert_scroll_latest(cells, cursor, latest, context):
+    rows = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, len(cells[0]))]
+    frame = "\n".join(rows)
+    x, y = cursor
+    assert live_conversation(frame), (context, "still looking back", frame)
+    assert composer_ready(frame, x, y), (context, frame)
+    assert y == len(rows) - 2 and rows[y] == "› keep" and set(rows[y - 1]) == {"─"}, (context, "composer geometry", frame)
+    source = cell_rows(cells, 0, y - 1, 0, len(cells[0]) - 1)
+    written = [row.rstrip(" ") for row in source if row.rstrip(" ")]
+    assert latest in written[-3:], (context, "latest row not last", frame)
+
+
+def assert_submitted_feedback(cells, times):
+    rows = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)]
+    composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
+    history = rows[:composer]
+    assert "›" not in [row.strip() for row in history], rows
+    for row in history:
+        if row.startswith("› "):
+            assert untimed(row) == "› x", ("submitted source changed", row)
+            assert len(row) == len(cells[0]) - 1 and row[-5:] in times and not row[3:-5].strip(" "), (row, times)
+    if rows[composer].strip() == "›":
+        assert "› x" in map(untimed, history) or {"Sending…", "Sent"} & set(history), rows
+
+
+def message_feedback(frames, text):
+    for cells in frames:
+        rows = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)]
+        composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
+        history = rows[:composer]
+        if rows[composer].strip() == "›":
+            assert f"› {text}" in map(untimed, history) or {"Sending…", "Sent"} & set(history), (text, rows)
+
+
+def assert_editor_submission(cells):
+    # Conversation source columns, not the joined stream returned by read_terminal.
+    rows = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)]
+    composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
+    assert rows[composer] == "›", rows
+    history = "\n" + "\n".join(map(untimed, rows[:composer]))
+    assert "\n› line1\n  line2" in history, history
+    assert "\nedited 2" in history, history
+
+
+def conversation_body(cells, cursor, *, queued, call=None, work=None):
+    """Partition ONLY the known one-call/work, one-row draft fixtures.
+
+    Screen's actual coordinate witness pins source->call->blank gap and the
+    bottom queue/rule/composer/footer. Validate ALL chrome before excluding it;
+    never erase matching strings from prose or infer capacity as source rows.
+    """
+    # This shape has exactly one call/work, one queue, rule, draft and footer.
+    # The actual Screen witness pins its rail at H-5, even with a short body.
+    assert cells and len(cells[0]) == 80 and all(len(row) == 80 for row in cells), "fixed visual fixture"
+    columns = 80
+    rail_rows = len(cells) - 5
+    raw = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, columns)]
+    frame = "\n".join(raw)
+    assert all(row[-1].data == "▐" for row in cells[:rail_rows]), ("physical visual rail", frame)
+    rows = [row.rstrip(" ") for row in cell_rows(cells, 0, rail_rows, 0, columns - 1)] + raw[rail_rows:]
+    assert len(rows) >= 8 and live_or_back_frame(frame), ("not a conversation", frame)
+    assert cursor == (2, len(rows) - 2) and rows[-2] == "›", ("composer geometry", cursor, frame)
+    assert rows[-3] == "─" * columns, ("rule geometry", frame)
+    assert len(queued) == columns and rows[-4] == queued, ("queued geometry", queued, frame)
+    assert sum(row == queued for row in rows) == 1, ("ambiguous queued row", frame)
+    end = len(rows) - 4
+    assert (call is None) != (work is None), "one explicit live chrome owner required"
+    prefix = "  • " + call if call is not None else "• " + work
+    pattern = re.compile(re.escape(prefix) + r" · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
+    matches = [index for index, row in enumerate(rows) if pattern.fullmatch(row)]
+    assert len(matches) == 1 and matches[0] < end, ("missing/moved/ambiguous work row", frame)
+    boundary = matches[0]
+    assert all(not row for row in rows[boundary + 1:end]), ("nonblank below live chrome", frame)
+    return "\n".join(rows[:boundary])
+
+
+def live_or_back_frame(frame):
+    return not frame.startswith(("Browsing", "Message ·", "Action "))
+
+
+def unchanged_fitted_frame(before, frame):
+    assert frame == before and not looking_back(frame), ("fitted scroll changed cells", before, frame)
+
+
+def fitted_scroll(master, keys, draft):
+    """Up may draw NOTHING. Ctrl-A proves it was consumed, not a new frame
+    from a clock; every intermediate commit must keep source AND draft cells.
+    Ctrl-E then restores the caret. No provider/read/quiet-time surrogate.
+    """
+    capture = terminal_capture(master)
+    before = capture.completed
+    assert draft and capture.draft(draft, 2 + len(draft)) and live_conversation(before), before
+    previous = capture.listener
+    capture.listener = lambda frame, x, y: unchanged_fitted_frame(before, frame)
+    try:
+        # keyed_frame owns the listener while waiting, so its predicate checks
+        # each commit too, including ones before the caret barrier is reached.
+        def reached(frame, x, y):
+            unchanged_fitted_frame(before, frame)
+            return x == 2 and y == capture.screen.lines - 2
+        keyed_frame(master, keys + b"\x01", reached)
+        keyed_frame(master, b"\x05", lambda frame, x, y: (
+            unchanged_fitted_frame(before, frame) is None and x == 2 + len(draft)))
+    finally:
+        capture.listener = previous
+
+
+def conversation_protocol_cases():
+    """Independent, current-frame protocol counterexamples; no PTY/Host."""
+    from terminal_screen import ScreenCapture
+    def capture_rows(rows):
+        capture = ScreenCapture(80, len(rows))
+        capture.feed(terminal_frame(rows, (len(rows) - 1, 3)))
+        return capture
+    # Exercise the actual committed cell observer: content rail glyphs are
+    # not chrome, and a missing or displaced physical rail cannot pass.
+    rail = capture_rows(["Saved heading".ljust(79) + "▐", "literal ▐".ljust(79) + "▐", "›"])
+    assert exact_railed_row(rail, "Saved heading")
+    assert exact_railed_row(rail, "literal ▐")
+    assert not exact_railed_row(rail, "literal")
+    for bad in ("Saved heading".ljust(80), "Saved heading".ljust(78) + "▐ "):
+        broken = capture_rows([bad, "›"])
+        try:
+            accepted = exact_railed_row(broken, "Saved heading")
+        except AssertionError:
+            accepted = False
+        assert not accepted, "invalid physical rail accepted"
+    for label in LOOKBACK_LABELS:
+        assert looking_back("body\n" + label)
+        assert not looking_back(label + "\nnotice takes priority")
+    assert not looking_back("body Looking back\nSession · Looking back")
+    assert not live_conversation("Browsing · Esc returns\n Status · s\nmetadata")
+    # Command selection and a future canonical prepend are different events.
+    # A pinned source can remain identical while Start arrives ABOVE it;
+    # only a subsequent user navigation reveals that label.
+    source = ["› fresh start", "", "renderer answer fresh start"]
+    def history_frame(body, footer, draft="›"):
+        return body + [""] * (21 - len(body)) + ["─" * 80, draft, footer]
+    before = history_frame(source, "fresh start · model")
+    loading = history_frame(source, "Loading earlier messages…")
+    selected = history_frame(source, "Looking back · Ctrl-End: latest")
+    prepended = selected.copy()  # Arrival preserves the visible source anchor.
+    navigated = history_frame(["Start of conversation", *source], "Looking back · Ctrl-End: latest")
+    sequence = [before, loading, selected, prepended, navigated]
+    accepted = [history_selected("\n".join(rows), 2, 22) for rows in sequence]
+    assert accepted == [False, False, True, True, True], accepted
+    assert "Start of conversation" not in "\n".join(sequence[accepted.index(True)])
+    final = "\n".join(navigated)
+    assert final.index("Start of conversation") < final.index("› fresh start") < final.index("renderer answer fresh start")
+    assert final.count("› fresh start") == final.count("renderer answer fresh start") == 1
+    # A visible word in the body is not proof of transcript selection; nor
+    # can an Up injected into an inspection stand in for the queued intent.
+    for rejected in (
+            history_frame(["Start of conversation", *source], "fresh start · model"),
+            ["Browsing · Esc returns", *selected[1:-1], "Session · model"],
+            ["Browsing · Esc returns", "Message · 301 lines", *selected[2:-1], "Session · model"],
+            history_frame(source, "Looking back · Ctrl-End: latest", "› /history")):
+        assert not history_selected("\n".join(rejected), 2, 22), rejected
+    assert not history_selected("\n".join(selected), 0, 0)
+    assert not history_selected("\n".join(selected), 3, 22)
+    for label in LOOKBACK_LABELS:
+        for prompt in ("›", ">"):
+            assert history_selected("\n".join(history_frame(source, label, prompt)), 2, 22)
+    queue = "› QUEUED-SOURCE".ljust(72) + "3 queued"
+    for height in (24, 200):
+        for boundary in (2, height - 5):
+            body = ["BODY-FIRST ▐"] + ["BODY-MIDDLE"] * (boundary - 2) + ["BODY-LAST"]
+            rows = body + ["  • Held call · 42s"] + [""] * (height - 5 - boundary)
+            rows += [queue, "─" * 80, "›", "Looking back · Ctrl-End: latest"]
+            rows = [row.ljust(79) + "▐" if y < height - 5 else row for y, row in enumerate(rows)]
+            frame = "\n".join(rows)
+            def observe(candidate):
+                capture = capture_rows(candidate)
+                actual = conversation_body(capture.completed_cells, (2, height - 2), queued=queue, call="Held call")
+                assert actual == "\n".join(body), ("source changed", actual)
+                assert "QUEUED-SOURCE" not in actual
+            observe(rows)
+            for change in ("missing", "moved", "ambiguous", "duplicate-in-body", "missing-queue", "moved-queue"):
+                bad = rows.copy()
+                def put(y, value):
+                    bad[y] = value.ljust(79) + "▐" if y < height - 5 else value
+                if change == "missing": put(boundary, "")
+                elif change == "moved":
+                    put(0, "  • Held call · 42s")
+                    put(boundary, "BODY-FIRST ▐")
+                elif change == "ambiguous": put(0, "  • Held call · 42s")
+                elif change == "duplicate-in-body": put(0, "› QUEUED-SOURCE")
+                elif change == "missing-queue": bad[-4] = ""
+                else: bad[-4], bad[-3] = bad[-3], bad[-4]
+                try:
+                    observe(bad)
+                except AssertionError:
+                    pass
+                else:
+                    raise AssertionError(("invalid source/chrome accepted", change))
+            for bad in (frame.replace("BODY-LAST", "WRONG"), frame.replace("›\n", "› changed\n"), frame + " altered"):
+                try: unchanged_fitted_frame(frame, bad)
+                except AssertionError: pass
+                else: raise AssertionError("changed fitted frame accepted")
+    # The same source/chrome boundary applies without a tool: provider work
+    # occupies the one live row, with its distinct UNINDENTED label.
+    waiting_rows = ["BODY-FIRST", "BODY-LAST", "• Waiting · 42s"] + [""] * 17
+    waiting_rows += [queue, "─" * 80, "›", "Looking back · Ctrl-End: latest"]
+    waiting_rows = [row.ljust(79) + "▐" if y < 19 else row for y, row in enumerate(waiting_rows)]
+    waiting_capture = capture_rows(waiting_rows)
+    assert conversation_body(waiting_capture.completed_cells, (2, 22), queued=queue, work="Waiting") == "BODY-FIRST\nBODY-LAST"
+    # One socket read can contain a correct barrier followed by a wrong
+    # commit. The fitted-scroll observer MUST inspect both, not just newest
+    # state or the first matching cursor. These are synthetic byte frames.
+    from terminal_screen import ScreenCapture
+    baseline = ["brief answer"] + [""] * 20 + ["─" * 80, "› keep", "Session s"]
+    for corrupt in (False, True):
+        reader, peer = socket.socketpair()
+        with reader, peer:
+            fd = reader.fileno()
+            capture = ScreenCapture()
+            _captures[fd] = capture
+            capture.feed(terminal_frame(baseline, (23, 7)))
+            end = terminal_frame(baseline, (23, 3))
+            if corrupt:
+                wrong = baseline.copy()
+                wrong[0] = "Start of conversation"
+                end += terminal_frame(wrong, (23, 3))
+            peer.settimeout(1)
+            written, failures = [], []
+            def produce():
+                try:
+                    written.append(peer.recv(128))
+                    peer.sendall(end)
+                    if not corrupt:
+                        written.append(peer.recv(128))
+                        peer.sendall(terminal_frame(baseline, (23, 7)))
+                except BaseException as error:
+                    failures.append(error)
+            producer = threading.Thread(target=produce)
+            producer.start()
+            try:
+                fitted_scroll(fd, b"\x1b[A", "keep")
+            except AssertionError as error:
+                assert corrupt and error.args[0][0] == "fitted scroll changed cells", error
+            else:
+                assert not corrupt, "wrong intermediate fitted frame accepted"
+            producer.join(timeout=2)
+            assert not producer.is_alive() and not failures, failures
+            assert written == [b"\x1b[A\x01"] + ([] if corrupt else [b"\x05"]), written
+            forget_terminal(fd)
+    # Return helpers distinguish actual transcript footer from prose bearing
+    # the words and still use Esc for genuine inspection navigation.
+    for inspection in (False, True):
+        reader, peer = socket.socketpair()
+        with reader, peer:
+            fd = reader.fileno()
+            capture = terminal_capture(fd, fresh=True)
+            before = baseline.copy()
+            if inspection:
+                before[0] = "Browsing · Esc returns"
+            else:
+                before[-1] = "Looking back · Ctrl-End: latest"
+            capture.feed(terminal_frame(before, (23, 7)))
+            peer.sendall(terminal_frame(baseline, (23, 7)))
+            assert return_to_live(fd) == "\n".join(baseline)
+            peer.settimeout(1)
+            assert peer.recv(128) == b"\x1b"
+            forget_terminal(fd)
+    for prefix in ("", "  "):
+        assert LIVE_LINE.search(prefix + "• Held call · 42s")
+        assert LIVE_CLOCK.sub(r"\1", prefix + "• Held call · 42s") == prefix + "• Held call · "
+    assert not LIVE_LINE.search(" • Held call · 42s")
+    print("conversation protocol: exact footer, history selection before asynchronous Start, 24/200-row body/chrome, six rejected corruptions and fitted every-frame equality passed", flush=True)
+
+
+def observation_window_cases():
+    """Real byte collection into one existing capture; no app, PTY or mocks."""
+    from terminal_screen import ScreenCapture
+    reader, writer = os.pipe()
+    try:
+        capture = ScreenCapture(20, 4)
+        capture.feed(terminal_frame(["OLD", "", "", ""], (3, 2)))
+        snapshots = []
+        capture.listener = lambda screen, x, y: snapshots.append(capture.completed_cells)
+        os.write(writer, terminal_frame(["SELECTED", "", "", ""], (3, 2)) +
+                 terminal_frame(["Start", "SOURCE", "FORBIDDEN LATE", ""], (3, 2)))
+        # Writing bytes alone changes no committed observation. A negative
+        # assertion here would falsely accept the uncollected late frame.
+        assert cell_rows(capture.completed_cells, 0, 1, 0, 20)[0].rstrip(" ") == "OLD"
+        observe_for(reader, 0.01, capture=capture)
+        assert [cell_rows(cells, 0, 1, 0, 20)[0].rstrip(" ") for cells in snapshots] == ["SELECTED", "Start"]
+        rows = cell_rows(capture.completed_cells, 0, 4, 0, 20)
+        assert rows[0].rstrip(" ") == "Start" and rows[1].rstrip(" ") == "SOURCE", rows
+        assert any("FORBIDDEN LATE" in row for row in rows), rows
+    finally:
+        os.close(reader)
+        os.close(writer)
+    print("observation window: actual pending bytes, every commit, canonical source and late negative cue collected", flush=True)
+
+
+def cell_value_cases():
+    """Assertions consume actual immutable cell values, not observer handles."""
+    from terminal_screen import ScreenCapture
+    def cells_for(rows, columns=80):
+        capture = ScreenCapture(columns, len(rows))
+        capture.feed(terminal_frame(rows, (len(rows) - 1, 3)))
+        # Projection does not change capture's existing raw display spelling.
+        assert "\n".join(row.rstrip() for row in cell_rows(capture.completed_cells, 0, len(rows), 0, columns)) == capture.completed
+        return capture.completed_cells
+    def rejects(action):
+        try: action()
+        except AssertionError: return
+        raise AssertionError("invalid cell value accepted")
+    # The primitive neither trims, normalizes, nor strips glyphs. Wide
+    # continuations occupy cells, not additional source characters.
+    cells_for(["👩‍💻 é\tZ", "CR\r\nLF", "literal ▐"])
+    cells = cells_for(["é 界 ▐", "literal".ljust(79) + "▐", "space \u00a0"])
+    assert cell_rows(cells, 0, 1, 0, 6) == ["é 界 ▐"]
+    assert cell_rows(cells, 1, 2, 78, 80) == [" ▐"]
+    assert cell_rows(cells, 2, 3, 0, 7) == ["space \u00a0"]
+    assert cell_rows(cells, 0, 0, 0, 0) == []
+    for bounds in ((-1, 1, 0, 1), (0, 4, 0, 1), (0, 1, -1, 2), (0, 1, 0, 81), (2, 1, 0, 1)):
+        rejects(lambda: cell_rows(cells, *bounds))
+    def submitted(text, columns=80):
+        # Explicit source values, not a model of Sending/work/queue geometry.
+        rows = ["PRIOR ▐", "› " + text + " " * (columns - 8 - len(text)) + "11:42", "  line2", "edited 2"]
+        rows += [""] * 17 + ["─" * columns, "›", "Session s"]
+        return [row.ljust(columns - 1) + "▐" if y < 21 else row for y, row in enumerate(rows)]
+    x = submitted("x")
+    assert_submitted_feedback(cells_for(x), {"11:42"})
+    later = ScreenCapture(80, 24)
+    later.feed(terminal_frame(x, (23, 3)))
+    first_cells = later.completed_cells
+    later.feed(terminal_frame([row.replace("› x", "› y") for row in x], (23, 3)))
+    assert_submitted_feedback(first_cells, {"11:42"})
+    rejects(lambda: assert_submitted_feedback(later.completed_cells, {"11:42"}))
+    for old, new in (("› x", "› y"), ("11:42", "11:43"), ("› x ", "› xX")):
+        rejects(lambda: assert_submitted_feedback(cells_for([row.replace(old, new) for row in x]), {"11:42"}))
+    for text in ("BBB", "CCC"):
+        value = cells_for(submitted(text))
+        message_feedback([value], text)  # Finished, without Sent.
+        for status in ("Sending…", "Sent"):
+            rows = submitted(text);rows[1] = "";rows[20] = status
+            message_feedback([cells_for(rows)], text)
+        rows = submitted(text);rows[1] = ""
+        rejects(lambda: message_feedback([cells_for(rows)], text))
+        rows[22] = "› " + text  # Before Enter, a nonempty draft is feedback.
+        message_feedback([cells_for(rows)], text)
+    for columns in (80, 2048):
+        rows = submitted("line1", columns)
+        rows[4] = "EDGE literal ▐".ljust(columns - 2) + "▐▐"
+        value = cells_for(rows, columns)
+        before = cell_rows(value, 0, 24, 0, columns)
+        assert_editor_submission(value)
+        source = cell_rows(value, 0, 21, 0, columns - 1)
+        assert source[4].endswith("▐") and "literal ▐" in source[4]
+        assert cell_rows(value, 0, 24, 0, columns) == before
+        for fault in ("missing", "wrong-line", "wrong-source", "draft-only"):
+            bad = rows.copy()
+            if fault == "missing": bad[1] = ""
+            elif fault == "wrong-line": bad[2], bad[3] = bad[3], bad[2]
+            elif fault == "wrong-source": bad[1] = bad[1].replace("line1", "lineX")
+            else: bad[1] = "";bad[22] = "› line1";bad[23] = "  line2"
+            rejects(lambda: assert_editor_submission(cells_for(bad, columns)))
+        inspected = cells_for(["Browsing · Esc returns", "literal".ljust(columns - 1) + "▐"], columns)
+        assert cell_rows(inspected, 1, 2, 0, columns)[0].endswith("▐")
+    # Readiness owns ONLY the current exact unresolved clock in content
+    # columns. A short body's call overlaps the rail; a full body's does not.
+    # Full queue/body/rail geometry remains a SEPARATE visual proof.
+    for elapsed in ("0s", "2m 3s", "1h 2m"):
+        old = cells_for(["  • Held call · 99s".ljust(79) + "▐"])
+        assert listed_call_ready(old)
+        for edge in ("▐", " "):
+            for label in ("  • Held call", "• Held call · 42s", "  ✓ Held call · 42s", "  • Other call · 42s", "prefix • Held call · 42s", "  • Held call · 42s extra"):
+                assert not listed_call_ready(cells_for([label.ljust(79) + edge]))
+            assert listed_call_ready(cells_for([("  • Held call · " + elapsed).ljust(79) + edge]))
+        assert not listed_call_ready(cells_for([""]))  # Never reuse the old clock.
+    assert listed_call_ready(cells_for(["  • Held call · 42s"]))
+    assert not listed_call_ready(cells_for(["  • Held call · 42s".ljust(78) + "▐ "]))
+    # The direct-scroll fixture has no call or queue: source ends at the
+    # rule. Empty SOURCE cells stay empty even when their gutter is painted.
+    for height in (30, 16):
+        body = [""] * (height - 3)
+        body[0] = "literal ▐"
+        body[-5:] = ["scroll answer 23", "", "second row 23", "", "third row 23"]
+        rows = [row.ljust(79) + "▐" for row in body] + ["─" * 80, "› keep", "Session · model"]
+        assert_scroll_latest(cells_for(rows), (6, height - 2), "third row 23", height)
+        for fault in ("wrong", "missing", "draft", "rule", "position", "lookback"):
+            bad = rows.copy()
+            cursor = (6, height - 2)
+            if fault == "wrong": bad[-4] = "WRONG SOURCE".ljust(79) + "▐"
+            elif fault == "missing": bad[-4] = " " * 79 + "▐"
+            elif fault == "draft": bad[-2] = "› changed"
+            elif fault == "rule": bad[-3] = "─" * 79 + "X"
+            elif fault == "position": cursor = (6, height - 3)
+            else: bad[-1] = "Looking back · Ctrl-End: latest"
+            rejects(lambda: assert_scroll_latest(cells_for(bad), cursor, "third row 23", fault))
+        # Keep the original LAST THREE written-source bound, not merely any
+        # earlier occurrence. Rail-only blank rows must not consume that bound.
+        body[-7:] = ["TARGET", "", "after one", "", "after two", "", ""]
+        rows = [row.ljust(79) + "▐" for row in body] + rows[-3:]
+        assert_scroll_latest(cells_for(rows), (6, height - 2), "TARGET", height)
+        too_old = rows.copy();too_old[-4] = "after three".ljust(79) + "▐"
+        rejects(lambda: assert_scroll_latest(cells_for(too_old), (6, height - 2), "TARGET", height))
+        nbsp = rows.copy();nbsp[-4] = "\u00a0".ljust(79) + "▐"
+        rejects(lambda: assert_scroll_latest(cells_for(nbsp), (6, height - 2), "TARGET", height))
+        # The literal rightmost SOURCE glyph survives; only physical col79
+        # belongs to the gutter. No character-strip normalization is allowed.
+        literal = "third row 23".ljust(78) + "▐"
+        rows[-4] = literal + "▐"
+        assert_scroll_latest(cells_for(rows), (6, height - 2), literal, height)
+        rejects(lambda: assert_scroll_latest(cells_for(rows), (6, height - 2), "third row 23", height))
+    # Comparison remains a pure key: no copied globals, fake clock or IO mocks.
+    for left, right in (("9s", "10s"), ("59s", "1m 0s"), ("59m 59s", "1h 0m")):
+        a, b = submitted("x"), submitted("x")
+        a[4], b[4] = [("• Waiting · " + elapsed).ljust(79) + "▐" for elapsed in (left, right)]
+        ca, cb = cells_for(a), cells_for(b)
+        assert clock_key(ca) == clock_key(cb)
+        for suffix in (" EXTRA", "\u00a0", "\u2002", " ▐"):
+            bad = b.copy();bad[4] = ("• Waiting · " + right + suffix).ljust(79) + "▐"
+            assert clock_key(cells_for(bad)) != clock_key(ca)
+        changed = b.copy();changed[0] = "CHANGED SOURCE".ljust(79) + "▐"
+        assert clock_key(cells_for(changed)) != clock_key(ca)
+        broken = b.copy();broken[1] = "missing physical rail"
+        rejects(lambda: clock_key(cells_for(broken)))
+    for columns, header in ((80, "Browsing · Esc returns"), (80, "Action requires attention"), (80, "Message · Esc returns"), (100, "wide"), (2048, "wide")):
+        value = cells_for([header, "• Waiting · 9s", "literal ▐"], columns)
+        raw = "\n".join(row.rstrip() for row in cell_rows(value, 0, len(value), 0, columns))
+        assert clock_key(value) == LIVE_CLOCK.sub(r"\1", raw)
+    print("cell values: explicit ranges, exact feedback/time/editor source, literal/Unicode, current readiness and clock-only comparison passed", flush=True)
+
+
 def return_to_live(master, key=b"\x1b", timeout=15, *, input_fd=None):
     """Leave browsing or an inspection; wait until live output is drawn.
 
@@ -1309,13 +1798,13 @@ def return_to_live(master, key=b"\x1b", timeout=15, *, input_fd=None):
     """
     capture = terminal_capture(master)
     shown = capture.completed
-    if not shown.startswith("Browsing") and composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y):
+    if live_conversation(shown) and composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y):
         return shown  # Already live: Esc would draw nothing to wait for.
     os.write(master if input_fd is None else input_fd, key)
     deadline = time.monotonic() + timeout
     while True:
         shown = capture.completed
-        if (not shown.startswith("Browsing")
+        if (live_conversation(shown)
                 and composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y)):
             return shown
         remaining = deadline - time.monotonic()
@@ -1324,7 +1813,38 @@ def return_to_live(master, key=b"\x1b", timeout=15, *, input_fd=None):
 
 # The clock that ends a live line ("• Waiting · 12s") redraws every second
 # while work runs; it is not a change of what the screen says.
-LIVE_CLOCK = re.compile(r"^([•!?] .+ · )(?:retry \d+ in )?\d+[hms](?: \d+[ms])?$", re.M)
+LIVE_CLOCK = re.compile(r"^((?:  )?[•!?] .+ · )(?:retry \d+ in )?\d+[hms](?: \d+[ms])?$", re.M)
+
+
+def clock_key(cells):
+    """Comparison only: keep raw cells except a proved conversation clock.
+
+    Inspection/full-width/wide-entry and unknown composer shapes retain the
+    old key. No body boundary or navigation fact is inferred from the rail.
+    """
+    assert cells, "committed cells required"
+    rows = [row.rstrip() for row in cell_rows(cells, 0, len(cells), 0, len(cells[0]))]
+    frame = "\n".join(rows)
+    old = LIVE_CLOCK.sub(r"\1", frame)
+    if (not live_or_back_frame(frame) or any(len(row) != 80 for row in cells) or len(rows) < 4
+            or rows[-3] != "─" * 80 or not rows[-2].startswith("›") or reason_shown(rows[-1])):
+        return old
+    rule = len(rows) - 3
+    # A whole Action can be bottom-aligned without a top heading. Its
+    # full-width cells have no conversation rail; keep the old key there too.
+    if not any(row[79].data == "▐" for row in cells[:rule]):
+        return old
+    rail_rows = next((y for y, row in enumerate(cells) if row[79].data != "▐"), len(cells))
+    assert 0 < rail_rows <= rule, ("clock rail extent", frame)
+    assert all(row[79].data != "▐" for row in cells[rail_rows:rule]), ("noncontiguous clock rail", frame)
+    key = rows.copy()
+    for y in range(rail_rows):
+        clock = cell_rows(cells, y, y + 1, 0, 79)[0].rstrip(" ")
+        if LIVE_CLOCK.fullmatch(clock):
+            # Exact clock syntax consumes ALL non-padding content. Preserve
+            # its label (including literal ▐); only elapsed+ASCII padding vary.
+            key[y] = LIVE_CLOCK.sub(r"\1", clock) + "▐"
+    return "\n".join(key)
 
 
 def settle_screen(master, quiet=1.0, timeout=15):
@@ -1332,34 +1852,126 @@ def settle_screen(master, quiet=1.0, timeout=15):
     seconds; return the screen. A ticking clock never goes quiet for a full
     second, so ticks alone must not keep the screen unsettled."""
     deadline = time.monotonic() + timeout
-    still = LIVE_CLOCK.sub(r"\1", current_screen(master))
+    capture = terminal_capture(master)
+    still = clock_key(capture.completed_cells)
     quiet_until = time.monotonic() + quiet
     while (frame := next_frame(master, max(0, quiet_until - time.monotonic()))) is not None:
-        if LIVE_CLOCK.sub(r"\1", frame) != still:
-            still = LIVE_CLOCK.sub(r"\1", frame)
+        key = clock_key(capture.completed_cells)
+        if key != still:
+            still = key
             quiet_until = time.monotonic() + quiet
         assert time.monotonic() < deadline, ("screen never settled", current_screen(master))
     return current_screen(master)
 
 
-def raw_export(master, screen):
-    """The printed raw export command, rejoined across word-wrapped rows.
+def transcript_source(capture, screen):
+    """Source rectangle for the settled single-composer transcript fixture."""
+    assert screen == capture.completed, "transcript source needs the current committed frame"
+    cells = capture.completed_cells
+    columns = capture.screen.columns
+    assert len(cells) >= 3 and columns > 1 and all(len(row) == columns for row in cells), "invalid frame geometry"
+    rows = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, columns)]
+    assert rows[-3] == "─" * columns, ("unexpected transcript rule", screen)
+    for index, row in enumerate(cells[:-3]):
+        assert row[-1].data == "▐", ("missing physical transcript rail", index, screen)
+    source = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells) - 3, 0, columns - 1)]
+    return "\n".join(source + rows[-3:])
 
-    Word wrap consumes the space at a soft break; a row filled to the edge
-    broke inside a word instead (a long hex identity), so it joins directly.
+
+def raw_export(master, screen, *, rail=True):
+    """Read the displayed invocation from this exact committed cell grid.
+
+    A filled physical source row wraps within a word; a shorter one wraps at
+    a space. The transcript rail is a separate cell, never command data.
+    Inspection pages use the full physical width instead.
     """
-    columns = terminal_capture(master).screen.columns
-    lines = screen.split("\n")
-    start = next(index for index, line in enumerate(lines) if line.lstrip(" ").startswith("Raw export: "))
+    capture = terminal_capture(master)
+    assert screen == capture.completed, "raw export needs the current committed frame"
+    cells = capture.completed_cells
+    columns = capture.screen.columns
+    assert columns > int(rail) and cells and all(len(row) == columns for row in cells), "invalid frame geometry"
+    width = columns - int(rail)
+    lines = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, width)]
+    starts = [i for i, line in enumerate(lines) if line.lstrip(" ").startswith("Raw export: ")]
+    assert len(starts) == 1, ("missing or ambiguous raw export", screen)
+    start = starts[0]
     command = lines[start].lstrip(" ").removeprefix("Raw export: ")
-    previous = lines[start]
-    for line in lines[start + 1:]:
+    for index in range(start, len(lines)):
+        if rail:
+            assert cells[index][-1].data == "▐", ("missing physical transcript rail", index, screen)
+        full = cells[index][width - 1].data != " "
         if re.search(r"--ordinal [0-9]+$", command):
-            break
-        command += ("" if len(previous) == columns else " ") + line
-        previous = line
-    assert re.search(r"--ordinal [0-9]+$", command), screen
-    return command
+            # A digit at the right edge may continue on the next row. Only a
+            # blank following row disambiguates an exactly-full final row.
+            if full:
+                assert index + 1 < len(lines) and not lines[index + 1], ("ambiguous ordinal at edge", screen)
+            return command
+        assert index + 1 < len(lines) and lines[index + 1], ("incomplete raw export", screen)
+        command += ("" if full else " ") + lines[index + 1]
+    raise AssertionError(("incomplete raw export", screen))
+
+
+def raw_export_oracles():
+    """Exercise reconstruction against real committed cells, not display text."""
+    master, slave = open_pty()
+    try:
+        capture = terminal_capture(master)
+        def draw(rows, columns, rail="▐"):
+            width = columns - int(rail is not None)
+            assert all(len(row) <= width for row in rows), rows
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
+            capture.resize(columns, 24)
+            capture.feed(terminal_frame([row.ljust(width) + (rail or "") for row in rows], (len(rows) + 1, 1)))
+            return raw_export(master, capture.completed, rail=rail is not None)
+        expected = "rui session read-conversation --store-hex 616263 --session k7m2qx --position 6 --ordinal 0"
+        assert draw(["Raw export: " + expected], 512) == expected
+        assert draw(["Raw export: " + expected], 512, rail=None) == expected
+        transcript = ["Raw export: rui session", "read-conversation --store-hex",
+            "012345678901234567890123456789012345678", "90123 --session k7m2qx --position 6", "--ordinal 0"]
+        expected_wrap = ("rui session read-conversation --store-hex "
+            "01234567890123456789012345678901234567890123 --session k7m2qx --position 6 --ordinal 0")
+        assert draw(transcript, 40) == expected_wrap
+        inspection = ["Raw export: rui session", "read-conversation --store-hex",
+            "0123456789012345678901234567890123456789", "0123 --session k7m2qx --position 6", "--ordinal 0"]
+        assert draw(inspection, 40, rail=None) == expected_wrap
+        assert draw(["Raw export: rui --literal ▐ --ordinal 0"], 80) == "rui --literal ▐ --ordinal 0"
+        def reject(action):
+            try:
+                action()
+            except (AssertionError, StopIteration):
+                return
+            raise AssertionError("corrupt raw export accepted")
+        reject(lambda: raw_export(master, capture.completed + "\n"))
+        reject(lambda: draw(["Raw export: rui --ordinal "], 40, rail="0"))
+        reject(lambda: draw(["Raw export: rui --ordinal 0"], 40, rail=" "))
+        reject(lambda: draw(["Raw export: rui --ordinal 0", "Raw export: rui --ordinal 1"], 80))
+        reject(lambda: draw(["Raw export: rui --ordinal "], 40))
+        # A digit at the edge may have a further digit on the next row.
+        edge = "Raw export: rui --ordinal 1".rjust(39)
+        reject(lambda: draw([edge, "2"], 40))
+        assert draw([edge, ""], 40) == "rui --ordinal 1"
+        # A settled transcript owns its rail on every source row, while the
+        # rule, composer and footer remain full-width screen chrome.
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
+        capture.resize(40, 24)
+        body = ["literal ▐".ljust(39) + "▐"] + [" " * 39 + "▐"] * 20
+        rows = body + ["─" * 40, "›", "Looking back"]
+        capture.feed(terminal_frame(rows, (23, 3)))
+        source = transcript_source(capture, capture.completed)
+        assert source.split("\n")[0] == "literal ▐", source
+        assert source.split("\n")[-3:] == ["─" * 40, "›", "Looking back"], source
+        reject(lambda: transcript_source(capture, capture.completed + "\n"))
+        rows[1] = " " * 40
+        capture.feed(terminal_frame(rows, (23, 3)))
+        reject(lambda: transcript_source(capture, capture.completed))
+        rows[1] = " " * 39 + "▐"
+        rows[-3] = "─" * 39
+        capture.feed(terminal_frame(rows, (23, 3)))
+        reject(lambda: transcript_source(capture, capture.completed))
+    finally:
+        forget_terminal(master)
+        dispose_all(lambda: os.close(master), lambda: os.close(slave))
+    print("raw export cells: exact wraps, full-width inspection, literal rail and malformed/stale/ambiguous negatives passed", flush=True)
 
 
 def drawn_style(master, text, offset=0):
@@ -2048,16 +2660,10 @@ def scroll_return_case():
             return {path: path.read_bytes() for path in records.glob("*.json")}, len(endpoint.requests)
 
         def live(latest, context):
-            shown = settle_screen(master, quiet=0.5)
+            settle_screen(master, quiet=0.5)
             capture = terminal_capture(master)
-            assert not shown.startswith("Browsing"), (context, "still browsing", shown)
-            assert composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y), (context, shown)
-            # The draft keeps the row over the Session line, under the rule,
-            # and the latest text is the last written row above it.
-            rows = shown.split("\n")
-            y = capture.screen.cursor.y
-            written = [row for row in rows[:y - 1] if row.strip()]
-            assert y == len(rows) - 2 and rows[y] == "› keep" and set(rows[y - 1]) == {"─"} and latest in written[-3:], (context, "latest row not last", shown)
+            cursor = (capture.screen.cursor.x, capture.screen.cursor.y)
+            assert_scroll_latest(capture.completed_cells, cursor, latest, context)
 
         def leave(saved):
             records_before, requests = saved
@@ -2076,31 +2682,34 @@ def scroll_return_case():
                 context = (rows, count)
                 os.write(master, b"\x1b[A" * count)
                 shown = settle_screen(master, quiet=0.5)
-                assert shown.startswith("Browsing · Esc returns"), (context, shown)
+                assert looking_back(shown), (context, shown)
                 os.write(master, b"\x1b[B" * count)
                 live(latest, context)
             leave(saved)
             master = slave = caller = None
-        # At the history boundary extra rows up move nothing, so the same
-        # count down still reaches live output; every return key works.
+        # A saved all-fitting conversation with no predecessors is already
+        # at the top. None of these keys may add Start, detach or move cells.
         latest = "brief answer"
         for rows in (30, 16):
-            saved = enter(sessions[1], rows, latest.strip())
-            for up, back in ((b"\x1b[A", b"\x1b[B" * 40), (b"\x1bOA", b"\x1b"),
-                    (b"\x1b[5;2~", b"\x1b[1;5F"), (b"\x1b[5~", b"\x1b[6~" * 40)):
-                context = (rows, up, back[:8])
-                os.write(master, up * 40)
-                shown = settle_screen(master, quiet=0.5)
-                assert shown.startswith("Browsing · Esc returns") and "Start of conversation" in shown, (context, shown)
+            saved = enter(sessions[1], rows, latest)
+            for up in (b"\x1b[A", b"\x1bOA", b"\x1b[5;2~", b"\x1b[5~"):
+                fitted_scroll(master, up * 40, "keep")
+                live(latest, (rows, up))
+            # /history deliberately exposes the canonical Start; Esc remains
+            # supported, but no return path REQUIRES it, including with draft.
+            for back in (b"\x1b[B" * 40, b"\x1b", b"\x1b[1;5F", b"\x1b[6~" * 40):
+                history_top(master, b"\x15/history\n")
+                scroll_until(master, b"\x1b[5~", "Start of conversation")
+                keyed_frame(master, b"keep", lambda frame, x, y: composer_ready(frame, x, y) and frame.split("\n")[y] == "› keep" and x == 6)
                 if back == b"\x1b":
-                    return_to_live(master)
+                    return_to_live(master, key=back)
                 else:
                     os.write(master, back)
-                live(latest, context)
+                live(latest, (rows, back[:8]))
             leave(saved)
             master = slave = caller = None
         completed = True
-        print("scroll return: N rows up then N down (1, 8, 40 at 30 and 16 rows) and history-boundary returns reach live output; draft kept, nothing sent")
+        print("scroll return: real line motion returns at actual end, fitted Up/PgUp keep every frame, explicit history returns without required Esc; draft kept, nothing sent")
     finally:
         dispose_all(
             lambda: stop_process(caller, timeout=5) if caller is not None else None,
@@ -2140,6 +2749,17 @@ def persistent_opening_case():
             "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
         message = admit(home, "session", "send", "--to", session, input="literal **user** é")
         fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "opening saved answer")
+        # The Host's page is an independent source for the exported identity;
+        # this is the only assistant answer in the Session at this point.
+        from control_integration import raw_request
+        page_request = json.dumps({"version": host_process.WIRE_VERSION, "kind": "conversation_page",
+            "store": str(store), "session": session, "end": "0", "before_position": "0", "before_ordinal": "0"}).encode()
+        head, body = raw_request(host.rui_ready_fields["socket"], "/v1/conversation-page", page_request)
+        assert head.startswith(b"HTTP/1.1 200 "), (head, body)
+        page = json.loads(body)
+        answers = [item for item in page["items"] if item["kind"] == "assistant"]
+        assert not page["more"] and len(answers) == 1, page
+        answer_identity = (answers[0]["position"], answers[0]["ordinal"])
         assert run(home, "request", "read-result", "--store", store, "--key", message["request"]) == large_answer
         assert run(home, "request", "read-result", message["request"]) == large_answer
         master, slave = open_pty()
@@ -2154,10 +2774,10 @@ def persistent_opening_case():
         # The last row is the Session line, which names this unlabelled
         # Session by its first Message.
         assert output.rsplit("\n", 1)[1].startswith("literal **user** é · "), output
-        output = output.rsplit("\n", 1)[0]
+        output = transcript_source(terminal_capture(master), output).rsplit("\n", 1)[0]
         assert output.count("literal **user** é") == 1, ("opening lost or duplicated User", output)
         assert "\n› literal **user** é" in output, output
-        assert "\nSaved heading\n" in output and "# Saved heading" not in output, output
+        assert exact_railed_row(terminal_capture(master), "Saved heading") and "# Saved heading" not in output, output
         assert all(noise not in output for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), output
         assert output.count("Saved heading") == 1, ("opening bypassed assistant renderer", output)
         assert output.count("saved bold é") == 1 and "**saved" not in output, output
@@ -2258,10 +2878,12 @@ def persistent_opening_case():
                 session], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             startup = terminal_gate(caller, master, opening_held, ("queued opening", handoff, proxy.exchanges))
-            os.write(master, b"/history\n" + handoff)
-            # /history scrolls to the start once opening establishes it.
-            output = read_terminal(master, "Start of conversation")
-            shown = current_screen(master)
+            # First prove the ORIGINAL queued intent survived the opening
+            # cancellation; a new Up must not hide a lost command.
+            history_top(master, b"/history\n" + handoff)
+            output = scroll_until(master, b"\x1b[5~", "Start of conversation")
+            shown_frame = current_screen(master)
+            shown = transcript_source(terminal_capture(master), shown_frame)
             assert "Start of conversation" in shown, ("queued history lost its scroll", handoff, shown)
             assert shown.index("Start of conversation") < shown.index("literal **user** é") < shown.index("saved user 01"), \
                 ("queued history consumed an unestablished opening cursor", handoff, shown)
@@ -2286,9 +2908,10 @@ def persistent_opening_case():
         # Session's first Message; the checks below are about the rows above.
         def above_line(frames):
             return "\n".join(row for row in frames.split("\n") if not row.startswith("literal **user** é · "))
-        output = read_terminal(master, "› ")
-        assert "\nliteral **user** é · " in output, output
-        output = above_line(output)
+        read_terminal(master, "› ")
+        opening_frame = current_screen(master)
+        assert "\nliteral **user** é · " in opening_frame, opening_frame
+        output = above_line(transcript_source(terminal_capture(master), opening_frame))
         assert "saved user 09" in output and "literal **user** é" not in output, output
         assert output.index("saved user 08") < output.index("saved answer 08") < output.index("saved user 09"), output
         message = admit(home, "session", "send", "--to", session, input="late input")
@@ -2363,14 +2986,16 @@ def persistent_opening_case():
         os.write(master, b"\x05\x15")
         read_terminal(master, "› ", composer=True)
         scroll_until(master, b"\x1b[5~", "Start of conversation")
-        recovered = above_line(current_screen(master))
+        recovered_frame = current_screen(master)
+        recovered = above_line(transcript_source(terminal_capture(master), recovered_frame))
         assert recovered.count("literal **user** é") == 1 and "Historical item omitted" in recovered, recovered
         assert "Saved heading" not in recovered and "OPENING-COMPLETE" not in recovered, "oversized historical content leaked"
         assert recovered.index("Start of conversation") < recovered.index("literal **user** é") < recovered.index("Historical item omitted") < recovered.index("saved user 01"), recovered
-        export = raw_export(master, recovered)
+        export = raw_export(master, recovered_frame)
         command = shlex.split(export)
         assert command[0:4] == ["rui", "session", "read-conversation", "--store-hex"] and bytes.fromhex(command[4]) == str(store).encode(), export
         assert command[5:7] == ["--session", session] and "--session-hex" not in command, export
+        assert command[7:] == ["--position", answer_identity[0], "--ordinal", answer_identity[1]], (command, answer_identity)
         assert all(32 <= ord(char) < 127 for char in export), "raw export printed terminal controls"
         executables = state / "bin"
         executables.mkdir()
@@ -3140,7 +3765,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             assert f"! {description} — Failed (exit {exit_code})\n  Earlier output omitted" in details, details
             assert "inspection-only-output" in details and "Exit code:" not in details, details
             assert "Historical item omitted" not in details, details
-            export = raw_export(master, details)
+            export = raw_export(master, details, rail=False)
             exported = run(home, *shlex.split(export)[1:])
             assert len(exported.encode()) > 8192 and exported.startswith(f"Bash failed. Exit code: {exit_code}.\n"), exported[:200]
             assert "inspection-only-output" in exported
@@ -3464,8 +4089,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 "--", reference], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             read_terminal(master, "› ")
-            os.write(master, b"/history\n")
-            read_terminal(master, "Browsing · Esc returns")
+            history_top(master)
             scroll_until(master, b"\x1b[5~", "Start of conversation")
             history = current_screen(master)
             assert f"! {description} — Failed (exit {exit_code})\n" in history, history
@@ -4244,48 +4868,16 @@ def incomplete_input_case(home, store, session, endpoint, host):
     print("incomplete input: all four native deadlines, delayed output, exact restoration and no dispatch passed", flush=True)
 
 
+def listed_call_ready(cells):
+    running = re.compile(r"  • Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
+    return any(running.fullmatch(row.rstrip(" "))
+               for row in cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1))
+
+
 def wait_for_listed_call(tty):
-    # A matching Bash projection supplies the unresolved row's clock. The
-    # command stays held until after traversal; a bare heading can precede claim.
-    running = re.compile(r"• Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
-    tty.wait(predicate=lambda: any(running.fullmatch(row) for row in tty.capture.completed.splitlines()), timeout=30)
-
-
-def listed_call_readiness_cases():
-    """A heading may precede claim; only the current running row is a barrier."""
-    from terminal_screen import ScreenCapture
-
-    class OfferedFrames:
-        def __init__(self, elapsed):
-            self.capture = ScreenCapture(80, 24)
-            self.frames = (
-                "• Held call\n• Queued · 0s",
-                "✓ Held call · 42s",
-                "• Other call · 42s",
-                "prefix • Held call · 42s",
-                "• Held call · 42s extra",
-                "• Held call · " + elapsed,
-            )
-            self.offered = None
-            # Accumulated output already contains a timed row: it is not current.
-            self.frame("• Held call · 99s")
-            self.frame(self.frames[0])
-
-        def frame(self, text):
-            self.capture.feed(("\x1b[?2026h\x1b[H\x1b[2J" + text.replace("\n", "\r\n") + "\x1b[?2026l").encode())
-
-        def wait(self, marker=None, *, predicate=None, timeout=15):
-            assert timeout == 30, timeout
-            for self.offered, frame in enumerate(self.frames):
-                self.frame(frame)
-                if (predicate() if predicate is not None else self.capture.reached(marker)):
-                    return self.capture.completed
-            raise AssertionError(("running listed call was not accepted", self.capture.completed))
-
-    for elapsed in ("0s", "2m 3s", "1h 2m"):
-        tty = OfferedFrames(elapsed)
-        wait_for_listed_call(tty)
-        assert tty.offered == len(tty.frames) - 1, ("listed call accepted before current running row", tty.capture.completed)
+    # Current exact two-space unresolved timed row; full visual queue/body
+    # geometry is asserted independently during traversal, not learned here.
+    tty.wait(predicate=lambda: listed_call_ready(tty.capture.completed_cells), timeout=30)
 
 
 def renderer_cases():
@@ -4295,7 +4887,9 @@ def renderer_cases():
     import canonical_failure_integration as canonical
     import resource
 
-    listed_call_readiness_cases()
+    conversation_protocol_cases()
+    cell_value_cases()
+    observation_window_cases()
 
     # Every-frame oracles see each synchronized commit, not just the newest one after a read.
     control, seen = ScreenCapture(), []
@@ -4366,11 +4960,11 @@ def renderer_cases():
             finally:
                 self.capture.listener = previous
 
-        def every_frame(self):
+        def every_frame(self, *, with_cells=False):
             """Every committed frame from now on. One read can commit several
             frames; the newest after a read hides the ones before it."""
             frames = []
-            self.capture.listener = lambda screen, x, y: frames.append(screen)
+            self.capture.listener = lambda screen, x, y: frames.append(self.capture.completed_cells if with_cells else screen)
             return frames
 
         def send(self, text, marker=None, *, predicate=None):
@@ -4393,6 +4987,15 @@ def renderer_cases():
             if failure:
                 raise failure[0]
             return result
+
+        def history_top(self):
+            # Keep this owner's input writer and collection deadline; only
+            # the current-frame acceptance fact is shared with direct PTYs.
+            return self.send("/history\n", predicate=lambda: history_selected(
+                self.capture.completed, self.capture.screen.cursor.x, self.capture.screen.cursor.y))
+
+        def observe_for(self, seconds):
+            observe_for(self.master, seconds, capture=self.capture)
 
         def ready(self, descriptor, until=lambda: True):
             """Return once an offered frame shows what `until` accepts. Rui
@@ -4513,9 +5116,10 @@ def renderer_cases():
         return create_session(home, "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", permission)
 
-    def answer(index):
+    def answer(index, *, tall=False):
         marker = f"renderer answer {index}"
-        endpoint.responses.append(fixture.sse_answer(f"renderer-{index}", f"reason-{index}", f"message-{index}", marker)[0])
+        text = "\n".join(f"SCROLL-CONTEXT-{i:02d}" for i in range(60)) + "\n" + marker if tall else marker
+        endpoint.responses.append(fixture.sse_answer(f"renderer-{index}", f"reason-{index}", f"message-{index}", text)[0])
         return marker
 
     def submitted(text):
@@ -4658,7 +5262,7 @@ def renderer_cases():
                 tty.send(recover, "Original confirmed")
                 assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved
                 assert json.loads(saved)["text"]["value"] == "original é"
-                fixture.wait_for(lambda: len(endpoint.requests) == before + 1, "original renderer request")
+                fixture.wait_for(tty.draining(lambda: len(endpoint.requests) == before + 1), "original renderer request")
                 submitted("original é")
                 assert tty.capture.draft("next cafXé!", 11), tty.capture.completed
                 marker = answer(f"retained {name}")
@@ -5016,32 +5620,16 @@ def renderer_cases():
         marker = answer("submitted feedback")
         with terminal(session) as tty:
             tty.send("x", predicate=lambda: tty.capture.draft("x", 3))
-            frames = tty.every_frame()
+            frames = tty.every_frame(with_cells=True)
             sent = time.time()
             tty.send("\n", marker)
             # The time is the Host's admission second, in this local zone.
             times = {time.strftime("%H:%M", time.localtime(second)) for second in range(int(sent), int(time.time()) + 1)}
-            for frame in frames:
-                rows = frame.rstrip("\n").split("\n")
-                composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
-                history = rows[:composer]
-                assert "›" not in [row.strip() for row in history], frame
-                for row in history:
-                    if untimed(row) == "› x":
-                        assert len(row) == 80 and row[-5:] in times, (row, times)
-                if rows[composer].strip() == "›":
-                    assert "› x" in map(untimed, history) or {"Sending…", "Sent"} & set(history), frame
+            for cells in frames:
+                assert_submitted_feedback(cells, times)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         print("renderer: a submitted Message shows as sending or in full from Enter on", flush=True)
-
-        def feedback(frames, text):
-            for frame in frames:
-                rows = frame.rstrip("\n").split("\n")
-                composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
-                history = rows[:composer]
-                if rows[composer].strip() == "›":
-                    assert f"› {text}" in map(untimed, history) or {"Sending…", "Sent"} & set(history), (text, frame)
 
         def held_pages():
             """Once holding is set, Activity page requests reach the Host only
@@ -5069,7 +5657,7 @@ def renderer_cases():
         with terminal(session) as tty:
             os.write(tty.master, b"AAA\n")
             fixture.wait_for(tty.draining(holding[b"AAA"].is_set), "the AAA content read was never held", timeout=10)
-            frames = tty.every_frame()
+            frames = tty.every_frame(with_cells=True)
             sent = len(proxy.mutations)
             def accepted():
                 rows = tty.capture.completed.split("\n")
@@ -5084,7 +5672,7 @@ def renderer_cases():
             for response in unused:
                 endpoint.responses.remove(response)
             tty.wait(markers[0] if unused else markers[1])
-            feedback(frames, "BBB")
+            message_feedback(frames, "BBB")
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
@@ -5104,11 +5692,11 @@ def renderer_cases():
                 fixture.wait_for(lambda: fixture.completed_observation(store, key), "backlog answer", timeout=20)
             fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "backlog settled", timeout=20)
             marker = answer("caught up")
-            frames = tty.every_frame()
+            frames = tty.every_frame(with_cells=True)
             tty.send("CCC\n", predicate=lambda: "Sent" in tty.capture.completed)
             release.set()
             tty.wait(marker, timeout=20)
-            feedback(frames, "CCC")
+            message_feedback(frames, "CCC")
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
@@ -5299,7 +5887,7 @@ def renderer_cases():
             time.sleep(0.3)
             released[1].set()
             tty.wait("Recent conversation — tool details", timeout=20)
-            time.sleep(1.5)
+            tty.observe_for(1.5)
             assert "Recent conversation — tool details" in tty.capture.completed, tty.capture.completed
             for frame in frames:
                 assert " Status · " not in frame, frame
@@ -5316,11 +5904,11 @@ def renderer_cases():
         with terminal(session) as tty:
             tty.send("fresh start\n", marker)
             frames = tty.every_frame()
-            tty.send("/history\n", "Start of conversation")
+            tty.history_top()
             for _ in range(3):
                 os.write(tty.master, b"\x1b[5~")
-                time.sleep(0.3)
-            time.sleep(1)
+                tty.observe_for(0.3)
+            tty.observe_for(1)
             shown = tty.capture.completed
             assert shown.index("Start of conversation") < shown.index("› fresh start") < shown.index(marker), shown
             for frame in frames:
@@ -5391,7 +5979,7 @@ def renderer_cases():
             tty.wait("› later 8", timeout=20)
             release_reply.set()
             tty.wait(predicate=lambda: "Sending…" not in tty.capture.completed, timeout=10)
-            time.sleep(1)
+            tty.observe_for(1)
             tty.wait(predicate=lambda: "Sent" not in tty.capture.completed.rstrip("\n").split("\n")[-4:], timeout=5)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
@@ -5410,7 +5998,7 @@ def renderer_cases():
             tty.send("\x1b\r", predicate=lambda: "! Key combination not recognized" not in tty.capture.completed and tty.capture.draft("", 2, prompt="  "))
             tty.send("\x1b\n2", predicate=lambda: tty.capture.draft("2", 3, prompt="  "))
             # A hand-typed Esc expires before Enter, which then sends.
-            marker = answer("esc then enter")
+            marker = answer("esc then enter", tall=True)
             os.write(tty.master, b"\x1b")
             time.sleep(0.3)
             assert len(endpoint.requests) == requests, endpoint.requests
@@ -5419,9 +6007,9 @@ def renderer_cases():
             tty.send("ok", predicate=lambda: tty.capture.draft("ok", 4))
             marker = answer("alt chord")
             # Sent while browsing, the Message returns to the live view.
-            tty.send("\x1b[A", "Browsing · Esc returns")
+            tty.send("\x1b[A", predicate=lambda: looking_back(tty.capture.completed))
             tty.send("\r", marker)
-            assert "Browsing · Esc returns" not in tty.capture.completed, tty.capture.completed
+            assert live_conversation(tty.capture.completed), tty.capture.completed
             assert "In tmux" not in tty.capture.completed, tty.capture.completed
             submitted("ok")
             tty.caller.send_signal(signal.SIGINT)
@@ -5444,7 +6032,7 @@ def renderer_cases():
             marker = answer("recall control")
             admit(home, "session", "send", "--store", store, "--to", session, input="RECALL-\x01-CONTROL")
             tty.wait(marker)
-            tty.send("//RECALL-SLASH\r", answer("recall slash"))
+            tty.send("//RECALL-SLASH\r", answer("recall slash", tall=True))
             submitted("/RECALL-SLASH")
             requests = len(endpoint.requests)
             older, newer = "\x10", "\x0e"
@@ -5455,8 +6043,8 @@ def renderer_cases():
                 # Only a step over the control Message says it passed one, either way.
                 assert (passed in tty.capture.completed) == (step in (1, 4)), (step, tty.capture.completed)
             # Up on a recalled draft scrolls, and the draft stays recalled.
-            tty.send("\x1b[A", "Browsing · Esc returns")
-            tty.send("\x1b[B", predicate=lambda: "Browsing" not in tty.capture.completed and tty.capture.draft("//RECALL-SLASH", 16))
+            tty.send("\x1b[A", predicate=lambda: looking_back(tty.capture.completed))
+            tty.send("\x1b[B", predicate=lambda: live_conversation(tty.capture.completed) and tty.capture.draft("//RECALL-SLASH", 16))
             # Presses made while a step is read add up; Ctrl-P stops at the oldest.
             tty.send(older * 4, predicate=lambda: "No earlier message." in tty.capture.completed and tty.capture.draft("RECALL-ONE", 12))
             tty.send("!", predicate=lambda: tty.capture.draft("RECALL-ONE!", 13))
@@ -5488,7 +6076,8 @@ def renderer_cases():
         session = configure()
         hint = "In tmux, Shift-Enter sends · Alt-J adds a line"
         with terminal(session, tmux=True) as tty:
-            tty.send("\x1b[A", "Start of conversation")
+            tty.history_top()
+            scroll_until(tty.master, b"\x1b[5~", "Start of conversation", capture=tty.capture)
             assert "Earlier rows left this view." not in tty.capture.completed, tty.capture.completed
             tty.send("x", predicate=lambda: hint in tty.capture.completed and tty.capture.draft("x", 3))
             tty.send("\x7f", predicate=lambda: hint not in tty.capture.completed and tty.capture.draft("", 2))
@@ -5529,7 +6118,7 @@ def renderer_cases():
                 release.set()
                 tty.wait(marker, timeout=20)
                 shown = tty.capture.completed
-                assert marker in shown and "Browsing · Esc returns" not in shown and " Status · " not in shown, (command, route, shown)
+                assert marker in shown and live_conversation(shown) and " Status · " not in shown, (command, route, shown)
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
             proxy.close()
@@ -5594,11 +6183,11 @@ def renderer_cases():
                     fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "evicted Message answered", timeout=20)
                     release.set()
                 tty.wait("REPLY-04399", timeout=30)
-                tty.send("\x1b[A", "Browsing · Esc returns")
+                tty.send("\x1b[A", predicate=lambda: looking_back(tty.capture.completed))
                 # Each /history jumps to the transcript's top, where the
                 # preceding page then loads.
                 for _ in range(10):
-                    tty.send("/history\n", predicate=lambda: "Loading earlier messages…" not in tty.capture.completed)
+                    tty.history_top()
                     if "Start of conversation" in tty.capture.completed:
                         break
                 shown = tty.capture.completed
@@ -5635,12 +6224,13 @@ def renderer_cases():
                 assert tty.capture.completed == before, (return_key, before, tty.capture.completed)
             # In the transcript the same block opens and returns to its rows,
             # once the transcript has loaded what precedes it.
-            tty.send("\x1b[A", predicate=lambda: "Browsing · Esc returns" in tty.capture.completed and "Start of conversation" in tty.capture.completed)
+            tty.history_top()
+            scroll_until(tty.master, b"\x1b[5~", "Start of conversation", capture=tty.capture)
             browsing = tty.capture.completed
             tty.send("\x0f", heading)
             tty.send("\x1b", predicate=lambda: "Message ·" not in tty.capture.completed)
             assert tty.capture.completed == browsing, (browsing, tty.capture.completed)
-            tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
+            tty.send("\x1b[1;5F", predicate=lambda: live_conversation(tty.capture.completed))
             # A page still loading when a Message is sent never opens over it.
             holding, release, held = threading.Event(), threading.Event(), threading.Event()
             holding.set()
@@ -5673,7 +6263,7 @@ def renderer_cases():
             tty.send("\x0f", "No collapsed message in view")
             assert "Message ·" not in tty.capture.completed
             # A newer Ctrl-O that finds nothing still replaces a loading page.
-            tty.send("\x1b[A", "Browsing · Esc returns")
+            tty.send("\x1b[A", predicate=lambda: looking_back(tty.capture.completed))
             for _ in range(10):
                 if "┄ 299 more lines" in tty.capture.completed:
                     break
@@ -5697,15 +6287,14 @@ def renderer_cases():
                     if "┄ 299 more lines" not in tty.capture.completed:
                         break
                     tty.send("\x1b[B", predicate=lambda: True)
-                assert "┄ 299 more lines" not in tty.capture.completed and "Browsing" in tty.capture.completed, tty.capture.completed
+                assert "┄ 299 more lines" not in tty.capture.completed and looking_back(tty.capture.completed), tty.capture.completed
                 tty.send("\x0f", "No collapsed message in view")
                 holding.clear()
                 release.set()
                 fixture.wait_for(lambda: proxy.exchanges, "the superseded content read", timeout=20)
-                time.sleep(1)  # Its settlement would draw the page now.
-                tty.send("\x1b[A", predicate=lambda: True)  # Reads what was drawn.
+                tty.observe_for(1)  # Include any page its settlement would draw.
                 shown = tty.capture.completed
-                assert "Message ·" not in shown and "Browsing" in shown, shown
+                assert "Message ·" not in shown and looking_back(shown), shown
             finally:
                 release.set()
                 proxy.close()
@@ -5719,16 +6308,22 @@ def renderer_cases():
             # first line, cut to fit, and how many wait at the right edge.
             return any(row.startswith("› " + text) and row.endswith(" " + label) for row in tty.capture.completed.split("\n"))
 
-        def traverse(tty, steps=10):
-            tty.send("\x1b[A", "Browsing · Esc returns")
+        def traverse(tty, steps=10, *, queued=None, call=None, work=None):
+            tty.history_top()
             # Each step loads one older page or one listed Message.
             for _ in range(steps):
-                tty.send("/history\n", predicate=lambda: "Loading earlier messages…" not in tty.capture.completed)
+                tty.history_top()
                 if "Start of conversation" in tty.capture.completed:
                     break
             # The last row is the Session line, which can name an unlabelled
             # Session by its first Message.
-            return tty.capture.completed.rsplit("\n", 1)[0]
+            cells = tty.capture.completed_cells
+            frame = "\n".join(row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, len(cells[0])))
+            assert looking_back(frame), frame
+            if queued is not None:
+                cursor = tty.capture.screen.cursor
+                return conversation_body(cells, (cursor.x, cursor.y), queued=queued, call=call, work=work)
+            return "\n".join(row.rstrip(" ") for row in cell_rows(cells, 0, len(cells) - 1, 0, 79))
 
         def reachable(shown, before, row, reply="REPLY-00000", form=omitted):
             # The transcript reaches the Message exactly once, after what
@@ -5873,9 +6468,10 @@ def renderer_cases():
             release.set()
             tty.wait("OK-REPLY", timeout=30)
             tty.send("THIRD-QUESTION\n", answer("styled third"))
-            tty.send("\x1b[A", "Start of conversation")
+            tty.history_top()
+            scroll_until(tty.master, b"\x1b[5~", "Start of conversation", capture=tty.capture)
             shown = tty.capture.completed
-            assert "Browsing · Esc returns" in shown and "Earlier rows left this view." not in shown, shown
+            assert looking_back(shown) and "Earlier rows left this view." not in shown, shown
             for text in ("› DRIVER-QUESTION", "SHORT-STYLED-END", "› QUEUED-M", "OK-REPLY", "› THIRD-QUESTION", "renderer answer styled third"):
                 assert shown.count(text) == 1, (text, shown)
             assert shown.index("SHORT-STYLED-END") < shown.index("OK-REPLY") < shown.index("› THIRD-QUESTION"), shown
@@ -5903,7 +6499,7 @@ def renderer_cases():
                 tty.wait("REPLY-04399", timeout=30)
                 # The queued Message is now applied, and its own answer held.
                 fixture.wait_for(lambda: len(endpoint.requests) > requests + 1, "second model request", timeout=20)
-                time.sleep(1)  # Scans read its row; nothing more shows.
+                tty.observe_for(1)  # Collect the scans even when no answer may show.
                 assert "SILENT-SECOND-DONE" not in tty.capture.completed
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
@@ -6003,13 +6599,16 @@ def renderer_cases():
                 queue_three(tty)
                 first_release.set()
                 tty.wait("LONG-04399", timeout=60)
+                # This fixture uses only single-cell precomposed Latin text:
+                # fixed80-column expectation, NOT a second Unicode fitter.
+                queued_row = ("› " + big[:68] + "…").ljust(72) + "3 queued"
                 wait_for_listed_call(tty)
                 assert waiting(tty, "BIG-START", "3 queued"), tty.capture.completed
-                shown = traverse(tty)
+                shown = traverse(tty, queued=queued_row, call="Held call")
                 assert "Start of conversation" in shown and shown.count("DRIVER-QUESTION") == 1, shown
                 assert "EQUAL-CONTENT" not in shown and "BIG-START" not in shown and "Queued" not in shown, shown
                 assert "LONG-00000" not in shown, "the copy started before the front"
-                tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
+                tty.send("\x1b[1;5F", predicate=lambda: live_conversation(tty.capture.completed))
                 (workspace / "listed-release").write_text("")
                 tty.wait("LISTED-DONE", timeout=30)
                 shown = traverse(tty)
@@ -6113,8 +6712,9 @@ def renderer_cases():
                     tty.send(f"MANY-STOPPED-{index:02d}\n", predicate=lambda index=index, label=label: waiting(tty, f"MANY-STOPPED-{index:02d}", label) and tty.capture.draft("", 2))
                 run(home, "session", "stop", "--store", store, "--session", session, "--record", state / "many-stop.json", "--key", "many-stop")
                 tty.wait(predicate=lambda: "! Session stopped." in tty.capture.completed, timeout=30)
-                live = tty.capture.completed
-                rows = [untimed(row) for row in live.split("\n")]
+                cells = tty.capture.completed_cells
+                live = "\n".join(row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, len(cells[0])))
+                rows = [untimed(row.rstrip(" ")) for row in cell_rows(cells, 0, len(cells), 0, 79)]
                 order = [rows.index(f"› MANY-STOPPED-{index:02d}") for index in range(40)]
                 assert all(rows.count(f"› MANY-STOPPED-{index:02d}") == 1 for index in range(40)), live
                 assert order == sorted(order) and order[-1] < rows.index("! Session stopped."), live
@@ -6199,10 +6799,11 @@ def renderer_cases():
                 opened = tty.wait(predicate=lambda: tty.capture.draft("", 2) and waiting(tty, "OPENING-QUEUED-23", "24 queued"))
                 assert "queued behind" not in opened and "Queued" not in opened, opened
                 assert not any(f"OPENING-QUEUED-{index:02d}" in opened for index in range(23)), opened
-                shown = traverse(tty)
+                queued_row = "› OPENING-QUEUED-23".ljust(71) + "24 queued"
+                shown = traverse(tty, queued=queued_row, work="Waiting")
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
                 assert "OPENING-QUEUED-" not in shown and "Queued" not in shown and shown.count("ACTIVE-ORIGINAL") == 1, shown
-                tty.send("\x1b", predicate=lambda: "Browsing" not in tty.capture.completed)
+                tty.send("\x1b[1;5F", predicate=lambda: live_conversation(tty.capture.completed))
                 first_release.set()
                 tty.wait("OPENING-QUEUED-DONE", timeout=30)
                 assert "queued" not in tty.capture.completed, tty.capture.completed
@@ -6227,7 +6828,7 @@ def renderer_cases():
         resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
 
 
-def main(selected="all"):
+def main(selected="all", *, held_owner=None):
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
@@ -6297,7 +6898,7 @@ def main(selected="all"):
     if selected == "persistent-permission":
         return
     if selected == "all" and not split_callers:
-        terminal_restoration_integration.main()
+        terminal_restoration_integration.main(held_owner=held_owner)
         canonical_failure_integration.main()
     if selected == "caller-core":
         selected = "all"
@@ -7589,7 +8190,11 @@ def main(selected="all"):
                     observed = terminal_step(master, typed, f"edited {index}")
                 assert f"edited {index}" in observed, observed
                 if index == 2:
-                    assert "\n› line1\n  line2" in "\n".join(map(untimed, observed.split("\n"))), observed
+                    # observed joins distinct frames. Source proof uses ONLY
+                    # the current committed cells, never that stream plus a newer grid.
+                    capture = terminal_capture(master)
+                    assert composer_ready(capture.completed, capture.screen.cursor.x, capture.screen.cursor.y), capture.completed
+                    assert_editor_submission(capture.completed_cells)
                     assert "\nedited 2" in observed, observed
                 if "› " not in observed.split(f"edited {index}", 1)[1]:
                     await_screen(master, "", composer=True)
@@ -7786,5 +8391,6 @@ def main(selected="all"):
 
 
 if __name__ == "__main__":
+    held_owner = os.environ.get("RUI_TEST_HELD_OWNER")
     host_process.enter()
-    main(sys.argv[2] if len(sys.argv) == 3 else "all")
+    main(sys.argv[2] if len(sys.argv) == 3 else "all", held_owner=held_owner)

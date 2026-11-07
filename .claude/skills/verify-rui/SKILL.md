@@ -96,11 +96,13 @@ It also prints macOS Accessibility and Screen Recording status for information o
 
 Stable handles from the product:
 - `›`: the composer prompt.
-- `Browsing · Esc returns`: an inspection or scrolled view.
+- `Browsing · Esc returns`: an inspection page, not a scrolled transcript.
+- `Looking back`: transcript footer; `New output below` appears when live text advanced. Ctrl-End follows latest; live tools and queue keep their geometry.
 - `Session: NAME` and `Work:`: the /status page.
 - `Start of conversation`.
 - `Detached. Host work continues.` and `Resume: rui session resume …`: shown after exit.
-- `Run Bash`: the consent prompt.
+- `PgDn reads the rest`: the long-Action consent read gate; after reading, `Allow once` / `Deny` and `←→ choose · enter confirms` identify the choice.
+  Do not wait for `Run Bash` before paging the disclosure; use the [consent recipe](features/consent.md).
 - `Fixture answer N: received "…"`: the fixture echoes the exact received text.
 
 Fixture policy, chosen by the latest user text:

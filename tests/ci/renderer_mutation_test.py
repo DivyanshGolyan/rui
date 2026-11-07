@@ -80,12 +80,18 @@ class MutationGateTests(unittest.TestCase):
             binary = root / "already-executed-test"
             binary.write_text("retained model binary")
             check = gate.model("pages")
+            alias = root / "source-alias"
+            alias.symlink_to(root, target_is_directory=True)
+            wrong = root / "other-source"
+            wrong.mkdir()
             for status in (0, 1):
                 receipt = {"source": str(root), "selector": "pages", "source_unchanged": True,
                            "overlay_unchanged": True,
                            "exit": status, "direct_exit": status,
                            "binary": str(binary), "binary_sha256": gate.sha(binary)}
-                for index, alteration in enumerate(({}, {"source": "/wrong-source"}, {"selector": "focus"},
+                for index, alteration in enumerate(({}, {"source": str(alias)},
+                                                     {"source": str(wrong)}, {"source": str(root / "missing")},
+                                                     {"selector": "focus"},
                                                      {"source_unchanged": False}, {"overlay_unchanged": False},
                                                      {"overlay_unchanged": None}, {"direct_exit": -9},
                                                      {"exit": 1 - status}, {"binary_sha256": "wrong"})):
@@ -100,9 +106,10 @@ class MutationGateTests(unittest.TestCase):
                         command = [sys.executable, "-c", f"print({transcript!r}); raise SystemExit({status})"]
                         with patch.object(gate.Check, "command", return_value=command):
                             result = gate.run_check(check, root, log, 5, dict(os.environ))
-                        expected = "invalid-model-receipt" if alteration else "passed" if status == 0 else "behavioral-kill"
+                        valid_source = not alteration or alteration == {"source": str(alias)}
+                        expected = ("passed" if status == 0 else "behavioral-kill") if valid_source else "invalid-model-receipt"
                         self.assertEqual(result["outcome"], expected)
-                        if not alteration:
+                        if valid_source:
                             self.assertEqual(result["receipt_sha256"], gate.sha(output / "receipt.json"))
 
     def test_source_drift_during_baseline_or_mutant_execution_fails_closed(self):
@@ -190,6 +197,7 @@ class MutationGateTests(unittest.TestCase):
             (root / "owner").write_text("unchanged")
             with patch.object(gate, "tracked", return_value=[Path("owner")]), \
                  patch.object(gate.subprocess, "check_output", return_value="fixture"), \
+                 patch.object(gate.platform, "platform", return_value="fixture-platform"), \
                  patch.object(gate, "run_check") as execute:
                 def failure(check, directory, log, timeout, environment):
                     log.write_text("compile failure")
@@ -200,6 +208,7 @@ class MutationGateTests(unittest.TestCase):
                 self.assertEqual(execute.call_count, 1)
             report = json.loads((root / "evidence/report.json").read_text())
             self.assertTrue(report["tree_unchanged"])
+            self.assertEqual(report["platform"], "fixture-platform")
             self.assertEqual(report["mutations"], [])
 
     def test_duplicate_or_missing_anchor_is_not_a_kill(self):

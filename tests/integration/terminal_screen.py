@@ -8,13 +8,20 @@ import re
 import unicodedata
 
 import pyte
-from wcwidth import wcwidth
+from wcwidth import wcwidth, wcswidth
 
 
 LIMIT = 1024 * 1024
 BOUNDARY = re.compile(r"\x1b\[\?2026([hl])")
 PLAIN_CONTROL = re.compile(r"\x1b\[[0-9;?$]*[A-Za-z~]|\x1b[()][A-Z0-9]|\r(?!\n)")
 RESTORE = "\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l"
+
+
+def cell_rows(cells, top, bottom, left, right):
+    """Text of an explicit physical-cell rectangle; no trimming or policy."""
+    assert 0 <= top <= bottom <= len(cells), (top, bottom, len(cells))
+    assert 0 <= left <= right and all(right <= len(row) for row in cells[top:bottom]), (left, right)
+    return ["".join(cell.data for cell in row[left:right]) for row in cells[top:bottom]]
 
 
 def shown(text, screen):
@@ -26,36 +33,152 @@ def shown(text, screen):
 
 
 class CombiningScreen(pyte.Screen):
-    """Normalize adjacent combining marks once, retaining pyte draw semantics."""
+    """Keep zero-width Unicode marks without dropping the following draw text."""
+    # A variation selector can widen a cell beyond its first scalar's width.
+    @property
+    def display(self):
+        rows = []
+        for y in range(self.lines):
+            parts = []
+            wide = False
+            for x in range(self.columns):
+                if wide:
+                    wide = False
+                    continue
+                data = self.buffer[y][x].data
+                width = wcswidth(data)
+                assert data and 1 <= width <= 2, "invalid terminal cell"
+                parts.append(data)
+                wide = width == 2
+            rows.append("".join(parts))
+        return rows
+
     def draw(self, data):
         translated = data.translate(self.g1_charset if self.charset else self.g0_charset)
         start = index = 0
         while index < len(translated):
             width = wcwidth(translated[index])
-            combining = width == 0 and unicodedata.combining(translated[index])
+            combining = width == 0 and unicodedata.category(translated[index]).startswith("M")
             if width <= 0 and not combining:
                 break  # Stock draw discards the suffix after an unprintable.
             if combining:
                 end = index + 1
-                while end < len(translated) and wcwidth(translated[end]) == 0 and unicodedata.combining(translated[end]):
+                while end < len(translated) and wcwidth(translated[end]) == 0 and unicodedata.category(translated[end]).startswith("M"):
                     end += 1
-                super().draw(data[start:index + 1])
+                super().draw(data[start:index])
                 if self.cursor.x or self.cursor.y:
                     row = self.cursor.y if self.cursor.x else self.cursor.y - 1
                     column = self.cursor.x - 1 if self.cursor.x else self.columns - 1
                     cell = self.buffer[row][column]
-                    self.buffer[row][column] = cell._replace(
-                        data=unicodedata.normalize("NFC", cell.data + translated[index + 1:end]))
+                    if not cell.data and column:
+                        column -= 1
+                        cell = self.buffer[row][column]
+                    combined = unicodedata.normalize("NFC", cell.data + translated[index:end])
+                    before, after = wcswidth(cell.data), wcswidth(combined)
+                    assert 1 <= before <= after <= 2 and column + after <= self.columns, "unsupported mark width"
+                    self.buffer[row][column] = cell._replace(data=combined)
+                    if after > before:
+                        self.buffer[row][column + 1] = cell._replace(data="")
+                        self.cursor.x = min(self.columns, self.cursor.x + after - before)
                 start = index = end
             else:
                 index += 1
         super().draw(data[start:])
 
 
+class SgrStream:
+    """Translate only supported colon-form SGR for pyte, without changing raw input.
+
+    CSI and control-string state survives feed boundaries. OSC/DCS payloads
+    pass unchanged; in particular a URI or clipboard payload is never parsed
+    as terminal output. Bounds prevent an unterminated CSI growing indefinitely.
+    """
+    MAX_CSI = 256
+
+    def __init__(self):
+        self.state = "text"
+        self.csi = ""
+
+    @staticmethod
+    def sgr(sequence):
+        prefix = "\x1b[" if sequence.startswith("\x1b[") else "\x9b"
+        params = sequence[len(prefix):-1].split(";")
+        converted = []
+        for param in params:
+            if ":" not in param:
+                if param and (not param.isascii() or not param.isdigit()):
+                    return sequence
+                converted.append(param)
+                continue
+            parts = param.split(":")
+            if len(parts) == 6 and parts[1:3] == ["2", ""]:
+                parts.pop(2)  # ISO 8613-6 default color-space identifier.
+            if parts[0] not in ("38", "48") or not (
+                len(parts) == 3 and parts[1] == "5" or
+                len(parts) == 5 and parts[1] == "2"
+            ):
+                return sequence
+            if any(not value.isascii() or not value.isdigit() or int(value) > 255
+                   for value in parts[2:]):
+                return sequence
+            converted.extend(parts)
+        return prefix + ";".join(converted) + "m"
+
+    def feed(self, text):
+        output = []
+        for char in text:
+            if self.state == "text":
+                if char == "\x1b":
+                    self.state = "escape"
+                elif char == "\x9b":
+                    self.csi, self.state = char, "csi"
+                elif char in ("\x9d", "\x90", "\x98", "\x9e", "\x9f"):
+                    output.append(char)
+                    self.state = "string"
+                else:
+                    output.append(char)
+            elif self.state == "escape":
+                if char == "\x1b":
+                    output.append(char)
+                elif char == "[":
+                    self.csi, self.state = "\x1b[", "csi"
+                elif char in "]P_X^":
+                    output.append("\x1b" + char)
+                    self.state = "string"
+                else:
+                    output.append("\x1b" + char)
+                    self.state = "text"
+            elif self.state == "csi":
+                if char == "\x1b":
+                    output.append(self.csi)
+                    self.csi, self.state = "", "escape"
+                else:
+                    self.csi += char
+                    assert len(self.csi) <= self.MAX_CSI, "unbounded terminal CSI"
+                    if "@" <= char <= "~":
+                        output.append(self.sgr(self.csi) if char == "m" else self.csi)
+                        self.csi, self.state = "", "text"
+            elif self.state == "string":
+                output.append(char)
+                if char in ("\x07", "\x9c"):
+                    self.state = "text"
+                elif char == "\x1b":
+                    self.state = "string_escape"
+            else:
+                assert self.state == "string_escape"
+                output.append(char)
+                if char == "\\":
+                    self.state = "text"
+                elif char != "\x1b":
+                    self.state = "string"
+        return "".join(output)
+
+
 class ScreenCapture:
     def __init__(self, columns=80, rows=24):
         self.screen = CombiningScreen(columns, rows)
         self.stream = pyte.Stream(self.screen)
+        self.sgr = SgrStream()
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.pending = self.frame = self.completed = ""
         # Cells of the latest committed frame, for style oracles.
@@ -95,7 +218,7 @@ class ScreenCapture:
                 elif part == "\x1b[?1049l":
                     self.alternate = False
                 else:
-                    self.stream.feed(part)
+                    self.stream.feed(self.sgr.feed(part))
                     if not self.alternate:
                         # Main-screen text (before entry or after restoration),
                         # such as diagnostics and detach notices, is a stream.

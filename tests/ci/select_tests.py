@@ -15,10 +15,10 @@ from strict_paths import strict
 # Renderer, terminal and frontend owners select the roots that run their unit
 # tests and PTY callers, not the Store-native check, unless a strict path changes.
 FRONTEND = ("src/AnswerRenderer.zig", "src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig",
-            "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig",
+            "src/session_departure.zig", "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/RenderBackend.zig", "src/RenderGeometry.zig", "src/testing/render.zig",
             "src/session_view.zig", "src/session_history.zig", "src/session_reads.zig", "src/ClientTask.zig",
             "src/ConversationViewport.zig", "src/Terminal*", "src/session_sequence_model_test.zig", "src/overview_view.zig",
-            "src/Overview.zig", "src/keymap.zig", "src/status_page.zig", "src/command_value.zig", "src/home_path.zig")
+            "src/Overview.zig", "src/OverviewPaint.zig", "src/keymap.zig", "src/status_page.zig", "src/command_value.zig", "src/home_path.zig")
 PTY_TARGETS = ("terminal-restoration-integration", "canonical-failure-integration")
 # Nonblocking renderer harnesses; renderer-contracts.yml filters on these paths.
 RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
@@ -55,6 +55,12 @@ RULES = (
      ("test-logic",), (), "Portable owner transitions and encoding"),
     (("src/ResponseTiming.zig",), ("test-logic",), ("test-logic",),
      "Response policy values alongside native timeout consumers"),
+    (("src/output_blocks.zig",), ("test-logic",), ("test-logic",),
+     "Bounded typed output source extents and prepared span traversal"),
+    (("src/table_row.zig",), ("test-logic",), ("test-logic",),
+     "Pure shared table row ranges and delimiter syntax, without render activation"),
+    (("src/markdown_prefix.zig",), ("test-logic",), ("test-logic",),
+     "Raw quote-prefix and shared fence lexical values, without render activation"),
     (("src/turn_policy.zig",), ("test-logic",), ("test-logic",),
      "Turn completion and compaction decisions over transaction facts"),
     (("src/retry_policy.zig",), ("test-logic", "check"), ("test-logic", "test"),
@@ -71,7 +77,7 @@ RULES = (
     (("src/model_list.zig",), ("test-logic", "test", "codex-h2-integration"),
      ("test-logic", "test", "codex-h2-integration"), "Provider model lists; the Host's fetch and the wire reply follow"),
     (("src/SessionFrontend.zig", "src/SessionSubmission.zig", "src/session_consent.zig", "src/session_departure.zig",
-      "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/session_view.zig", "src/session_history.zig",
+      "src/SessionScreen.zig", "src/SessionTerminal.zig", "src/RenderBackend.zig", "src/RenderGeometry.zig", "src/testing/render.zig", "src/session_view.zig", "src/session_history.zig",
       "src/session_reads.zig", "src/ClientTask.zig", "src/Overview.zig", "src/keymap.zig", "src/slash_commands.zig",
       "src/status_page.zig", "src/command_value.zig", "src/home_path.zig"),
      ("test-logic", "test", "admission-debug-integration", *PTY_TARGETS),
@@ -80,8 +86,10 @@ RULES = (
     (("src/ConversationViewport.zig", "src/TerminalFrame.zig", "src/draft_layout.zig", "src/session_line.zig", "src/work_line.zig", "src/queued_line.zig", "src/TerminalInput.zig", "src/TerminalEditor.zig", "src/keymap.zig"),
      ("test-logic", *PTY_TARGETS), ("test-logic", *PTY_TARGETS),
      "Terminal layout and input values retain their separate logic root and native wiring"),
+    (("src/OverviewPaint.zig",), ("test", *PTY_TARGETS), ("test", *PTY_TARGETS),
+     "Direct shared-backend overview and model-picker cells with native handoffs"),
     (("src/overview_view.zig", "src/attention.zig", "src/model_picker.zig"), ("test-logic",), ("test-logic",),
-     "Overview decisions and screen over values; its shell's owner selects native checks"),
+     "Pure overview identity, layout, selection and effects; UI painting has its own root"),
     (("src/failure_class.zig",), ("test-logic", "test"), ("test-logic", "test"),
      "What a saved failure code lets the person do; the conversation view renders it"),
     (RENDERER_HARNESSES, (), (), "Renderer harnesses: only the nonblocking renderer contracts run them"),
