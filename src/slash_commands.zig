@@ -404,6 +404,7 @@ pub const Entry = struct {
 pub const SkillChoices = struct {
     entries: []const Entry = &.{},
     generation: u64 = 0,
+    total: usize = 0,
     pending: bool = false,
     dismissed: bool = false,
 };
@@ -549,6 +550,14 @@ pub const Shown = struct {
         if (kept.source != source) return fresh;
         if (kept.revision != revision) return .{ .list = built, .revision = revision, .source = source, .seen = if (kept.seen == .drawn) .drawn else .hidden };
         return .{ .list = built, .revision = revision, .source = source, .highlight = @min(kept.highlight, built.count - 1), .seen = kept.seen };
+    }
+
+    /// Skill choices depend on the caret and metadata as well as the draft.
+    /// Changed choices must be drawn before a selection key can use them.
+    pub fn nextAt(previous: ?Shown, revision: u64, cursor: usize, start: usize, end: usize, generation: u64, list: ?List) ?Shown {
+        var source = std.hash.Wyhash.init(0);
+        inline for (.{ revision, cursor, start, end, generation }) |value| source.update(std.mem.asBytes(&value));
+        return nextOf(previous, revision, source.final(), list);
     }
 
     /// The list Enter, Esc and the arrows act on: `stored`, the latest
@@ -1103,4 +1112,25 @@ test "inline skills list reserves bounded space without starving either kind" {
     try std.testing.expectEqual(List.capacity, skills_only.count);
     try std.testing.expect(!skills_only.enter(0).runs);
     try std.testing.expect(withSkills(null, "/", &.{}) == null);
+}
+
+test "inline skills list gates every cursor and metadata identity change" {
+    const rows = [_]Entry{.{ .kind = .skill, .word = "/example", .shown = "/example", .description = "", .runs = false }};
+    const list = withSkills(null, "/", &rows).?;
+    const initial = [_]u64{ 1, 2, 0, 8, 3 };
+    var shown = Shown.nextAt(null, initial[0], initial[1], initial[2], initial[3], initial[4], list).?;
+    shown.drew(true);
+    const unchanged = Shown.nextAt(shown, initial[0], initial[1], initial[2], initial[3], initial[4], list).?;
+    try std.testing.expectEqual(.drawn, unchanged.seen);
+    for (0..initial.len) |index| {
+        var changed = initial;
+        changed[index] += 1;
+        var stored: ?Shown = shown;
+        const current = Shown.nextAt(stored, changed[0], changed[1], changed[2], changed[3], changed[4], list);
+        try std.testing.expect(Shown.drawnNow(&stored, current) == null);
+        try std.testing.expectEqual(.hidden, stored.?.seen);
+    }
+    shown.close();
+    const closed = Shown.nextAt(shown, initial[0], initial[1], initial[2], initial[3], initial[4], list).?;
+    try std.testing.expectEqual(.closed, closed.seen);
 }
