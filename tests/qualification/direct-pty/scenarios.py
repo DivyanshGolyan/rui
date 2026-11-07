@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 
-from driver import DirectPty, cell_rows, defer_signals, history_rows
+from driver import DirectPty, assert_history_anchor, defer_signals, inspection, lookback
 from host_process import canonical_fixture_root, dispose_all
 import model_fixture as model
 import codex_integration as codex
@@ -202,34 +202,6 @@ def recovery(fixture, row):
     assert_submitted(fixture.endpoint.requests, ["original éZ", "next cafXYé!"])
     tty.send(b"/exit\r")
     tty.finish()
-
-
-def lookback(screen):
-    """A transcript has a footer; a selected inspection has a heading."""
-    lines = screen.splitlines()
-    return bool(lines and lines[-1].startswith("Looking back · ")
-                and lines[-1].endswith("Ctrl-End: latest"))
-
-
-def inspection(screen, session):
-    lines = screen.splitlines()
-    return bool(lines and lines[0].startswith("Browsing · ")
-                and f" Status · {session}" in screen)
-
-
-def assert_history_anchor(capture, first, browsing):
-    assert lookback(capture.completed) == browsing, "navigation view changed before ordered marker"
-    assert not capture.completed.startswith("Browsing"), "inspection replaced conversation"
-    # At 80x24 the rule, composer and footer take three rows. In live the
-    # 21st source row is the fixture's final answer marker, not a History line.
-    count = 21 if browsing else 20
-    expected = [f"History line {number:03d}" for number in range(first, first + count)]
-    actual = history_rows(capture)
-    assert actual == expected, ("navigation history anchor/distance", actual, expected)
-    cells = capture.completed_cells
-    source = cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)
-    ending = sum(line.strip() == "TD4 history end" for line in source)
-    assert ending == (0 if browsing else 1), ("navigation end marker", ending)
 
 
 def navigation(fixture, row):
