@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const Range = struct { start: usize, end: usize };
+
 pub const Candidate = struct { start: usize, end: usize, prefix: []const u8 };
 
 fn nameByte(c: u8) bool {

@@ -5,6 +5,7 @@ const vaxis = @import("vaxis");
 const Input = @import("TerminalInput.zig");
 const keymap = @import("keymap.zig");
 const Key = keymap.Key;
+const skill_completion = @import("skill_completion.zig");
 
 extern fn utf8proc_grapheme_break_stateful(c_int, c_int, *c_int) c_int;
 extern fn utf8proc_category(c_int) c_int;
@@ -29,6 +30,125 @@ paste_start: struct { cursor: usize = 0, length: usize = 0 } = .{},
 /// This editor saw the current marked paste begin. A replacement editor
 /// receiving the rest of a paste rejects it rather than adopting it.
 pasting: bool = false,
+/// Selected skills borrow their spelling from this editor's owned bytes.
+/// Both lists retain capacity on reset. The second restores marks when a
+/// renderer-rejected paste restores the original bytes, without allocating
+/// on the keyboard path. Unmarked editors never allocate either list.
+marks: std.ArrayList(Attachment) = .empty,
+paste_marks: std.ArrayList(Attachment) = .empty,
+
+pub const Attachment = skill_completion.Range;
+pub const AttachError = error{
+    InvalidSkillRange,
+    InvalidSkillName,
+    InvalidSkillBoundary,
+    InvalidSkillState,
+    SkillCapacityExceeded,
+} || std.mem.Allocator.Error;
+
+/// Borrowed until the next edit, reset or attachment. Sorted by byte offset.
+pub fn attachments(self: *const Editor) []const Attachment {
+    return self.marks.items;
+}
+
+/// Resets the draft, retaining the optional attachment allocations.
+pub fn reset(self: *Editor) void {
+    const marks = self.marks;
+    const paste_marks = self.paste_marks;
+    self.* = .{ .buffer = self.buffer, .allow_paste = self.allow_paste, .completion = self.completion, .marks = marks, .paste_marks = paste_marks };
+    self.marks.clearRetainingCapacity();
+    self.paste_marks.clearRetainingCapacity();
+}
+
+pub fn deinitAttachments(self: *Editor, allocator: std.mem.Allocator) void {
+    self.marks.deinit(allocator);
+    self.paste_marks.deinit(allocator);
+    self.marks = .empty;
+    self.paste_marks = .empty;
+}
+
+/// Replaces one complete slash token, not its suffix. Reservation and every
+/// fallible check precede the edit: failure preserves bytes, caret and marks.
+pub fn attachSkill(self: *Editor, allocator: std.mem.Allocator, start: usize, end: usize, name: []const u8) AttachError!void {
+    if (self.rejected != null or self.partial_length != 0 or self.pasting) return error.InvalidSkillState;
+    if (start >= end or end > self.length or !self.byteBoundary(start) or !self.byteBoundary(end)) return error.InvalidSkillRange;
+    if (name.len == 0 or name.len > 64) return error.InvalidSkillName;
+    for (name) |byte| if (!((byte >= 'a' and byte <= 'z') or (byte >= '0' and byte <= '9') or byte == '-')) return error.InvalidSkillName;
+    const token = skill_completion.candidate(self.buffer[0..self.length], end) orelse return error.InvalidSkillBoundary;
+    if (token.start != start or token.end != end) return error.InvalidSkillBoundary;
+    const added = name.len + 1;
+    if (added > self.buffer.len - (self.length - (end - start))) return error.SkillCapacityExceeded;
+    // The caller may borrow name from these same bytes.
+    var spelling: [65]u8 = undefined;
+    spelling[0] = '/';
+    @memcpy(spelling[1..added], name);
+    // Reserve private rollback storage first, so an OOM cannot invalidate
+    // a borrowed public range slice by moving marks before the second OOM.
+    try self.paste_marks.ensureTotalCapacity(allocator, self.marks.items.len + 1);
+    try self.marks.ensureUnusedCapacity(allocator, 1);
+    const length = self.length - (end - start) + added;
+    self.changeMarks(start, end, added);
+    if (added > end - start) {
+        std.mem.copyBackwards(u8, self.buffer[start + added .. length], self.buffer[end..self.length]);
+    } else {
+        std.mem.copyForwards(u8, self.buffer[start + added .. length], self.buffer[end..self.length]);
+    }
+    @memcpy(self.buffer[start..][0..added], spelling[0..added]);
+    self.length = length;
+    self.cursor = start + added;
+    self.edits +%= 1;
+    self.validateMarks(start, start + added);
+    var index: usize = 0;
+    while (index < self.marks.items.len and self.marks.items[index].start < start) : (index += 1) {}
+    self.marks.insertAssumeCapacity(index, .{ .start = start, .end = start + added });
+}
+
+fn byteBoundary(self: *const Editor, offset: usize) bool {
+    return offset == self.length or self.buffer[offset] & 0xc0 != 0x80;
+}
+
+/// Applies a replacement's byte geometry before moving bytes. A touching
+/// insertion survives only if the resulting token boundaries remain valid.
+fn changeMarks(self: *Editor, start: usize, end: usize, added: usize) void {
+    if (start == end and added == 0) return;
+    var kept: usize = 0;
+    for (self.marks.items) |original| {
+        var mark = original;
+        if (start < mark.end and end > mark.start) continue;
+        if (mark.start >= end) {
+            mark.start = mark.start - (end - start) + added;
+            mark.end = mark.end - (end - start) + added;
+        }
+        self.marks.items[kept] = mark;
+        kept += 1;
+    }
+    self.marks.items.len = kept;
+}
+
+fn validateMarks(self: *Editor, start: usize, end: usize) void {
+    var kept: usize = 0;
+    for (self.marks.items) |mark| {
+        // Only adjacent bytes can change an untouched name/path boundary.
+        // Include the byte after a sentence dot. Avoid rescanning code spans
+        // from the draft's start for every unrelated mark on every scalar.
+        if (end < mark.start -| 1 or start > mark.end + 1) {
+            self.marks.items[kept] = mark;
+            kept += 1;
+            continue;
+        }
+        // Selection already established code-span eligibility. Thereafter
+        // only local name/path boundaries govern this explicit intent; code
+        // elsewhere cannot silently revoke it. A bounded view also avoids
+        // scanning the entire preceding draft during an ordinary edit.
+        const context = mark.start -| 1;
+        const bytes = self.buffer[context..@min(self.length, mark.end + 2)];
+        const token = skill_completion.candidate(bytes, mark.end - context) orelse continue;
+        if (token.start != mark.start - context or token.end != mark.end - context) continue;
+        self.marks.items[kept] = mark;
+        kept += 1;
+    }
+    self.marks.items.len = kept;
+}
 
 /// What an input did before any screen's table: an edit, or, as `action`,
 /// a `Key` the editor had no use for. `apply` gives that key the screen's
@@ -364,6 +484,20 @@ pub fn plainEnter(decoded: Input.Decoded) bool {
     };
 }
 
+/// Only an unpasted, unmodified Tab may select an explicit skill.
+pub fn plainTab(decoded: Input.Decoded) bool {
+    return switch (decoded) {
+        .event => |value| !value.pasted and switch (value.event) {
+            .key_press => |pressed| switch (classify(pressed)) {
+                .edit => |command| command == .tab,
+                else => false,
+            },
+            else => false,
+        },
+        else => false,
+    };
+}
+
 pub fn select(comptime keys: anytype, decoded: Input.Decoded) Selection(@TypeOf(keys).Action) {
     const value = switch (decoded) {
         .none, .report => return .none,
@@ -448,13 +582,28 @@ fn take(self: *Editor, decoded: Input.Decoded) KeyOutcome {
     return switch (value.event) {
         .paste_start => blk: {
             if (value.pasted or !self.allow_paste) self.reject(.invalid);
-            if (!value.pasted) self.paste_start = .{ .cursor = self.cursor, .length = self.length };
+            if (!value.pasted) {
+                self.paste_start = .{ .cursor = self.cursor, .length = self.length };
+                self.paste_marks.clearRetainingCapacity();
+                self.paste_marks.appendSliceAssumeCapacity(self.marks.items);
+            }
             self.pasting = true;
             break :blk .none;
         },
         .paste_end => blk: {
             if (!value.pasted or !self.pasting) self.reject(.invalid);
+            if (value.pasted and self.pasting) {
+                // A paste is one literal insertion. Intermediate scalars
+                // can temporarily break a boundary ("/text " before a mark)
+                // that the complete paste preserves. Reconcile its single
+                // geometry against the original marks, also after rollback.
+                self.marks.clearRetainingCapacity();
+                self.marks.appendSliceAssumeCapacity(self.paste_marks.items);
+                self.changeMarks(self.paste_start.cursor, self.paste_start.cursor, self.length - self.paste_start.length);
+                self.validateMarks(self.paste_start.cursor, self.paste_start.cursor + self.length - self.paste_start.length);
+            }
             self.pasting = false;
+            self.paste_marks.clearRetainingCapacity();
             if (self.rejected == .edit_rejected) {
                 self.rejected = null;
                 break :blk .{ .refused = .edit_rejected };
@@ -846,6 +995,8 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
                 std.mem.copyForwards(u8, self.buffer[self.paste_start.cursor..], self.buffer[suffix..self.length]);
                 self.length = self.paste_start.length;
                 self.cursor = self.paste_start.cursor;
+                self.marks.clearRetainingCapacity();
+                self.marks.appendSliceAssumeCapacity(self.paste_marks.items);
                 self.reject(.edit_rejected);
                 return .none;
             }
@@ -853,9 +1004,11 @@ fn insert(self: *Editor, byte: u8, pasted_input: bool) KeyOutcome {
         }
     }
     const at_end = self.cursor == self.length;
+    self.changeMarks(self.cursor, self.cursor, self.partial_length);
     std.mem.copyBackwards(u8, self.buffer[self.cursor + self.partial_length .. self.length + self.partial_length], self.buffer[self.cursor..self.length]);
     @memcpy(self.buffer[self.cursor .. self.cursor + self.partial_length], self.partial[0..self.partial_length]);
     self.length += self.partial_length;
+    self.validateMarks(self.cursor, self.cursor + self.partial_length);
     self.edits +%= 1;
     self.cursor += self.partial_length;
     self.partial_length = 0;
@@ -914,8 +1067,10 @@ fn move(self: *Editor, position: usize) KeyOutcome {
 
 fn erase(self: *Editor, from: usize, to: usize) KeyOutcome {
     if (self.rejected != null or from == to) return .none;
+    self.changeMarks(from, to, 0);
     std.mem.copyForwards(u8, self.buffer[from .. self.length - (to - from)], self.buffer[to..self.length]);
     self.length -= to - from;
+    self.validateMarks(from, from);
     self.edits +%= 1;
     // Removing a separator may join the suffix to the preceding cluster.
     // Snap to the first boundary at or after the erased range's start.
@@ -1451,6 +1606,321 @@ test "archive confirmation accepts normalized CR LF and encoded Enter but not mo
         for (wire) |byte| {
             var decoded = input.feed(byte, 0);
             while (decoded != .none) : (decoded = input.next()) try std.testing.expect(!plainEnter(decoded));
+        }
+    }
+}
+
+fn expectSkillMarks(editor: *const Editor, expected: []const Attachment) !void {
+    try std.testing.expectEqualSlices(Attachment, expected, editor.attachments());
+}
+
+test "selected skill replaces whole token preserving punctuation Unicode and exact selection" {
+    const allocator = std.testing.allocator;
+    var storage: [128]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    defer editor.deinitAttachments(allocator);
+    _ = editor.append("é /partial, suffix /exact!");
+    _ = editor.move(6);
+    try editor.attachSkill(allocator, 3, 11, "name");
+    try std.testing.expectEqualStrings("é /name, suffix /exact!", editor.buffer[0..editor.length]);
+    try std.testing.expectEqual(@as(usize, 8), editor.cursor);
+    try editor.attachSkill(allocator, 17, 23, "exact");
+    try expectSkillMarks(&editor, &.{ .{ .start = 3, .end = 8 }, .{ .start = 17, .end = 23 } });
+    try editor.attachSkill(allocator, 3, 8, "a");
+    try std.testing.expectEqualStrings("é /a, suffix /exact!", editor.buffer[0..editor.length]);
+    try expectSkillMarks(&editor, &.{ .{ .start = 3, .end = 5 }, .{ .start = 14, .end = 20 } });
+    // Name can itself borrow the buffer being changed.
+    try editor.attachSkill(allocator, 3, 5, editor.buffer[15..20]);
+    try std.testing.expectEqualStrings("é /exact, suffix /exact!", editor.buffer[0..editor.length]);
+    try expectSkillMarks(&editor, &.{ .{ .start = 3, .end = 9 }, .{ .start = 18, .end = 24 } });
+}
+
+test "selected skill insertion shifts and caret moves preserve but overlaps detach" {
+    const allocator = std.testing.allocator;
+    var storage: [128]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    defer editor.deinitAttachments(allocator);
+    _ = editor.append("é /foo, /bar!");
+    try editor.attachSkill(allocator, 3, 7, "foo");
+    try editor.attachSkill(allocator, 9, 13, "bar");
+    var stream: Input = .{};
+    for ("\x01\x1b[C\x1b[C\x05\x1bb\x1bf") |byte| _ = editor.feed(&stream, byte);
+    try expectSkillMarks(&editor, &.{ .{ .start = 3, .end = 7 }, .{ .start = 9, .end = 13 } });
+    _ = editor.move(0);
+    _ = editor.insertText("界 ", false);
+    try expectSkillMarks(&editor, &.{ .{ .start = 7, .end = 11 }, .{ .start = 13, .end = 17 } });
+    // A whitespace insertion at the leading edge shifts, at the trailing
+    // edge preserves. Interior insertion invalidates only its own mark.
+    _ = editor.move(7);
+    _ = editor.insert(' ', false);
+    _ = editor.move(12);
+    _ = editor.insert(' ', false);
+    try expectSkillMarks(&editor, &.{ .{ .start = 8, .end = 12 }, .{ .start = 15, .end = 19 } });
+    _ = editor.move(10);
+    _ = editor.insert('x', false);
+    try expectSkillMarks(&editor, &.{.{ .start = 16, .end = 20 }});
+}
+
+test "selected skill name and path boundary mutations detach" {
+    const allocator = std.testing.allocator;
+    const Case = struct { before: []const u8, at: usize, inserted: []const u8, retained: bool };
+    for ([_]Case{
+        .{ .before = "/foo", .at = 0, .inserted = "x", .retained = false },
+        .{ .before = "/foo", .at = 0, .inserted = "/", .retained = false },
+        .{ .before = "/foo", .at = 0, .inserted = "é", .retained = false },
+        .{ .before = "/foo", .at = 4, .inserted = "-x", .retained = false },
+        .{ .before = "/foo", .at = 4, .inserted = "/path", .retained = false },
+        .{ .before = "/foo", .at = 4, .inserted = ".txt", .retained = false },
+        .{ .before = "/foo", .at = 4, .inserted = "_x", .retained = false },
+        .{ .before = "/foo", .at = 4, .inserted = "é", .retained = false },
+        .{ .before = "/foo", .at = 4, .inserted = ",", .retained = true },
+        .{ .before = "/foo", .at = 4, .inserted = ".", .retained = true },
+        .{ .before = "/foo. ", .at = 5, .inserted = "x", .retained = false },
+    }) |case| {
+        var storage: [80]u8 = undefined;
+        var editor: Editor = .{ .buffer = &storage };
+        defer editor.deinitAttachments(allocator);
+        _ = editor.append(case.before);
+        try editor.attachSkill(allocator, 0, 4, "foo");
+        _ = editor.move(case.at);
+        _ = editor.insertText(case.inserted, false);
+        try std.testing.expectEqual(@as(usize, @intFromBool(case.retained)), editor.attachments().len);
+    }
+}
+
+test "selected skill every deletion class updates ranges through actual editor keys" {
+    const allocator = std.testing.allocator;
+    const Case = struct { bytes: []const u8, expected: []const Attachment };
+    for ([_]Case{
+        .{ .bytes = "\x01\x1b[3~", .expected = &.{ .{ .start = 1, .end = 5 }, .{ .start = 7, .end = 11 } } },
+        .{ .bytes = "\x01\x1b[C\x7f", .expected = &.{ .{ .start = 1, .end = 5 }, .{ .start = 7, .end = 11 } } },
+        .{ .bytes = "\x01\x1b[C\x1b[C\x17", .expected = &.{ .{ .start = 0, .end = 4 }, .{ .start = 6, .end = 10 } } },
+        .{ .bytes = "\x01\x1b[C\x1b[C\x1b\x7f", .expected = &.{ .{ .start = 0, .end = 4 }, .{ .start = 6, .end = 10 } } },
+        .{ .bytes = "\x01\x1b[C\x1b[C\x15", .expected = &.{ .{ .start = 0, .end = 4 }, .{ .start = 6, .end = 10 } } },
+        .{ .bytes = "\x01\x0b", .expected = &.{} },
+        .{ .bytes = "\x01\x1b[C\x1b[C\x1b[C\x04", .expected = &.{.{ .start = 8, .end = 12 }} },
+        // Deleting the only separator breaks the leading boundary.
+        .{ .bytes = "\x01\x1b[C\x1b[3~", .expected = &.{.{ .start = 8, .end = 12 }} },
+    }) |case| {
+        var storage: [80]u8 = undefined;
+        var editor: Editor = .{ .buffer = &storage };
+        defer editor.deinitAttachments(allocator);
+        _ = editor.append("é /foo, /bar!");
+        try editor.attachSkill(allocator, 3, 7, "foo");
+        try editor.attachSkill(allocator, 9, 13, "bar");
+        var stream: Input = .{};
+        for (case.bytes) |byte| _ = editor.feed(&stream, byte);
+        try expectSkillMarks(&editor, case.expected);
+    }
+}
+
+test "selected skill marked paste is literal and rollback restores marks exactly" {
+    const allocator = std.testing.allocator;
+    for ([_]usize{ 0, 2, 4 }) |cursor| {
+        var storage: [96]u8 = undefined;
+        var editor: Editor = .{ .buffer = &storage };
+        defer editor.deinitAttachments(allocator);
+        _ = editor.append("/foo /bar");
+        try editor.attachSkill(allocator, 0, 4, "foo");
+        try editor.attachSkill(allocator, 5, 9, "bar");
+        _ = editor.move(cursor);
+        var stream: Input = .{};
+        for ("\x1b[200~pasted\n\xcc\x81discarded\x1b[201~") |byte| _ = editor.feed(&stream, byte);
+        try std.testing.expectEqualStrings("/foo /bar", editor.buffer[0..editor.length]);
+        try std.testing.expectEqual(cursor, editor.cursor);
+        try expectSkillMarks(&editor, &.{ .{ .start = 0, .end = 4 }, .{ .start = 5, .end = 9 } });
+        _ = editor.move(0);
+        for ("\x1b[200~/literal \x1b[201~") |byte| _ = editor.feed(&stream, byte);
+        try std.testing.expectEqualStrings("/literal /foo /bar", editor.buffer[0..editor.length]);
+        try expectSkillMarks(&editor, &.{ .{ .start = 9, .end = 13 }, .{ .start = 14, .end = 18 } });
+        // An accepted paste inside a selected token permanently detaches it.
+        _ = editor.move(11);
+        for ("\x1b[200~x\x1b[201~") |byte| _ = editor.feed(&stream, byte);
+        try expectSkillMarks(&editor, &.{.{ .start = 15, .end = 19 }});
+    }
+}
+
+test "selected skill attachment failures preserve bytes cursor and marks" {
+    const allocator = std.testing.allocator;
+    var storage: [16]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    defer editor.deinitAttachments(allocator);
+    _ = editor.append("é /foo /b!");
+    try editor.attachSkill(allocator, 3, 7, "foo");
+    _ = editor.move(2);
+    try std.testing.expectError(error.InvalidSkillRange, editor.attachSkill(allocator, 1, 7, "bar"));
+    try std.testing.expectError(error.InvalidSkillRange, editor.attachSkill(allocator, 8, 7, "bar"));
+    try std.testing.expectError(error.InvalidSkillRange, editor.attachSkill(allocator, 3, 80, "bar"));
+    try std.testing.expectError(error.InvalidSkillBoundary, editor.attachSkill(allocator, 4, 7, "bar"));
+    for ([_][]const u8{ "", "Bad", "foo/bar", "a b", "x\n", "é", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }) |name| {
+        try std.testing.expectError(error.InvalidSkillName, editor.attachSkill(allocator, 8, 10, name));
+    }
+    try std.testing.expectError(error.SkillCapacityExceeded, editor.attachSkill(allocator, 8, 10, "long-name"));
+    try std.testing.expectEqualStrings("é /foo /b!", editor.buffer[0..editor.length]);
+    try std.testing.expectEqual(@as(usize, 2), editor.cursor);
+    try expectSkillMarks(&editor, &.{.{ .start = 3, .end = 7 }});
+    // Both reservations are individually fallible and never commit bytes.
+    for (0..2) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var fresh: Editor = .{ .buffer = &storage };
+        defer fresh.deinitAttachments(failing.allocator());
+        _ = fresh.append("/f suffix");
+        _ = fresh.move(1);
+        try std.testing.expectError(error.OutOfMemory, fresh.attachSkill(failing.allocator(), 0, 2, "foo"));
+        try std.testing.expectEqualStrings("/f suffix", fresh.buffer[0..fresh.length]);
+        try std.testing.expectEqual(@as(usize, 1), fresh.cursor);
+        try expectSkillMarks(&fresh, &.{});
+    }
+}
+
+test "selected skill reset retains both allocations and empty editor stays allocation free" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const allocator = failing.allocator();
+    var storage: [48]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    defer editor.deinitAttachments(allocator);
+    _ = editor.append("plain");
+    editor.reset();
+    try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+    _ = editor.append("/foo");
+    try editor.attachSkill(allocator, 0, 4, "foo");
+    const allocations = failing.allocations;
+    const primary = editor.marks.items.ptr;
+    const snapshot = editor.paste_marks.items.ptr;
+    editor.reset();
+    try std.testing.expectEqual(primary, editor.marks.items.ptr);
+    try std.testing.expectEqual(snapshot, editor.paste_marks.items.ptr);
+    try std.testing.expectEqual(@as(usize, 0), editor.attachments().len);
+    _ = editor.append("/foo");
+    try editor.attachSkill(allocator, 0, 4, "foo");
+    try std.testing.expectEqual(allocations, failing.allocations);
+}
+
+test "selected skill existing marks survive attachment allocation failure at either reservation" {
+    const base = std.testing.allocator;
+    for (0..2) |failed_reservation| {
+        var failing = std.testing.FailingAllocator.init(base, .{});
+        const allocator = failing.allocator();
+        var storage: [128]u8 = undefined;
+        var editor: Editor = .{ .buffer = &storage };
+        defer editor.deinitAttachments(allocator);
+        _ = editor.append("/foo /bar");
+        try editor.attachSkill(allocator, 0, 4, "foo");
+        // Fill the naturally allocated mark capacity with real selections,
+        // leaving one final token unattached. No private capacity mutation.
+        while (editor.marks.items.len < editor.marks.capacity) {
+            const start = editor.length - 4;
+            try editor.attachSkill(allocator, start, start + 4, "bar");
+            _ = editor.append(" /bar");
+        }
+        var saved: [128]u8 = undefined;
+        @memcpy(saved[0..editor.length], editor.buffer[0..editor.length]);
+        const saved_marks = try base.dupe(Attachment, editor.attachments());
+        defer base.free(saved_marks);
+        const cursor = editor.cursor;
+        const borrowed = editor.attachments();
+        failing.fail_index = failing.alloc_index + failed_reservation;
+        failing.resize_fail_index = failing.resize_index;
+        try std.testing.expectError(error.OutOfMemory, editor.attachSkill(allocator, editor.length - 4, editor.length, "longer"));
+        try std.testing.expectEqualStrings(saved[0..editor.length], editor.buffer[0..editor.length]);
+        try std.testing.expectEqual(cursor, editor.cursor);
+        try expectSkillMarks(&editor, saved_marks);
+        try std.testing.expectEqual(borrowed.ptr, editor.attachments().ptr);
+        // A rollback reservation succeeding before primary OOM must not
+        // break a later successful paste's snapshot capacity invariant.
+        var stream: Input = .{};
+        _ = editor.move(0);
+        for ("\x1b[200~ok \x1b[201~") |byte| _ = editor.feed(&stream, byte);
+        try std.testing.expectEqual(saved_marks.len, editor.attachments().len);
+    }
+}
+
+test "selected skill attachment refuses partial rejected and active paste drafts atomically" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "\xc3", "\x00", "\x1b[200~" }) |pending_bytes| {
+        var storage: [32]u8 = undefined;
+        var editor: Editor = .{ .buffer = &storage };
+        defer editor.deinitAttachments(allocator);
+        _ = editor.append("/foo");
+        try editor.attachSkill(allocator, 0, 4, "foo");
+        _ = editor.move(0);
+        var stream: Input = .{};
+        if (std.mem.eql(u8, pending_bytes, "\xc3")) {
+            // The stream normally assembles the scalar before giving it to
+            // this editor; direct text insertion may still leave a partial.
+            _ = editor.insert(0xc3, false);
+        } else {
+            for (pending_bytes) |byte| _ = editor.feed(&stream, byte);
+        }
+        try std.testing.expectError(error.InvalidSkillState, editor.attachSkill(allocator, 0, 4, "bar"));
+        try std.testing.expectEqualStrings("/foo", editor.buffer[0..editor.length]);
+        try std.testing.expectEqual(@as(usize, 0), editor.cursor);
+        try expectSkillMarks(&editor, &.{.{ .start = 0, .end = 4 }});
+    }
+}
+
+test "selected skill append Tab and newline use ordinary boundary transitions" {
+    const allocator = std.testing.allocator;
+    const Complete = struct {
+        fn add(_: *const anyopaque, _: []const u8) ?[]const u8 {
+            return "x";
+        }
+    };
+    var storage: [80]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage, .completion = .{ .context = &{}, .add = Complete.add } };
+    defer editor.deinitAttachments(allocator);
+    _ = editor.append("/foo");
+    try editor.attachSkill(allocator, 0, 4, "foo");
+    var stream: Input = .{};
+    // Alt-Enter at the leading edge preserves and shifts the selected name.
+    _ = editor.move(0);
+    for ("\x1b\r") |byte| _ = editor.feed(&stream, byte);
+    try expectSkillMarks(&editor, &.{.{ .start = 1, .end = 5 }});
+    _ = editor.move(1);
+    _ = editor.feed(&stream, '\t');
+    try std.testing.expectEqualStrings("\n/foox", editor.buffer[0..editor.length]);
+    try expectSkillMarks(&editor, &.{});
+    editor.reset();
+    _ = editor.append("/foo");
+    try editor.attachSkill(allocator, 0, 4, "foo");
+    _ = editor.append(" suffix");
+    try expectSkillMarks(&editor, &.{.{ .start = 0, .end = 4 }});
+}
+
+test "selected skill remote backticks do not revoke explicit intent" {
+    const allocator = std.testing.allocator;
+    var storage: [80]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage };
+    defer editor.deinitAttachments(allocator);
+    _ = editor.append("words /foo");
+    try editor.attachSkill(allocator, 6, 10, "foo");
+    _ = editor.move(0);
+    _ = editor.insert('`', false);
+    try expectSkillMarks(&editor, &.{.{ .start = 7, .end = 11 }});
+    // Even a later edit at this selected token's boundary uses only its
+    // lexical boundary, not the now-unclosed code span earlier in the draft.
+    _ = editor.move(11);
+    _ = editor.insert('!', false);
+    try expectSkillMarks(&editor, &.{.{ .start = 7, .end = 11 }});
+}
+
+test "selected skill plain Tab excludes paste modified keys and literal tab text" {
+    for ([_][]const u8{ "\t", "\x1b[9u", "\x1b[27;1;9~" }) |wire| {
+        var stream: Input = .{};
+        var tabs: usize = 0;
+        for (wire) |byte| {
+            var decoded = stream.feed(byte, 0);
+            while (decoded != .none) : (decoded = stream.next()) if (plainTab(decoded)) {
+                tabs += 1;
+            };
+        }
+        try std.testing.expectEqual(@as(usize, 1), tabs);
+    }
+    for ([_][]const u8{ "\x1b[Z", "\x1b[9;2u", "\x1b[9;3u", "\x1b[9;5u", "\x1b[200~\t\x1b[201~", "\x1b[97;1;9u" }) |wire| {
+        var stream: Input = .{};
+        for (wire) |byte| {
+            var decoded = stream.feed(byte, 0);
+            while (decoded != .none) : (decoded = stream.next()) try std.testing.expect(!plainTab(decoded));
         }
     }
 }
