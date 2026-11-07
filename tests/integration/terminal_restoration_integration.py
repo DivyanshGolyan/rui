@@ -2492,12 +2492,17 @@ int main(int argc, char **argv) {
     SEND("\033[?2026h\033[H\033[2JVISIBLE-CANCEL-PREFIX\033[?2026l");
     int fd = open(argv[1], O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0 || close(fd)) return 2;
-    /* A pre-arm marker and an unrelated complete frame must not hold. */
+    /* The unchanged pre-arm marker remains on screen, but no marker bytes
+       were accepted after arming. An unrelated complete frame also passes. */
+    SEND("\033[?2026h\033[?2026l");
     SEND("\033[?2026h\033[H\033[2Jno marker\033[?2026l");
-    SEND("\033[?2026h\033[H\033[2JVISIBLE-CANCEL-PREFIX");
-    /* Even a post-arm marker must not hold until its frame is complete. */
+    SEND("\033[?2026h\033[H\033[2JVISIBLE-");
+    SEND("CANCEL-");
+    SEND("PREFIX");
+    /* Split accepted writes must match, but not hold an unclosed frame. */
     SEND(" progress");
-    SEND("\033[?2026l");
+    SEND("\033[?20");
+    SEND("26l");
     errno = 0;
     if (write(1, "blocked", 7) != -1 || errno != EAGAIN) return 3;
     return 0;
@@ -2518,9 +2523,9 @@ int main(int argc, char **argv) {
         capture.listener = lambda frame, x, y: frames.append(frame)
         while select.select([master], [], [], 0)[0]:
             capture.feed(os.read(master, 65536))
-        assert len(frames) == 3, frames
-        assert "VISIBLE-CANCEL-PREFIX" in frames[0] and "no marker" in frames[1], frames
-        assert "VISIBLE-CANCEL-PREFIX progress" in frames[2], frames
+        assert len(frames) == 4, frames
+        assert "VISIBLE-CANCEL-PREFIX" in frames[0] and "VISIBLE-CANCEL-PREFIX" in frames[1], frames
+        assert "no marker" in frames[2] and "VISIBLE-CANCEL-PREFIX progress" in frames[3], frames
         assert log.read_text().splitlines() == ["visible-prefix-written", "visible-frame-closed", "visible-stream-held"]
         print("visible stream hook: pre-arm, unclosed-frame and held-write controls passed", flush=True)
     finally:
@@ -2543,7 +2548,12 @@ def visible_stream_handoff_cases(state, library):
         responses = [fixture.sse_tool_calls("visible", [("bash", "visible-call", text)])] if phase == "permission" else [
             fixture.sse_answer("visible", "visible-r", "visible-m", long)[0]]
         if phase == "history":
-            responses += [fixture.sse_answer(f"short-{i}", f"short-{i}-r", f"short-{i}-m", f"{marker} history {i}\nOPENING-READY")[0] for i in range(8)]
+            # One target in the oldest response, outside the opening viewport.
+            # Short pages put that target at history's top instead of hiding it
+            # behind hundreds of lines of the long-stream fixture.
+            responses = [fixture.sse_answer(f"short-{i}", f"short-{i}-r", f"short-{i}-m",
+                f"{marker} history target" if i == 0 else f"history {i}\nOPENING-READY")[0]
+                for i in range(8)]
         endpoint = fixture.SuccessEndpoint(responses)
         thread = threading.Thread(target=endpoint.serve_forever)
         thread.start()
@@ -2569,15 +2579,33 @@ def visible_stream_handoff_cases(state, library):
             if phase != "opening":
                 ready = "VISIBLE-END" if phase == "details" else "OPENING-READY" if phase == "history" else "› "
                 human.read_terminal(master, ready, composer=True)
-                generation = human.terminal_capture(master).generation
+                capture = human.terminal_capture(master)
+                generation = capture.generation
+                if phase == "history":
+                    assert marker not in capture.completed, ("history target was already visible before arming", capture.completed)
                 arm.touch()
                 os.write(master, (f"/{phase}\n" if phase in ("history", "details") else "produce content\n").encode())
             if phase == "history":
                 capture = human.terminal_capture(master)
-                fixture.wait_for(human.draining(master, lambda: log.exists() and
-                    "visible-frame-closed" in log.read_text() and capture.generation > generation),
-                    "armed marker frame intercepted")
-                assert marker in capture.completed and human.looking_back(capture.completed), capture.completed
+                raw = bytearray()
+                def feed(chunk):
+                    raw.extend(chunk)
+                    del raw[:-65536]
+                    capture.feed(chunk)
+                try:
+                    fixture.wait_for(human.draining(master, lambda: log.exists() and
+                        "visible-frame-closed" in log.read_text() and capture.generation > generation, feed=feed),
+                        "armed marker frame intercepted")
+                except host_process.WaitTimeout as error:
+                    # Retain only bounded actual bytes and screen; never fabricate a
+                    # marker or promote an unclosed frame to committed evidence.
+                    probe = b"<no probe log>"
+                    if log.exists():
+                        with log.open("rb") as source:
+                            probe = source.read(4096)
+                    raise AssertionError(("history marker gate timed out", bytes(raw), capture.completed,
+                        generation, capture.generation, probe)) from error
+                assert f"{marker} history target" in capture.completed and human.looking_back(capture.completed), capture.completed
                 events = log.read_text().splitlines()
                 assert events.index("visible-prefix-written") < events.index("visible-frame-closed"), events
             else:
