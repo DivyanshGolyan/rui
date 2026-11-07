@@ -13,10 +13,7 @@ pub const max_bytes_per_byte = "\\x00".len;
 /// A code point that must never reach a terminal raw: C0, DEL and C1
 /// controls act on it, and bidi controls reorder the text the user reads.
 pub fn isControl(scalar: u21) bool {
-    return scalar < 0x20 or scalar >= 0x7f and scalar <= 0x9f or
-        scalar == 0x061c or scalar == 0x200e or scalar == 0x200f or
-        scalar >= 0x202a and scalar <= 0x202e or
-        scalar >= 0x2066 and scalar <= 0x2069;
+    return controlSpelling(scalar) != null;
 }
 
 /// A link the answer renderer shows by its text: OSC 8 carries its address,
@@ -135,17 +132,48 @@ fn feedByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
             return self.finish(out);
         };
         if (isControl(scalar)) {
-            var escaped: [12]u8 = undefined;
-            try out.writeAll(try std.fmt.bufPrint(&escaped, "\\u{x:0>4}", .{scalar}));
+            try out.writeAll(escapedControl(scalar));
         } else try out.writeAll(slice);
         self.utf8_len = 0;
     }
 }
 
+/// Immutable literal spellings may be borrowed by Window cells through encode.
+const byte_spellings = blk: {
+    var result: [256][max_bytes_per_byte]u8 = undefined;
+    const hex = "0123456789abcdef";
+    for (0..256) |byte| result[byte] = .{ '\\', 'x', hex[byte / 16], hex[byte % 16] };
+    break :blk result;
+};
+
+pub fn escapedByte(value: u8) []const u8 {
+    return &byte_spellings[value];
+}
+
+const c1_spellings = blk: {
+    var result: [32][6]u8 = undefined;
+    const hex = "0123456789abcdef";
+    for (0..32) |index| result[index] = .{ '\\', 'u', '0', '0', hex[(index + 0x80) / 16], hex[index % 16] };
+    break :blk result;
+};
+
+/// Requires a control scalar; the spelling stays valid through frame encoding.
+pub fn escapedControl(scalar: u21) []const u8 {
+    return controlSpelling(scalar).?;
+}
+
+fn controlSpelling(scalar: u21) ?[]const u8 {
+    if (scalar < 0x20 or scalar == 0x7f) return escapedByte(@intCast(scalar));
+    if (scalar >= 0x80 and scalar <= 0x9f) return &c1_spellings[scalar - 0x80];
+    inline for (.{ 0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069 }) |control| {
+        if (scalar == control) return std.fmt.comptimePrint("\\u{x:0>4}", .{control});
+    }
+    return null;
+}
+
 fn escapeByte(self: *Self, out: *std.Io.Writer, value: u8) !void {
     _ = self;
-    var escaped: [max_bytes_per_byte]u8 = undefined;
-    try out.writeAll(try std.fmt.bufPrint(&escaped, "\\x{x:0>2}", .{value}));
+    try out.writeAll(escapedByte(value));
 }
 
 test "natural Unicode stays readable while controls and ambiguous command bytes remain visible" {
@@ -196,4 +224,104 @@ test "TerminalText propagates output failure during feed and incomplete-byte fin
     text = .{ .mode = .line };
     try text.feed(&output, "\xe2");
     try std.testing.expectError(error.WriteFailed, text.finish(&output));
+}
+
+test "TerminalText complete control domain keeps immutable exact spellings and noncontrols literal" {
+    var borrowed: [77][]const u8 = undefined;
+    var expected: [77][6]u8 = undefined;
+    var lengths: [77]usize = undefined;
+    var scalars: [77]u21 = undefined;
+    var count: usize = 0;
+    // Independent accepted policy, including every neighboring noncontrol scalar.
+    for (0..0x110000) |value| {
+        const scalar: u21 = @intCast(value);
+        const protected = value < 0x20 or (value >= 0x7f and value <= 0x9f) or
+            value == 0x061c or value == 0x200e or value == 0x200f or
+            (value >= 0x202a and value <= 0x202e) or (value >= 0x2066 and value <= 0x2069);
+        errdefer std.debug.print("control policy at U+{x}\n", .{value});
+        try std.testing.expectEqual(protected, isControl(scalar));
+        if (!protected) continue;
+        const spelling = if (value < 0x80)
+            try std.fmt.bufPrint(&expected[count], "\\x{x:0>2}", .{value})
+        else
+            try std.fmt.bufPrint(&expected[count], "\\u{x:0>4}", .{value});
+        lengths[count] = spelling.len;
+        scalars[count] = scalar;
+        borrowed[count] = escapedControl(scalar);
+        try std.testing.expectEqualStrings(spelling, borrowed[count]);
+        count += 1;
+    }
+    try std.testing.expectEqual(borrowed.len, count);
+    // Later spellings and streaming writes cannot overwrite any earlier borrow.
+    var bytes: [16]u8 = undefined;
+    for (0..256) |value| {
+        const byte: u8 = @intCast(value);
+        var golden: [4]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&golden, "\\x{x:0>2}", .{value}), escapedByte(byte));
+        var output = std.Io.Writer.fixed(&bytes);
+        var text: Self = .{ .mode = .line };
+        try text.feed(&output, &.{byte});
+        try text.finish(&output);
+    }
+    for (borrowed, expected, lengths, scalars) |spelling, golden, len, scalar| {
+        try std.testing.expectEqualStrings(golden[0..len], spelling);
+        try std.testing.expect(spelling.ptr == escapedControl(scalar).ptr);
+    }
+}
+
+test "TerminalText every accepted control preserves mode bytes across every UTF-8 feed split" {
+    const ranges = [_][2]u21{
+        .{ 0x00, 0x1f },     .{ 0x7f, 0x9f },     .{ 0x061c, 0x061c },
+        .{ 0x200e, 0x200f }, .{ 0x202a, 0x202e }, .{ 0x2066, 0x2069 },
+    };
+    for (ranges) |range| {
+        for (range[0]..range[1] + 1) |value| {
+            const scalar: u21 = @intCast(value);
+            var encoded: [4]u8 = undefined;
+            const len = try std.unicode.utf8Encode(scalar, &encoded);
+            inline for (.{ Mode.line, Mode.label, Mode.multiline }) |mode| {
+                var golden: [6]u8 = undefined;
+                const expected: []const u8 = if (mode == .multiline and (scalar == '\n' or scalar == '\t'))
+                    encoded[0..len]
+                else if (mode != .multiline and scalar == '\n')
+                    "\\n"
+                else if (mode != .multiline and scalar == '\t')
+                    "\\t"
+                else if (mode != .multiline and scalar == '\r')
+                    "\\r"
+                else if (scalar < 0x80)
+                    try std.fmt.bufPrint(&golden, "\\x{x:0>2}", .{value})
+                else
+                    try std.fmt.bufPrint(&golden, "\\u{x:0>4}", .{value});
+                for (0..len + 1) |split| {
+                    var bytes: [8]u8 = undefined;
+                    var output = std.Io.Writer.fixed(&bytes);
+                    var text: Self = .{ .mode = mode };
+                    try text.feed(&output, encoded[0..split]);
+                    try text.feed(&output, encoded[split..len]);
+                    try text.finish(&output);
+                    try std.testing.expectEqualStrings(expected, output.buffered());
+                }
+            }
+        }
+    }
+}
+
+test "TerminalText line label and multiline keep their quote slash and whitespace contracts" {
+    const input = "\"\\\n\t\r";
+    inline for (.{
+        .{ Mode.line, "\\\"\\\\\\n\\t\\r" },
+        .{ Mode.label, "\"\\\\\\n\\t\\r" },
+        .{ Mode.multiline, "\"\\\n\t\\x0d" },
+    }) |case| {
+        for (0..input.len + 1) |split| {
+            var bytes: [32]u8 = undefined;
+            var output = std.Io.Writer.fixed(&bytes);
+            var text: Self = .{ .mode = case[0] };
+            try text.feed(&output, input[0..split]);
+            try text.feed(&output, input[split..]);
+            try text.finish(&output);
+            try std.testing.expectEqualStrings(case[1], output.buffered());
+        }
+    }
 }

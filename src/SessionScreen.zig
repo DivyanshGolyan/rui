@@ -1,6 +1,7 @@
 //! Logical text and cells belong to the UI thread. Nothing here reads the TTY
 //! or joins a worker. The supplied writer owns output credit and cancellation.
 const std = @import("std");
+const OutputBlocks = @import("output_blocks.zig");
 const vaxis = @import("vaxis");
 const Viewport = @import("ConversationViewport.zig");
 const Document = Viewport.Document;
@@ -15,6 +16,9 @@ const View = @import("session_view.zig");
 const protocol = @import("protocol.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const Self = @This();
+const Backend = @import("RenderBackend.zig");
+pub const Test = @import("testing/render.zig");
+const LiveAnchor = struct { offset: u64, row: u16 };
 
 /// What the conversation area shows. The transcript is a frozen copy of live
 /// text that can grow older canonical pages at its top; inspection, Action and
@@ -43,9 +47,10 @@ pub const Ticket = struct {
     first: Position,
     next: Position,
     delivered: bool = false,
+    live_first: ?LiveAnchor = null,
 };
 
-/// Proof that every byte of one frame was written and flushed. Only `render`
+/// Proof that every byte of one frame was written and flushed. Only `renderPrepared`
 /// returns it, after its final flush; `presented` applies it once.
 pub const Delivered = struct { frame: u64 };
 
@@ -53,23 +58,22 @@ pub const Delivered = struct { frame: u64 };
 /// one draws the choice.
 pub const PresentationChange = struct { read_completed: bool = false };
 
-vx: vaxis.Vaxis = undefined,
-memory: Memory = .{},
+backend: *Backend,
 // Live text and its transcript copy keep a right margin for user Messages'
 // times; pages loaded from files use the full width.
-live: Document = .{ .sidenotes = true },
-browsing: Document = .{},
-staging: Document = .{},
+live: Viewport.Pane = .{ .text = .{ .sidenotes = true } },
+browsing: Viewport.Pane = .{},
+staging: Viewport.Pane = .{},
 // The draft as displayed: tabs show as one space so offsets stay exact.
 composer: [65_536]u8 = undefined,
 view: ViewKind = .live,
-// Newer transcript rows left the copy so older pages fit; returning to them
-// means returning to live.
-newer_trimmed: bool = false,
+// The copy's normalized live endpoint. Capacity limits are not retention
+// loss: both retain their exact endpoint, while a gap cannot be joined.
+tail: union(enum) { retained: u64, limited: u64, gap } = .{ .retained = 0 },
+live_first: ?LiveAnchor = null,
 // Rows asked for above the transcript's top while an older page loads; the
 // page applies them, so holding PgUp or the wheel keeps moving.
 overscroll: usize = 0,
-browsing_height: u16 = 0,
 // The byte the draft's first shown line started at in the latest frame,
 // kept first by the next one so the input scrolls only when its caret
 // leaves view. The choice never moves it.
@@ -111,41 +115,25 @@ drawn: struct { first: Position = .{}, rows: u16 = 0 } = .{},
 commands: ?slash_commands.Shown = null,
 height: u16 = 1,
 colour: bool,
+home: []const u8 = "",
 
-pub fn init(self: *Self, io: std.Io, environ: *std.process.Environ.Map, colour: bool) !void {
-    self.* = .{ .colour = colour };
-    self.vx = try vaxis.init(io, self.memory.allocator(), environ, .{});
-    self.vx.caps.no_color = !colour;
-    // SessionTerminal, not Vaxis.Tty, owns mode entry and restoration.
-    self.vx.state.alt_screen = true;
-}
-
-pub fn deinit(self: *Self) void {
-    // This is memory disposal only, after terminal restoration and joins.
-    self.vx.screen.deinit(self.memory.allocator());
-    self.vx.screen_last.deinit(self.memory.allocator());
-    std.debug.assert(self.memory.used == 0);
+pub fn init(self: *Self, backend: *Backend) void {
+    self.* = .{ .backend = backend, .colour = backend.policy().depth != .none };
+    inline for (.{ &self.live, &self.browsing, &self.staging }) |pane| pane.text.width_method = backend.widthMethod();
 }
 
 pub fn append(self: *Self, bytes: []const u8) !void {
-    try self.live.append(bytes);
+    try self.live.text.append(bytes);
 }
 
-/// Absolute live offsets: bytes before `origin` left the retained view.
-/// Preparing escapes oversized and invisible clusters, which changes the
-/// length of text not yet prepared, so the end is taken after preparing.
-/// Escaped text never changes again, and the next item begins a new
-/// cluster, so the offset names the same text until it leaves the view.
-/// Both ends are taken after preparing: escaping can also grow text and
-/// move the origin past offsets recorded earlier.
 pub fn liveEnd(self: *Self) !u64 {
-    try self.live.prepare();
-    return self.live.origin + self.live.length;
+    try self.live.text.prepare();
+    return self.live.text.origin + self.live.text.length;
 }
 
 pub fn liveStart(self: *Self) !u64 {
-    try self.live.prepare();
-    return self.live.origin;
+    try self.live.text.prepare();
+    return self.live.text.origin;
 }
 
 fn paneLayout(kind: ViewKind, columns: u16, method: vaxis.gwidth.Method, home: []const u8) Viewport.Layout {
@@ -158,16 +146,71 @@ pub fn textLayout(self: *const Self) Viewport.Layout {
 
 // An overlay does not lend its full-width layout to the retained transcript.
 // Capture and restore under that pane's own old/new rail-adjusted widths.
-pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
-    if (self.vx.caps.unicode == method) return;
+fn reflowHiddenTranscript(self: *Self, columns: u16, method: vaxis.gwidth.Method) void {
+    if (self.view != .message or self.message_return != .transcript) return;
+    const first = self.browsing.anchor(paneLayout(.transcript, self.backend.geometry().cols, self.backend.widthMethod(), self.home));
+    self.browsing.restore(paneLayout(.transcript, columns, method, self.home), .{ .offset = first.offset }, self.height, true);
+}
+
+/// Stack-lived source coordinates while another screen borrows this backend.
+/// Contains no ticket, read credit, offer, or navigation state.
+pub const BorrowedLayout = struct {
+    view: ViewKind,
+    columns: u16,
+    method: vaxis.gwidth.Method,
+    active: ?Position,
+    transcript: ?Position,
+};
+
+pub fn suspendLayout(self: *Self) BorrowedLayout {
+    const active = if (self.view == .live or self.view == .action) null else self.viewed().anchor(self.textLayout());
+    const transcript = if (self.view == .message and self.message_return == .transcript)
+        self.browsing.anchor(paneLayout(.transcript, self.backend.geometry().cols, self.backend.widthMethod(), self.home))
+    else
+        null;
     self.invalidateLayout();
-    self.vx.caps.unicode = method;
-    self.vx.screen.width_method = method;
-    inline for (.{ &self.live, &self.browsing, &self.staging }) |document| {
-        document.width_method = method;
-        document.dirty = true;
+    return .{ .view = self.view, .columns = self.backend.geometry().cols, .method = self.backend.widthMethod(), .active = active, .transcript = transcript };
+}
+
+pub fn resumeLayout(self: *Self, saved: BorrowedLayout) void {
+    std.debug.assert(self.view == saved.view);
+    self.invalidateLayout();
+    // A failed borrower cannot revive an uncertain encoded diff or receipt.
+    if (!self.backend.idle()) return;
+    self.adoptWidth(self.backend.widthMethod());
+    if (saved.transcript) |at| {
+        const before = paneLayout(.transcript, saved.columns, saved.method, self.home);
+        const after = paneLayout(.transcript, self.backend.geometry().cols, self.backend.widthMethod(), self.home);
+        self.browsing.restore(after, if (before.width == after.width and before.method == after.method) at else .{ .offset = at.offset }, self.height, true);
     }
-    self.vx.queueRefresh();
+    if (saved.active) |at| {
+        const before = paneLayout(saved.view, saved.columns, saved.method, self.home);
+        const after = self.textLayout();
+        // Height-only changes preserve the wrapped row. A real reflow keeps
+        // the logical source unit, whose old row has no meaning at this width.
+        self.viewed().restore(after, if (before.width == after.width and before.method == after.method) at else .{ .offset = at.offset }, self.height, self.view == .transcript);
+    }
+}
+
+fn adoptWidth(self: *Self, method: vaxis.gwidth.Method) void {
+    inline for (.{ &self.live, &self.browsing, &self.staging }) |pane| {
+        if (pane.text.width_method != method) {
+            pane.text.width_method = method;
+            pane.text.dirty = true;
+        }
+    }
+}
+
+pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
+    if (self.backend.widthMethod() == method) return;
+    const anchor = self.viewed().anchor(self.textLayout());
+    self.reflowHiddenTranscript(self.backend.geometry().cols, method);
+    self.invalidateLayout();
+    var policy = self.backend.policy();
+    policy.width = method;
+    _ = self.backend.setPolicy(policy);
+    self.adoptWidth(method);
+    if (self.view != .live and self.view != .action) self.viewed().restore(self.textLayout(), .{ .offset = anchor.offset }, self.height, self.view == .transcript);
 }
 
 pub fn actionVisible(self: *const Self) bool {
@@ -176,7 +219,7 @@ pub fn actionVisible(self: *const Self) bool {
 
 /// Paging a long Action moves its `?` row off screen.
 pub fn actionTopHidden(self: *const Self) bool {
-    return self.actionVisible() and !self.browsing.atTop(self.textLayout(), self.height);
+    return self.actionVisible() and self.browsing.scroll.scroll.y != 0;
 }
 
 /// Delivered frames showed every Action row in the current layout.
@@ -185,13 +228,14 @@ pub fn actionRead(self: *const Self) bool {
 }
 
 /// Width, geometry and adoption changes restart reading from the top.
-fn invalidateLayout(self: *Self) void {
+pub fn invalidateLayout(self: *Self) void {
+    if (self.view == .action) self.browsing.scroll.scroll.y = 0;
     self.action_seen = .{};
     self.scope +%= 1;
 }
 
 /// View and consent changes revoke any in-flight frame's authority.
-fn invalidateScope(self: *Self) void {
+pub fn invalidateScope(self: *Self) void {
     self.scope +%= 1;
 }
 
@@ -264,6 +308,9 @@ pub fn presented(self: *Self, delivered: Delivered) PresentationChange {
     const ticket = &(self.ticket orelse return .{});
     if (ticket.frame != delivered.frame or ticket.delivered) return .{};
     ticket.delivered = true;
+    if (ticket.scope == self.scope) if (ticket.live_first) |first| {
+        self.live_first = first;
+    };
     const action = if (self.consent) |pending| pending.action else null;
     if (ticket.scope != self.scope or ticket.action != action or ticket.action == null or !self.actionVisible() or !self.preview_complete) return .{};
     const was_read = self.actionRead();
@@ -325,7 +372,7 @@ pub const ChoiceOutcome = union(enum) { picked, decision: ConsentPolicy.Decision
 /// showed is the Action's current one. A live
 /// probe of geometry and command comes first.
 pub fn choose(self: *Self, key: ChoiceKey, offer: ?Offer, size: std.posix.winsize, command_blocked: bool) ChoiceOutcome {
-    if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) {
+    if (size.col != self.backend.geometry().cols or size.row != self.backend.geometry().rows) {
         self.invalidateLayout();
         return .{ .blocked = .layout };
     }
@@ -360,7 +407,7 @@ pub fn choose(self: *Self, key: ChoiceKey, offer: ?Offer, size: std.posix.winsiz
 pub fn reasonOffered(self: *const Self, offer: ?Offer, size: std.posix.winsize, command_blocked: bool) ?ConsentPolicy.Decision {
     const shown = self.standing(offer) orelse return null;
     if (self.liveApproval(command_blocked) != .reason) return null;
-    if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) return null;
+    if (size.col != self.backend.geometry().cols or size.row != self.backend.geometry().rows) return null;
     const denial: ConsentPolicy.Decision = .{ .action = self.consent.?.action, .choice = .deny };
     return if (std.meta.eql(shown, denial)) denial else null;
 }
@@ -511,8 +558,8 @@ pub fn collapsedInView(self: *Self) ?usize {
 /// Shows one Message's full text over the live view or the transcript.
 pub fn showMessage(self: *Self, io: std.Io, file: std.Io.File) !void {
     std.debug.assert(self.view == .live or self.view == .transcript);
-    try self.load(&self.staging, io, file, true);
-    self.staging.top = .{};
+    try self.load(&self.staging.text, io, file, true, null);
+    self.staging.scroll.scroll.y = 0;
     self.message_return = self.view;
     self.view = .message;
     self.invalidateScope();
@@ -522,7 +569,7 @@ pub fn showMessage(self: *Self, io: std.Io, file: std.Io.File) !void {
 /// position. An Action that became pending meanwhile takes precedence.
 pub fn leaveMessage(self: *Self) !void {
     std.debug.assert(self.view == .message);
-    self.staging.clear();
+    self.staging.text.clear();
     if (self.action_view != null) return self.latest();
     self.view = self.message_return;
     self.invalidateScope();
@@ -568,10 +615,11 @@ fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix:
 pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void {
     const length = (try file.stat(io)).size;
     self.view = if (action) .action else .inspection;
-    try self.load(&self.browsing, io, file, true);
-    self.browsing.quotes = action;
-    self.browsing.top = .{};
-    self.preview_complete = length <= Viewport.capacity and self.browsing.origin == 0;
+    try self.load(&self.browsing.text, io, file, true, null);
+    self.browsing.text.quotes = action;
+    self.browsing.scroll.scroll.y = 0;
+    self.browsing.blank_tail = 0;
+    self.preview_complete = length <= Viewport.capacity and self.browsing.text.origin == 0;
     if (action) {
         self.action_seen = .{};
         self.action_view = .{ .io = io, .file = file };
@@ -588,14 +636,14 @@ pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void 
 /// visible line keeps its line number, clamped to the new page.
 pub fn refreshFile(self: *Self, io: std.Io, file: std.Io.File) !void {
     std.debug.assert(self.view == .inspection);
-    const document = &self.browsing;
-    const first = document.first(self.textLayout(), self.height).offset;
+    const document = &self.browsing.text;
+    const first = self.browsing.anchor(self.textLayout()).offset;
     const line = std.mem.count(u8, document.bytes[0..@min(first, document.length)], "\n");
     const length = (try file.stat(io)).size;
-    try self.load(document, io, file, true);
+    try self.load(document, io, file, true, null);
     var offset: usize = 0;
     for (0..line) |_| offset = 1 + (std.mem.indexOfScalarPos(u8, document.bytes[0..document.length], offset, '\n') orelse break);
-    document.top = .{ .offset = offset };
+    self.browsing.restore(self.textLayout(), .{ .offset = offset }, self.height, false);
     self.preview_complete = length <= Viewport.capacity and document.origin == 0;
 }
 
@@ -628,7 +676,7 @@ fn prepareDraft(self: *Self, bytes: []const u8, size: std.posix.winsize) ![]cons
     while (clusters.next()) |cluster| {
         const text = cluster.bytes(bytes);
         if (std.mem.eql(u8, text, "\n") or std.mem.eql(u8, text, "\t")) continue;
-        const cells = vaxis.gwidth.gwidth(text, self.vx.caps.unicode);
+        const cells = vaxis.gwidth.gwidth(text, self.backend.widthMethod());
         if (cells == 0 or cells > size.col - 2) return error.UnrepresentableTerminalGrapheme;
     }
     const draft = self.composer[0..bytes.len];
@@ -685,65 +733,65 @@ fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, s
     _ = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(rows)), .height = 1 }).printSegment(.{ .text = text, .style = self.style(.quiet) }, .{ .wrap = .none });
 }
 
-/// Adopts the frame's geometry, selects its projection, encodes it and
-/// returns its receipt only after every byte is written and flushed.
-/// Rendering credits nothing; `presented` does.
-pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: []const u8, cursor: usize, footer: Footer, live: *const View.Live) !Delivered {
-    const status = footer.status;
-    // The terminal reports untrusted geometry. Cell allocations (including
-    // replacement grids during resize) share the same bounded allocator.
-    try Frame.validateGeometry(size.col, size.row);
-    var frame: std.Io.Writer.Allocating = .init(self.memory.allocator());
-    defer frame.deinit();
-    if (size.col != self.vx.screen.width or size.row != self.vx.screen.height) {
-        // Reflow keeps the first browsed line in view and the draft bytes and
-        // caret unchanged. An Action restarts its reading from the top.
-        const browsed = self.view == .transcript or self.view == .inspection or (self.view == .message and self.message_return == .transcript);
-        const anchor: Position = if (browsed) .{ .offset = self.browsing.first(self.textLayout(), self.height).offset } else .{};
-        self.browsing.top = anchor;
-        if (self.view == .message) self.staging.top = .{ .offset = self.staging.first(self.textLayout(), self.height).offset };
+/// A transient source reflow coordinate, never navigation or delivery state.
+pub const Reflow = struct { anchor: Position, resized: bool };
+
+/// Capture under the OLD geometry, then begin the nonpumping backend frame.
+/// Terminal stages waiting bytes after this and before borrowing paint cells.
+pub fn prepareFrame(self: *Self, size: std.posix.winsize) !Reflow {
+    try self.live.text.prepare();
+    const old_layout = self.textLayout();
+    var anchor = if (self.view != .live) self.viewed().anchor(old_layout) else Position{};
+    const resized = size.col != self.backend.geometry().cols or size.row != self.backend.geometry().rows;
+    if (resized) {
+        anchor.row = 0;
+        self.reflowHiddenTranscript(size.col, self.backend.widthMethod());
         self.invalidateLayout();
-        // A render failure retires this invocation; no old grid is needed for
-        // rollback. Retire it before allocating replacements, rather than
-        // charging both geometries at once (notably on 16-KiB-page macOS).
-        const empty = try vaxis.AllocatingScreen.init(self.memory.allocator(), 0, 0);
-        self.vx.screen.deinit(self.memory.allocator());
-        self.vx.screen_last.deinit(self.memory.allocator());
-        self.vx.screen = .{};
-        self.vx.screen_last = empty;
-        self.vx.resize(self.memory.allocator(), &frame.writer, .{ .rows = size.row, .cols = size.col, .x_pixel = size.xpixel, .y_pixel = size.ypixel }) catch |err| switch (err) {
-            error.WriteFailed => return error.OutOfMemory, // This writer only allocates frame memory.
-            else => return err,
-        };
     }
+    try self.backend.begin(.{ .cols = size.col, .rows = size.row, .x_pixel = size.xpixel, .y_pixel = size.ypixel });
+    return .{ .anchor = anchor, .resized = resized };
+}
+
+/// Paint and freeze before output can pump. Existing screen tickets are issued
+/// after successful encode; Delivered exists only after the final flush.
+pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, reflow: Reflow, bytes: []const u8, cursor: usize, footer: Footer, live: *const View.Live) !Delivered {
+    const status = footer.status;
+    const anchor = reflow.anchor;
+    const resized = reflow.resized;
     // Selected after the geometry: a resize restarts reading, and the frame
     // says so. The choice takes the input's row in place of the draft, which
     // it keeps.
     const selector = self.select(footer.command).row == .selector;
     const draft = try self.prepareDraft(if (selector) "" else bytes, size);
-    const window = self.vx.window();
-    window.clear();
-    var call_storage: [3][View.Live.line_bytes]u8 = undefined;
+    const window = self.backend.window();
+    const scratch = self.backend.scratch();
+    const call_storage = try scratch.create([3][View.Live.line_bytes]u8);
     var calls: [3][]const u8 = undefined;
-    const selected = self.view != .live;
+    const selected = self.view != .live and self.view != .transcript;
     // Calls keep their places. While the work is a running Bash call, that
     // call's own row carries the clock; the live line says it only when the
     // row is not shown.
-    var clock: [work_line.max_clock_bytes]u8 = undefined;
+    const clock = try scratch.create([work_line.max_clock_bytes]u8);
     const running: ?work_line.Call = if (footer.live) |line| line.call else null;
     var clock_call: ?usize = null;
     if (!selected) for (live.entries[0..live.count], 0..) |entry, index| {
         const named = if (running) |call| entry.operation == call.operation and entry.ordinal == call.ordinal else false;
         if (named) clock_call = index;
-        calls[index] = try live.line(index, &call_storage[index], if (named) work_line.clockText(&clock, footer.live.?.clock, .conversation, .unicode) else "");
+        calls[index] = try live.line(index, &call_storage.*[index], if (named) work_line.clockText(clock, footer.live.?.clock, .conversation, .unicode) else "");
     };
     const document = self.viewed();
+    try document.text.prepare();
+    const projection = document.projection(self.textLayout());
     var layout: Frame = undefined;
-    try layout.plan(document, .{
+    const frame_input: Frame.Input = .{
         .width = size.col,
         .height = size.row,
-        .method = self.vx.caps.unicode,
+        .method = self.backend.widthMethod(),
+        .document_width = self.textLayout().width,
+        .first_row = document.scroll.scroll.y,
+        .document_total = projection.total,
         .draft = draft,
+        .draft_source = if (selector) "" else bytes,
         .cursor = if (selector) 0 else cursor,
         .draft_anchor = if (selector) 0 else self.draft_anchor,
         .status = status,
@@ -759,49 +807,62 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .action_pending = self.action_view != null,
         .action_seen = self.action_seen,
         .preview_complete = self.preview_complete,
-    });
+    };
+    try layout.plan(&document.text, frame_input);
+    if (self.view == .live) {
+        document.scroll.scroll.y = std.math.maxInt(usize);
+        document.blank_tail = 0;
+    } else if (self.view == .transcript and (resized or self.height != layout.height)) {
+        document.restore(self.textLayout(), anchor, layout.height, true);
+    } else if (resized and self.view != .action) {
+        document.restore(self.textLayout(), anchor, layout.height, false);
+    }
     self.height = layout.height;
+    const conversation = self.view == .live or self.view == .transcript;
+    document.scroll.vertical_scrollbar = if (conversation) .{ .fg = self.style(.normal), .bg = self.style(.quiet) } else null;
+    const body = window.child(.{ .y_off = layout.navigation_height, .height = layout.height });
+    document.scroll.draw(body, .{ .cols = self.textLayout().width, .rows = projection.total +| document.blank_tail });
+    try layout.observe(projection, document.scroll.scroll.y, frame_input);
     if (!selector) self.draft_anchor = layout.draft_lines[0].start;
-    self.browsing_height = layout.browsing_height;
     self.drawn = .{ .first = layout.first, .rows = @intCast(layout.document_rows) };
     self.commands = footer.commands;
     if (self.commands) |*commands| commands.drew(layout.list_height != 0);
-    _ = layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet));
-    _ = document.draw(window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = @intCast(layout.document_rows) }), layout.first, true, self.colour, .{});
+    _ = try layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet), .{});
+    try projection.paint(&document.scroll, window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = layout.height - layout.document_offset }), self.colour, self.backend.scratch());
     if (layout.document_offset != 0) {
         // The conversation's latest rows fill the rows above a whole Action;
         // they are context, never read rows of the Action.
-        try self.live.prepare();
-        _ = self.live.draw(window.child(.{ .y_off = layout.navigation_height, .height = layout.document_offset }), self.live.bottom(self.textLayout(), layout.document_offset), true, self.colour, .{});
+        try self.live.text.prepare();
+        _ = try self.live.text.draw(window.child(.{ .y_off = layout.navigation_height, .height = layout.document_offset }), self.live.text.positionAtRow(self.textLayout(), self.live.text.rowCount(self.textLayout()) -| layout.document_offset), true, self.colour, .{}, .{ .scratch = self.backend.scratch(), .home = self.textLayout().home });
     }
     const failure = std.mem.startsWith(u8, status, "!") or std.mem.startsWith(u8, status, "Rejected");
-    _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status_height }), .{}, true, self.colour, self.style(if (selector) .attention else .quiet));
+    _ = try layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status_height }), .{}, true, self.colour, self.style(if (selector) .attention else .quiet), .{});
     // Only a failure's own line is marked; standing notices below stay quiet.
-    if (failure and !selector) _ = layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status.lineRows(self.textLayout(), 0) }), .{}, true, self.colour, self.style(.failure));
+    if (failure and !selector) _ = try layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status.lineRows(self.textLayout(), 0) }), .{}, true, self.colour, self.style(.failure), .{});
     var call_row = layout.calls_row;
     for (0..layout.used) |index| {
-        _ = layout.calls[index].draw(window.child(.{ .y_off = call_row, .height = layout.call_heights[index] }), .{}, true, self.colour, self.style(live.style(index)));
+        _ = try layout.calls[index].draw(window.child(.{ .y_off = call_row, .height = layout.call_heights[index] }), .{}, true, self.colour, self.style(live.style(index)), .{});
         call_row += layout.call_heights[index];
     }
-    _ = layout.heading.draw(window.child(.{ .y_off = call_row, .height = layout.overflow_height }), .{}, true, self.colour, self.style(.quiet));
+    _ = try layout.heading.draw(window.child(.{ .y_off = call_row, .height = layout.overflow_height }), .{}, true, self.colour, self.style(.quiet), .{});
     // Cells borrow the clock's bytes until the frame is rendered.
-    var live_clock: [work_line.max_clock_bytes]u8 = undefined;
-    if (layout.live_height != 0) self.drawLive(window.child(.{ .y_off = layout.live_row, .height = 1 }), size.col, footer.live.?, &live_clock);
+    const live_clock = try scratch.create([work_line.max_clock_bytes]u8);
+    if (layout.live_height != 0) self.drawLive(window.child(.{ .y_off = layout.live_row, .height = 1 }), size.col, footer.live.?, live_clock);
     // Cells borrow these rows' bytes until the frame is rendered.
-    var queued_text: [queued_line.text_capacity]u8 = undefined;
-    var queued_label: [queued_line.label_capacity]u8 = undefined;
+    const queued_text = try scratch.create([queued_line.text_capacity]u8);
+    const queued_label = try scratch.create([queued_line.label_capacity]u8);
     if (layout.queued_height != 0) {
         const queued = footer.queued.?.waiting;
-        const row = queued_line.row(&queued_text, &queued_label, queued.line, queued.count, size.col, self.vx.caps.unicode);
+        const row = queued_line.row(queued_text, queued_label, queued.line, queued.count, size.col, self.backend.widthMethod());
         const cells = window.child(.{ .y_off = layout.queued_row, .height = 1 });
         _ = cells.printSegment(.{ .text = row.text, .style = self.style(.quiet) }, .{ .wrap = .none });
         _ = cells.child(.{ .x_off = @intCast(row.column) }).printSegment(.{ .text = row.label, .style = self.style(.quiet) }, .{ .wrap = .none });
     }
     // Cells borrow the rule's label until the frame is rendered too.
-    var rule_label: [64]u8 = undefined;
-    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.list_row - 1, .height = 1 }), size.col, layout.draft, &rule_label);
-    var overflow: [32]u8 = undefined;
-    if (layout.list_height != 0) self.drawCommands(window, &layout, &self.commands.?, &overflow);
+    const rule_label = try scratch.create([64]u8);
+    if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.list_row - 1, .height = 1 }), size.col, layout.draft, rule_label);
+    const overflow = try scratch.create([32]u8);
+    if (layout.list_height != 0) self.drawCommands(window, &layout, &self.commands.?, overflow);
     if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col) else {
         // Continuation rows align under the text; only the draft's first
         // line has a glyph. Each shown line is printed whole: draft_layout
@@ -810,7 +871,9 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
             const row = layout.draft_top + @as(u16, @intCast(index));
             const first = layout.draft.first + index == 0;
             _ = window.child(.{ .y_off = row, .height = 1, .width = 2 }).printSegment(.{ .text = if (first) "› " else "  ", .style = self.style(.user) }, .{});
-            _ = window.child(.{ .x_off = 2, .y_off = row, .height = 1 }).print(&.{.{ .text = draft[line.start..line.end] }}, .{ .wrap = .none });
+            const parts = line.gutter();
+            _ = window.child(.{ .x_off = 2, .y_off = row, .height = 1 }).print(&.{ .{ .text = parts[0] }, .{ .text = parts[1] }, .{ .text = parts[2] } }, .{ .wrap = .none });
+            _ = window.child(.{ .x_off = 2 + line.prefixCells(), .y_off = row, .height = 1 }).print(&.{.{ .text = draft[line.start..line.end] }}, .{ .wrap = .none });
         }
     }
     const line_row = size.row - layout.line_height;
@@ -818,26 +881,18 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     // reason's frame offer the denial.
     var says_deny = false;
     if (layout.notice.length != 0) {
-        _ = layout.notice.draw(window.child(.{ .y_off = line_row, .height = layout.line_height }), .{}, true, self.colour, self.style(if (std.mem.startsWith(u8, footer.notice, "!")) .failure else .normal));
+        _ = try layout.notice.draw(window.child(.{ .y_off = line_row, .height = layout.line_height }), .{}, true, self.colour, self.style(if (std.mem.startsWith(u8, footer.notice, "!")) .failure else .normal), .{});
         says_deny = std.mem.indexOf(u8, footer.notice, deny_words) != null;
     } else if (layout.line_height != 0) {
         // While an Action waits, the line under the input says how to decide it.
         const text = if (self.selected.approval != .absent)
-            approvalHint(self.selected.approval, self.actionVisible(), size.col, self.vx.caps.unicode)
-        else if (footer.session) |line| line.shown.text(line.facts, size.col, self.vx.caps.unicode) else "";
+            approvalHint(self.selected.approval, self.actionVisible(), size.col, self.backend.widthMethod())
+        else if (self.view == .transcript) self.lookbackLabel(size.col) else if (footer.session) |line| line.shown.text(line.facts, size.col, self.backend.widthMethod()) else "";
         _ = window.child(.{ .y_off = line_row, .height = 1 }).printSegment(.{ .text = text, .style = self.style(.quiet) }, .{ .wrap = .none });
         says_deny = self.selected.approval == .reason and text.len != 0;
     }
     if (selector) window.hideCursor() else window.showCursor(layout.caret_column, layout.caret_row);
-    // Every frame: links can reach the grid from any document.
-    try self.boundLinks();
-    // Finish consuming every borrowed cell before output can pump input and
-    // change the browsing document. The frame shares the cell memory budget.
-    // Any failure is fatal; never drop a frame and continue accepting consent.
-    self.vx.render(&frame.writer) catch |err| switch (err) {
-        error.WriteFailed => return error.OutOfMemory, // Not a terminal I/O failure: frame allocation failed.
-        else => return err,
-    };
+    const encoded = try self.backend.encode();
     // Issue the ticket before output can pump input. A width report, resize
     // or any other invalidation during the write advances the scope, so the
     // receipt then credits nothing; redrawing those rows is safe.
@@ -848,6 +903,7 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
         .action = if (!self.actionVisible()) null else if (self.consent) |pending| pending.action else null,
         .shown = if (self.selected.approval == .reason and !says_deny) null else ConsentPolicy.offered(self.consent, self.selected.approval),
         .inputs = self.inputs,
+        .live_first = if (self.view == .live) .{ .offset = self.live.text.origin + if (layout.first.order(.end) == .eq) @as(usize, 0) else layout.first.offset, .row = layout.first.row } else null,
         .first = layout.first,
         .next = layout.action_seen,
     };
@@ -856,43 +912,11 @@ pub fn render(self: *Self, out: *std.Io.Writer, size: std.posix.winsize, bytes: 
     if (self.offer) |made| if (!std.meta.eql(self.showing(self.ticket.?), made.decision)) {
         self.offer = null;
     };
-    try out.writeAll(frame.written());
+    try out.writeAll(encoded);
     try out.flush();
     return .{ .frame = self.frames };
 }
 
-/// The shown grid copies each linked cell's address into an arena that
-/// keeps every cell's largest copy until the grid is replaced. A frame links
-/// at most `frame_link_bytes` of addresses, and a grid whose copies reach
-/// `grid_link_bytes` is replaced and the next frame redrawn whole, so links
-/// stay within the cell memory budget at any geometry.
-const frame_link_bytes = 128 * 1024;
-const grid_link_bytes = 512 * 1024;
-
-fn boundLinks(self: *Self) !void {
-    var linked: usize = 0;
-    var kept: usize = 0;
-    for (self.vx.screen.buf, self.vx.screen_last.buf) |*cell, last| {
-        kept += last.uri.capacity;
-        if (cell.link.uri.len == 0) continue;
-        if (linked + cell.link.uri.len > frame_link_bytes) cell.link = .{} else linked += cell.link.uri.len;
-    }
-    if (kept < grid_link_bytes) return;
-    const allocator = self.memory.allocator();
-    const width = self.vx.screen_last.width;
-    const height = self.vx.screen_last.height;
-    // As on resize: retire the old grid before charging its replacement.
-    const empty = try vaxis.AllocatingScreen.init(allocator, 0, 0);
-    self.vx.screen_last.deinit(allocator);
-    self.vx.screen_last = empty;
-    const replacement = try vaxis.AllocatingScreen.init(allocator, width, height);
-    self.vx.screen_last.deinit(allocator);
-    self.vx.screen_last = replacement;
-    self.vx.queueRefresh();
-}
-
-/// The input row while an Action waits: Allow once and Deny with the
-/// highlighted option in reverse video, or why there is no choice yet.
 fn drawChoice(self: *const Self, window: vaxis.Window, width: u16) void {
     const waiting: []const u8 = switch (self.selected.approval) {
         .reading => "  PgDn reads the rest",
@@ -952,7 +976,7 @@ test "the line under a waiting Action shortens to its width or says nothing" {
 /// The live line: its mark and words in the line's tone, then its clock,
 /// quiet.
 fn drawLive(self: *const Self, window: vaxis.Window, width: u16, line: work_line.Line, clock: *[work_line.max_clock_bytes]u8) void {
-    const fitted = work_line.fit(clock, line, width, self.vx.caps.unicode);
+    const fitted = work_line.fit(clock, line, width, self.backend.widthMethod());
     const words: View.Style = switch (line.tone) {
         .normal => .normal,
         .quiet => .quiet,
@@ -972,8 +996,9 @@ fn drawLive(self: *const Self, window: vaxis.Window, width: u16, line: work_line
     }
 }
 
-/// The rule above the input. It names the draft lines hidden above or
-/// below the input when there are any.
+/// The existing footer row is shared: notice, approval, lookback, metadata.
+/// Narrow widths keep the state before the End hint. Draft hidden-line labels
+/// stay on the rule and never compete with this indication.
 fn lookbackLabel(self: *const Self, width: u16) []const u8 {
     const forms: []const []const u8 = switch (self.tail) {
         .gap => &.{ "Looking back · Retention gap below · Ctrl-End: latest", "Retention gap below · Ctrl-End", "Retention gap below", "Gap below", "Gap" },
@@ -992,7 +1017,7 @@ fn lookbackLabel(self: *const Self, width: u16) []const u8 {
 fn drawRule(self: *const Self, window: vaxis.Window, width: u16, draft: draft_layout.View, buffer: *[64]u8) !void {
     const label = draft_layout.label(buffer, draft, .{ .up = "↑", .down = "↓", .dot = "·" });
     window.fill(.{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.style(.quiet) });
-    const column = draft_layout.labelColumn(vaxis.gwidth.gwidth(label, self.vx.caps.unicode), width) orelse return;
+    const column = draft_layout.labelColumn(vaxis.gwidth.gwidth(label, self.backend.widthMethod()), width) orelse return;
     _ = window.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = label, .style = self.style(.quiet) }, .{});
 }
 
@@ -1009,44 +1034,6 @@ fn style(self: *const Self, value: View.Style) vaxis.Style {
     };
 }
 
-// Account actual page-rounded backing bytes, not just requested cell bytes.
-// The UI alone uses this allocator; resize peaks and Vaxis's retained grapheme
-// arena share 32 MiB. At 49,152 cells the empty grids take 15.41 MiB; reserve
-// the other half for dense multibyte graphemes, per-cell SGR and geometric frame
-// growth, including 16-KiB allocation rounding. Refusal is fatal, not truncation.
-const Memory = struct {
-    used: usize = 0,
-    peak: usize = 0,
-    const limit = 32 * 1024 * 1024;
-
-    fn allocator(self: *Memory) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
-    }
-
-    fn charge(length: usize) usize {
-        // Exercise Apple Silicon's larger charge granule on Linux tests too.
-        const page = if (@import("builtin").is_test) @max(16384, std.heap.pageSize()) else std.heap.pageSize();
-        return std.mem.alignForward(usize, length, page);
-    }
-
-    fn alloc(raw: *anyopaque, length: usize, alignment: std.mem.Alignment, address: usize) ?[*]u8 {
-        const self: *Memory = @ptrCast(@alignCast(raw));
-        if (length > limit) return null;
-        const amount = charge(length);
-        if (amount > limit - self.used) return null;
-        const result = std.heap.page_allocator.rawAlloc(length, alignment, address) orelse return null;
-        self.used += amount;
-        if (@import("builtin").is_test) self.peak = @max(self.peak, self.used);
-        return result;
-    }
-
-    fn free(raw: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, address: usize) void {
-        const self: *Memory = @ptrCast(@alignCast(raw));
-        self.used -= charge(bytes.len);
-        std.heap.page_allocator.rawFree(bytes, alignment, address);
-    }
-};
-
 var test_words: [work_line.max_words_bytes]u8 = undefined;
 
 test "wide resize preserves a growing combining draft" {
@@ -1054,49 +1041,49 @@ test "wide resize preserves a growing combining draft" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var storage: [4096]u8 = undefined;
     var out = std.Io.Writer.Discarding.init(&storage);
     const wide: std.posix.winsize = .{ .row = 24, .col = 2048, .xpixel = 0, .ypixel = 0 };
     const narrow: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
     const long: [5000]u8 = @splat('X');
-    _ = try screen.render(&out.writer, wide, &long, long.len, .{}, &.{});
-    std.debug.print("renderer allocation wide5000X: retained={d}, peak={d} bytes (page charged, not RSS)\n", .{ screen.memory.used, screen.memory.peak });
+    _ = try Test.render(screen, &out.writer, wide, &long, long.len, .{}, &.{});
+    std.debug.print("renderer allocation wide5000X: retained={d}, peak={d} bytes (page charged, not RSS)\n", .{ screen.backend.memory.used, screen.backend.memory.peak });
     try screen.append(&long);
     try screen.append("\n");
-    screen.memory.peak = screen.memory.used;
-    _ = try screen.render(&out.writer, narrow, "", 0, .{}, &.{});
-    std.debug.print("renderer allocation resize2048→80: retained={d}, peak={d} bytes\n", .{ screen.memory.used, screen.memory.peak });
+    screen.backend.memory.peak = screen.backend.memory.used;
+    _ = try Test.render(screen, &out.writer, narrow, "", 0, .{}, &.{});
+    std.debug.print("renderer allocation resize2048→80: retained={d}, peak={d} bytes\n", .{ screen.backend.memory.used, screen.backend.memory.peak });
     var draft: [4097]u8 = undefined;
     draft[0] = 'a';
     for (0..2048) |index| @memcpy(draft[1 + index * 2 ..][0..2], "\u{301}");
     for (0..2049) |marks| {
         const text = draft[0 .. 1 + marks * 2];
-        _ = try screen.render(&out.writer, narrow, text, text.len, .{}, &.{});
+        _ = try Test.render(screen, &out.writer, narrow, text, text.len, .{}, &.{});
     }
-    const window = screen.vx.window();
-    try std.testing.expectEqualStrings(&draft, window.readCell(2, screen.vx.screen.cursor.row).?.char.grapheme);
-    try std.testing.expectError(error.TerminalTooLarge, screen.render(&out.writer, .{ .row = 135, .col = 480, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{}));
+    const window = Test.window(screen);
+    try std.testing.expectEqualStrings(&draft, window.readCell(2, screen.backend.storage.?.vx.screen.cursor.row).?.char.grapheme);
     screen.colour = true;
-    screen.vx.caps.no_color = false;
+    _ = screen.backend.setPolicy(.{ .depth = .indexed, .width = screen.backend.widthMethod() });
     for ([_][]const u8{ "中", "é", "🐄", "\x1b[1m\x1b[3m\x1b[4m\x1b[91mX\x1b[0mX" }) |pattern| {
-        screen.live.clear();
+        screen.live.text.clear();
         const cells: usize = if (std.mem.indexOf(u8, pattern, "\x1b") != null or std.mem.eql(u8, pattern, "中") or std.mem.eql(u8, pattern, "🐄")) 2 else 1;
         for (0..Frame.max_cells / cells) |_| try screen.append(pattern);
         for ([_]std.posix.winsize{ .{ .row = 192, .col = 256, .xpixel = 0, .ypixel = 0 }, wide }) |size| {
-            screen.memory.peak = screen.memory.used;
-            _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
-            std.debug.print("renderer allocation dense {s} {d}x{d}: retained={d}, peak={d} bytes\n", .{ if (cells == 1) "NFD" else if (std.mem.indexOf(u8, pattern, "\x1b") != null) "SGR" else pattern, size.row, size.col, screen.memory.used, screen.memory.peak });
+            screen.backend.memory.peak = screen.backend.memory.used;
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+            std.debug.print("renderer allocation dense {s} {d}x{d}: retained={d}, peak={d} bytes\n", .{ if (cells == 1) "NFD" else if (std.mem.indexOf(u8, pattern, "\x1b") != null) "SGR" else pattern, size.row, size.col, screen.backend.memory.used, screen.backend.memory.peak });
             // Check emitted cells, not merely a non-crashing render.
-            const first = screen.vx.window().readCell(0, 0).?;
+            const first = Test.window(screen).readCell(0, 0).?;
             try std.testing.expectEqualStrings(if (cells == 1) "é" else if (std.mem.indexOf(u8, pattern, "\x1b") != null) "X" else pattern, first.char.grapheme);
             if (std.mem.indexOf(u8, pattern, "\x1b") != null) {
                 try std.testing.expect(first.style.bold and first.style.italic and first.style.ul_style == .single);
-                try std.testing.expect(!screen.vx.window().readCell(1, 0).?.style.bold);
+                try std.testing.expect(!Test.window(screen).readCell(1, 0).?.style.bold);
             }
         }
     }
+    try std.testing.expectError(error.TerminalTooLarge, Test.render(screen, &out.writer, .{ .row = 135, .col = 480, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{}));
 }
 
 test "a transcript's front is taken after escaping, which can grow live text past the view" {
@@ -1104,19 +1091,19 @@ test "a transcript's front is taken after escaping, which can grow live text pas
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     // 135 KiB of zero-width spaces fit unescaped; escaped they exceed the view.
     try screen.append("GROWS-FIRST\n");
     for (0..45000) |_| try screen.append("\u{200b}");
     try screen.append("\nGROWS-END\n");
-    try std.testing.expectEqual(@as(u64, 0), screen.live.origin);
+    try std.testing.expectEqual(@as(u64, 0), screen.live.text.origin);
     const front = try screen.liveStart();
     try std.testing.expect(front > 0);
     try screen.beginTranscript(front);
-    try std.testing.expectEqual(front, screen.browsing.origin);
-    try std.testing.expectEqualStrings(screen.live.text(), screen.browsing.text());
-    try std.testing.expectEqual(front + screen.live.length, try screen.liveEnd());
+    try std.testing.expectEqual(front, screen.browsing.text.origin);
+    try std.testing.expectEqualStrings(screen.live.text.text(), screen.browsing.text.text());
+    try std.testing.expectEqual(front + screen.live.text.length, try screen.liveEnd());
 }
 
 test "the input keeps the bottom rows under a rule while content starts at the top" {
@@ -1124,15 +1111,15 @@ test "the input keeps the bottom rows under a rule while content starts at the t
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, true);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, true);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
     var shown: session_line.Shown = .{};
     const session: SessionLine = .{ .facts = .{ .name = "Fix flaky store tests", .model = "gpt-6.1-sol", .effort = .low, .left = 69 }, .shown = &shown };
-    _ = try screen.render(&out.writer, size, "", 0, .{ .session = session }, &.{});
-    const window = screen.vx.window();
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{ .session = session }, &.{});
+    const window = Test.window(screen);
     var storage: [160]u8 = undefined;
     try std.testing.expectEqualStrings("─", window.readCell(0, 21).?.char.grapheme);
     try std.testing.expectEqualStrings("─", window.readCell(79, 21).?.char.grapheme);
@@ -1140,7 +1127,7 @@ test "the input keeps the bottom rows under a rule while content starts at the t
     try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · low · 69% left", rowText(screen, 23, &storage));
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 23).?.style.fg);
     try screen.append("› inspect\n  Done.\n");
-    _ = try screen.render(&out.writer, size, "next\nline", 9, .{ .session = session }, &.{});
+    _ = try Test.render(screen, &out.writer, size, "next\nline", 9, .{ .session = session }, &.{});
     try std.testing.expectEqualStrings("›", window.readCell(0, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("D", window.readCell(2, 1).?.char.grapheme);
     try std.testing.expectEqualStrings(" ", window.readCell(0, 2).?.char.grapheme);
@@ -1152,7 +1139,7 @@ test "the input keeps the bottom rows under a rule while content starts at the t
     try std.testing.expectEqualStrings("l", window.readCell(2, 22).?.char.grapheme);
     try std.testing.expectEqualStrings("F", window.readCell(0, 23).?.char.grapheme);
     // Status sits directly above the rule.
-    _ = try screen.render(&out.writer, size, "next", 4, .{ .status = "Sending…", .session = session }, &.{});
+    _ = try Test.render(screen, &out.writer, size, "next", 4, .{ .status = "Sending…", .session = session }, &.{});
     try std.testing.expectEqualStrings("S", window.readCell(0, 20).?.char.grapheme);
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 20).?.style.fg);
     try std.testing.expectEqualStrings("─", window.readCell(0, 21).?.char.grapheme);
@@ -1160,14 +1147,14 @@ test "the input keeps the bottom rows under a rule while content starts at the t
     // A notice takes the line until the next key, in the failure colour
     // when it reports one; the input does not move.
     for ([_][]const u8{ "Work continues while you compose.", "! Unknown command /x · /help" }, [_]vaxis.Color{ .default, .{ .index = 9 } }) |notice, colour| {
-        _ = try screen.render(&out.writer, size, "next", 4, .{ .status = "Sending…", .notice = notice, .session = session }, &.{});
+        _ = try Test.render(screen, &out.writer, size, "next", 4, .{ .status = "Sending…", .notice = notice, .session = session }, &.{});
         try std.testing.expectEqualStrings(notice, rowText(screen, 23, &storage));
         try std.testing.expectEqual(colour, window.readCell(0, 23).?.style.fg);
         try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
         try std.testing.expectEqualStrings("S", window.readCell(0, 20).?.char.grapheme);
     }
     for ([_]u16{ 51, 40 }, [_][]const u8{ "Fix flaky store tests · gpt-6.1-sol · 69% left", "Fix flaky stor… · gpt-6.1-sol · 69% left" }) |columns, expected| {
-        _ = try screen.render(&out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .session = session }, &.{});
+        _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .session = session }, &.{});
         try std.testing.expectEqualStrings(expected, rowText(screen, 23, &storage));
     }
 }
@@ -1177,26 +1164,26 @@ test "a draft past its cap scrolls inside the input and the rule counts what it 
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const size: std.posix.winsize = .{ .row = 40, .col = 40, .xpixel = 0, .ypixel = 0 };
     // Thirteen lines: ten show, three hide above the caret at the end.
     const draft = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13";
-    _ = try screen.render(&out.writer, size, draft, draft.len, .{}, &.{});
+    _ = try Test.render(screen, &out.writer, size, draft, draft.len, .{}, &.{});
     var storage: [160]u8 = undefined;
     try std.testing.expectEqualStrings("──────────── ↑ 3 more lines ────────────", rowText(screen, 28, &storage));
     try std.testing.expectEqualStrings("  4", rowText(screen, 29, &storage));
     try std.testing.expectEqualStrings("  13", rowText(screen, 38, &storage));
     // Moving the caret up inside the shown lines keeps them; above them,
     // the input scrolls by one row and the rule counts both sides.
-    _ = try screen.render(&out.writer, size, draft, 6, .{}, &.{});
+    _ = try Test.render(screen, &out.writer, size, draft, 6, .{}, &.{});
     try std.testing.expectEqualStrings("  4", rowText(screen, 29, &storage));
-    _ = try screen.render(&out.writer, size, draft, 4, .{}, &.{});
+    _ = try Test.render(screen, &out.writer, size, draft, 4, .{}, &.{});
     try std.testing.expectEqualStrings("───────── ↑ 2 · ↓ 1 more lines ─────────", rowText(screen, 28, &storage));
     try std.testing.expectEqualStrings("  3", rowText(screen, 29, &storage));
-    _ = try screen.render(&out.writer, size, draft, 0, .{}, &.{});
+    _ = try Test.render(screen, &out.writer, size, draft, 0, .{}, &.{});
     try std.testing.expectEqualStrings("──────────── ↓ 3 more lines ────────────", rowText(screen, 28, &storage));
     try std.testing.expectEqualStrings("› 1", rowText(screen, 29, &storage));
 }
@@ -1206,21 +1193,21 @@ test "the transcript fills every row above the rule" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
     for ([_]usize{ 21, 22, 23 }) |rows| {
         for ([_]bool{ false, true }) |trailing_newline| {
-            screen.live.clear();
+            screen.live.text.clear();
             for (0..rows) |row| {
                 var bytes: [16]u8 = undefined;
                 const text = try std.fmt.bufPrint(&bytes, "row{d:0>2}{s}", .{ row, if (row + 1 < rows or trailing_newline) "\n" else "" });
                 try screen.append(text);
             }
-            _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
-            const window = screen.vx.window();
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+            const window = Test.window(screen);
             // Twenty-one rows sit above the rule, the input row and the line.
             const first = rows -| 21;
             for (first..rows, 0..) |row, y| {
@@ -1231,16 +1218,15 @@ test "the transcript fills every row above the rule" {
             try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
             try screen.beginTranscript(0);
             try std.testing.expect(!screen.browse(false, true));
-            _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
-            // The browsing heading takes a row; the first row stays reachable.
-            try std.testing.expectEqualStrings("B", window.readCell(0, 0).?.char.grapheme);
-            try std.testing.expectEqualStrings("r", window.readCell(0, 1).?.char.grapheme);
-            try std.testing.expectEqualStrings("0", window.readCell(4, 1).?.char.grapheme);
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+            // Transcript chrome is identical: no browsing header.
+            try std.testing.expectEqualStrings("r", window.readCell(0, 0).?.char.grapheme);
+            try std.testing.expectEqualStrings("0", window.readCell(4, 0).?.char.grapheme);
             // Paging past the transcript's end returns to live output.
             try std.testing.expect(screen.browse(true, true));
             try screen.latest();
             try std.testing.expectEqual(ViewKind.live, screen.view);
-            _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
             for (first..rows, 0..) |row, y| {
                 var bytes: [16]u8 = undefined;
                 const expected = try std.fmt.bufPrint(&bytes, "row{d:0>2}", .{row});
@@ -1255,14 +1241,14 @@ test "mandatory status and calls wrap wide clusters before the edge" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const size: std.posix.winsize = .{ .row = 12, .col = 8, .xpixel = 0, .ypixel = 0 };
     var live: View.Live = .{};
-    _ = try screen.render(&out.writer, size, "", 0, .{ .status = "1234567中Z" }, &live);
-    const window = screen.vx.window();
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{ .status = "1234567中Z" }, &live);
+    const window = Test.window(screen);
     // Two status rows sit right above the rule on row 9.
     try std.testing.expectEqualStrings("7", window.readCell(6, 7).?.char.grapheme);
     try std.testing.expectEqualStrings("中", window.readCell(0, 8).?.char.grapheme);
@@ -1271,17 +1257,17 @@ test "mandatory status and calls wrap wide clusters before the edge" {
     live.total = 1;
     live.entries[0] = .{ .operation = 7, .ordinal = 9, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
     try live.entries[0].presentation.description.?.set("12345中Z");
-    _ = try screen.render(&out.writer, size, "", 0, .{ .status = "Idle" }, &live);
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{ .status = "Idle" }, &live);
     // The call follows the empty conversation from the top; the status
     // stays right above the rule on row 9. The continuation aligns under
     // the call's text, after its glyph.
-    try std.testing.expectEqualStrings("5", window.readCell(6, 0).?.char.grapheme);
-    try std.testing.expectEqualStrings("中", window.readCell(2, 1).?.char.grapheme);
-    try std.testing.expectEqualStrings("Z", window.readCell(4, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("3", window.readCell(6, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(5, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("Z", window.readCell(7, 1).?.char.grapheme);
     try std.testing.expectEqualStrings("I", window.readCell(0, 8).?.char.grapheme);
-    _ = try screen.render(&out.writer, size, "", 0, .{ .status = "́Z" }, &live);
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{ .status = "́Z" }, &live);
     try std.testing.expectEqualStrings("\\", window.readCell(0, 8).?.char.grapheme);
-    try std.testing.expectEqualStrings("中", window.readCell(2, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(5, 1).?.char.grapheme);
 }
 
 test "actual overflow yields wording before clipping required status" {
@@ -1289,39 +1275,48 @@ test "actual overflow yields wording before clipping required status" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const live: View.Live = .{ .total = 100 };
-    _ = try screen.render(&out.writer, .{ .row = 3, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle" }, &live);
-    const window = screen.vx.window();
+    _ = try Test.render(screen, &out.writer, .{ .row = 3, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle" }, &live);
+    const window = Test.window(screen);
     try std.testing.expectEqualStrings("+", window.readCell(0, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("/", window.readCell(7, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("I", window.readCell(0, 1).?.char.grapheme);
     try std.testing.expectEqualStrings("›", window.readCell(0, 2).?.char.grapheme);
     // Work under way gives up its line rather than the frame.
     const waiting: protocol.WorkState = .{ .working = .{ .since = 1 } };
-    _ = try screen.render(&out.writer, .{ .row = 3, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle", .live = work_line.of(&test_words, &waiting, null, 2_000) }, &live);
+    _ = try Test.render(screen, &out.writer, .{ .row = 3, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle", .live = work_line.of(&test_words, &waiting, null, 2_000) }, &live);
     try std.testing.expectEqualStrings("+", window.readCell(0, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("I", window.readCell(0, 1).?.char.grapheme);
-    try std.testing.expectError(error.TerminalTooSmall, screen.render(&out.writer, .{ .row = 2, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle" }, &live));
-    // The choice's input row needs the same rows the draft does.
-    var action = try ActionFixture.init(1);
-    defer action.deinit();
-    try screen.adopt(std.testing.io, action.file, 1, true);
-    try std.testing.expectError(error.TerminalTooSmall, screen.render(&out.writer, .{ .row = 2, .col = 12, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .command = true, .status = "? Delete\n! Original retained" }, &.{}));
-    try std.testing.expectEqual(ConsentPolicy.Row.selector, screen.selected.row);
-    screen.withdrawAction();
     var calls: View.Live = .{ .count = 3, .total = 4 };
     for ([_][]const u8{ "Wait for bypass café", "Inspect application settings and report configuration errors before applying changes to local assets", "Wait for bypass café" }, 0..) |label, index| {
         calls.entries[index] = .{ .operation = 7, .ordinal = index, .presentation = .{ .description = .{}, .code = if (index == 1) .failed else .unresolved, .publication_position = null } };
         try calls.entries[index].presentation.description.?.set(label);
     }
     const before = out.written().len;
-    screen.vx.queueRefresh();
-    _ = try screen.render(&out.writer, .{ .row = 6, .col = 32, .xpixel = 0, .ypixel = 0 }, "live cafXé!", "live cafX".len, .{ .status = "Sending…\nCommand still running." }, &calls);
+    screen.backend.invalidate();
+    _ = try Test.render(screen, &out.writer, .{ .row = 6, .col = 32, .xpixel = 0, .ypixel = 0 }, "live cafXé!", "live cafX".len, .{ .status = "Sending…\nCommand still running." }, &calls);
     try std.testing.expect(std.mem.indexOf(u8, out.written()[before..], "+3 more calls") != null);
+    // Each failed paint retires its invocation, even before bytes escape.
+    for ([_]bool{ false, true }) |choice| {
+        const failed = try std.testing.allocator.create(Self);
+        defer std.testing.allocator.destroy(failed);
+        try Test.init(failed, std.testing.io, &environ, false);
+        defer Test.deinit(failed);
+        if (!choice) {
+            try std.testing.expectError(error.TerminalTooSmall, Test.render(failed, &out.writer, .{ .row = 2, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle" }, &live));
+        } else {
+            // The choice's input row needs the same rows the draft does.
+            var action = try ActionFixture.init(1);
+            defer action.deinit();
+            try failed.adopt(std.testing.io, action.file, 1, true);
+            try std.testing.expectError(error.TerminalTooSmall, Test.render(failed, &out.writer, .{ .row = 2, .col = 12, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .command = true, .status = "? Delete\n! Original retained" }, &.{}));
+            try std.testing.expectEqual(ConsentPolicy.Row.selector, failed.selected.row);
+        }
+    }
 }
 
 test "the running call's row carries the clock, in its place, and other work ends the conversation" {
@@ -1329,8 +1324,8 @@ test "the running call's row carries the clock, in its place, and other work end
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try screen.append("› run the store tests\n");
@@ -1345,43 +1340,44 @@ test "the running call's row carries the clock, in its place, and other work end
     // Unresolved headings can precede claim. The queued footer is current work,
     // but neither call row has a running clock until a matching Bash is claimed.
     const pending: protocol.WorkState = .{ .pending = .{ .since = 130 } };
-    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &pending, 7, 142_000) }, &calls);
-    try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 2, &buffer));
-    try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 3, &buffer));
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &pending, 7, 142_000) }, &calls);
+    try std.testing.expectEqualStrings("  • Run zig build", rowText(screen, 2, &buffer));
+    try std.testing.expectEqualStrings("  • Run zig build", rowText(screen, 3, &buffer));
     try std.testing.expectEqualStrings("• Queued · 12s", rowText(screen, 4, &buffer));
-    for ([_]u64{ 1, 2 }, [_][2][]const u8{ .{ "• Run zig build · 42s", "• Run zig build" }, .{ "• Run zig build", "• Run zig build · 42s" } }) |ordinal, rows| {
+    for ([_]u64{ 1, 2 }, [_][2][]const u8{ .{ "  • Run zig build · 42s", "  • Run zig build" }, .{ "  • Run zig build", "  • Run zig build · 42s" } }) |ordinal, rows| {
         const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = ordinal, .description = calls.entries[ordinal].presentation.description, .running = 2, .approvals = 0 } };
-        _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
+        _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
         try std.testing.expectEqualStrings("› run the store tests", rowText(screen, 0, &buffer));
-        try std.testing.expectEqualStrings("✓ Read the failing test output", rowText(screen, 1, &buffer));
+        try std.testing.expectEqualStrings("  ✓ Read the failing test output", rowText(screen, 1, &buffer));
         try std.testing.expectEqualStrings(rows[0], rowText(screen, 2, &buffer));
         try std.testing.expectEqualStrings(rows[1], rowText(screen, 3, &buffer));
         try std.testing.expectEqualStrings("", rowText(screen, 4, &buffer));
         // A call of another Operation is not the one running.
-        _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 8, 142_000) }, &calls);
-        try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 2, &buffer));
-        try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 3, &buffer));
+        _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 8, 142_000) }, &calls);
+        try std.testing.expectEqualStrings("  • Run zig build", rowText(screen, 2, &buffer));
+        try std.testing.expectEqualStrings("  • Run zig build", rowText(screen, 3, &buffer));
         try std.testing.expectEqualStrings("• Run zig build · 42s", rowText(screen, 4, &buffer));
     }
     // Other work under way is the conversation's last line, then goes.
     const waiting: protocol.WorkState = .{ .working = .{ .since = 130 } };
-    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
-    try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 3, &buffer));
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
+    try std.testing.expectEqualStrings("  • Run zig build", rowText(screen, 3, &buffer));
     try std.testing.expectEqualStrings("• Waiting · 12s", rowText(screen, 4, &buffer));
-    _ = try screen.render(&out.writer, size, "", 0, .{}, &calls);
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &calls);
     try std.testing.expectEqualStrings("", rowText(screen, 4, &buffer));
     // A narrow line cuts the words and keeps the clock, under the
     // conversation and calls that now wrap.
-    _ = try screen.render(&out.writer, .{ .row = 12, .col = 14, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
-    try std.testing.expectEqualStrings("  build", rowText(screen, 7, &buffer));
+    _ = try Test.render(screen, &out.writer, .{ .row = 12, .col = 14, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
+    try std.testing.expectEqualStrings("    build", rowText(screen, 7, &buffer));
     try std.testing.expectEqualStrings("• Waiti… · 12s", rowText(screen, 8, &buffer));
-    try std.testing.expectEqualStrings("─", screen.vx.window().readCell(0, 9).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 9).?.char.grapheme);
     // Stopping says so quietly, with no clock.
     const stopping: protocol.WorkState = .{ .stopping = .{ .since = 130 } };
     screen.colour = true;
-    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &stopping, 7, 142_000) }, &calls);
+    _ = screen.backend.setPolicy(.{ .depth = .indexed, .width = screen.backend.widthMethod() });
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &stopping, 7, 142_000) }, &calls);
     try std.testing.expectEqualStrings("Stopping…", rowText(screen, 4, &buffer));
-    try std.testing.expectEqual(screen.style(.quiet).fg, screen.vx.window().readCell(0, 4).?.style.fg);
+    try std.testing.expectEqual(screen.style(.quiet).fg, Test.window(screen).readCell(0, 4).?.style.fg);
     try std.testing.expect(!std.meta.eql(screen.style(.normal).fg, screen.style(.quiet).fg));
 }
 
@@ -1390,8 +1386,8 @@ test "a browsed page keeps the live line above the status" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     for (0..40) |index| {
@@ -1404,66 +1400,14 @@ test "a browsed page keeps the live line above the status" {
     try calls.entries[0].presentation.description.?.set("Run zig build");
     const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = 0, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };
     const footer: Footer = .{ .status = "Opening…", .live = work_line.of(&test_words, &state, 7, 142_000) };
-    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
+    _ = try Test.render(screen, &out.writer, size, "", 0, footer, &calls);
     try screen.beginTranscript(0);
     _ = screen.browse(false, true);
-    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
+    _ = try Test.render(screen, &out.writer, size, "", 0, footer, &calls);
     var buffer: [256]u8 = undefined;
-    // Calls are not drawn on a page, so the line says the running call.
-    try std.testing.expectEqualStrings("• Run zig build · 42s", rowText(screen, 7, &buffer));
+    // The same call row carries the clock while looking back.
+    try std.testing.expectEqualStrings("  • Run zig build · 42s", rowText(screen, 7, &buffer));
     try std.testing.expectEqualStrings("Opening…", rowText(screen, 8, &buffer));
-    // The page moves by the rows it shows.
-    try std.testing.expectEqual(screen.height, screen.browsing_height);
-}
-
-test "a queued Message sits dimmed right above the status, in the latest view only" {
-    var environ = try std.testing.environ.createMap(std.testing.allocator);
-    defer environ.deinit();
-    const screen = try std.testing.allocator.create(Self);
-    defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
-    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer out.deinit();
-    for (0..40) |index| {
-        var bytes: [16]u8 = undefined;
-        try screen.append(try std.fmt.bufPrint(&bytes, "row{d:0>2}\n", .{index}));
-    }
-    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
-    const calls: View.Live = .{};
-    // The row confirms the send, so the status no longer says Sent.
-    const footer: Footer = .{ .status = "Sent", .queued = .{ .waiting = .{ .line = "also check the history scratch cache", .count = 2 }, .status = "" } };
-    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
-    var buffer: [256]u8 = undefined;
-    try std.testing.expectEqualStrings("row39", rowText(screen, 7, &buffer));
-    try std.testing.expectEqualStrings("› also check the history scrat… 2 queued", rowText(screen, 8, &buffer));
-    try std.testing.expect(!screenHas(screen, "Sent", &buffer));
-    for ([_]u16{ 0, 32 }) |column| try std.testing.expectEqual(screen.style(.quiet).fg, screen.vx.window().readCell(column, 8).?.style.fg);
-    // A short terminal with a call, the live line and a multiline draft has
-    // no row for it: the status says Sent instead.
-    var running: View.Live = .{ .count = 1, .total = 1 };
-    running.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
-    try running.entries[0].presentation.description.?.set("Run zig build");
-    const state: protocol.WorkState = .{ .working = .{ .since = 100 } };
-    var working = footer;
-    working.live = work_line.of(&test_words, &state, null, 142_000);
-    const short: std.posix.winsize = .{ .row = 6, .col = 40, .xpixel = 0, .ypixel = 0 };
-    const draft = "one\ntwo\nthree";
-    _ = try screen.render(&out.writer, short, draft, draft.len, working, &running);
-    try std.testing.expect(!screenHas(screen, "queued", &buffer));
-    try std.testing.expect(screenHas(screen, "Sent", &buffer));
-    try std.testing.expect(screenHas(screen, "Run zig build", &buffer));
-    // With a one-line draft it has the row, and Sent goes.
-    _ = try screen.render(&out.writer, short, "one", 3, working, &running);
-    try std.testing.expect(screenHas(screen, "queued", &buffer));
-    try std.testing.expect(!screenHas(screen, "Sent", &buffer));
-    // A browsed page shows the conversation down to the status instead,
-    // and Sent with it.
-    try screen.beginTranscript(0);
-    _ = screen.browse(false, true);
-    _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
-    try std.testing.expect(!screenHas(screen, "queued", &buffer));
-    try std.testing.expect(screenHas(screen, "Sent", &buffer));
 }
 
 test "a queued Message keeps its row and status while looking back" {
@@ -1520,8 +1464,8 @@ test "a command list of one row shows a command, not only how many match" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const calls: View.Live = .{};
@@ -1529,14 +1473,14 @@ test "a command list of one row shows a command, not only how many match" {
     var buffer: [256]u8 = undefined;
     for ([_]u16{ 6, 9, 24 }) |rows| {
         errdefer std.debug.print("rows={d}\n", .{rows});
-        _ = try screen.render(&out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "/", 1, footer, &calls);
+        _ = try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "/", 1, footer, &calls);
         try std.testing.expectEqual(.drawn, screen.commands.?.seen);
         try std.testing.expect(screenHas(screen, slash_commands.conversation.usage.get(.archive), &buffer));
     }
 }
 
 fn screenHas(screen: *Self, text: []const u8, buffer: *[256]u8) bool {
-    for (0..screen.vx.screen.height) |row| if (std.mem.indexOf(u8, rowText(screen, @intCast(row), buffer), text) != null) return true;
+    for (0..screen.backend.storage.?.vx.screen.height) |row| if (std.mem.indexOf(u8, rowText(screen, @intCast(row), buffer), text) != null) return true;
     return false;
 }
 
@@ -1545,8 +1489,8 @@ test "a description's controls read escaped alike on its call row and on the liv
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try screen.append("row\n");
@@ -1559,25 +1503,25 @@ test "a description's controls read escaped alike on its call row and on the liv
     var buffer: [256]u8 = undefined;
     // On its call row.
     const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = 0, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };
-    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
-    try std.testing.expectEqualStrings(shown, rowText(screen, 1, &buffer));
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
+    try std.testing.expectEqualStrings("  " ++ shown, rowText(screen, 1, &buffer));
     // On the live line: the call is not among the rows, as from an older
     // Host that names no call.
     const older: protocol.WorkState = .{ .bash = .{ .since = 100, .call = null, .description = calls.entries[0].presentation.description, .running = 1, .approvals = 0 } };
-    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &older, 7, 142_000) }, &.{});
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &older, 7, 142_000) }, &.{});
     try std.testing.expectEqualStrings(shown, rowText(screen, 1, &buffer));
     // Cut to a narrow line, the words are cut as shown, never as raw bytes.
-    _ = try screen.render(&out.writer, .{ .row = 12, .col = 20, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &older, 7, 142_000) }, &.{});
+    _ = try Test.render(screen, &out.writer, .{ .row = 12, .col = 20, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &older, 7, 142_000) }, &.{});
     try std.testing.expectEqualStrings("• Run\\t\\x1b[2… · 42s", rowText(screen, 1, &buffer));
 }
 
-test "narrow browsing retains the complete return instruction" {
+test "narrow lookback footer uses measured labels without an Escape mode" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try screen.append("retained conversation\n");
@@ -1586,9 +1530,11 @@ test "narrow browsing retains the complete return instruction" {
     for ([_]u16{ 8, 20 }) |columns| {
         for ([_][]const u8{ "", "Sending…" }) |status| {
             const before = out.written().len;
-            screen.vx.queueRefresh();
-            _ = try screen.render(&out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = status }, &.{});
-            try std.testing.expect(std.mem.indexOf(u8, out.written()[before..], "Esc") != null);
+            screen.backend.storage.?.vx.queueRefresh();
+            _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = status }, &.{});
+            _ = before;
+            var row: [256]u8 = undefined;
+            try std.testing.expectEqualStrings(if (columns == 8) "Back" else "Looking back", rowText(screen, 23, &row));
         }
     }
 }
@@ -1599,11 +1545,11 @@ test "prepared Action preserves selected inspection until explicit return" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    _ = try screen.render(&out.writer, .{ .row = 12, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{});
+    _ = try Test.render(screen, &out.writer, .{ .row = 12, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{});
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const inspection = try tmp.dir.createFile(io, "inspection", .{ .read = true });
@@ -1628,42 +1574,42 @@ test "prepared Action preserves selected inspection until explicit return" {
         }
         try screen.showFile(io, inspection, false);
         _ = screen.browse(false, true);
-        const position = screen.browsing.top;
+        const position = screen.browsing.scroll.scroll.y;
         try screen.adopt(io, action, 5, true);
-        try std.testing.expectEqualStrings(status, screen.browsing.text());
-        try std.testing.expectEqual(position, screen.browsing.top);
+        try std.testing.expectEqualStrings(status, screen.browsing.text.text());
+        try std.testing.expectEqual(position, screen.browsing.scroll.scroll.y);
         try std.testing.expect(!screen.actionVisible());
         try std.testing.expect(screen.preview_complete);
         try screen.latest();
         try std.testing.expect(screen.actionVisible());
         try std.testing.expectEqual(!oversized, screen.preview_complete);
-        try std.testing.expect(std.mem.startsWith(u8, screen.browsing.text(), "Run Bash: exact command\n"));
+        try std.testing.expect(std.mem.startsWith(u8, screen.browsing.text.text(), "Run Bash: exact command\n"));
         if (!oversized) {
             try screen.append("› clean the build cache\n");
             const size: std.posix.winsize = .{ .row = 12, .col = 80, .xpixel = 0, .ypixel = 0 };
             // The first frame adopts the terminal's size, which restarts reading.
-            _ = try screen.render(&out.writer, size, "kept draft", 10, .{}, &.{});
+            _ = try Test.render(screen, &out.writer, size, "kept draft", 10, .{}, &.{});
             screen.action_seen = .end;
             try std.testing.expectEqual(ConsentPolicy.Projection{ .row = .selector, .approval = .choice }, screen.select(false));
-            _ = screen.presented(try screen.render(&out.writer, size, "kept draft", 10, .{}, &.{}));
+            _ = screen.presented(try Test.render(screen, &out.writer, size, "kept draft", 10, .{}, &.{}));
             try std.testing.expect(screen.promptCompleted(.empty, false, false));
             var storage: [160]u8 = undefined;
             // The conversation, then the whole Action right above the rule.
             try std.testing.expectEqualStrings("› clean the build cache", rowText(screen, 0, &storage));
             try std.testing.expectEqualStrings("", rowText(screen, 7, &storage));
             try std.testing.expectEqualStrings("Run Bash: exact command", rowText(screen, 8, &storage));
-            try std.testing.expectEqualStrings("─", screen.vx.window().readCell(0, 9).?.char.grapheme);
+            try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 9).?.char.grapheme);
             // The choice takes the input's row, Allow once highlighted; the
             // draft stays hidden, and the line under it says how to choose.
             try std.testing.expectEqualStrings("  › Allow once      Deny", rowText(screen, 10, &storage));
-            try std.testing.expect(screen.vx.window().readCell(2, 10).?.style.reverse);
-            try std.testing.expect(!screen.vx.window().readCell(18, 10).?.style.reverse);
-            try std.testing.expect(!screen.vx.screen.cursor_vis);
+            try std.testing.expect(Test.window(screen).readCell(2, 10).?.style.reverse);
+            try std.testing.expect(!Test.window(screen).readCell(18, 10).?.style.reverse);
+            try std.testing.expect(!screen.backend.storage.?.vx.screen.cursor_vis);
             try std.testing.expectEqualStrings("←→ choose · enter confirms", rowText(screen, 11, &storage));
             try std.testing.expect(press(screen, .{ .pick = .deny }, size, false) == .picked);
-            _ = try screen.render(&out.writer, size, "kept draft", 10, .{}, &.{});
+            _ = try Test.render(screen, &out.writer, size, "kept draft", 10, .{}, &.{});
             try std.testing.expectEqualStrings("    Allow once    › Deny", rowText(screen, 10, &storage));
-            try std.testing.expect(screen.vx.window().readCell(18, 10).?.style.reverse);
+            try std.testing.expect(Test.window(screen).readCell(18, 10).?.style.reverse);
         }
         screen.releaseAction();
         screen.consent = null;
@@ -1675,10 +1621,11 @@ test "prepared Action preserves selected inspection until explicit return" {
 fn rowText(screen: *Self, row: u16, storage: []u8) []const u8 {
     // The drawing grid borrows render's scratch. Inspect the owned copy of
     // the rendered cells, which remains valid after render returns.
-    const window = &screen.vx.screen_last;
+    const window = &screen.backend.storage.?.vx.screen_last;
     var length: usize = 0;
     for (0..window.width) |column| {
         const grapheme = (window.readCell(@intCast(column), row) orelse break).char.grapheme;
+        if (column + 1 == window.width and std.mem.eql(u8, grapheme, "▐")) break;
         if (length + grapheme.len > storage.len) break;
         @memcpy(storage[length..][0..grapheme.len], grapheme);
         length += grapheme.len;
@@ -1692,8 +1639,8 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
@@ -1707,7 +1654,7 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
     try action.writePositionalAll(io, writer.buffered(), 0);
     var storage: [160]u8 = undefined;
 
-    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
     try screen.adopt(io, action, 3, true);
     try screen.latest();
     var seen: [40]bool = @splat(false);
@@ -1715,7 +1662,7 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
     while (true) : (steps += 1) {
         try std.testing.expect(steps < 100);
         _ = screen.select(false);
-        _ = screen.presented(try screen.render(&out.writer, size, "", 0, .{}, &.{}));
+        _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
         for (0..12) |row| {
             const shown = rowText(screen, @intCast(row), &storage);
             if (std.mem.startsWith(u8, shown, "row ")) seen[try std.fmt.parseInt(usize, shown[4..6], 10)] = true;
@@ -1738,10 +1685,10 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
     }
     // A word that ends at the edge leaves its following space undrawn.
     try screen.append("0123456789012345678901234567890123456789 next\n");
-    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
     try screen.beginTranscript(0);
     for (0..5) |_| _ = screen.browse(false, false);
-    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
     const before = try std.testing.allocator.dupe(u8, rowText(screen, 1, &storage));
     defer std.testing.allocator.free(before);
     try std.testing.expect(std.mem.startsWith(u8, before, "live "));
@@ -1750,10 +1697,10 @@ test "line scrolling marks only drawn Action rows and older pages keep the row i
     defer older.close(io);
     try older.writePositionalAll(io, "older 1\nolder 2\nolder 3\n", 0);
     _ = try screen.prependFile(io, older);
-    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
     try std.testing.expectEqualStrings(before, rowText(screen, 1, &storage));
     // Resize keeps the first browsed line in view.
-    _ = try screen.render(&out.writer, .{ .row = 10, .col = 30, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{});
+    _ = try Test.render(screen, &out.writer, .{ .row = 10, .col = 30, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{});
     try std.testing.expectEqualStrings(before, rowText(screen, 1, &storage));
 }
 
@@ -1762,18 +1709,18 @@ test "an unchanged frame writes nothing" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const size: std.posix.winsize = .{ .row = 10, .col = 40, .xpixel = 0, .ypixel = 0 };
     try screen.append("hello\n");
-    _ = try screen.render(&out.writer, size, "", 0, .{ .status = "Sending…" }, &.{});
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{ .status = "Sending…" }, &.{});
     const before = out.written().len;
     // Observation polls redraw several times a second while idle.
-    _ = try screen.render(&out.writer, size, "", 0, .{ .status = "Sending…" }, &.{});
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{ .status = "Sending…" }, &.{});
     try std.testing.expectEqual(before, out.written().len);
-    _ = try screen.render(&out.writer, size, "a", 1, .{ .status = "Sending…" }, &.{});
+    _ = try Test.render(screen, &out.writer, size, "a", 1, .{ .status = "Sending…" }, &.{});
     try std.testing.expect(out.written().len > before);
 }
 
@@ -1783,8 +1730,8 @@ test "a Message page returns to the view and position it came from" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     for (0..60) |index| {
@@ -1806,29 +1753,29 @@ test "a Message page returns to the view and position it came from" {
     for ([_]ViewKind{ .live, .transcript }) |origin| {
         try screen.latest();
         if (origin == .transcript) {
-            _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
             try screen.beginTranscript(0);
             for (0..2) |_| try std.testing.expect(!screen.browse(false, true));
         }
         for ([_]bool{ false, true }) |resized| {
-            _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
             for (0..12) |row| {
                 const text = rowText(screen, @intCast(row), &storage);
                 @memcpy(expected[row][0..text.len], text);
                 lengths[row] = text.len;
             }
             try screen.showMessage(io, page);
-            _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
             try std.testing.expectEqualStrings("Message · 2 lines", rowText(screen, 1, &storage));
             try std.testing.expectEqualStrings("second", rowText(screen, 4, &storage));
             // A resize on the page reflows the hidden view from its first row.
             if (resized) {
-                _ = try screen.render(&out.writer, narrow, "", 0, .{}, &.{});
-                _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+                _ = try Test.render(screen, &out.writer, narrow, "", 0, .{}, &.{});
+                _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
             }
             try screen.leaveMessage();
             try std.testing.expectEqual(origin, screen.view);
-            _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
             for (0..12) |row| try std.testing.expectEqualStrings(expected[row][0..lengths[row]], rowText(screen, @intCast(row), &storage));
         }
     }
@@ -1847,8 +1794,8 @@ test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
@@ -1859,7 +1806,7 @@ test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
         try screen.append(try std.fmt.bufPrint(&line, "\n› " ++ View.Mark.body ++ "preview {d}\n" ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n", .{block}));
         for (0..12) |row| try screen.append(try std.fmt.bufPrint(&line, "answer {d} row {d}\n", .{ block, row }));
     }
-    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
     // The newest block scrolled off with its answer's rows below it.
     try std.testing.expectEqual(@as(?usize, null), screen.collapsedInView());
     try screen.beginTranscript(0);
@@ -1869,7 +1816,7 @@ test "Ctrl-O names the lowest collapsed block drawn, counted from the end" {
     var seen: [8]?usize = undefined;
     var count: usize = 0;
     while (true) {
-        _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+        _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
         const index = screen.collapsedInView();
         if (count == 0 or !std.meta.eql(seen[count - 1], index)) {
             seen[count] = index;
@@ -1909,8 +1856,8 @@ test "browsing up then down by the same rows returns to the latest view" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     for (0..120) |index| {
@@ -1920,15 +1867,15 @@ test "browsing up then down by the same rows returns to the latest view" {
     for ([_]u16{ 30, 16 }) |rows| {
         for ([_]usize{ 1, 8, 40 }) |moves| {
             const size: std.posix.winsize = .{ .row = rows, .col = 60, .xpixel = 0, .ypixel = 0 };
-            _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
             try screen.beginTranscript(0);
             for (0..moves) |_| {
                 try std.testing.expect(!screen.browse(false, false));
-                _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+                _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
             }
             for (0..moves) |step| {
                 try std.testing.expectEqual(step + 1 == moves, screen.browse(true, false));
-                _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
+                _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
             }
             try screen.latest();
         }
@@ -1995,8 +1942,6 @@ test "only a complete frame write in an unchanged scope credits Action rows" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(io, &environ, false);
-    defer screen.deinit();
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
     var fixture = try ActionFixture.init(4);
     defer fixture.deinit();
@@ -2004,7 +1949,9 @@ test "only a complete frame write in an unchanged scope credits Action rows" {
     const Hooks = struct {
         var file: std.Io.File = undefined;
         fn width(screen_: *Self) !void {
-            screen_.setWidth(if (screen_.vx.caps.unicode == .unicode) .wcwidth else .unicode);
+            // Reports invalidate authority immediately. SessionTerminal owns
+            // applying the new width only after this frozen frame is released.
+            screen_.invalidateLayout();
         }
         fn replace(screen_: *Self) !void {
             // Another client decided A; B is adopted before A's frame ends.
@@ -2018,6 +1965,9 @@ test "only a complete frame write in an unchanged scope credits Action rows" {
     Hooks.file = fixture.file;
     for ([_]enum { fails, fails_finally, width, replaced, left, stale, delivered }{ .fails, .fails_finally, .width, .replaced, .left, .stale, .delivered }) |case| {
         errdefer std.debug.print("receipt case={s}\n", .{@tagName(case)});
+        // A failed output retires its backend; cases are separate invocations.
+        try Test.init(screen, io, &environ, false);
+        defer Test.deinit(screen);
         screen.withdrawAction();
         screen.view = .live;
         try screen.adopt(io, fixture.file, 0xa, true);
@@ -2036,9 +1986,9 @@ test "only a complete frame write in an unchanged scope credits Action rows" {
             else => null,
         };
         // Each case writes a whole frame, not a diff against the last case.
-        screen.vx.queueRefresh();
+        screen.backend.invalidate();
         // The whole proposal fits: one frame would complete reading.
-        const result = screen.render(&held.writer, size, "", 0, .{}, &.{});
+        const result = Test.render(screen, &held.writer, size, "", 0, .{}, &.{});
         if (case == .fails or case == .fails_finally) {
             try std.testing.expectError(error.WriteFailed, result);
             try std.testing.expectEqual(case == .fails, held.written == 0);
@@ -2048,7 +1998,7 @@ test "only a complete frame write in an unchanged scope credits Action rows" {
         const delivered = try result;
         if (case == .stale) {
             // A later frame supersedes the earlier receipt.
-            const newer = try screen.render(&held.writer, size, "", 0, .{}, &.{});
+            const newer = try Test.render(screen, &held.writer, size, "", 0, .{}, &.{});
             try std.testing.expect(!screen.presented(delivered).read_completed);
             try std.testing.expect(!screen.actionRead());
             try std.testing.expect(screen.presented(newer).read_completed);
@@ -2085,8 +2035,8 @@ test "a decision prompt is offered only after its own delivered frame" {
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
     var fixture = try ActionFixture.init(4);
     defer fixture.deinit();
@@ -2095,13 +2045,13 @@ test "a decision prompt is offered only after its own delivered frame" {
     try screen.adopt(io, fixture.file, 0xa, true);
     // The frame that completes reading still said "read the rest".
     _ = screen.select(false);
-    try std.testing.expect(screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{})).read_completed);
+    try std.testing.expect(screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{})).read_completed);
     try std.testing.expect(!screen.awaitsOffer());
     try std.testing.expect(!screen.promptCompleted(.empty, false, false));
     try std.testing.expectEqual(ConsentPolicy.Approval.choice, screen.select(false).approval);
     // A planned decision prompt is not a delivered one.
     try std.testing.expect(!screen.promptCompleted(.empty, false, false));
-    const prompt = try screen.render(&held.writer, size, "", 0, .{}, &.{});
+    const prompt = try Test.render(screen, &held.writer, size, "", 0, .{}, &.{});
     _ = screen.presented(prompt);
     try std.testing.expect(screen.awaitsOffer());
     try std.testing.expect(screen.offered() == null);
@@ -2121,21 +2071,21 @@ test "a decision prompt is offered only after its own delivered frame" {
     try std.testing.expectEqual(@as(u64, 0xa), screen.consent.?.action);
     // Read again, prompt again, then a queued command blocks the decision.
     _ = screen.select(false);
-    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{}));
     _ = screen.select(false);
-    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{}));
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
     _ = screen.select(false);
     try expectBlocked(.command, press(screen, .enter, size, true));
     try std.testing.expectEqual(@as(u64, 0xa), screen.consent.?.action);
     // While the command holds the choice, its frames show no decision.
-    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{ .command = true }, &.{}));
+    _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{ .command = true }, &.{}));
     try std.testing.expectEqual(ConsentPolicy.Approval.held, screen.selected.approval);
     try std.testing.expect(!screen.awaitsOffer());
     try std.testing.expect(!screen.promptCompleted(.empty, false, false));
     // The same Action needs a new delivered prompt and empty service.
     _ = screen.select(false);
-    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{}));
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
     _ = screen.select(false);
     // An arrow moves the highlight only on an offer, and spends it: Enter
@@ -2145,7 +2095,7 @@ test "a decision prompt is offered only after its own delivered frame" {
     try expectBlocked(.not_ready, press(screen, .enter, size, false));
     // A frame issued but not delivered offers nothing.
     _ = screen.select(false);
-    const shows_deny = try screen.render(&held.writer, size, "", 0, .{}, &.{});
+    const shows_deny = try Test.render(screen, &held.writer, size, "", 0, .{}, &.{});
     try std.testing.expect(!screen.promptCompleted(.empty, false, false));
     _ = screen.presented(shows_deny);
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
@@ -2164,8 +2114,8 @@ test "a redraw that leaves the choice unchanged keeps its offer; one that hides 
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
     var fixture = try ActionFixture.init(4);
     defer fixture.deinit();
@@ -2174,12 +2124,12 @@ test "a redraw that leaves the choice unchanged keeps its offer; one that hides 
     try screen.adopt(io, fixture.file, 0xa, true);
     for (0..2) |_| {
         _ = screen.select(false);
-        _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+        _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{}));
     }
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
     // A key read while a redraw showing the same choice is written acts on
     // the choice the delivered frame showed.
-    const pending = try screen.render(&held.writer, size, "", 0, .{}, &.{});
+    const pending = try Test.render(screen, &held.writer, size, "", 0, .{}, &.{});
     const decided = press(screen, .enter, size, false);
     try std.testing.expect(decided == .decision);
     try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xa, .choice = .allow_once }, decided.decision);
@@ -2187,27 +2137,27 @@ test "a redraw that leaves the choice unchanged keeps its offer; one that hides 
     try screen.adopt(io, fixture.file, 0xb, true);
     for (0..2) |_| {
         _ = screen.select(false);
-        _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+        _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{}));
     }
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
     // A clock tick redraws the screen, issued and delivered, before the key
     // is read: the key still picks the choice it was shown.
     for (0..2) |_| {
         _ = screen.select(false);
-        _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+        _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{}));
     }
     try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xb, .choice = .allow_once }, screen.offered().?);
     try std.testing.expect(press(screen, .{ .pick = .deny }, size, false) == .picked);
     // A redraw that shows no decision, such as a command holding the
     // choice, retires the offer even once the choice is shown again.
     _ = screen.select(false);
-    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{}));
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
     _ = screen.select(true);
-    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{ .command = true }, &.{}));
+    _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{ .command = true }, &.{}));
     try std.testing.expect(screen.offered() == null);
     _ = screen.select(false);
-    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{}));
     try std.testing.expect(screen.offered() == null);
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
     try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xb, .choice = .deny }, screen.offered().?);
@@ -2219,8 +2169,8 @@ test "an offer is spent by any input after its frame, even one that arrives whil
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
     var fixture = try ActionFixture.init(4);
     defer fixture.deinit();
@@ -2229,18 +2179,18 @@ test "an offer is spent by any input after its frame, even one that arrives whil
     try screen.adopt(io, fixture.file, 0xa, true);
     for (0..2) |_| {
         _ = screen.select(false);
-        _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+        _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{}));
     }
     // A key read after the frame was issued and before its receipt.
     _ = screen.select(false);
-    const frame = try screen.render(&held.writer, size, "", 0, .{}, &.{});
+    const frame = try Test.render(screen, &held.writer, size, "", 0, .{}, &.{});
     try std.testing.expect(screen.spendOffer() == null);
     _ = screen.presented(frame);
     try std.testing.expect(!screen.awaitsOffer());
     try std.testing.expect(!screen.promptCompleted(.empty, false, false));
     // The next frame, with no key after it, offers its decision.
     _ = screen.select(false);
-    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{}));
     try std.testing.expect(screen.promptCompleted(.empty, false, false));
     try std.testing.expectEqual(ConsentPolicy.Decision{ .action = 0xa, .choice = .allow_once }, screen.offered().?);
     try std.testing.expect(screen.spendOffer() != null);
@@ -2249,7 +2199,7 @@ test "an offer is spent by any input after its frame, even one that arrives whil
 
 /// Writes and delivers one whole frame.
 fn deliver(screen: *Self, held: *HeldWriter, size: std.posix.winsize) !void {
-    _ = screen.presented(try screen.render(&held.writer, size, "", 0, .{}, &.{}));
+    _ = screen.presented(try Test.render(screen, &held.writer, size, "", 0, .{}, &.{}));
 }
 
 test "a change to the screen retires the offer: no Enter decides on a later frame until that frame is offered" {
@@ -2258,8 +2208,8 @@ test "a change to the screen retires the offer: no Enter decides on a later fram
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(io, &environ, false);
-    defer screen.deinit();
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
     const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
     const resized: std.posix.winsize = .{ .row = 14, .col = 44, .xpixel = 0, .ypixel = 0 };
     var fixture = try ActionFixture.init(3);
@@ -2286,7 +2236,7 @@ test "a change to the screen retires the offer: no Enter decides on a later fram
                 try std.testing.expectEqual(ConsentPolicy.Approval.reading, screen.selected.approval);
             },
             .width => {
-                screen.setWidth(if (screen.vx.caps.unicode == .unicode) .wcwidth else .unicode);
+                screen.setWidth(if (screen.backend.storage.?.vx.caps.unicode == .unicode) .wcwidth else .unicode);
                 try expectBlocked(.reading, press(screen, .enter, now, false));
                 try deliver(screen, &held, now);
             },
@@ -2315,36 +2265,134 @@ test "a change to the screen retires the offer: no Enter decides on a later fram
     }
 }
 
-test "links stay within the cell memory budget at every frame and over many frames" {
+test "snapshot detach pins delivered content through labels, tray draft and resize changes" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
-    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer out.deinit();
-    const TerminalText = @import("TerminalText.zig");
-    const uri = "https://" ++ @as([TerminalText.max_link_bytes - "https://".len]u8, @splat('a'));
-    for (0..40) |_| try screen.append(TerminalText.link_open ++ uri ++ TerminalText.link_end ++ @as([79]u8, @splat('x')) ++ TerminalText.link_close ++ "\n");
-    const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
-    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
-    var linked: usize = 0;
-    for (screen.vx.screen.buf) |cell| linked += @intFromBool(cell.link.uri.len != 0);
-    try std.testing.expectEqual(frame_link_bytes / uri.len, linked);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), TerminalText.link_open ++ uri ++ TerminalText.link_end) != null);
-    // Copies an earlier frame left in the shown grid reach its bound: the
-    // grid is replaced and the next frame draws every cell again.
-    const arena = screen.vx.screen_last.arena.allocator();
-    for (screen.vx.screen_last.buf[0 .. grid_link_bytes / uri.len]) |*cell| try cell.uri.ensureTotalCapacity(arena, uri.len);
-    out.clearRetainingCapacity();
-    _ = try screen.render(&out.writer, size, "", 0, .{}, &.{});
-    var kept: usize = 0;
-    for (screen.vx.screen_last.buf) |cell| kept += cell.uri.capacity;
-    try std.testing.expect(kept < grid_link_bytes);
-    // Unchanged, the frame would write nothing; redrawn, it writes every row.
-    try std.testing.expect(out.written().len > 20 * 79);
+    const size: std.posix.winsize = .{ .row = 12, .col = 60, .xpixel = 0, .ypixel = 0 };
+    for (0..30) |index| {
+        var line: [32]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&line, "row {d:0>2}\n", .{index}));
+    }
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    const delivered = screen.live_first.?;
+    // Live grows before another frame: detaching uses what was delivered,
+    // not the undisplayed new bottom. A stale receipt cannot replace it.
+    const old_receipt = Delivered{ .frame = screen.frames };
+    try screen.append("not delivered yet\n");
+    try screen.beginTranscript(0);
+    _ = screen.presented(old_receipt);
+    try std.testing.expectEqual(delivered.offset, screen.browsing.anchor(screen.textLayout()).offset);
+    var row: [256]u8 = undefined;
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+    const first = try std.testing.allocator.dupe(u8, rowText(screen, 0, &row));
+    defer std.testing.allocator.free(first);
+    _ = try screen.markBeginning();
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+    try std.testing.expectEqualStrings(first, rowText(screen, 0, &row));
+    var calls: View.Live = .{ .count = 1, .total = 1 };
+    calls.entries[0] = .{ .operation = 1, .ordinal = 0, .presentation = .{ .code = .unresolved, .description = null, .publication_position = null } };
+    _ = try Test.render(screen, &out.writer, size, "draft\nsecond\nthird", 18, .{}, &calls);
+    try std.testing.expectEqualStrings(first, rowText(screen, 0, &row));
+    const taller: std.posix.winsize = .{ .row = 24, .col = 50, .xpixel = 0, .ypixel = 0 };
+    _ = try Test.render(screen, &out.writer, taller, "", 0, .{}, &.{});
+    try std.testing.expectEqualStrings(first, rowText(screen, 0, &row));
+    try std.testing.expect(screen.browsing.blank_tail > 0);
+    screen.setWidth(if (screen.backend.storage.?.vx.caps.unicode == .unicode) .wcwidth else .unicode);
+    _ = try Test.render(screen, &out.writer, taller, "", 0, .{}, &.{});
+    try std.testing.expectEqualStrings(first, rowText(screen, 0, &row));
 }
+
+test "new output leaves a snapshot unchanged until contiguous catchup reaches actual end" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 10, .col = 40, .xpixel = 0, .ypixel = 0 };
+    for (0..30) |_| try screen.append("older row\n");
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(0);
+    _ = screen.browse(false, false);
+    const anchor = screen.browsing.anchor(screen.textLayout());
+    const length = screen.browsing.text.length;
+    for (0..12) |_| try screen.append("new row\n");
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+    try std.testing.expectEqual(length, screen.browsing.text.length);
+    try std.testing.expectEqual(anchor, screen.browsing.anchor(screen.textLayout()));
+    try std.testing.expect(std.mem.indexOf(u8, screen.lookbackLabel(80), "New output below") != null);
+    // The old snapshot bottom cannot resume following while live is newer.
+    try std.testing.expect(!screen.browse(true, false));
+    const before_join = screen.browsing.anchor(screen.textLayout());
+    _ = try screen.catchUp();
+    try std.testing.expectEqual(before_join, screen.browsing.anchor(screen.textLayout()));
+    try std.testing.expect(std.mem.endsWith(u8, screen.browsing.text.text(), "new row\n"));
+    var moves: usize = 0;
+    while (!screen.browse(true, false)) : (moves += 1) {
+        try std.testing.expect(moves < 20);
+        _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+    }
+    try std.testing.expectEqual(@as(usize, 11), moves);
+    try screen.latest();
+    try std.testing.expectEqual(ViewKind.live, screen.view);
+}
+
+test "capacity limit and lost retention are distinct and cannot claim the frozen end is latest" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 60, .xpixel = 0, .ypixel = 0 };
+    const line = "retained line bytes\n";
+    while (screen.live.text.length < Viewport.capacity - line.len) try screen.append(line);
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(screen.live.text.origin);
+    const first = screen.browsing.anchor(screen.textLayout());
+    for (0..5) |_| try screen.append("new line\n");
+    _ = try screen.catchUp();
+    try std.testing.expectEqual(first, screen.browsing.anchor(screen.textLayout()));
+    try std.testing.expect(screen.tail == .limited);
+    try std.testing.expect(std.mem.indexOf(u8, screen.lookbackLabel(80), "More output below") != null);
+    try std.testing.expect(!screen.browse(true, true));
+    // Evict the join endpoint from live: this is an actual missing interval.
+    for (0..15000) |_| try screen.append(line);
+    _ = try screen.catchUp();
+    try std.testing.expect(screen.tail == .gap);
+    try std.testing.expect(std.mem.indexOf(u8, screen.lookbackLabel(80), "Retention gap below") != null);
+    try std.testing.expect(!screen.browse(true, true));
+    try std.testing.expect(screen.browsing.text.length <= Viewport.capacity);
+    for ([_]vaxis.gwidth.Method{ .unicode, .wcwidth }) |method| {
+        _ = screen.backend.setPolicy(.{ .depth = screen.backend.policy().depth, .width = method });
+        for (8..2049) |width| {
+            for ([_]u8{ 0, 1, 2, 3 }) |state| {
+                screen.tail = switch (state) {
+                    0 => .gap,
+                    1 => .{ .limited = 0 },
+                    2 => .{ .retained = 0 },
+                    else => .{ .retained = screen.live.text.origin + screen.live.text.length },
+                };
+                const label = screen.lookbackLabel(@intCast(width));
+                try std.testing.expect(label.len != 0);
+                try std.testing.expect(session_line.cells(label, method) <= width);
+                try std.testing.expect(std.mem.indexOf(u8, label, "Esc") == null);
+                if (width >= 60) try std.testing.expect(std.mem.indexOf(u8, label, "Ctrl-End") != null);
+            }
+        }
+    }
+}
+
 test "live and transcript chrome have identical cells with calls queue work drafts and NO_COLOR" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
@@ -2485,3 +2533,242 @@ test "live and transcript chrome have identical cells with calls queue work draf
     };
 }
 
+test "idle clock redraw cost stays bounded over retained text populations" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    const state: protocol.WorkState = .{ .working = .{ .since = 100 } };
+    for ([_][]const u8{ "short line\n", "abcdefghijklmnopqrstuvwxyz", "\x1b[90m中 é 🐄\x1b[39m\n", @import("TerminalText.zig").link_open ++ "https://example.test" ++ @import("TerminalText.zig").link_end ++ "linked text" ++ @import("TerminalText.zig").link_close ++ "\n" }, 0..) |line, index| {
+        screen.live.text.clear();
+        while (screen.live.text.length < 240 * 1024) try screen.append(line);
+        _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+        const start = std.Io.Clock.awake.now(std.testing.io);
+        for (0..10) |tick| _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, null, 142_000 + tick * 1000) }, &.{});
+        const end = std.Io.Clock.awake.now(std.testing.io);
+        std.debug.print("idle clock redraw case{d}: {d}ns /10\n", .{ index, end.nanoseconds - start.nanoseconds });
+    }
+}
+
+fn expectHiddenTranscriptReflow(width_report: bool) !void {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var page = try ActionFixture.init(1);
+    defer page.deinit();
+    screen.setWidth(.wcwidth);
+    const line = if (width_report) "👩‍🚀👩‍🚀👩‍🚀\n" else "abcdefghiX\n";
+    for (0..30) |_| try screen.append(line);
+    const size: std.posix.winsize = .{ .row = 12, .col = 10, .xpixel = 0, .ypixel = 0 };
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(0);
+    screen.browsing.scroll.scroll.y = 20;
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+    const first = screen.browsing.anchor(screen.textLayout());
+    try std.testing.expectEqual(10 * line.len, first.offset);
+    try screen.showMessage(std.testing.io, page.file);
+    if (width_report) screen.setWidth(.unicode) else {
+        _ = try Test.render(screen, &out.writer, .{ .row = 12, .col = 20, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{});
+    }
+    try screen.leaveMessage();
+    const returned = screen.browsing.anchor(screen.textLayout());
+    try std.testing.expectEqual(first.offset, returned.offset);
+    try std.testing.expectEqual(@as(u16, 0), returned.row);
+}
+
+fn expectBorrowedScreenReflow(overlay: bool) !void {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    const borrower = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(borrower);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var page = try ActionFixture.init(30);
+    defer page.deinit();
+    const line = "👩‍🚀👩‍🚀👩‍🚀\n";
+    for (0..40) |_| try screen.append(line);
+    const old_size: std.posix.winsize = .{ .row = 12, .col = 10, .xpixel = 0, .ypixel = 0 };
+    _ = screen.presented(try Test.render(screen, &out.writer, old_size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(0);
+    screen.browsing.scroll.scroll.y = 20;
+    _ = screen.presented(try Test.render(screen, &out.writer, old_size, "", 0, .{}, &.{}));
+    const transcript_first = screen.browsing.anchor(screen.textLayout());
+    try std.testing.expectEqual(10 * line.len, transcript_first.offset);
+    if (overlay) {
+        try screen.showMessage(std.testing.io, page.file);
+        screen.staging.scroll.scroll.y = 4;
+        _ = screen.presented(try Test.render(screen, &out.writer, old_size, "", 0, .{}, &.{}));
+    }
+    const active_first = screen.viewed().anchor(screen.textLayout());
+    const saved = screen.suspendLayout();
+    const backend = screen.backend;
+    borrower.init(backend);
+    borrower.view = .inspection;
+    try borrower.browsing.text.append("A synthetic upgrade panel; no upgrade operations run.\n");
+    borrower.setWidth(.unicode);
+    const size: std.posix.winsize = .{ .row = 14, .col = 20, .xpixel = 0, .ypixel = 0 };
+    _ = try Test.render(borrower, &out.writer, size, "", 0, .{}, &.{});
+    screen.resumeLayout(saved);
+    try std.testing.expectEqual(active_first.offset, screen.viewed().anchor(screen.textLayout()).offset);
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    if (overlay) try screen.leaveMessage();
+    try std.testing.expectEqual(transcript_first.offset, screen.browsing.anchor(screen.textLayout()).offset);
+    try std.testing.expectEqual(@as(u16, 0), screen.browsing.anchor(screen.textLayout()).row);
+    try std.testing.expect(screen.backend == backend and borrower.backend == backend and backend.idle());
+}
+
+test "a borrowed screen restores transcript source across backend resize and width reports" {
+    try expectBorrowedScreenReflow(false);
+}
+
+test "a borrowed screen restores Message and hidden transcript at their own layouts" {
+    try expectBorrowedScreenReflow(true);
+}
+
+test "a width report on a Message overlay reflows its hidden transcript at its own width" {
+    try expectHiddenTranscriptReflow(true);
+}
+
+test "a resize on a Message overlay reflows its hidden transcript at its own width" {
+    try expectHiddenTranscriptReflow(false);
+}
+
+test "a borrowed layout keeps live following and never restores Action offers or read credit" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    const borrower = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(borrower);
+    for ([_]bool{ false, true }) |action| {
+        try Test.init(screen, std.testing.io, &environ, false);
+        defer Test.deinit(screen);
+        var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer out.deinit();
+        var page = try ActionFixture.init(2);
+        defer page.deinit();
+        for (0..30) |_| try screen.append("live source\n");
+        const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+        if (action) try screen.adopt(std.testing.io, page.file, 0x11, true);
+        _ = screen.select(false);
+        _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+        _ = screen.select(false);
+        const delivered = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+        _ = screen.presented(delivered);
+        if (action) {
+            try std.testing.expect(screen.actionRead());
+            try std.testing.expect(screen.promptCompleted(.empty, false, false));
+            try std.testing.expect(screen.offered() != null);
+        }
+        const saved = screen.suspendLayout();
+        try std.testing.expect(saved.active == null and saved.transcript == null);
+        try std.testing.expect(screen.stale() and screen.offered() == null);
+        borrower.init(screen.backend);
+        borrower.view = .inspection;
+        try borrower.browsing.text.append("Synthetic panel\n");
+        borrower.setWidth(.unicode);
+        const resized: std.posix.winsize = .{ .row = 14, .col = 50, .xpixel = 0, .ypixel = 0 };
+        _ = try Test.render(borrower, &out.writer, resized, "", 0, .{}, &.{});
+        try screen.append("output while another screen borrowed the grid\n");
+        screen.resumeLayout(saved);
+        try std.testing.expect(!screen.presented(delivered).read_completed);
+        if (action) {
+            try std.testing.expect(!screen.actionRead());
+            try std.testing.expectEqual(@as(usize, 0), screen.browsing.scroll.scroll.y);
+            try std.testing.expect(screen.offered() == null);
+            try std.testing.expectEqual(@as(u64, 0x11), screen.consent.?.action);
+        } else {
+            _ = try Test.render(screen, &out.writer, resized, "", 0, .{}, &.{});
+            try std.testing.expectEqual(ViewKind.live, screen.view);
+            try std.testing.expect(screen.live.scroll.scroll.y + screen.height >= screen.live.projection(screen.textLayout()).total);
+        }
+    }
+}
+
+test "a borrowed layout cannot revive a poisoned backend or a prior delivered receipt" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const delivered = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+    const saved = screen.suspendLayout();
+    screen.backend.poison();
+    screen.resumeLayout(saved);
+    try std.testing.expect(!screen.backend.idle());
+    try std.testing.expect(!screen.presented(delivered).read_completed);
+    try std.testing.expectError(error.RenderBackendPoisoned, Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+}
+
+test "borrowed layouts retain wrapped rows unless their own wrapping layout changes" {
+    for ([_]bool{ false, true }) |overlay| {
+        for (0..4) |change| {
+            var env = try std.testing.environ.createMap(std.testing.allocator);
+            defer env.deinit();
+            const screen = try std.testing.allocator.create(Self);
+            defer std.testing.allocator.destroy(screen);
+            try Test.init(screen, std.testing.io, &env, false);
+            defer Test.deinit(screen);
+            const borrower = try std.testing.allocator.create(Self);
+            defer std.testing.allocator.destroy(borrower);
+            var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+            defer out.deinit();
+            const size: std.posix.winsize = .{ .row = 12, .col = 20, .xpixel = 0, .ypixel = 0 };
+            for (0..12) |_| try screen.append("intro\n");
+            for (0..300) |_| try screen.append("abcdef ");
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+            try screen.beginTranscript(0);
+            screen.browsing.scroll.scroll.y = 21;
+            const transcript = screen.browsing.anchor(screen.textLayout());
+            try std.testing.expectEqual(Position{ .offset = 72, .row = 9 }, transcript);
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            const file = try tmp.dir.createFile(std.testing.io, "message", .{ .read = true });
+            defer file.close(std.testing.io);
+            try file.writePositionalAll(std.testing.io, screen.browsing.text.text(), 0);
+            if (overlay) {
+                try screen.showMessage(std.testing.io, file);
+                screen.staging.scroll.scroll.y = 17;
+            }
+            const active = screen.viewed().anchor(screen.textLayout());
+            try std.testing.expectEqual(Position{ .offset = 72, .row = if (overlay) 5 else 9 }, active);
+            const saved = screen.suspendLayout();
+            borrower.init(screen.backend);
+            borrower.view = .inspection;
+            try borrower.browsing.text.append("Synthetic borrower; no upgrade operation.\n");
+            var resized = size;
+            if (change == 1) resized.row += 3; // Height alone does not rewrap.
+            if (change == 2) resized.col += 9;
+            if (change == 3) borrower.setWidth(.unicode);
+            _ = try Test.render(borrower, &out.writer, resized, "", 0, .{}, &.{});
+            screen.resumeLayout(saved);
+            const expected_active: Position = if (change < 2) active else .{ .offset = active.offset };
+            const hidden_layout = paneLayout(.transcript, resized.col, screen.backend.widthMethod(), screen.home);
+            const expected_transcript: Position = if (change < 2) transcript else .{ .offset = transcript.offset };
+            try std.testing.expectEqual(expected_active, screen.viewed().anchor(screen.textLayout()));
+            try std.testing.expectEqual(expected_transcript, screen.browsing.anchor(hidden_layout));
+            _ = try Test.render(screen, &out.writer, resized, "", 0, .{}, &.{});
+            try std.testing.expectEqual(expected_active, screen.viewed().anchor(screen.textLayout()));
+            if (overlay) try screen.leaveMessage();
+            try std.testing.expectEqual(expected_transcript, screen.browsing.anchor(screen.textLayout()));
+        }
+    }
+}

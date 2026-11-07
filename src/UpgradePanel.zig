@@ -37,28 +37,28 @@ offered: bool = false,
 dirty: bool = true,
 shown_phase: ?upgrade.Phase = null,
 
-pub fn run(init: std.process.Init, store: []const u8, terminal: *SessionTerminal, stream: *TerminalInput, interrupted: *client.Cancellation) !Outcome {
+pub fn run(init: std.process.Init, store: []const u8, terminal: *SessionTerminal, interrupted: *client.Cancellation) !Outcome {
     var arena: std.heap.ArenaAllocator = .init(init.gpa);
     defer arena.deinit();
     const allocator = arena.allocator();
     const screen = try allocator.create(SessionScreen);
-    try screen.init(init.io, init.environ_map, terminal.screen.colour);
-    defer screen.deinit();
-    screen.setWidth(terminal.screen.vx.caps.unicode);
-    screen.view = .inspection;
     const original = terminal.screen;
+    screen.init(original.backend);
+    screen.home = original.home;
+    screen.view = .inspection;
+    const saved_layout = original.suspendLayout();
     const pump_before = terminal.pump;
-    var self: Self = .{ .init = init, .store = store, .allocator = allocator, .terminal = terminal, .stream = stream, .interrupted = interrupted, .screen = screen };
+    var self: Self = .{ .init = init, .store = store, .allocator = allocator, .terminal = terminal, .stream = &terminal.stream, .interrupted = interrupted, .screen = screen };
     defer self.dispose();
     terminal.screen = screen;
     terminal.pump = .{ .context = &self, .step = pump };
     defer {
         terminal.screen = original;
         terminal.pump = pump_before;
-        original.vx.queueRefresh();
+        original.resumeLayout(saved_layout);
     }
     try self.task.start(init.io, &self, work);
-    const driven: anyerror!void = self.drive() catch |err| if (err == error.InteractiveInterrupted and self.close) {} else err;
+    const driven: anyerror!void = self.drive();
     const restored: anyerror!void = if (std.meta.isError(driven)) terminal.finish() else {};
     self.task.cancel();
     const joined = self.task.join();
@@ -150,6 +150,7 @@ fn drive(self: *Self) !void {
         const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
         if (self.dirty) try self.draw();
+        if (self.close) break;
         _ = try self.step(16);
     }
 }
@@ -178,9 +179,10 @@ fn document(self: *Self) !void {
     var text: TerminalText = .{ .mode = .multiline };
     try text.feed(&safe.writer, raw.written());
     try text.finish(&safe.writer);
-    self.screen.browsing.clear();
-    try self.screen.browsing.append(safe.written());
-    self.screen.browsing.top = .{};
+    self.screen.browsing.text.clear();
+    try self.screen.browsing.text.append(safe.written());
+    self.screen.browsing.scroll.scroll.y = 0;
+    self.screen.browsing.blank_tail = 0;
 }
 
 fn installable(self: *const Self) bool {
@@ -192,8 +194,8 @@ fn draw(self: *Self) !void {
     self.dirty = false;
     self.offered = false;
     if (self.checked == null and self.failure == null) {
-        self.screen.browsing.clear();
-        try self.screen.browsing.append("Upgrade Rui\n\nChecking the published stable release and local installation.\nThis check does not install or start a Host.\n");
+        self.screen.browsing.text.clear();
+        try self.screen.browsing.text.append("Upgrade Rui\n\nChecking the published stable release and local installation.\nThis check does not install or start a Host.\n");
     }
     const phase = self.phase.load(.acquire);
     const hint = if (self.task.thread != null)
@@ -202,9 +204,12 @@ fn draw(self: *Self) !void {
     const live: View.Live = .{};
     _ = try self.terminal.redraw("", 0, .{ .status = phaseText(phase), .notice = hint }, &live);
     self.shown_phase = phase;
+    // A return accepted while writing hands input back at delivery, not
+    // after a freshness read belonging to the next owner.
+    if (self.close) return;
     for (0..1024) |_| {
         if (!try self.step(0)) {
-            self.offered = self.installable() and self.stream.pending() == .none;
+            self.offered = self.installable() and !self.screen.stale() and self.stream.pending() == .none;
             break;
         }
         if (self.close) break;
@@ -227,12 +232,14 @@ fn phaseText(phase: upgrade.Phase) []const u8 {
 fn pump(raw: *anyopaque) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-    _ = try self.step(16);
-    if (self.close) return error.InteractiveInterrupted;
+    // A panel-local return does not abandon the invocation's frozen frame.
+    // Signals and real input/output errors still abort through their owners.
+    if (self.close) return;
+    _ = try self.step(if (self.terminal.writing) 0 else 16);
 }
 
 fn step(self: *Self, wait: i32) !bool {
-    const read = self.terminal.next(self.init.io, self.stream, wait) catch |err| switch (err) {
+    const read = self.terminal.next(self.init.io, wait) catch |err| switch (err) {
         error.InputDeadline => {
             try self.input(try self.stream.expire());
             return true;
@@ -250,7 +257,7 @@ fn step(self: *Self, wait: i32) !bool {
 fn input(self: *Self, decoded: TerminalInput.Decoded) !void {
     switch (decoded) {
         .report => |report| switch (report) {
-            .width => |method| self.screen.setWidth(method),
+            .width => |method| self.terminal.widthReported(method),
             .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
             .focus => |focused| self.terminal.focused = focused,
             .program_status => _ = self.terminal.answered(.program_status),
@@ -492,8 +499,12 @@ test "upgrade panel receipt rendering failure never replaces the primary termina
 test "upgrade panel retains copied cleanup facts in its joined document and restored exit report" {
     const screen = try std.testing.allocator.create(SessionScreen);
     defer std.testing.allocator.destroy(screen);
+    var env = try std.testing.environ.createMap(std.testing.allocator);
+    defer env.deinit();
+    try SessionScreen.Test.init(screen, std.testing.io, &env, false);
+    defer SessionScreen.Test.deinit(screen);
     inline for (.{ .preparation, .publication, .disposal }) |phase| {
-        screen.* = .{ .colour = false };
+        screen.init(screen.backend);
         const primary: ?anyerror = if (phase == .disposal) null else error.ReleaseChecksumMismatch;
         var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = screen, .operation = .install, .result = if (phase == .disposal) test_installed_result else null, .failure = primary };
         var source_path = "/synthetic/retained-stage".*;
@@ -501,7 +512,7 @@ test "upgrade panel retains copied cleanup facts in its joined document and rest
         reporter.report(reporter.context, .{ .primary = primary, .secondary = error.AccessDenied, .retained_path = &source_path });
         @memset(&source_path, 'x');
         try self.document();
-        const document_text = screen.browsing.text();
+        const document_text = screen.browsing.text.text();
         try std.testing.expect(std.mem.indexOf(u8, document_text, "AccessDenied") != null);
         try std.testing.expect(std.mem.indexOf(u8, document_text, "$'/synthetic/retained-stage'") != null);
         if (primary != null) try std.testing.expect(std.mem.indexOf(u8, document_text, "ReleaseChecksumMismatch") != null);
@@ -549,5 +560,223 @@ test "upgrade panel prepublication errors retain unchanged Host access while act
         result.activation = case.activation;
         const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .stream = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = result };
         try std.testing.expectEqual(case.outcome, self.installationOutcome());
+    }
+}
+
+test "upgrade panel paints with the invocation backend and decoder before offering any installation" {
+    var env = try std.testing.environ.createMap(std.testing.allocator);
+    defer env.deinit();
+    const original = try std.testing.allocator.create(SessionScreen);
+    defer std.testing.allocator.destroy(original);
+    try SessionScreen.Test.init(original, std.testing.io, &env, false);
+    defer SessionScreen.Test.deinit(original);
+    const panel = try std.testing.allocator.create(SessionScreen);
+    defer std.testing.allocator.destroy(panel);
+    panel.init(original.backend);
+    panel.view = .inspection;
+    const saved = original.suspendLayout();
+    var keys: [2]c_int = undefined;
+    if (std.c.pipe(&keys) != 0) return error.SystemResources;
+    defer for (keys) |fd| {
+        _ = std.c.close(fd);
+    };
+    var output: [2]c_int = undefined;
+    if (std.c.pipe(&output) != 0) return error.SystemResources;
+    defer for (output) |fd| {
+        _ = std.c.close(fd);
+    };
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    for (keys ++ output) |fd| {
+        const flags = std.c.fcntl(fd, std.c.F.GETFL);
+        if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return error.SystemResources;
+    }
+    var terminal: SessionTerminal = .{ .original = undefined, .flags = .{ 0, 0 }, .input = keys[0], .output = output[1], .screen = panel };
+    var cancellation: client.Cancellation = .{};
+    var self: Self = .{ .init = undefined, .store = "/synthetic/store", .allocator = std.testing.allocator, .terminal = &terminal, .stream = &terminal.stream, .interrupted = &cancellation, .screen = panel, .checked = test_checked };
+    self.init.io = std.testing.io;
+    terminal.pump = .{ .context = &self, .step = pump };
+    try self.document();
+    try self.input(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = true } });
+    try std.testing.expect(!self.offered and !self.install_requested);
+    try self.draw();
+    var bytes: [64 * 1024]u8 = undefined;
+    try std.testing.expect(std.c.read(output[0], &bytes, bytes.len) > 0);
+    try std.testing.expect(self.offered and !self.install_requested);
+    const at = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    _ = terminal.stream.feed('\x1b', at);
+    _ = terminal.stream.feed('[', at);
+    try self.input(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } }, .pasted = false } });
+    try std.testing.expect(self.close and !self.install_requested and self.task.thread == null);
+    terminal.screen = original;
+    terminal.pump = null;
+    original.resumeLayout(saved);
+    try std.testing.expect(original.backend == panel.backend and original.backend.idle());
+    try std.testing.expect(self.stream == &terminal.stream);
+    try std.testing.expectEqual(TerminalInput.Pending.incomplete, terminal.stream.pending());
+}
+
+/// Synthetic terminal credit only: no worker, network, installer or Host.
+const HeldPanel = struct {
+    self: Self,
+    screen: *SessionScreen,
+    env: std.process.Environ.Map,
+    pipes: [2][2]c_int,
+    terminal: SessionTerminal,
+    cancellation: client.Cancellation = .{},
+
+    fn create() !*@This() {
+        const held = try std.testing.allocator.create(@This());
+        errdefer std.testing.allocator.destroy(held);
+        var pipes: [2][2]c_int = undefined;
+        var opened: usize = 0;
+        errdefer for (pipes[0..opened]) |pipe| for (pipe) |fd| {
+            _ = std.c.close(fd);
+        };
+        for (&pipes) |*pipe| {
+            if (std.c.pipe(pipe) != 0) return error.SystemResources;
+            opened += 1;
+        }
+        const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+        for (pipes) |pipe| for (pipe) |fd| {
+            const flags = std.c.fcntl(fd, std.c.F.GETFL);
+            if (flags < 0 or std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return error.SystemResources;
+        };
+        const screen = try std.testing.allocator.create(SessionScreen);
+        errdefer std.testing.allocator.destroy(screen);
+        var env = try std.testing.environ.createMap(std.testing.allocator);
+        errdefer env.deinit();
+        held.* = .{ .self = undefined, .screen = screen, .env = env, .pipes = pipes, .terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .input = pipes[0][0], .output = pipes[1][1], .screen = screen } };
+        try SessionScreen.Test.init(screen, std.testing.io, &held.env, false);
+        screen.view = .inspection;
+        held.self = .{ .init = undefined, .store = "/synthetic/store", .allocator = std.testing.allocator, .terminal = &held.terminal, .stream = &held.terminal.stream, .interrupted = &held.cancellation, .screen = screen, .checked = test_checked };
+        held.self.init.io = std.testing.io;
+        return held;
+    }
+    fn destroy(held: *@This()) void {
+        for (held.pipes) |pipe| for (pipe) |fd| {
+            _ = std.c.close(fd);
+        };
+        SessionScreen.Test.deinit(held.screen);
+        std.testing.allocator.destroy(held.screen);
+        held.env.deinit();
+        std.testing.allocator.destroy(held);
+    }
+    fn hold(held: *@This(), input_bytes: []const u8) !void {
+        held.screen.backend.invalidate();
+        try std.testing.expectEqual(@as(isize, @intCast(input_bytes.len)), std.c.write(held.pipes[0][1], input_bytes.ptr, input_bytes.len));
+        var block: [4096]u8 = @splat('x');
+        while (std.c.write(held.pipes[1][1], &block, block.len) > 0) {}
+    }
+    fn credit(held: *@This()) void {
+        var sink: [65536]u8 = undefined;
+        while (std.c.read(held.pipes[1][0], &sink, sink.len) > 0) {}
+    }
+};
+
+test "upgrade panel width reports defer policy changes until the frozen frame ends" {
+    const held = try HeldPanel.create();
+    defer held.destroy();
+    const Credit = struct {
+        held: *HeldPanel,
+        observed: bool = false,
+        fn step(raw: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try pump(&self.held.self);
+            if (self.held.terminal.pending_width != null) {
+                try std.testing.expect(self.held.terminal.writing and !self.held.screen.backend.idle());
+                try std.testing.expectEqual(vaxis.gwidth.Method.wcwidth, self.held.screen.backend.widthMethod());
+                try std.testing.expect(!self.held.screen.ticket.?.delivered);
+                self.observed = true;
+                self.held.credit();
+            }
+        }
+    };
+    var credit: Credit = .{ .held = held };
+    held.terminal.pump = .{ .context = &credit, .step = Credit.step };
+    try held.hold("\x1b[?2027;3$y");
+    try held.self.draw();
+    try std.testing.expect(credit.observed);
+    try std.testing.expectEqual(vaxis.gwidth.Method.unicode, held.screen.backend.widthMethod());
+    try std.testing.expect(held.terminal.pending_width == null and held.screen.backend.idle());
+    try std.testing.expect(!held.self.offered and !held.self.install_requested and held.screen.stale());
+    held.credit();
+    try held.self.draw();
+    try std.testing.expect(held.self.offered and !held.screen.stale());
+    try held.self.input(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = true } });
+    try std.testing.expect(!held.self.install_requested);
+    try held.self.input(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } });
+    try std.testing.expect(held.self.install_requested and !held.self.offered);
+    // Do not drive the synthetic admission: no installation worker is started.
+    try std.testing.expect(held.self.task.thread == null);
+}
+
+test "upgrade panel benign close finishes the frame before handing queued input back" {
+    const held = try HeldPanel.create();
+    defer held.destroy();
+    const tail = "z\x03\x1b[";
+    const Credit = struct {
+        held: *HeldPanel,
+        credited: bool = false,
+        fn step(raw: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try pump(&self.held.self);
+            if (!self.held.self.close or self.credited) return;
+            try std.testing.expect(self.held.terminal.writing and !self.held.screen.ticket.?.delivered);
+            try std.testing.expectEqual(@as(isize, tail.len), std.c.write(self.held.pipes[0][1], tail, tail.len));
+            self.credited = true;
+            self.held.credit();
+        }
+    };
+    var credit: Credit = .{ .held = held };
+    held.terminal.pump = .{ .context = &credit, .step = Credit.step };
+    const backend = held.screen.backend;
+    const stream = held.self.stream;
+    try held.hold("\x1b[27u");
+    try held.self.drive();
+    try std.testing.expect(credit.credited and held.self.close);
+    try std.testing.expect(!held.self.offered and !held.self.install_requested and held.self.task.thread == null);
+    try std.testing.expect(backend.idle() and held.screen.backend == backend and stream == &held.terminal.stream);
+    var remaining: [16]u8 = undefined;
+    const n = std.c.read(held.pipes[0][0], &remaining, remaining.len);
+    try std.testing.expectEqual(@as(isize, tail.len), n);
+    try std.testing.expectEqualStrings(tail, remaining[0..@intCast(n)]);
+    try std.testing.expectEqual(TerminalInput.Pending.none, stream.pending());
+    for (tail[0..2], 0..) |byte, i| {
+        const decoded = stream.feed(byte, 0);
+        try std.testing.expect(decoded == .event);
+        try std.testing.expect(decoded.event.event.key_press.matchExact(if (i == 0) 'z' else 'c', if (i == 0) .{} else .{ .ctrl = true }));
+    }
+    for (tail[2..]) |byte| _ = stream.feed(byte, 0);
+    try std.testing.expectEqual(TerminalInput.Pending.incomplete, stream.pending());
+    const up = stream.feed('A', 0);
+    try std.testing.expect(up == .event and up.event.event.key_press.matchExact(vaxis.Key.up, .{}));
+    // Returning the same healthy grid can draw again without a new decoder.
+    held.terminal.pump = null;
+    held.screen.invalidateLayout();
+    _ = try held.terminal.redraw("", 0, .{}, &.{});
+    try std.testing.expect(backend.idle() and held.screen.backend == backend);
+}
+
+test "upgrade panel invocation interruption and real pump failures never deliver a held frame" {
+    for ([_]bool{ false, true }) |interrupted| {
+        const held = try HeldPanel.create();
+        defer held.destroy();
+        const Failure = struct {
+            held: *HeldPanel,
+            interrupted: bool,
+            fn step(raw: *anyopaque) !void {
+                const self: *@This() = @ptrCast(@alignCast(raw));
+                self.held.self.close = true;
+                if (!self.interrupted) return error.TerminalReadFailed;
+                self.held.cancellation.requestStop();
+                try pump(&self.held.self);
+            }
+        };
+        var failure: Failure = .{ .held = held, .interrupted = interrupted };
+        held.terminal.pump = .{ .context = &failure, .step = Failure.step };
+        try held.hold("");
+        try std.testing.expectError(if (interrupted) error.InteractiveInterrupted else error.TerminalReadFailed, held.self.drive());
+        try std.testing.expect(!held.screen.backend.idle() and !held.screen.ticket.?.delivered);
+        try std.testing.expect(!held.self.offered and !held.self.install_requested);
     }
 }
