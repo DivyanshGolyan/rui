@@ -803,6 +803,7 @@ It reuses `configureYaml`, whose POSIX feature exposure is scoped to the depende
 The ordinary Linux CI builds retain the same dependency compile boundary; this focused target does not add work to an ordinary build.
 
 Focused `skills ` tests cover real YAML scalars/ignored nested metadata, repository-over-home precedence, worktree and non-git roots, symlinks, unreadability, explicit caps, malformed UTF-8 and metadata-only deltas.
+Description regressions cover unchanged short and exact-limit ASCII and multibyte scalars, visible Unicode-safe truncation above 1,024 code points, catalog round trips and full unchanged invocation content.
 Catalog JSON requires actual string tokens for name, description and path, rejecting numeric/byte-array coercions while preserving escaped Unicode.
 A full 4096-entry ordering regression covers the constant-stack heap sorts used by discovery, encoding, decoding and deltas.
 The Linux `stack-frames` gate measures the real catalog decode and Configure/creating-Message import paths.
