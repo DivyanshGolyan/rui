@@ -399,6 +399,15 @@ pub const Entry = struct {
     runs: bool = true,
 };
 
+/// A metadata reader's borrowed skill rows for the current cursor token.
+/// The renderer and controller never open skill files.
+pub const SkillChoices = struct {
+    entries: []const Entry = &.{},
+    generation: u64 = 0,
+    pending: bool = false,
+    dismissed: bool = false,
+};
+
 /// What the list shows for a draft: the words that start what is typed.
 pub const List = struct {
     /// The word being typed, which every entry's word starts.
