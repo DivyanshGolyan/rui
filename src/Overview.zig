@@ -4343,6 +4343,8 @@ test "upgrade quiescence cancels read jobs rather than granting them mutation cu
 
 
 test "upgrade duplicate Escape joins cancelled task and retires only its own refusal" {
+    var phase: []const u8 = "setup";
+    errdefer std.debug.print("upgrade-duplicate-owner failed at {s}\n", .{phase});
     const Gate = struct {
         observed: std.atomic.Value(bool) = .init(false),
         release: std.atomic.Value(bool) = .init(false),
@@ -4361,26 +4363,38 @@ test "upgrade duplicate Escape joins cancelled task and retires only its own ref
     const overview = rig.overview;
     var gate: Gate = .{};
     defer gate.release.store(true, .release);
+    phase = "first command";
     try std.testing.expect(try rig.press("/upgrade\n") == null);
     try std.testing.expect(overview.upgrade_requested);
     overview.upgrade_job.started = true;
     overview.upgrade_job.allocator = std.testing.allocator;
     overview.upgrade_running = true;
     try overview.upgrade_job.task.start(std.testing.io, &gate, Gate.work);
+    phase = "duplicate refusal";
     try std.testing.expect(try rig.press("/upgrade\n") == null);
     try std.testing.expectEqualStrings("/upgrade", overview.composerDraft().bytes);
     try std.testing.expectEqualStrings(view.upgrade_busy_notice, overview.state.notice.?.text());
     // A single actual byte passes through the production deadline/decoder.
+    phase = "raw Escape expiry and cancellation";
     try std.testing.expect(try pressKey(rig, "\x1b") == null);
     try std.testing.expectEqual(TerminalInput.Pending.none, overview.terminal.stream.pending());
     try std.testing.expect(overview.upgrade_job.cancelling);
+    std.debug.print("upgrade-duplicate-owner: raw Escape consumed, cancel flag set\n", .{});
+    phase = "worker token";
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &gate.observed, test_poll.isSet);
+    std.debug.print("upgrade-duplicate-owner: worker observed cancellation token\n", .{});
     try std.testing.expectEqualStrings("/upgrade", overview.composerDraft().bytes);
     gate.release.store(true, .release);
+    phase = "worker completion";
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &overview.upgrade_job, Gate.completed);
+    std.debug.print("upgrade-duplicate-owner: gated task completed\n", .{});
+    phase = "owner turn and join";
     _ = try overview.turn();
     try std.testing.expect(overview.upgrade_job.task.thread == null and !overview.upgrade_requested);
+    std.debug.print("upgrade-duplicate-owner: task joined, requested cleared\n", .{});
     try std.testing.expectEqualStrings("/upgrade", overview.composerDraft().bytes);
+    phase = "visible cancellation notice";
+    std.debug.print("upgrade-duplicate-owner: notice={s}; pending={}\n", .{ if (overview.state.notice) |*notice| notice.text() else "<none>", overview.upgrade_notice_pending });
     try std.testing.expect(std.mem.startsWith(u8, overview.state.notice.?.text(), "Upgrade cancelled"));
 }
 
