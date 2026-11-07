@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.parse import parse_qs, urlparse
 
 import release_publication as publication
 
@@ -76,76 +77,149 @@ class RepositoryTest(unittest.TestCase):
 
 
 class GitHub:
-    """Only the gh process boundary is replaced; tag and branch operations use Git."""
+    """REST collections and immutable resources have independent visibility."""
 
     def __init__(self):
         self.records = {}
         self.files = {}
+        self.asset_ids = {}
+        self.asset_states = {}
+        self.next_asset_id = 100
         self.calls = []
+        self.upload_count = 0
         self.fail_upload_after = None
         self.corrupt_upload = None
         self.fail_after_publish = False
         self.fail_after_create = False
+        self.hide_created_from_inventory = False
+        self.stale_inventory = None
 
     def add(self, sha, files=None, draft=True):
         self.records[TAG] = {"id": 1, "tag_name": TAG, "draft": draft,
-                             "target_commitish": sha}
+                             "target_commitish": sha,
+                             "upload_url": "https://uploads.github.com/repos/owner/rui/releases/1/assets{?name,label}"}
         self.files[TAG] = dict(files or {})
+        self.asset_ids.clear()
+        self.asset_states.clear()
 
     def record(self):
         record = copy.deepcopy(self.records[TAG])
-        record["assets"] = [{"name": name, "state": "uploaded", "size": len(data)}
+        for name in self.files[TAG]:
+            if name not in self.asset_ids:
+                self.next_asset_id += 1
+                self.asset_ids[name] = self.next_asset_id
+        record["assets"] = [{"id": self.asset_ids[name], "name": name,
+                             "state": self.asset_states.get(name, "uploaded"), "size": len(data)}
                             for name, data in self.files[TAG].items()]
         return record
 
-    def __call__(self, *args):
+    @staticmethod
+    def action(args):
+        if "--paginate" in args:
+            return "inventory"
+        method = args[args.index("--method") + 1] if "--method" in args else "GET"
+        if method == "DELETE":
+            return "delete"
+        if method == "PATCH":
+            return "edit"
+        if method == "POST":
+            return "upload" if any("uploads.github.com" in str(arg) for arg in args) else "create"
+        return "download" if "Accept: application/octet-stream" in args else "get"
+
+    def __call__(self, *args, input=None, output=None):
         self.calls.append(args)
-        if args[:1] == ("api",):
-            return json.dumps([[self.record()] if TAG in self.records else []])
-        action, tag = args[1:3]
+        action = self.action(args)
+        if action == "inventory":
+            if self.stale_inventory is not None:
+                return json.dumps([self.stale_inventory])
+            records = [self.record()] if TAG in self.records and not self.hide_created_from_inventory else []
+            return json.dumps([records])
+        if args[0] != "api":
+            raise AssertionError(f"lifecycle must use REST resources: {args}")
+        path = next(arg for arg in args[1:] if str(arg).startswith(("repos/", "https://")))
         if action == "create":
-            if tag in self.records:
+            if TAG in self.records:
                 raise AssertionError("release was created twice")
-            if "--verify-tag" in args and not git("ls-remote", "origin", f"refs/tags/{tag}"):
-                raise AssertionError("orphan tag was not verified")
-            self.add(args[args.index("--target") + 1])
+            payload = json.loads(input)
+            if path != "repos/owner/rui/releases" or payload["tag_name"] != TAG or payload["draft"] is not True:
+                raise AssertionError("invalid REST draft creation")
+            self.add(payload["target_commitish"])
             if self.fail_after_create:
                 self.fail_after_create = False
                 raise subprocess.CalledProcessError(1, ["gh", *args])
-            return ""
+            return json.dumps(self.record())
+        if action in ("upload", "delete", "edit") and not self.records[TAG]["draft"]:
+            raise AssertionError("attempted to mutate public release")
         if action == "upload":
-            if not self.records[tag]["draft"]:
-                raise AssertionError("attempted to overwrite public assets")
-            for index, filename in enumerate(args[args.index("--clobber") + 1:], 1):
-                path = Path(filename)
-                self.files[tag][path.name] = path.read_bytes()
-                if self.fail_upload_after == index:
-                    self.fail_upload_after = None
-                    raise subprocess.CalledProcessError(1, ["gh", *args])
-            if self.corrupt_upload:
-                self.files[tag][self.corrupt_upload] = b"corrupted transfer"
+            url = urlparse(path)
+            if url.scheme != "https" or url.netloc != "uploads.github.com" or url.path != "/repos/owner/rui/releases/1/assets":
+                raise AssertionError("upload must use the acknowledged release resource")
+            name = parse_qs(url.query)["name"][0]
+            if name in self.files[TAG]:
+                raise AssertionError("asset replacement must delete its asset ID first")
+            filename = Path(args[args.index("--input") + 1])
+            self.files[TAG][name] = filename.read_bytes()
+            self.upload_count += 1
+            if self.corrupt_upload == name:
+                self.files[TAG][name] = b"corrupted transfer"
+            result = next(asset for asset in self.record()["assets"] if asset["name"] == name)
+            if self.fail_upload_after == self.upload_count:
+                self.fail_upload_after = None
+                raise subprocess.CalledProcessError(1, ["gh", *args])
+            return json.dumps(result)
+        if action in ("delete", "download"):
+            asset_id = int(str(path).rsplit("/", 1)[1])
+            name = next(name for name, identity in self.asset_ids.items() if identity == asset_id)
+            if action == "delete":
+                del self.files[TAG][name]
+                del self.asset_ids[name]
+                self.asset_states.pop(name, None)
+            else:
+                Path(output).write_bytes(self.files[TAG][name])
             return ""
-        if action == "download":
-            directory = Path(args[args.index("--dir") + 1])
-            for name, data in self.files[tag].items():
-                (directory / name).write_bytes(data)
-            return ""
+        if path != "repos/owner/rui/releases/1":
+            raise AssertionError(f"unexpected release resource {path}")
         if action == "edit":
-            if "--draft=false" not in args or "--latest" not in args:
+            payload = json.loads(input)
+            if payload["draft"] is not False or payload["make_latest"] != "true":
                 raise AssertionError("publication must set latest and clear draft")
-            target = self.records[tag]["target_commitish"]
-            if not git("ls-remote", "origin", f"refs/tags/{tag}"):
-                git("push", "--quiet", "origin", f"{target}:refs/tags/{tag}")
-            self.records[tag]["draft"] = False
+            target = self.records[TAG]["target_commitish"]
+            if not git("ls-remote", "origin", f"refs/tags/{TAG}"):
+                git("push", "--quiet", "origin", f"{target}:refs/tags/{TAG}")
+            self.records[TAG]["draft"] = False
             if self.fail_after_publish:
                 self.fail_after_publish = False
                 raise subprocess.CalledProcessError(1, ["gh", *args])
-            return ""
-        raise AssertionError(f"unexpected gh invocation {args}")
+        return json.dumps(self.record())
 
     def mutations(self):
-        return [call[1] for call in self.calls if call[:1] == ("release",)
-                and call[1] in ("create", "upload", "edit")]
+        return [self.action(call) for call in self.calls if self.action(call) in ("create", "upload", "delete", "edit")]
+
+
+class ProcessBoundaryTest(unittest.TestCase):
+    def test_asset_download_preserves_binary_stdout_without_decoding(self):
+        payload = b"\xff\x00\xfe\r\n"
+        with tempfile.TemporaryDirectory() as scratch:
+            output = Path(scratch) / "asset.tar.gz"
+
+            def run(command, **kwargs):
+                kwargs["stdout"].write(payload)
+                return subprocess.CompletedProcess(command, 0)
+
+            with mock.patch.object(subprocess, "run", side_effect=run) as process:
+                publication.gh("api", "repos/owner/rui/releases/assets/123", output=output)
+            self.assertEqual(output.read_bytes(), payload)
+            self.assertEqual(process.call_args.args[0], ["gh", "api", "repos/owner/rui/releases/assets/123"])
+            self.assertNotIn("text", process.call_args.kwargs)
+            self.assertNotIn("stderr", process.call_args.kwargs)
+
+    def test_json_request_forwards_text_stdin_and_checks_exit(self):
+        with mock.patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout='{"id":123}')) as process:
+            self.assertEqual(publication._json("--method", "POST", "repos/owner/rui/releases", payload={"draft": True}), {"id": 123})
+        self.assertEqual(process.call_args.kwargs["input"], '{"draft": true}')
+        self.assertTrue(process.call_args.kwargs["check"])
+        self.assertNotIn("stderr", process.call_args.kwargs)
+        self.assertEqual(process.call_args.args[0][-2:], ["--input", "-"])
 
 
 class InventoryTest(unittest.TestCase):
@@ -213,13 +287,100 @@ class PublicationTest(RepositoryTest):
         self.assertFalse(self.github.record()["draft"])
         self.assertEqual(self.github.files[TAG], self.local)
         self.assertEqual(git("ls-remote", "origin", f"refs/tags/{TAG}").split()[0], self.second)
-        create = next(call for call in self.github.calls if call[1:2] == ("create",))
-        self.assertIn("--draft", create)
-        self.assertNotIn("--verify-tag", create)
-        self.assertEqual(create[create.index("--target") + 1], self.second)
-        actions = [call[1] for call in self.github.calls if call[0] == "release"]
-        self.assertEqual(actions, ["create", "upload", "download", "edit", "download"])
+        actions = [self.github.action(call) for call in self.github.calls]
+        self.assertEqual(actions.count("inventory"), 1)
+        self.assertEqual(actions.count("create"), 1)
+        self.assertEqual(actions.count("upload"), len(ASSETS))
+        self.assertEqual(actions.count("download"), 2 * len(ASSETS))
+        self.assertEqual(actions.count("edit"), 1)
+        self.assertLess(max(i for i, action in enumerate(actions) if action == "upload"), actions.index("download"))
+        self.assertLess(actions.index("download"), actions.index("edit"))
         self.assertIsNone(self.stable(), "publication helper must not advance stable itself")
+
+    def test_created_release_does_not_require_collection_index_visibility(self):
+        self.github.hide_created_from_inventory = True
+        self.assertIsNone(self.publish())
+        self.assertFalse(self.github.record()["draft"])
+        self.assertEqual(self.github.files[TAG], self.local)
+        self.assertEqual(sum(self.github.action(call) == "inventory" for call in self.github.calls), 1)
+
+    def test_stale_draft_index_after_publication_cannot_hide_patch_acknowledgement(self):
+        self.github.add(self.second)
+        self.github.stale_inventory = [self.github.record()]
+        self.publish()
+        self.assertTrue(self.github.stale_inventory[0]["draft"])
+        self.assertEqual(self.github.stale_inventory[0]["assets"], [])
+        self.assertFalse(self.github.record()["draft"])
+        self.assertEqual(sum(self.github.action(call) == "inventory" for call in self.github.calls), 1)
+        self.assertEqual(self.github.mutations().count("edit"), 1)
+
+    def test_direct_resource_identity_is_revalidated_before_mutation(self):
+        self.github.add(self.second)
+        for key, value, error in (("id", 99, "resource ID changed"),
+                                  ("tag_name", "v0.48.4", "invalid release identity"),
+                                  ("target_commitish", self.first, "draft target is not immutable"),
+                                  ("draft", None, "invalid release identity")):
+            with self.subTest(key=key):
+                def malformed_resource(*args, key=key, value=value, **kwargs):
+                    result = self.github(*args, **kwargs)
+                    if self.github.action(args) == "get":
+                        record = json.loads(result)
+                        record[key] = value
+                        return json.dumps(record)
+                    return result
+
+                publication.gh.side_effect = malformed_resource
+                with self.assertRaisesRegex(SystemExit, error):
+                    self.publish()
+                self.assertEqual(self.github.mutations(), [])
+
+    def test_creation_response_must_acknowledge_a_valid_resource_id(self):
+        def missing_create_id(*args, **kwargs):
+            result = self.github(*args, **kwargs)
+            if self.github.action(args) == "create":
+                record = json.loads(result)
+                del record["id"]
+                return json.dumps(record)
+            return result
+
+        publication.gh.side_effect = missing_create_id
+        with self.assertRaisesRegex(SystemExit, "positive integer ID"):
+            self.publish()
+        self.assertEqual(self.github.mutations(), ["create"])
+
+    def test_unfinished_draft_asset_is_replaced_by_asset_id(self):
+        self.github.add(self.second, {"install.sh": b"unfinished"})
+        self.github.asset_states["install.sh"] = "starter"
+        original_id = self.github.record()["assets"][0]["id"]
+        self.publish()
+        self.assertFalse(self.github.record()["draft"])
+        self.assertEqual(self.github.files[TAG], self.local)
+        deletes = [call for call in self.github.calls if self.github.action(call) == "delete"]
+        self.assertEqual(len(deletes), 1)
+        self.assertIn(f"repos/owner/rui/releases/assets/{original_id}", deletes[0])
+        self.assertNotEqual(self.github.asset_ids["install.sh"], original_id)
+
+    def test_upload_acknowledgement_must_name_completed_asset_resource(self):
+        def malformed_upload(*args, **kwargs):
+            result = self.github(*args, **kwargs)
+            if self.github.action(args) == "upload":
+                asset = json.loads(result)
+                asset["state"] = "starter"
+                return json.dumps(asset)
+            return result
+
+        publication.gh.side_effect = malformed_upload
+        with self.assertRaisesRegex(SystemExit, "acknowledge completed asset"):
+            self.publish()
+        self.assertTrue(self.github.record()["draft"])
+        self.assertNotIn("edit", self.github.mutations())
+
+    def test_unexpected_upload_url_fails_before_asset_deletion(self):
+        self.github.add(self.second, {"SHA256SUMS": b"old"})
+        self.github.records[TAG]["upload_url"] = "https://untrusted.example/upload{?name,label}"
+        with self.assertRaisesRegex(SystemExit, "unexpected upload URL"):
+            self.publish()
+        self.assertEqual(self.github.mutations(), [])
 
     def test_orphan_lightweight_and_annotated_tags_are_reused(self):
         for annotated in (False, True):
@@ -228,8 +389,9 @@ class PublicationTest(RepositoryTest):
                 self.github = GitHub()
                 publication.gh.side_effect = self.github
                 self.publish()
-                create = next(call for call in self.github.calls if call[1:2] == ("create",))
-                self.assertIn("--verify-tag", create)
+                self.assertEqual(self.github.mutations().count("create"), 1)
+                self.assertEqual(git("ls-remote", "origin", f"refs/tags/{TAG}^{{}}").split()[0]
+                                 if annotated else git("ls-remote", "origin", f"refs/tags/{TAG}").split()[0], self.second)
                 self.assertEqual(self.github.files[TAG], self.local)
                 git("push", "--quiet", "origin", f":refs/tags/{TAG}")
                 if annotated:
@@ -261,7 +423,10 @@ class PublicationTest(RepositoryTest):
     def test_existing_partial_draft_without_tag_is_resumed(self):
         self.github.add(self.second, {"install.sh": b"old partial installer"})
         self.publish()
-        self.assertEqual(self.github.mutations(), ["upload", "edit"])
+        self.assertEqual(self.github.mutations().count("upload"), len(ASSETS))
+        self.assertEqual(self.github.mutations().count("delete"), 1)
+        self.assertEqual(self.github.mutations().count("edit"), 1)
+        self.assertNotIn("create", self.github.mutations())
         self.assertEqual(self.github.files[TAG], self.local)
 
     def test_existing_complete_public_release_never_overwrites_cold_build_bytes(self):
@@ -271,21 +436,21 @@ class PublicationTest(RepositoryTest):
         self.assertIsNone(self.publish())
         self.assertEqual(self.github.files[TAG], published)
         self.assertEqual(self.github.mutations(), [])
-        self.assertIn("download", [call[1] for call in self.github.calls if call[0] == "release"])
+        self.assertIn("download", [self.github.action(call) for call in self.github.calls])
 
     def test_draft_published_before_upload_is_rechecked_without_overwrite(self):
         self.github.add(self.second, {"install.sh": b"partial"})
         published = artifacts("external publisher")
         reads = 0
 
-        def publish_on_second_inventory(*args):
+        def publish_on_second_inventory(*args, **kwargs):
             nonlocal reads
-            if args[0] == "api":
+            if self.github.action(args) == "get":
                 reads += 1
-                if reads == 2:
+                if reads == 1:
                     self.tag(self.second)
                     self.github.add(self.second, published, draft=False)
-            return self.github(*args)
+            return self.github(*args, **kwargs)
 
         publication.gh.side_effect = publish_on_second_inventory
         self.publish()
@@ -299,9 +464,9 @@ class PublicationTest(RepositoryTest):
         self.assertEqual(self.github.mutations(), [])
 
     def test_tag_changed_while_publishing_is_rejected_before_success(self):
-        def replace_tag_after_publication(*args):
-            result = self.github(*args)
-            if args[:2] == ("release", "edit"):
+        def replace_tag_after_publication(*args, **kwargs):
+            result = self.github(*args, **kwargs)
+            if self.github.action(args) == "edit":
                 git("push", "--quiet", "--force", "origin", f"{self.first}:refs/tags/{TAG}")
             return result
 

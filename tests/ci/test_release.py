@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 import release
 
@@ -34,39 +35,54 @@ class PlanTest(unittest.TestCase):
         self.records = []
         self.assets = {}
         self.gh_calls = []
+        self.next_asset_id = 1000
         self.addCleanup(patch.stopall)
         patch.dict(os.environ, {"GITHUB_REPOSITORY": "test/rui"}).start()
         patch("release.publication.gh", side_effect=self.gh).start()
 
-    def gh(self, *args):
+    def gh(self, *args, input=None, output=None):
         self.gh_calls.append(args)
-        if args[0] == "api":
+        if "--paginate" in args:
             return json.dumps([self.records])
-        if args[:2] == ("release", "download"):
-            target = Path(args[args.index("--dir") + 1])
-            for name, data in self.assets[args[2]].items():
-                (target / name).write_bytes(data)
+        self.assertEqual(args[0], "api")
+        path = next(str(arg) for arg in args[1:] if str(arg).startswith(("repos/", "https://")))
+        method = args[args.index("--method") + 1] if "--method" in args else "GET"
+        if method == "POST" and path == "repos/test/rui/releases":
+            record = json.loads(input)
+            record.update(id=len(self.records) + 1, prerelease=False, assets=[])
+            record["upload_url"] = f"https://uploads.github.com/repos/test/rui/releases/{record['id']}/assets{{?name,label}}"
+            self.records.append(record)
+            self.assets[record["tag_name"]] = {}
+            return json.dumps(record)
+        if "/releases/assets/" in path:
+            identity = int(path.rsplit("/", 1)[1])
+            record, asset = next((record, asset) for record in self.records
+                                 for asset in record["assets"] if asset["id"] == identity)
+            if method == "DELETE":
+                self.assertTrue(record["draft"])
+                record["assets"].remove(asset)
+                del self.assets[record["tag_name"]][asset["name"]]
+            else:
+                Path(output).write_bytes(self.assets[record["tag_name"]][asset["name"]])
             return ""
-        if args[:2] == ("release", "create"):
-            tag = args[2]
-            self.records.append({"tag_name": tag, "draft": True, "prerelease": False,
-                                 "target_commitish": args[args.index("--target") + 1], "assets": []})
-            self.assets[tag] = {}
-            return ""
-        if args[:2] == ("release", "upload"):
-            tag = args[2]
-            for filename in args[args.index("--clobber") + 1:]:
-                path = Path(filename)
-                self.assets[tag][path.name] = path.read_bytes()
-            record = next(record for record in self.records if record["tag_name"] == tag)
-            record["assets"] = [{"name": name} for name in self.assets[tag]]
-            return ""
-        if args[:2] == ("release", "edit"):
-            record = next(record for record in self.records if record["tag_name"] == args[2])
+        if path.startswith("https://uploads.github.com/"):
+            url = urlparse(path)
+            identity = int(url.path.split("/")[-2])
+            record = next(record for record in self.records if record["id"] == identity)
+            self.assertTrue(record["draft"])
+            name = parse_qs(url.query)["name"][0]
+            filename = Path(args[args.index("--input") + 1])
+            self.assets[record["tag_name"]][name] = filename.read_bytes()
+            self.next_asset_id += 1
+            asset = {"id": self.next_asset_id, "name": name, "state": "uploaded"}
+            record["assets"].append(asset)
+            return json.dumps(asset)
+        identity = int(path.rsplit("/", 1)[1])
+        record = next(record for record in self.records if record["id"] == identity)
+        if method == "PATCH":
             self.tag(record["tag_name"], record["target_commitish"])
-            record["draft"] = False
-            return ""
-        self.fail(f"unexpected gh call {args}")
+            record.update(json.loads(input))
+        return json.dumps(record)
 
     def commit(self, schema, path="src/store/schema.zig", digest=None):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -94,9 +110,15 @@ class PlanTest(unittest.TestCase):
             f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in sorted(payload.items())).encode()
         payload["install.sh"] = b"#!/bin/sh\nexit 0\n"
         self.assets[tag] = payload
-        self.records.append({"tag_name": tag, "draft": draft, "prerelease": False,
+        identity = len(self.records) + 1
+        assets = []
+        for name in names:
+            self.next_asset_id += 1
+            assets.append({"id": self.next_asset_id, "name": name, "state": "uploaded"})
+        self.records.append({"id": identity, "tag_name": tag, "draft": draft, "prerelease": False,
                              "target_commitish": sha,
-                             "assets": [{"name": name} for name in names]})
+                             "upload_url": f"https://uploads.github.com/repos/test/rui/releases/{identity}/assets{{?name,label}}",
+                             "assets": assets})
 
     def plan(self, sha):
         with contextlib.redirect_stderr(io.StringIO()):
@@ -137,8 +159,9 @@ class PlanTest(unittest.TestCase):
         self.main(sha)
         self.published("v0.48.0", sha)
         self.assertIsNone(self.plan(sha))
-        self.assertTrue(any(call[:2] == ("release", "download") for call in self.gh_calls))
+        self.assertTrue(any("Accept: application/octet-stream" in call for call in self.gh_calls))
         self.assets["v0.48.0"].pop("install.sh")
+        self.records[0]["assets"] = [asset for asset in self.records[0]["assets"] if asset["name"] != "install.sh"]
         with self.assertRaises(SystemExit):
             self.plan(sha)
 
@@ -171,13 +194,11 @@ class PlanTest(unittest.TestCase):
             release.publish("0.48.0", sha, directory, notes)
         self.assertFalse(self.records[0]["draft"])
         self.assertEqual(git("ls-remote", "origin", "refs/heads/stable"), "")
-        mutations = [call for call in self.gh_calls if call[:2] in
-                     (("release", "create"), ("release", "upload"), ("release", "edit"))]
+        mutations = [call for call in self.gh_calls if "--method" in call]
         with contextlib.redirect_stderr(io.StringIO()):
             release.publish("0.48.0", sha, directory, notes)
         self.assertEqual(git("ls-remote", "origin", "refs/heads/stable").split()[0], sha)
-        self.assertEqual(mutations, [call for call in self.gh_calls if call[:2] in
-                                    (("release", "create"), ("release", "upload"), ("release", "edit"))])
+        self.assertEqual(mutations, [call for call in self.gh_calls if "--method" in call])
 
     def test_refuses_divergent_release_history_and_outside_main_candidate(self):
         first = self.commit(48)
@@ -231,8 +252,7 @@ class PlanTest(unittest.TestCase):
         self.published("v0.48.0", first)
         with self.assertRaisesRegex(SystemExit, "identity changed"):
             release.publish("0.48.0", second, Path("missing"), Path("missing"))
-        self.assertFalse(any(call[:2] in (("release", "create"), ("release", "upload"))
-                             for call in self.gh_calls))
+        self.assertFalse(any("--method" in call for call in self.gh_calls))
 
     def test_refuses_to_ship_a_released_schema_whose_bootstrap_changed(self):
         shipped = self.commit(48, digest=0xaa)

@@ -286,12 +286,14 @@ zig build -Doptimize=ReleaseSafe -j2 --summary all
 
 ### Release publication
 
-Releases add no gate.
-[Release](.github/workflows/release.yml) publishes only commits that `stable` contains, so the evidence that promoted a commit also qualifies its release.
-Auto-land dispatches the workflow after each promotion.
-To recover a lost dispatch, run `gh workflow run release.yml --ref main -f sha=<stable SHA>`.
+Releases add no product correctness gate after main.
+[Release](.github/workflows/release.yml) starts on a main push and publishes the immutable event SHA that was admitted before merge.
+Only verified publication advances the `stable` compatibility pointer.
+To recover an admitted main commit, run `gh workflow run release.yml --ref main -f sha=<full main SHA>`.
 
-[release.py](tests/ci/release.py) skips a SHA that an existing release already includes, and it numbers the version from existing tags.
+[release.py](tests/ci/release.py) skips a SHA only when a verified public release already includes it, and can repair a missed pointer update without rebuilding.
+Drafts and orphan tags reserve a version for their exact SHA; recovery reuses that identity rather than skipping incomplete publication.
+A newer main SHA gets a newer version, so pending pushes may coalesce without promising a release for every merge.
 Each platform's native runner builds the tagged commit with empty caches and ReleaseSafe.
 The targets are portable: a baseline CPU, glibc 2.34 on Linux and macOS 15 on Apple Silicon.
 Each build must report the version and exact SHA from `rui --version`.
