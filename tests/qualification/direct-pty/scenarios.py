@@ -229,7 +229,19 @@ def navigation(fixture, row):
         tty.draft("", 2)
     history(80, False)
     generation = tty.screen.generation
-    chunks(tty, row["chunks"])
+    if row.get("status"):
+        # /status is fixture control, not a decoder/equivalence key vector.
+        # Split its submit boundary to dismiss even pending metadata exactly
+        # once, without retrying an Enter that production intentionally holds.
+        assert len(row["chunks"]) == 1, row["chunks"]
+        command = row["chunks"][0]
+        payload = bytes.fromhex(command["hex"])
+        assert payload == b"/status\r", payload
+        tty.pause(command.get("delay_before", 0))
+        tty.send(payload[:-1])
+        tty.send(b"\x07" + payload[-1:])
+    else:
+        chunks(tty, row["chunks"])
     if row.get("status"):
         tty.wait(lambda: inspection(tty.screen.completed, fixture.session),
                  label="navigation entered inspection", after=generation)
