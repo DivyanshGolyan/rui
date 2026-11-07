@@ -258,7 +258,7 @@ def run_check(check, root, log, timeout, environment):
         try:
             receipt = json.loads(receipt_path.read_text())
             binary = Path(receipt["binary"])
-            valid = (receipt["source"] == str(root) and
+            valid = (root.samefile(receipt["source"]) and
                      receipt["selector"] == check.name.removeprefix("TD1 sequence model ") and
                      receipt["source_unchanged"] is True and
                      receipt["overlay_unchanged"] is True and
