@@ -237,7 +237,8 @@ def main():
                 "queued": {"count": "0", "oldest_position": "0", "newest_admission": "0", "newest_position": "0"},
                 "work": {"state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "revision": "1", "workspace": "/w"},
                 "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
-                    "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
+                    "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"bytes": "0", "sha256": digest(b"").hex()},
+                    "authored": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)
             for fault in ("missing", "count", "duplicate", "order", "retired", "overflow"):
                 wire = copy.deepcopy(valid)
@@ -294,6 +295,16 @@ def main():
                 mock_reply(fields["socket"], store, "page", json.dumps(received({"session": "k7m2qx", "label": label})).encode(), ok=ok)
             for session in ("rui/1a2b3c4d-0000-4000-8000-000000000001", "reviewer", "K7m2qx", "k7m2qi", "k7\x00qx"):
                 mock_reply(fields["socket"], store, "page", json.dumps(received({"session": session})).encode())
+            # Both admission and received Messages require valid authored content references.
+            for message_kind in ("admission", "received"):
+                for fault in ("missing", "null", "bytes", "digest"):
+                    wire = copy.deepcopy(valid) if message_kind == "admission" else received({"session": "k7m2qx"})
+                    message_value = wire["items"][0]["value"][message_kind]
+                    if fault == "missing": del message_value["authored"]
+                    if fault == "null": message_value["authored"] = None
+                    if fault == "bytes": message_value["authored"]["bytes"] = "-1"
+                    if fault == "digest": message_value["authored"]["sha256"] = "z" * 64
+                    mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             for fault in ("order", "union", "digest", "binding", "integer", "field", "stamp", "sender", "undated", "dated"):
                 wire = copy.deepcopy(valid)
                 # Every row is dated, and an admission by its own admission.
