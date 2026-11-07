@@ -2716,7 +2716,7 @@ Normal desktop widths are the design target; narrower terminals wrap the same in
 Opening adds no configuration banner or command tutorial.
 Bash bypass mode retains its safety warning.
 Routine tool labels, including successful calls, are quiet and indented beneath assistant prose in both saved conversation and the live call tray; indentation keeps that hierarchy visible without colour.
-The whole tool label carries its state style, reset before assistant prose; failures and approval keep their prominent state styles, compact grouping and output summaries remain, and labels and links keep their existing escaping.
+Failure rows stay in the compact tool group: only their `!` glyph is red while the description and complete outcome are quiet; pending permissions retain their attention style, and labels and links keep their existing escaping.
 Routine capture, reserved keys, proposal fields, resize notices and repeated attention prose stay out of the transcript.
 Unconfirmed or rejected submissions retain actionable notices.
 Explicit `/status` keeps the current reserved recovery key under the page, even before publication, and `/requests` lists recovery handles; reservation does not prove capture or acceptance.
@@ -2732,11 +2732,12 @@ When all retained text fits and no older conversation exists, Up and PgUp do not
 `/history` can deliberately reveal `Start of conversation`; ordinary detachment does not insert that label into the shown short text.
 Actual backward movement or a real request for older conversation freezes a transcript copy that starts at the first retained read boundary, pinning the exact first logical content from the delivered frame before applying the movement.
 Live and transcript share body width, calls, queued row, draft and status geometry; only genuine inspection, Message and Action pages have navigation headings.
-The existing footer quietly says `Looking back`, or `New output below` when the normalized live endpoint has advanced, with `Ctrl-End` as the unconditional return hint.
+The conversation scrollbar uses the library's position and extent, with a distinct track and thumb even when colour is disabled; its reserved physical column is not transcript content.
+The existing footer quietly says `Looking back`, or `New output below` when the normalized live endpoint has advanced, with `Ctrl-G` as the return hint.
 Notices take priority over approval hints, then looking-back state, then Session metadata; the rule keeps its independent hidden-draft-line labels.
 No unread count or history persists beyond this snapshot.
 New output leaves the anchored snapshot unchanged; downward input appends its still-retained contiguous normalized suffix, with styles, links and exact collapsed Message proofs, before moving toward the actual current end.
-A frozen snapshot endpoint is never mistaken for the current end: an endpoint lost to retention or trimmed by older paging says `Retention gap below`, while insufficient snapshot capacity says `More output below`, not that saved output was lost; both retain `Ctrl-End` as an explicit transition to latest.
+A frozen snapshot endpoint is never mistaken for the current end: an endpoint lost to retention or trimmed by older paging says `Retention gap below`, while insufficient snapshot capacity says `More output below`, not that saved output was lost; both retain `Ctrl-G` as the advertised transition to latest; Ctrl-End remains available.
 A boundary pairs a live offset with the Conversation cursor before it (an Admission or call row is no Conversation cursor) and is valid only if no Conversation item at or after its cursor showed before its offset.
 `session_reads.Marks` owns that rule: the opening's start is one, and a later page records each item it shows that follows the conversation row of every Message shown so far as its Admission.
 A stop answers every Message up to its cutoff, since each has its row by then or never will, and a read whose stop shows queued Messages before its line keeps no boundary before that stop.
@@ -2899,11 +2900,11 @@ Only after trying those alternatives may genuine row pressure shorten the bounde
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
 If required instructions, overflow and input cannot fit, the renderer fails before emitting a clipped prompt and restores terminal configuration.
 
-Peer Messages show as one upright, dim line each, never with `›`: `← Received message from NAME` for a Message from a peer, `→ Messaged NAME` for one this Session sent, and `! Messaged NAME — Failed` for a send its target refused.
+Peer Messages show as one upright, indented quiet line each, never with `›`: `← Received message from NAME` for a Message from a peer, `→ Messaged NAME` for one this Session sent, and `! → Messaged NAME — Failed` for a send its target refused; only the failure glyph is red.
 The Message's text never shows: the model reads it, and the person sees only who it came from or went to.
 NAME is the peer's label as the Store holds it when the page is read, so a rename shows on every row; a peer without one shows its ID (`k7m2qx`).
 The Store looks the label up once per peer row; it is not copied into the Message.
-Peer rows group with tool rows: one after a tool row or another peer row follows it with no blank line, and a failed send stands apart as a failed tool row does.
+Peer rows, including failed sends, group with tool rows without intervening blank lines.
 The line keeps one row and ends in `…` when it does not fit; it is never a collapsed block for Ctrl-O.
 Its admission time goes in the right margin as on a user block; below 60 columns it does not show.
 The label is the complete canonical ID, never an abbreviation or separate identity.
@@ -3297,7 +3298,7 @@ The Store combines that admission-owned label with canonical outcomes for shared
 There is no presentation table, copied log, frontend cache, or identity-to-description map.
 One `tools.describe`, exhaustive over the Tool Catalog, gives every tool its description: Bash's is the one its model wrote, and a hosted web search, which has no field for the model to fill, gets one Rui writes from the provider's action at settlement: `Search “query”`, `Open site/page` (without the scheme or `www.`), `Find “pattern” in site/page`, or `Search the web` when the provider gives no details, on one line and cut with `…` within the same 100-byte bound.
 The search stays a model output item, not a Tool Call: the item row saves that description and whether it failed (Store schema 49).
-Conversation and Activity pages return it at the item's own position as a `hosted_call` item that carries only its `ToolPresentation` and no content, and the frontend draws it as a tool row, so successes pack with Bash rows and a failure stands apart.
+Conversation and Activity pages return it at the item's own position as a `hosted_call` item that carries only its `ToolPresentation` and no content, and the frontend draws it as a tool row, so successes and failures pack with Bash rows.
 Divyansh chose to show one line per search on 2026-11-02 (web search PR 3).
 Every screen draws a description as one line of prose: controls, bidi controls and `\` escape as on any terminal line, while `"` shows as written, since no escape contains one; an exact command or field still escapes `"` too.
 

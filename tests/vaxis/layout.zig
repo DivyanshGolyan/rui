@@ -704,3 +704,22 @@ test "render contract: bounded joined link closes before adjacent unlinked cell"
         }
     }
 }
+
+test "ScrollView paints an independent track and library-sized thumb" {
+    var cells: [20]vaxis.Cell = @splat(.{});
+    var screen: vaxis.Screen = .{ .width = 4, .height = 5, .width_method = .unicode, .buf = &cells };
+    const window: vaxis.Window = .{ .screen = &screen, .width = 4, .height = 5, .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0 };
+    for ([_]usize{ 0, 5 }) |top| {
+        @memset(&cells, .{});
+        var scroll: vaxis.widgets.ScrollView = .{ .scroll = .{ .y = top }, .vertical_scrollbar = .{
+            .character = .{ .grapheme = "▐", .width = 1 },
+            .track_character = .{ .grapheme = "│", .width = 1 },
+        } };
+        scroll.draw(window, .{ .cols = 3, .rows = 10 });
+        for (0..5) |row| {
+            const thumb = row >= top / 2 and row < top / 2 + 3;
+            try testing.expectEqualStrings(if (thumb) "▐" else "│", screen.readCell(3, @intCast(row)).?.char.grapheme);
+            try testing.expectEqualStrings(" ", screen.readCell(2, @intCast(row)).?.char.grapheme);
+        }
+    }
+}

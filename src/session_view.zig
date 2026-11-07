@@ -104,16 +104,17 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     var sink: Sink = .{};
     var compact = false;
     try peerLine(&sink, .inbound, peer, 1_800_000_000, &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "← Received message from 9f8e7d" ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("\n  " ++ S ++ "← Received message from 9f8e7d" ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
     // Without a time the margin stays empty.
     sink = .{};
     compact = false;
     try peerLine(&sink, .outbound, peer, std.math.maxInt(u64), &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged 9f8e7d" ++ R ++ "\n", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("\n  " ++ S ++ "→ Messaged 9f8e7d" ++ R ++ "\n", sink.bytes[0..sink.length]);
     var failed: Sink = .{};
-    try sendFailed(&failed, peer, &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "! Messaged 9f8e7d — Failed" ++ R ++ "\n", failed.bytes[0..failed.length]);
-    try std.testing.expect(!compact);
+    try sendFailed(&failed, peer, false, &compact);
+    try std.testing.expectEqualStrings("  !" ++ S ++ " → Messaged 9f8e7d — Failed" ++ R ++ "\n", failed.bytes[0..failed.length]);
+    try std.testing.expect(compact);
+    compact = false;
     // A named peer shows by its name, escaped as a label is, and rows in a
     // row share one group with no blank line between them.
     var named = peer;
@@ -121,11 +122,11 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     var group: Sink = .{};
     try peerLine(&group, .outbound, named, 1_800_000_000, &compact);
     try peerLine(&group, .inbound, named, 1_800_000_000, &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged Review\\x1b[2m the WAL" ++ N ++ "08:00" ++ R ++ "\n" ++
-        S ++ "← Received message from Review\\x1b[2m the WAL" ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
+    try std.testing.expectEqualStrings("\n  " ++ S ++ "→ Messaged Review\\x1b[2m the WAL" ++ N ++ "08:00" ++ R ++ "\n" ++
+        "  " ++ S ++ "← Received message from Review\\x1b[2m the WAL" ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
 }
 
-test "failed peer Messages distinguish absent targets and reset grouping without changing named output" {
+test "failed peer Messages preserve compact grouping and distinguish absent targets" {
     const Sink = struct {
         bytes: [1024]u8 = undefined,
         length: usize = 0,
@@ -139,25 +140,30 @@ test "failed peer Messages distinguish absent targets and reset grouping without
     var named = peer;
     try named.label.set("Review\x1b[2m the WAL");
     const cases = [_]struct { target: ?protocol.NamedPeer, line: []const u8 }{
-        .{ .target = null, .line = "! Message rejected — No valid target reference" },
-        .{ .target = peer, .line = "! Messaged k7m2qx — Failed" },
-        .{ .target = named, .line = "! Messaged Review\\x1b[2m the WAL — Failed" },
+        .{ .target = null, .line = " → Message rejected — No valid target reference" },
+        .{ .target = peer, .line = " → Messaged k7m2qx — Failed" },
+        .{ .target = named, .line = " → Messaged Review\\x1b[2m the WAL — Failed" },
     };
     for (cases) |case| {
         for ([_]bool{ false, true }) |grouped| {
             var sink: Sink = .{};
             var compact = grouped;
-            try sendFailed(&sink, case.target, &compact);
-            try std.testing.expect(!compact);
+            try sendFailed(&sink, case.target, false, &compact);
+            try std.testing.expect(compact);
             var expected: [1024]u8 = undefined;
-            const line = try std.fmt.bufPrint(&expected, "\n" ++ Mark.summary ++ "{s}" ++ Mark.reset ++ "\n", .{case.line});
+            const line = try std.fmt.bufPrint(&expected, "{s}  !" ++ Mark.summary ++ "{s}" ++ Mark.reset ++ "\n", .{ if (grouped) "" else "\n", case.line });
             try std.testing.expectEqualStrings(line, sink.bytes[0..sink.length]);
-            // The next ordinary peer row starts a new group, even when the
-            // rejected Message interrupted an existing compact group.
+            var coloured: Sink = .{};
+            var coloured_group = grouped;
+            try sendFailed(&coloured, case.target, true, &coloured_group);
+            var coloured_expected: [1024]u8 = undefined;
+            const styled = try std.fmt.bufPrint(&coloured_expected, "{s}  \x1b[91m!\x1b[39m" ++ Mark.summary ++ "{s}" ++ Mark.reset ++ "\n", .{ if (grouped) "" else "\n", case.line });
+            try std.testing.expectEqualStrings(styled, coloured.bytes[0..coloured.length]);
+            // A following peer joins the same group.
             const boundary = sink.length;
             try peerLine(&sink, .outbound, peer, std.math.maxInt(u64), &compact);
             try std.testing.expect(compact);
-            try std.testing.expectEqualStrings("\n" ++ Mark.summary ++ "→ Messaged k7m2qx" ++ Mark.reset ++ "\n", sink.bytes[boundary..sink.length]);
+            try std.testing.expectEqualStrings("  " ++ Mark.summary ++ "→ Messaged k7m2qx" ++ Mark.reset ++ "\n", sink.bytes[boundary..sink.length]);
         }
     }
 }
@@ -171,7 +177,7 @@ test "failed peer Messages distinguish absent targets and reset grouping without
 pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: protocol.NamedPeer, admitted_at: u64, compact: *bool) !void {
     if (!compact.*) try sink.feed("\n");
     compact.* = true;
-    try sink.feed(Mark.summary);
+    try sink.feed("  " ++ Mark.summary);
     try sink.feed(if (direction == .inbound) "← Received message from " else "→ Messaged ");
     try peerName(sink, peer);
     var buffer: [5]u8 = undefined;
@@ -182,16 +188,20 @@ pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: prot
     try sink.feed(Mark.reset ++ "\n");
 }
 
-/// A Message this Session sent that was rejected: set apart, as a failed
-/// tool row is. No target means the attempt named no valid Session reference.
-pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer, compact: *bool) !void {
-    compact.* = false;
-    try sink.feed("\n" ++ Mark.summary);
+/// A rejected peer send is grouped with tool rows, with no Message body.
+pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer, colour: bool, compact: *bool) !void {
+    if (!compact.*) try sink.feed("\n");
+    compact.* = true;
+    try sink.feed("  ");
+    try sink.feed(Style.failure.code(colour));
+    try sink.feed("!");
+    try sink.feed(Style.normal.code(colour));
+    try sink.feed(Mark.summary);
     if (target) |peer| {
-        try sink.feed("! Messaged ");
+        try sink.feed(" → Messaged ");
         try peerName(sink, peer);
         try sink.feed(" — Failed");
-    } else try sink.feed("! Message rejected — No valid target reference");
+    } else try sink.feed(" → Message rejected — No valid target reference");
     try sink.feed(Mark.reset ++ "\n");
 }
 
@@ -692,6 +702,7 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
     try sink.feed("  ");
     try sink.feed(state.style.code(colour));
     try sink.feed(state.glyph);
+    if (state.style == .failure) try sink.feed(Style.quiet.code(colour));
     try sink.feed(" ");
     var indented: Indented(@TypeOf(sink)) = .{ .sink = sink, .prefix = "    " };
     var escaped: Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .label } };
@@ -778,6 +789,7 @@ test "routine tools stay subordinate in every state without colouring assistant 
             if (colour) {
                 try std.testing.expect(std.mem.startsWith(u8, sink.bytes[0..sink.length], "  "));
                 try std.testing.expectEqualStrings(expected.code(true), sink.bytes[2..][0..expected.code(true).len]);
+                if (expected == .failure) try std.testing.expect(std.mem.indexOf(u8, sink.bytes[0..sink.length], "!\x1b[90m ") != null);
                 try std.testing.expect(std.mem.endsWith(u8, sink.bytes[0..sink.length], "\x1b[39m\n"));
             } else try std.testing.expectEqualStrings(tray, std.mem.trimEnd(u8, sink.bytes[0..sink.length], "\n"));
             try sink.feed("Assistant answer\n");
@@ -787,6 +799,10 @@ test "routine tools stay subordinate in every state without colouring assistant 
             var cells: [160]vaxis.Cell = @splat(.{});
             var screen: vaxis.Screen = .{ .width = 80, .height = 2, .width_method = .unicode, .buf = &cells };
             _ = try doc.draw(.{ .screen = &screen, .width = 80, .height = 2, .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0 }, .{}, true, colour, .{}, .{});
+            if (colour and expected == .failure) {
+                try std.testing.expectEqual(vaxis.Color{ .index = 9 }, screen.readCell(2, 0).?.style.fg);
+                try std.testing.expectEqual(vaxis.Color{ .index = 8 }, screen.readCell(4, 0).?.style.fg);
+            }
             try std.testing.expectEqualStrings("A", screen.readCell(0, 1).?.char.grapheme);
             try std.testing.expectEqual(vaxis.Color.default, screen.readCell(0, 1).?.style.fg);
             try std.testing.expect(!screen.readCell(0, 1).?.style.bold);
@@ -1345,11 +1361,10 @@ pub const ToolHeaderScan = struct {
 };
 
 pub fn toolResult(presentation: protocol.ToolPresentation, facts: ToolHeaderFacts, sink: anytype, colour: bool, compact: *bool) !void {
-    const succeeded = presentation.code == .succeeded;
     var buffer: [3]u8 = undefined;
     const exit = if (facts.exit) |value| try std.fmt.bufPrint(&buffer, "{d}", .{value}) else "";
-    try toolHeadingWith(presentation, sink, colour, !compact.* or !succeeded, exit);
-    compact.* = succeeded;
+    try toolHeadingWith(presentation, sink, colour, !compact.*, exit);
+    compact.* = true;
 }
 
 test "tool header hides all body lines for every outcome and first-line split" {
@@ -1397,11 +1412,15 @@ test "tool header hides all body lines for every outcome and first-line split" {
                     .pending_permission => "\x1b[33m",
                     else => "\x1b[91m",
                 });
-                try expected.feed(case[1]);
+                if (colour and toolState(case[0]).style == .failure) {
+                    try expected.feed(case[1][0..1]);
+                    try expected.feed("\x1b[90m");
+                    try expected.feed(case[1][1..]);
+                } else try expected.feed(case[1]);
                 if (colour) try expected.feed("\x1b[39m");
                 try expected.feed("\n");
                 try std.testing.expectEqualStrings(expected.bytes[0..expected.length], sink.bytes[0..sink.length]);
-                try std.testing.expectEqual(case[0] == .succeeded, compact);
+                try std.testing.expect(compact);
             }
         }
     }
@@ -1709,7 +1728,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             },
             .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at, compact_tools),
             .send_failed => |failed| {
-                try sendFailed(sink, failed.target, compact_tools);
+                try sendFailed(sink, failed.target, colour, compact_tools);
             },
             // The call's own line and the work status show the wait.
             .approval_requested, .session_changed, .compacted => {},
@@ -1744,7 +1763,7 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
     }
 }
 
-test "hosted calls draw as tool rows: successes pack together, a failure stands apart" {
+test "hosted calls and failures share compact tool rows" {
     const Sink = struct {
         bytes: [512]u8 = undefined,
         length: usize = 0,
@@ -1766,7 +1785,7 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
         try toolResult(.{ .description = description, .code = call[1], .publication_position = 1 }, .{}, &sink, false, &compact);
     }
     try std.testing.expectEqualStrings(
-        "\n  ✓ Search “zig 0.17”\n  ✓ Open ziglang.org/x\n\n  ! Find “Io” in ziglang.org/x — Failed\n\n  ✓ Search the web\n",
+        "\n  ✓ Search “zig 0.17”\n  ✓ Open ziglang.org/x\n  ! Find “Io” in ziglang.org/x — Failed\n  ✓ Search the web\n",
         sink.bytes[0..sink.length],
     );
 }
@@ -1915,7 +1934,7 @@ test "queued received Messages retain sources and time without repeated labels; 
     var time_buffer: [5]u8 = undefined;
     const time = clock(value.admitted_at, &time_buffer).?;
     var row_buffer: [128]u8 = undefined;
-    const row = try std.fmt.bufPrint(&row_buffer, Mark.summary ++ "← Received message from Review peer" ++ Mark.sidenote ++ "{s}" ++ Mark.reset ++ "\n", .{time});
+    const row = try std.fmt.bufPrint(&row_buffer, "  " ++ Mark.summary ++ "← Received message from Review peer" ++ Mark.sidenote ++ "{s}" ++ Mark.reset ++ "\n", .{time});
     var expected: [1024]u8 = undefined;
     const all = try std.fmt.bufPrint(&expected, "\n{s}{s}{s}{s}\n! Stopped before it ran · send it again to run it\n{s}", .{ row, row, row, row, row });
     try std.testing.expectEqualStrings(all, actual);

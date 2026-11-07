@@ -862,7 +862,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     }
     self.height = layout.height;
     const conversation = self.view == .live or self.view == .transcript;
-    document.scroll.vertical_scrollbar = if (conversation) .{ .fg = self.style(.normal), .bg = self.style(.quiet) } else null;
+    document.scroll.vertical_scrollbar = if (conversation) .{ .character = .{ .grapheme = "▐", .width = 1 }, .track_character = .{ .grapheme = "│", .width = 1 }, .fg = self.style(.normal), .bg = self.style(.quiet) } else null;
     const body = window.child(.{ .y_off = layout.navigation_height, .height = layout.height });
     document.scroll.draw(body, .{ .cols = self.textLayout().width, .rows = projection.total +| document.blank_tail });
     try layout.observe(projection, document.scroll.scroll.y, frame_input);
@@ -884,7 +884,9 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     if (failure and !selector) _ = try layout.status.draw(window.child(.{ .y_off = layout.status_row, .height = layout.status.lineRows(self.textLayout(), 0) }), .{}, true, self.colour, self.style(.failure), .{});
     var call_row = layout.calls_row;
     for (0..layout.used) |index| {
-        _ = try layout.calls[index].draw(window.child(.{ .y_off = call_row, .height = layout.call_heights[index] }), .{}, true, self.colour, self.style(live.style(index)), .{});
+        const call_style = live.style(index);
+        _ = try layout.calls[index].draw(window.child(.{ .y_off = call_row, .height = layout.call_heights[index] }), .{}, true, self.colour, self.style(if (call_style == .failure) .quiet else call_style), .{});
+        if (call_style == .failure and size.col > 2) _ = window.child(.{ .x_off = 2, .y_off = call_row, .width = 1, .height = 1 }).printSegment(.{ .text = "!", .style = self.style(.failure) }, .{ .wrap = .none });
         call_row += layout.call_heights[index];
     }
     _ = try layout.heading.draw(window.child(.{ .y_off = call_row, .height = layout.overflow_height }), .{}, true, self.colour, self.style(.quiet), .{});
@@ -1044,12 +1046,12 @@ fn drawLive(self: *const Self, window: vaxis.Window, width: u16, line: work_line
 /// stay on the rule and never compete with this indication.
 fn lookbackLabel(self: *const Self, width: u16) []const u8 {
     const forms: []const []const u8 = switch (self.tail) {
-        .gap => &.{ "Looking back · Retention gap below · Ctrl-End: latest", "Retention gap below · Ctrl-End", "Retention gap below", "Gap below", "Gap" },
-        .limited => &.{ "Looking back · More output below · Ctrl-End: latest", "More output below · Ctrl-End", "More output below", "More below", "More" },
+        .gap => &.{ "Looking back · Retention gap below · Ctrl-G: latest", "Retention gap below · Ctrl-G", "Retention gap below", "Gap below", "Gap" },
+        .limited => &.{ "Looking back · More output below · Ctrl-G: latest", "More output below · Ctrl-G", "More output below", "More below", "More" },
         .retained => if (self.tail.retained < self.live.text.origin + self.live.text.length)
-            &.{ "Looking back · New output below · Ctrl-End: latest", "New output below · Ctrl-End", "New output below", "New below", "New" }
+            &.{ "Looking back · New output below · Ctrl-G: latest", "New output below · Ctrl-G", "New output below", "New below", "New" }
         else
-            &.{ "Looking back · Ctrl-End: latest", "Looking back", "Back" },
+            &.{ "Looking back · Ctrl-G: latest", "Looking back", "Back" },
     };
     for (forms) |form| if (session_line.cells(form, self.backend.widthMethod()) <= width) return form;
     return "";
@@ -1440,6 +1442,15 @@ test "the running call's row carries the clock, in its place, and other work end
     try std.testing.expectEqualStrings("Stopping…", rowText(screen, 4, &buffer));
     try std.testing.expectEqual(screen.style(.quiet).fg, Test.window(screen).readCell(0, 4).?.style.fg);
     try std.testing.expect(!std.meta.eql(screen.style(.normal).fg, screen.style(.quiet).fg));
+    // A failure colours only its glyph; pending permission keeps attention.
+    calls.entries[0].presentation.code = .failed;
+    calls.entries[1].presentation.code = .pending_permission;
+    _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &calls);
+    try std.testing.expectEqualStrings("  ! Read the failing test output — Failed", rowText(screen, 1, &buffer));
+    try std.testing.expectEqual(screen.style(.failure).fg, Test.window(screen).readCell(2, 1).?.style.fg);
+    try std.testing.expectEqual(screen.style(.quiet).fg, Test.window(screen).readCell(4, 1).?.style.fg);
+    try std.testing.expectEqual(screen.style(.attention).fg, Test.window(screen).readCell(2, 2).?.style.fg);
+    try std.testing.expectEqual(screen.style(.attention).fg, Test.window(screen).readCell(4, 2).?.style.fg);
 }
 
 test "a browsed page keeps the live line above the status" {
@@ -1573,7 +1584,7 @@ test "a description's controls read escaped alike on its call row and on the liv
     try std.testing.expectEqualStrings(shown, rowText(screen, 1, &buffer));
     // Cut to a narrow line, the words are cut as shown, never as raw bytes.
     _ = try Test.render(screen, &out.writer, .{ .row = 12, .col = 20, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &older, 7, 142_000) }, &.{});
-    try std.testing.expectEqualStrings("• Run\\t\\x1b[2… · 42s", rowText(screen, 1, &buffer));
+    try std.testing.expectEqualStrings("• Run\\t\\x1b[2… · 42s", wholeRowText(screen, 1, &buffer));
 }
 
 test "narrow lookback footer uses measured labels without an Escape mode" {
@@ -1680,13 +1691,21 @@ test "prepared Action preserves selected inspection until explicit return" {
 }
 
 fn rowText(screen: *Self, row: u16, storage: []u8) []const u8 {
+    return rowTextIn(screen, row, storage, true);
+}
+
+fn wholeRowText(screen: *Self, row: u16, storage: []u8) []const u8 {
+    return rowTextIn(screen, row, storage, false);
+}
+
+fn rowTextIn(screen: *Self, row: u16, storage: []u8, source: bool) []const u8 {
     // The drawing grid borrows render's scratch. Inspect the owned copy of
     // the rendered cells, which remains valid after render returns.
     const window = &screen.backend.storage.?.vx.screen_last;
     var length: usize = 0;
     for (0..window.width) |column| {
         const grapheme = (window.readCell(@intCast(column), row) orelse break).char.grapheme;
-        if (column + 1 == window.width and std.mem.eql(u8, grapheme, "▐")) break;
+        if (source and column + 1 == window.width and (screen.view == .live or screen.view == .transcript) and row < screen.height) break;
         if (length + grapheme.len > storage.len) break;
         @memcpy(storage[length..][0..grapheme.len], grapheme);
         length += grapheme.len;
@@ -2448,7 +2467,7 @@ test "capacity limit and lost retention are distinct and cannot claim the frozen
                 try std.testing.expect(label.len != 0);
                 try std.testing.expect(session_line.cells(label, method) <= width);
                 try std.testing.expect(std.mem.indexOf(u8, label, "Esc") == null);
-                if (width >= 60) try std.testing.expect(std.mem.indexOf(u8, label, "Ctrl-End") != null);
+                if (width >= 60) try std.testing.expect(std.mem.indexOf(u8, label, "Ctrl-G") != null);
             }
         }
     }
@@ -2517,7 +2536,7 @@ test "live and transcript chrome have identical cells with calls queue work draf
             const raw = &screen.backend.storage.?.vx.screen_last;
             for (0..rows) |y| {
                 const glyph = raw.readCell(79, @intCast(y)).?.char.grapheme;
-                try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, glyph, "▐"));
+                try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, glyph, "│"));
             }
             try std.testing.expectEqualStrings("▐", raw.readCell(11, 0).?.char.grapheme);
             try std.testing.expectEqual(@as(u16, 2), screen.drawn.rows);
@@ -2529,13 +2548,13 @@ test "live and transcript chrome have identical cells with calls queue work draf
             try std.testing.expectEqualStrings("› QUEUED-SOURCE                                                         3 queued", rowText(screen, rows - 4, &row));
             try std.testing.expectEqual(@as(usize, 80 * "─".len), rowText(screen, rows - 3, &row).len);
             try std.testing.expectEqualStrings("›", rowText(screen, rows - 2, &row));
-            if (transcript) try std.testing.expectEqualStrings("Looking back · Ctrl-End: latest", rowText(screen, rows - 1, &row));
+            if (transcript) try std.testing.expectEqualStrings("Looking back · Ctrl-G: latest", rowText(screen, rows - 1, &row));
         }
         const waiting: protocol.WorkState = .{ .working = .{ .since = 100 } };
         _ = try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .queued = chrome.queued, .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &.{});
         const raw = &screen.backend.storage.?.vx.screen_last;
         try std.testing.expectEqual(rows - 5, screen.height);
-        for (0..rows) |y| try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, raw.readCell(79, @intCast(y)).?.char.grapheme, "▐"));
+        for (0..rows) |y| try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, raw.readCell(79, @intCast(y)).?.char.grapheme, "│"));
         var work_row: [256]u8 = undefined;
         try std.testing.expectEqual(@as(u16, 2), screen.drawn.rows);
         try std.testing.expectEqualStrings("• Waiting · 42s", rowText(screen, 2, &work_row));
@@ -2557,13 +2576,13 @@ test "live and transcript chrome have identical cells with calls queue work draf
             const full = &screen.backend.storage.?.vx.screen_last;
             try std.testing.expectEqual(rows - 5, screen.height);
             try std.testing.expectEqual(rows - 5, screen.drawn.rows);
-            for (0..rows) |y| try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, full.readCell(79, @intCast(y)).?.char.grapheme, "▐"));
+            for (0..rows) |y| try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, full.readCell(79, @intCast(y)).?.char.grapheme, "│"));
             try std.testing.expectEqualStrings("FULL-BODY", rowText(screen, rows - 6, &row));
             try std.testing.expectEqualStrings("  • Held call · 42s", rowText(screen, rows - 5, &row));
             try std.testing.expectEqualStrings(" ", full.readCell(79, rows - 5).?.char.grapheme);
             try std.testing.expectEqualStrings("› QUEUED-SOURCE                                                         3 queued", rowText(screen, rows - 4, &row));
             try std.testing.expectEqualStrings("›", rowText(screen, rows - 2, &row));
-            if (transcript) try std.testing.expectEqualStrings("Looking back · Ctrl-End: latest", rowText(screen, rows - 1, &row));
+            if (transcript) try std.testing.expectEqualStrings("Looking back · Ctrl-G: latest", rowText(screen, rows - 1, &row));
         }
     };
     // Conversation source reserves ONE physical column at either width.
@@ -2573,15 +2592,15 @@ test "live and transcript chrome have identical cells with calls queue work draf
         _ = screen.backend.setPolicy(.{ .depth = if (colour) .indexed else .none, .width = screen.backend.widthMethod() });
         try screen.latest();
         screen.live.text.clear();
-        try screen.append("PRIOR ▐\n› " ++ View.Mark.sidenote ++ "11:42" ++ View.Mark.reset ++ View.Mark.body ++ "line1" ++ View.Mark.reset ++ "\n  line2\nedited 2\nEDGE " ++ View.Mark.sidenote ++ "    ▐" ++ View.Mark.reset ++ View.Mark.body ++ "left ▐" ++ View.Mark.reset);
+        try screen.append("PRIOR ▐ │\n› " ++ View.Mark.sidenote ++ "11:42" ++ View.Mark.reset ++ View.Mark.body ++ "line1" ++ View.Mark.reset ++ "\n  line2\nedited 2\nEDGE " ++ View.Mark.sidenote ++ "    ▐" ++ View.Mark.reset ++ View.Mark.body ++ "left ▐" ++ View.Mark.reset);
         for ([_]bool{ false, true }) |transcript| {
             if (transcript) try screen.beginTranscript(0);
             _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{});
             const raw = &screen.backend.storage.?.vx.screen_last;
             try std.testing.expectEqual(@as(u16, 21), screen.height);
-            for (0..24) |y| try std.testing.expectEqual(y < 21, std.mem.eql(u8, raw.readCell(columns - 1, @intCast(y)).?.char.grapheme, "▐"));
+            for (0..24) |y| try std.testing.expectEqual(y < 21, std.mem.eql(u8, raw.readCell(columns - 1, @intCast(y)).?.char.grapheme, "│"));
             var row: [8192]u8 = undefined;
-            try std.testing.expectEqualStrings("PRIOR ▐", rowText(screen, 0, &row));
+            try std.testing.expectEqualStrings("PRIOR ▐ │", rowText(screen, 0, &row));
             try std.testing.expect(std.mem.startsWith(u8, rowText(screen, 1, &row), "› line1"));
             for (7..columns - 6) |x| try std.testing.expectEqualStrings(" ", raw.readCell(@intCast(x), 1).?.char.grapheme);
             for ("11:42", columns - 6..) |byte, x| try std.testing.expectEqualStrings(&.{byte}, raw.readCell(@intCast(x), 1).?.char.grapheme);
