@@ -14,7 +14,10 @@ Then edit the owning section and affected verification cases; keep rationale bes
 Identify conflicts with accepted behavior explicitly.
 Replace superseded text rather than creating parallel ADRs, proposals, glossaries, summaries or amendment ledgers.
 Keep [Research](research/README.md) a compact index of reproducible evidence.
-Write the top-level documents and docs/ one sentence per line, so PRs that edit different sentences of one paragraph merge without a conflict; `python3 tests/ci/sentence_lines.py` rewrites them and the policy job checks them.
+Write for the document's audience and purpose, with coherent paragraphs that reduce reader effort.
+Source line breaks are separate from sentence length and paragraph structure.
+For cleaner diffs, optionally use `python3 tests/ci/sentence_lines.py [paths ...]` to put sentences on separate source lines without changing rendering.
+Its `--check` mode is opt-in; sentence-per-line layout is not a merge requirement.
 
 ## Contract enforcement
 
@@ -161,7 +164,7 @@ Before every push, including review-fix rounds and after merging main, run only 
 
 - `python3 tests/ci/prepush.py`, which selects local feedback from the committed diff against the merge base.
   Use `--plan` to inspect its commands without executing them.
-  It checks whitespace, sentence layout for changed shared documents, formatting for changed Zig files, undefined names in changed Python files, and caller-error coverage for changed CLI owners.
+  It checks whitespace, formatting for changed Zig files, undefined names in changed Python files, and caller-error coverage for changed CLI owners.
   Source changes run their applicable import, provider, wire, fixture, platform and Store policy tests.
   CI Python owners run their corresponding test file when one exists; shared or unmapped policy inputs run the policy suite.
   Client changes run the existing TypeScript check instead of an unrelated Zig build.
