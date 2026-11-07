@@ -166,7 +166,7 @@ fn install(self: *Self) !void {
     self.response = null;
     for (self.page.?.entries, 0..) |entry, index| {
         const word = std.fmt.bufPrint(&self.words[index], "/{s}", .{entry.name}) catch unreachable;
-        self.entries[index] = .{ .kind = .skill, .word = word, .shown = word, .description = entry.description, .runs = false };
+        self.entries[index] = .{ .kind = .skill, .word = entry.name, .shown = word, .description = entry.description, .runs = false };
     }
     self.count = self.page.?.entries.len;
     self.generation +%= 1;
@@ -239,7 +239,8 @@ test "skill menu owns bounded rows and dismisses only the current cursor identit
     const chosen = menu.choices("/de, next", 3, 4).?;
     try std.testing.expectEqual(@as(usize, 1), chosen.entries.len);
     try std.testing.expectEqual(@as(usize, 4), chosen.total);
-    try std.testing.expectEqualStrings("/demo", chosen.entries[0].word);
+    try std.testing.expectEqualStrings("demo", chosen.entries[0].word);
+    try std.testing.expectEqualStrings("/demo", chosen.entries[0].shown);
     try std.testing.expectEqual(.skill, chosen.entries[0].kind);
     try std.testing.expect(!chosen.pending);
     try std.testing.expect(!chosen.dismissed);
@@ -269,7 +270,7 @@ test "skill menu retains active scope and rejects malformed replacement atomical
     try menu.install();
     menu.response = try testPage(std.testing.allocator, &@as([65]u8, @splat('a')));
     try std.testing.expectError(error.InvalidSkillSuggestions, menu.install());
-    try std.testing.expectEqualStrings("/kept", menu.entries[0].word);
+    try std.testing.expectEqualStrings("kept", menu.entries[0].word);
     try std.testing.expectEqual(@as(usize, 1), menu.count);
 }
 

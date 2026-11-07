@@ -502,7 +502,8 @@ pub fn withSkills(commands: ?List, typed: []const u8, skills: []const Entry) ?Li
     const command_count = if (commands) |list| list.count else 0;
     const keep_commands = @min(command_count, List.capacity - @as(usize, @min(skills.len, List.capacity / 2)));
     const keep_skills = @min(skills.len, List.capacity - keep_commands);
-    var combined: List = .{ .typed = typed };
+    std.debug.assert(typed.len != 0 and typed[0] == '/');
+    var combined: List = .{ .typed = typed[1..] };
     if (commands) |list| for (list.shown()[0..keep_commands]) |entry| combined.add(entry);
     for (skills[0..keep_skills]) |entry| {
         std.debug.assert(entry.kind == .skill);
@@ -1075,9 +1076,9 @@ test "archive and upgrade retain separate local command identities after merge" 
 }
 
 test "inline skills list preserves command collisions as distinct choices" {
-    var commands: List = .{ .typed = "/co" };
-    commands.add(.{ .word = "/copy", .shown = "/copy", .description = "copy output" });
-    const skills = [_]Entry{.{ .kind = .skill, .word = "/copy", .shown = "/copy", .description = "skill guidance", .runs = false }};
+    var commands: List = .{ .typed = "co" };
+    commands.add(.{ .word = "copy", .shown = "/copy", .description = "copy output" });
+    const skills = [_]Entry{.{ .kind = .skill, .word = "copy", .shown = "/copy", .description = "skill guidance", .runs = false }};
     const merged = withSkills(commands, "/co", &skills).?;
     try std.testing.expectEqual(@as(usize, 2), merged.count);
     try std.testing.expectEqual(.command, merged.entries[0].kind);
@@ -1088,11 +1089,11 @@ test "inline skills list preserves command collisions as distinct choices" {
 }
 
 test "inline skills list reserves bounded space without starving either kind" {
-    var commands: List = .{ .typed = "/" };
+    var commands: List = .{ .typed = "" };
     var skills: [List.capacity]Entry = undefined;
     for (&skills) |*entry| {
-        commands.add(.{ .word = "/command", .shown = "/command", .description = "" });
-        entry.* = .{ .kind = .skill, .word = "/skill", .shown = "/skill", .description = "", .runs = false };
+        commands.add(.{ .word = "command", .shown = "/command", .description = "" });
+        entry.* = .{ .kind = .skill, .word = "skill", .shown = "/skill", .description = "", .runs = false };
     }
     for (0..List.capacity + 1) |command_count| for (0..List.capacity + 1) |skill_count| {
         commands.count = command_count;
@@ -1115,7 +1116,7 @@ test "inline skills list reserves bounded space without starving either kind" {
 }
 
 test "inline skills list gates every cursor and metadata identity change" {
-    const rows = [_]Entry{.{ .kind = .skill, .word = "/example", .shown = "/example", .description = "", .runs = false }};
+    const rows = [_]Entry{.{ .kind = .skill, .word = "example", .shown = "/example", .description = "", .runs = false }};
     const list = withSkills(null, "/", &rows).?;
     const initial = [_]u64{ 1, 2, 0, 8, 3 };
     var shown = Shown.nextAt(null, initial[0], initial[1], initial[2], initial[3], initial[4], list).?;
@@ -1133,4 +1134,18 @@ test "inline skills list gates every cursor and metadata identity change" {
     shown.close();
     const closed = Shown.nextAt(shown, initial[0], initial[1], initial[2], initial[3], initial[4], list).?;
     try std.testing.expectEqual(.closed, closed.seen);
+}
+
+test "inline skills list merges actual builtin table prefixes" {
+    const skills = [_]Entry{.{ .kind = .skill, .word = "help", .shown = "/help", .description = "skill help", .runs = false }};
+    inline for (.{ conversation, overview }) |table| {
+        const builtins = table.suggest("/he", .{}).?;
+        try std.testing.expectEqualStrings("he", builtins.typed);
+        const merged = withSkills(builtins, "/he", &skills).?;
+        try std.testing.expectEqual(@as(usize, 2), merged.count);
+        try std.testing.expectEqual(.command, merged.entries[0].kind);
+        try std.testing.expectEqual(.skill, merged.entries[1].kind);
+        try std.testing.expectEqualStrings("lp", merged.completion(0));
+        try std.testing.expectEqualStrings("lp", merged.completion(1));
+    }
 }
