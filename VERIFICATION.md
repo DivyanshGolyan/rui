@@ -30,7 +30,7 @@ Where the shell is root, as in many containers, use an ordinary account that own
 
 | Change class | Required gate or evidence |
 | --- | --- |
-| Documentation | References, consistency and `git diff --check` |
+| Documentation | Review references and consistency. The plan runs `git diff --check` on the committed candidate diff. Only nonempty, exclusively allowlisted regular nonexecutable documentation and asset changes qualify for the [documentation lane](tests/ci/docs_only.py); executable, unknown and mixed changes keep normal verification. Source sentence layout remains optional |
 | Runtime behavior | Subsystem mapping below on the PR head for Linux main acceptance; Mac mapping and full Debug recovery on the exact main SHA before stable promotion. A skip is not evidence |
 | Build or dependency | Linux and macOS `check-full` and mapped checks before merge; manual empty-cache acceptance |
 | Resource owner | Comparable measurements and lifecycle evidence on applicable runners |
@@ -67,7 +67,7 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | Standalone Current, reply-delivery and login-signal oracles | Owning integration target; login signal on Linux only | Neither composed gate runs them. Changes to their helpers keep these targets |
 | Canonical-failure oracle | `canonical-failure-integration` on both systems | Skip it when a composed gate is selected; the human CLI fixture runs all cases |
 | Build, dependencies or bootstrap | `check-full`, full Debug admission, long timeout and churn witnesses, relevant H2 and standalone targets, manual empty-cache evidence | Transport build, dependency pins and bootstrap select both H2 targets |
-| Main admission, every ready PR | Native Mac core checks and the [upgrade check](.github/workflows/previous-release-upgrade.yml) on hosted Linux and macOS, all on the immutable merge candidate | `previous_release_upgrade.py` installs the pinned prior build, saves real work, then restarts the same Store under the candidate. Required admission runs before main |
+| Main admission, every ready PR | Successful plan and Linux aggregate on the immutable merge candidate. Normal changes also require policy, native Mac core checks and the [upgrade check](.github/workflows/previous-release-upgrade.yml) on hosted Linux and macOS | The conservative documentation lane requires explicit empty product selections and skipped policy, native, upgrade and cache jobs. Normal acceptance is unchanged: `previous_release_upgrade.py` installs the pinned prior build, saves real work, then restarts the same Store under the candidate. Required admission runs before main |
 | Host stack frames (Zig under `src/` outside frontend owners, `build.zig`, `tests/ci/stack_frames.*`) | `stack-frames` on x86-64 Linux; `check` runs it, `check-full` does not | [stack_frames.py](tests/ci/stack_frames.py) reads the ReleaseSafe binary's prologues and direct calls. It fails on a frame over 8 KiB reachable from a Host thread or a function of a module in `host_modules` unless an exception in [stack_frames.json](tests/ci/stack_frames.json) names its cause, and on a thread whose deepest chain passes its `chain_ceiling`. Exceptions and ceilings only shrink. Calls through function pointers outside `host_modules` are not followed, and no other platform is measured |
 | Caller error coverage (`cli.zig`, `cli_args.zig`, `client.zig`, `preferences.zig` and root `caller_*.zig` under `src/`) | `python3 tests/ci/caller_errors.py`, the prepush driver and CI policy | Caller-facing CLI modules cannot use raw `@errorName`; every literal production error reference or declaration in that inventory needs a catalog mapping or an existing pending entry. The trusted `origin/main` pending set only shrinks; first rollout bootstraps from the same trusted CLI-owned sources and the exact pinned Zig standard library. Closed inferred sets also fail compilation through `caller_error.of`; unmapped errors widened from other owners remain `internal_unexpected`, exit 1 (unclassified), without extending the CLI inventory. |
 | CI policy | Selector tests, workflow validation and `test-logic` on both runner architectures | Exercise actual CI bootstrap |
@@ -78,7 +78,8 @@ Neither composed gate covers that root, so run it with a selected composed gate.
 The compiler and dependency setup action is bootstrap, not CI policy.
 An unavailable selection base is an error.
 PR selection uses its recorded base and immutable merge candidate.
-Required core native and historical-upgrade checks do not disappear for a narrow diff.
+Normal changes retain required core native and historical-upgrade checks even for a narrow diff.
+Only the explicit documentation classification can omit them; an empty target list alone cannot.
 
 Qualification Go changes select `measurement-check`.
 Linux-memory Python or C changes also run the collector unittests and compile the diagnostic probe on Linux.
@@ -96,10 +97,14 @@ The checked PR merge commit and final squash commit have different identities; q
 A changed head or base requires current candidate checks before merge.
 
 [Selected checks](.github/workflows/check.yml) qualify each ready PR's immutable merge candidate.
-Linux runs the affected targets from [select_tests.py](tests/ci/select_tests.py).
+For normal changes, Linux runs the affected targets from [select_tests.py](tests/ci/select_tests.py).
 Native macOS runs the affected targets plus `check`, or its selected `check-full` superset, and full Debug admission recovery.
 The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs internally on Linux and macOS against that same candidate.
-The always-run `admission` aggregate requires every selected job, including cache-execution checks when selected.
+The documentation lane skips heavyweight policy, product builds and suites, and prior-release upgrades.
+It requires a successful plan with canonical empty product outputs and a successful Linux aggregate that verifies all product producers were skipped.
+The allowlist reads committed Git paths and modes against the selector's resolved base and candidate; any selected runtime, native, cache or resource obligation restores normal verification.
+Reference and consistency checks remain reviewed evidence, not automated link validation.
+The always-run `admission` aggregate requires the exact results for the declared change kind, including cache-execution checks when selected for normal changes.
 Failed, cancelled, missing or unexpectedly skipped required jobs do not qualify a candidate.
 Draft development checks never satisfy admission.
 Correctness failures are fixed on the PR before it reaches `main`.
