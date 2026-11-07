@@ -127,6 +127,10 @@ inspection: struct {
     // for every inspection; exit prints an unshown command's output, which can
     // carry recovery warnings.
     command_running: bool = false,
+    // Bound once at slash admission, never reselected after a reader joins.
+    queued_action: reads.ActionTarget = .none,
+    // Identity of the Action explicitly shown on the current inspection page.
+    shown_action: ?u64 = null,
 } = .{},
 // Messages sent and what live output has delivered of them.
 admission: struct {
@@ -623,7 +627,7 @@ fn parse(text: []const u8) Slash {
         .status => .{ .inspection = .status },
         .requests => .{ .inspection = .requests },
         .help => .{ .inspection = .help },
-        // The table's /copy words are `reads.Copy`'s own names.
+        // Public /copy words map to the reader; .action is contextual only.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
         .@"inspect-action", .setup, .configure, .result, .rename, .effort, .skill, .@"reload-skills" => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
@@ -671,7 +675,28 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         .unarchive => try self.converse(.unarchive),
         .exit => self.leaving = .detached,
         .history => |history| self.requestHistory(history),
-        .inspection => self.input.queueCommand(text),
+        .inspection => {
+            self.inspection.queued_action = .none;
+            if (slash_commands.parse(text) == .command and slash_commands.parse(text).command.name == .@"inspect-action") {
+                const screen = self.terminal.screen;
+                if (screen.consent) |pending| {
+                    const ticket = screen.ticket;
+                    self.inspection.queued_action = if (screen.actionVisible() and ticket != null and ticket.?.delivered and ticket.?.action != null and ticket.?.action.? == pending.action)
+                        .{ .captured = pending.action }
+                    else
+                        .stale;
+                }
+            }
+            if (std.mem.eql(u8, text, "/copy") and self.terminal.screen.view == .inspection and self.inspection.shown_action != null) {
+                const screen = self.terminal.screen;
+                const ticket = screen.ticket;
+                self.inspection.queued_action = if (ticket != null and ticket.?.delivered and ticket.?.scope == screen.scope and screen.consent != null and screen.consent.?.action == self.inspection.shown_action.?)
+                    .{ .captured = self.inspection.shown_action.? }
+                else
+                    .stale;
+            }
+            self.input.queueCommand(text);
+        },
         .discard => {
             self.submission.discardRejected() catch {
                 self.notice = "! Cannot discard an unresolved submission; Ctrl-R recovers the original.";
@@ -720,7 +745,14 @@ fn unknownCommand(self: *Self, text: []const u8) void {
 
 test "frontend answers local and unknown commands in place and keeps Host commands for inspection" {
     var stream: TerminalInput = .{};
-    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    try Screen.Test.init(screen, std.testing.io, &environ, false);
+    defer Screen.Test.deinit(screen);
+    var terminal: Terminal = .{ .original = undefined, .flags = undefined, .screen = screen };
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false };
     self.input.init(&stream);
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
     const cases = .{
@@ -1027,9 +1059,16 @@ fn applyUpgrade(self: *Self, outcome: UpgradePanel.Outcome) void {
     self.dirty = true;
 }
 
+/// A queued Action command never silently follows a successor.
+fn currentActionTarget(target: reads.ActionTarget, consent: ?ConsentPolicy.Pending) reads.ActionTarget {
+    if (target == .captured and (consent == null or consent.?.action != target.captured)) return .stale;
+    return target;
+}
+
 fn startQueuedCommand(self: *Self) !void {
     if (self.reader.thread == null) if (self.input.takeCommand()) |text| {
-        const kind = parse(text).inspection;
+        const parsed_kind = parse(text).inspection;
+        const kind: Inspection = if (std.mem.eql(u8, text, "/copy") and self.inspection.queued_action != .none) .{ .copy = .action } else parsed_kind;
         try self.leaveFor(kind);
         self.inspection.kind = kind;
         // The worker borrows its own copy; the editor may queue another.
@@ -1037,8 +1076,8 @@ fn startQueuedCommand(self: *Self) !void {
         @memcpy(job.command_text[0..text.len], text);
         job.command_text_length = text.len;
         job.inspection_submission = self.submission.view();
-        const consent = self.terminal.screen.consent;
-        job.inspection_action = if (consent) |pending| (if (pending.presentation == .preview) pending.action else null) else null;
+        job.action_target = currentActionTarget(self.inspection.queued_action, self.terminal.screen.consent);
+        self.inspection.queued_action = .none;
         // The newer inspection replaces a /status not yet shown.
         self.inspection.status_requested = false;
         try self.launch(job, switch (kind) {
@@ -1301,7 +1340,6 @@ fn drawFrame(self: *Self) !void {
     var facts = self.line.facts(&self.hint, self.session);
     if (facts) |*shown| shown.stop = said.stoppable;
     self.dirty = false;
-    // Reading completes only after delivery; the receipt stales the frame.
     const notice_revision = self.upgrade_note_revision;
     const rendered_upgrade = said.text == null and self.notice == null and !screen.actionVisible() and self.upgrade_note_len != 0;
     const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
@@ -1927,17 +1965,15 @@ fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?Screen.Offer) !void {
             } } });
         },
         .blocked => |why| self.notice = switch (why) {
-            .reading => "! Read the whole Action first; nothing authorized.",
             .command => "! Command still running. Nothing authorized.",
             .not_ready, .layout => "! Not ready; nothing authorized.",
         },
     }
 }
 
-/// Why a draft waits for the Action: a previewed Action is decided only in the shell.
+/// Why a draft waits for the pending Action.
 fn decisionNotice(self: *const Self) []const u8 {
     const screen = self.terminal.screen;
-    if (screen.consent.?.presentation == .preview) return "! Approval disabled · /help for exact shell commands. Draft retained.";
     return if (screen.actionVisible()) "! Action needs a decision; Esc returns to the choice. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.";
 }
 
@@ -2534,6 +2570,15 @@ test "the queued row shows what waits until it is taken, whatever the work is do
 }
 
 fn showInspection(self: *Self) !void {
+    if (self.job.result.inspected_action) |action| {
+        const current = self.terminal.screen.consent;
+        if (current == null or current.?.action != action) {
+            const stale = "Action no longer available; no successor selected and no decision sent.\n";
+            try self.files.inspection.setLength(self.init.io, 0);
+            try self.files.inspection.writePositionalAll(self.init.io, stale, 0);
+            self.job.result.inspected_action = null;
+        }
+    }
     const size = (try self.files.inspection.stat(self.init.io)).size;
     // A short command result is a notice, not a page, worded as the
     // overview words it.
@@ -2549,6 +2594,7 @@ fn showInspection(self: *Self) !void {
         return;
     }
     self.inspection.status = null;
+    self.inspection.shown_action = self.job.result.inspected_action;
     try self.terminal.screen.showFile(self.init.io, self.files.inspection, false);
     if (self.inspection.kind == .requests) self.saved_requests = self.job.result.requests;
     // The page heading already says how to return.
@@ -2559,10 +2605,18 @@ fn showInspection(self: *Self) !void {
 /// splits the sequence.
 fn showCopy(self: *Self) !void {
     self.dirty = true;
+    if (self.inspection.kind.copy == .action and self.job.result.copied == .clipboard) {
+        const current = self.terminal.screen.consent;
+        if (self.job.action_target != .captured or current == null or current.?.action != self.job.action_target.captured) {
+            self.notice = "Action unavailable; nothing copied.";
+            return;
+        }
+    }
     self.notice = switch (self.job.result.copied) {
         .no_answer => "No answer to copy yet.",
         .no_code => "No code block in the last answer.",
-        .too_large => "Too large for the clipboard · /copy file",
+        .no_action => "Action unavailable; nothing copied.",
+        .too_large => if (self.inspection.kind.copy == .action) "Action command too large for clipboard · /inspect-action" else "Too large for the clipboard · /copy file",
         // Rui cannot see whether the clipboard took it.
         .clipboard => |range| sent: {
             try self.terminal.clipboard(self.init.io, self.files.scratch, range.start, range.length);
@@ -2599,6 +2653,7 @@ fn applyStatus(self: *Self) !void {
     if (open) {
         self.inspection.status_requested = false;
         self.inspection.defaults = savedDefaults(self.home);
+        self.inspection.shown_action = null;
         try self.writeStatusPage();
         try screen.showFile(self.init.io, self.files.status, false);
         self.notice = null;
@@ -2653,6 +2708,7 @@ fn writeStatusPage(self: *Self) !void {
 
 /// Renders the shown /status page again and shows it in place.
 fn refreshStatusPage(self: *Self) !void {
+    self.inspection.shown_action = null;
     try self.writeStatusPage();
     try self.terminal.screen.refreshFile(self.init.io, self.files.status);
 }
@@ -2725,12 +2781,11 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
         screen.consent = .{ .action = 7, .presentation = .complete, .row = .selector };
         screen.view = .action;
         screen.preview_complete = true;
-        screen.action_seen = .end;
         _ = screen.select(self.commandActive());
         try std.testing.expectEqual(ConsentPolicy.Projection{ .row = .selector, .approval = .choice }, screen.selected);
         // A delivered frame that showed the choice, then offered.
         screen.frames +%= 1;
-        screen.ticket = .{ .frame = screen.frames, .scope = screen.scope, .action = 7, .shown = .allow_once, .inputs = screen.inputs, .first = .{}, .next = .{}, .delivered = true };
+        screen.ticket = .{ .frame = screen.frames, .scope = screen.scope, .action = 7, .shown = .allow_once, .inputs = screen.inputs, .delivered = true };
         try std.testing.expect(screen.promptCompleted(.empty, false, false));
         try std.testing.expect(screen.offered() != null);
         // The first key typed is the draft's, and the choice is no longer fresh.
@@ -2896,6 +2951,50 @@ const HeldFrontend = struct {
         return file;
     }
 };
+
+test "queued Action inspection and copy never follow a successor" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const file = try held.adopt(4);
+    defer file.close(std.testing.io);
+    try held.settle();
+    const self = &held.self;
+    try self.slashCommand("/inspect-action");
+    try std.testing.expect(self.inspection.queued_action == .captured);
+    try std.testing.expectEqual(@as(u64, 0xa), self.inspection.queued_action.captured);
+    try std.testing.expectEqualStrings("/inspect-action", self.input.queuedCommand().?);
+    held.screen.withdrawAction();
+    try held.screen.adopt(std.testing.io, file, 0xb, true);
+    try std.testing.expect(currentActionTarget(self.inspection.queued_action, held.screen.consent) == .stale);
+    try std.testing.expect(self.submission.view() == null);
+    // The scratch file remains valid if an omission sends the clipboard:
+    // the negative control must fail an assertion, not a bad descriptor.
+    const page = try held.tmp.dir.createFile(std.testing.io, "inspection", .{ .read = true });
+    defer page.close(std.testing.io);
+    try page.writePositionalAll(std.testing.io, "x", 0);
+    self.files = .{ .scratch = page, .action = file, .inspection = page, .status = page, .actions = .{ page, page } };
+    // A completed copy worker for the former Action cannot send OSC 52
+    // after the owner has adopted a successor.
+    self.inspection.kind = .{ .copy = .action };
+    self.job.action_target = self.inspection.queued_action;
+    self.job.result.copied = .{ .clipboard = .{ .start = 0, .length = 1 } };
+    try self.showCopy();
+    try std.testing.expectEqualStrings("Action unavailable; nothing copied.", self.notice.?);
+    try std.testing.expectEqual(@as(@TypeOf(held.terminal.clipboard_sequence), .closed), held.terminal.clipboard_sequence);
+    // A worker result that was valid before the swap cannot publish the old
+    // inspection as current or turn the successor into its target.
+    try page.setLength(std.testing.io, 0);
+    try page.writePositionalAll(std.testing.io, "old Action command", 0);
+    self.reading.phase = .inspection;
+    self.inspection.kind = .command;
+    self.job.result.inspected_action = 0xa;
+    try self.showInspection();
+    var output: [128]u8 = undefined;
+    const size = try page.readPositionalAll(std.testing.io, &output, 0);
+    try std.testing.expectEqualStrings("Action no longer available; no successor selected and no decision sent.\n", output[0..size]);
+    try std.testing.expect(self.inspection.shown_action == null);
+    try std.testing.expectEqual(@as(u64, 0xb), held.screen.consent.?.action);
+}
 
 test "held history status real Host" {
     var phase: []const u8 = "setup";

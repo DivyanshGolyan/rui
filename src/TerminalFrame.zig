@@ -79,8 +79,6 @@ draft_top: u16,
 draft_lines: [draft_layout.max_rows]draft_layout.Line = @splat(.{ .start = 0, .end = 0, .cells = 0 }),
 caret_row: u16,
 caret_column: u16,
-action_seen: Position,
-approval_ready: bool,
 
 pub const Input = struct {
     width: u16,
@@ -116,8 +114,6 @@ pub const Input = struct {
     selected: bool,
     action_visible: bool,
     action_pending: bool = false,
-    /// The first Action row not yet delivered in a frame.
-    action_seen: Position = .{},
     preview_complete: bool,
 };
 
@@ -184,8 +180,6 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
         .draft_top = 0,
         .caret_row = 0,
         .caret_column = 0,
-        .action_seen = input.action_seen,
-        .approval_ready = false,
     };
     try self.status.append(input.status);
     self.status_height = try rows(&self.status, layout);
@@ -249,10 +243,10 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
         self.used -= 1;
     }
     if (self.heading.length == 0 and heading_height != 0) {
-        try self.heading.append(if (input.action_visible) "Action preview · too large to approve here" else if (input.action_pending) "Browsing · Esc returns to Action" else "Browsing · Esc returns");
+        try self.heading.append(if (input.action_visible) (if (input.preview_complete) "Action · PgUp/PgDn" else "Action truncated · /inspect-action for exact content") else if (input.action_pending) "Browsing · Esc returns to Action" else "Browsing · Esc returns");
         if (try rows(&self.heading, layout) > heading_height) {
             self.heading.clear();
-            try self.heading.append(if (input.action_visible) (if (input.preview_complete or input.width < "Action preview".len) "Action" else "Action preview") else if (input.width < "Esc · Action".len) "Esc" else if (input.action_pending) "Esc · Action" else "Esc returns");
+            try self.heading.append(if (input.action_visible) (if (input.preview_complete) "Action" else if (input.width >= "Action truncated".len) "Action truncated" else if (input.width >= "Truncated".len) "Truncated" else "Action") else if (input.width < "Esc · Action".len) "Esc" else if (input.action_pending) "Esc · Action" else "Esc returns");
         }
     }
     const budget = available - self.live_height;
@@ -290,25 +284,15 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
 }
 
 /// Observes real text rows only, after ScrollView clamps the final canvas.
-/// This forecast is not delivery credit; SessionScreen.presented owns that.
 pub fn observe(self: *Self, rows_: Viewport.TextRows, first_row: usize, input: Input) !void {
     self.first = if (rows_.total == 0) .{} else rows_.position(first_row);
     self.document_rows = @min(rows_.total -| first_row, self.height);
     const next = rows_.position(first_row + self.document_rows);
-    self.action_seen = input.action_seen;
-    self.approval_ready = false;
     self.document_offset = 0;
     if (input.action_visible and input.preview_complete) {
         // A whole Action sits right above the input; a taller one pages from
         // its top.
         if (self.first.order(.{}) == .eq and next.order(.end) == .eq) self.document_offset = self.height - @as(u16, @intCast(self.document_rows));
-        // Only rows delivered contiguously from the top count as read.
-        if (self.first.order(input.action_seen) != .gt and next.order(input.action_seen) == .gt) self.action_seen = next;
-        self.approval_ready = self.action_seen.order(.end) == .eq;
-        if (self.navigation_height != 0 or self.heading.length != 0) {
-            self.heading.clear();
-            try self.heading.append(if (self.approval_ready) (if (input.width >= 11) "Action read" else "Read") else if (input.width >= 24) "Action continues · PgDn" else "PgDn");
-        }
     }
     self.calls_row = self.navigation_height + self.document_offset + @as(u16, @intCast(self.document_rows));
     var call_rows: u16 = 0;
@@ -584,7 +568,7 @@ test "the Session line shows once three rows remain under the status, then the r
 test "a notice that does not fit whole gives way instead of failing the frame" {
     var document: Viewport.Document = .{};
     var frame: Self = undefined;
-    const notice = "! Read the whole Action first; nothing authorized.";
+    const notice = "! Confirm the shown Action first; nothing authorized.";
     var input: Input = .{ .width = 20, .height = 4, .status = "Idle", .notice = notice, .cursor = 0, .calls = &.{}, .total_calls = 0, .selected = false, .action_visible = false, .preview_complete = true };
     try frame.plan(&document, input);
     try std.testing.expectEqualStrings("", frame.notice.text());
@@ -654,7 +638,6 @@ test "a multiline draft grows to its cap and then scrolls inside the input" {
         try frame.plan(&document, .{ .width = 100, .height = 24, .draft = &tall, .draft_source = &tall, .cursor = tall.len, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = action, .preview_complete = true });
         try std.testing.expectEqual(@as(usize, 2), frame.document_rows);
         try std.testing.expectEqualStrings(if (action) "" else "Browsing · Esc returns", frame.heading.text());
-        try std.testing.expectEqual(action, frame.approval_ready);
     }
 }
 
@@ -703,7 +686,6 @@ test "a whole Action ends right above the input, a taller one pages from the top
     try std.testing.expectEqual(@as(u16, 0), frame.navigation_height);
     // Its last row is the row above the rule.
     try std.testing.expectEqual(frame.draft_top - frame.rule_height - frame.status_height, frame.document_offset + 3);
-    try std.testing.expect(frame.approval_ready);
     // An inspection page or transcript keeps its text at the top.
     input.action_visible = false;
     try frame.plan(&document, input);
@@ -713,7 +695,7 @@ test "a whole Action ends right above the input, a taller one pages from the top
     for (0..40) |_| try document.append("  more\n");
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 0), frame.document_offset);
-    try std.testing.expectEqualStrings("Action continues · PgDn", frame.heading.text());
+    try std.testing.expectEqualStrings("Action · PgUp/PgDn", frame.heading.text());
 }
 
 test "inspection navigation names its actual return target at narrow widths" {
@@ -730,41 +712,21 @@ test "inspection navigation names its actual return target at narrow widths" {
     }
 }
 
-test "Action approval requires contiguous displayed rows and resets after resize" {
+test "long Action layout preserves source position across navigation and resize" {
     var document: Viewport.Document = .{};
     for (0..100) |_| try document.append("command line\n");
     var frame: Self = undefined;
     var input: Input = .{ .width = 80, .height = 24, .cursor = 0, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = true };
-    const layout: Viewport.Layout = .{ .width = 80, .method = .wcwidth };
-    input.first_row = 0;
+    input.first_row = 70;
     try frame.plan(&document, input);
-    try std.testing.expect(!frame.approval_ready);
-    try std.testing.expectEqualStrings("Action continues · PgDn", frame.heading.text());
-    const seen = frame.action_seen;
-    input.first_row = 70; // A jump must not certify the skipped rows.
-    input.action_seen = seen;
-    try frame.plan(&document, input);
-    try std.testing.expect(!frame.approval_ready);
-    try std.testing.expectEqual(seen, frame.action_seen);
-    input.first_row = 0;
-    for (0..8) |_| {
-        input.action_seen = frame.action_seen;
-        // Coalesced repeat cannot scroll past the first unread row even when
-        // many more keys arrive than could fit between two physical frames.
-        for (0..20) |_| {
-            var scroll: @import("vaxis").widgets.ScrollView = .{ .scroll = .{ .y = input.first_row orelse 0 } };
-            scroll.scroll.y +|= frame.height;
-            if (!frame.approval_ready) scroll.scroll.y = @min(scroll.scroll.y, document.rowOf(layout, input.action_seen));
-            scroll.scroll.restrictTo(0, document.rowCount(layout) -| frame.height);
-            input.first_row = scroll.scroll.y;
-        }
-        try frame.plan(&document, input);
-    }
-    try std.testing.expect(frame.approval_ready);
-    input.action_seen = .{};
+    try std.testing.expectEqual(@as(usize, 70 * "command line\n".len), frame.first.offset);
+    try std.testing.expectEqualStrings("Action · PgUp/PgDn", frame.heading.text());
     input.width = 40;
     try frame.plan(&document, input);
-    try std.testing.expect(!frame.approval_ready);
+    try std.testing.expectEqual(@as(usize, 70 * "command line\n".len), frame.first.offset);
+    input.preview_complete = false;
+    try frame.plan(&document, input);
+    try std.testing.expect(std.mem.indexOf(u8, frame.heading.text(), "truncated") != null);
 }
 
 test "quote draft negotiated Unicode keeps whole clusters and every source caret" {
