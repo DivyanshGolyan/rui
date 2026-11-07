@@ -8,7 +8,9 @@ pub fn build(b: *std.Build) void {
     const pr_ci = b.option(bool, "pr-ci", "Use the Linux x86_64 PR-only integration artifact") orelse false;
     const ci_targets = b.option([]const u8, "ci-targets", "Comma-separated CI targets to compile");
     const ci_part = b.option(CiPart, "ci-part", "Which selected CI compiles this producer emits") orelse .all;
-    const ci: CiArtifacts = .{ .b = b, .directory = b.option([]const u8, "ci-artifacts", "Verified native CI executables") };
+    const ci_names = b.allocator.create(CiNames) catch @panic("OOM");
+    ci_names.* = .{};
+    const ci: CiArtifacts = .{ .b = b, .directory = b.option([]const u8, "ci-artifacts", "Verified native CI executables"), .names = ci_names };
     // Hosted workers can have different CPUs. Transfer only the platform's
     // baseline instruction set; ordinary local builds still target their host.
     const ci_mode = ci_targets != null or ci.directory != null;
@@ -176,6 +178,9 @@ pub fn build(b: *std.Build) void {
             else
                 &.{},
         });
+        // The generated root has no source-owned path: register its stable
+        // artifact name explicitly, independent of the build cache path.
+        ci.registerGenerated(dependency_tests, b.fmt("test-{s}", .{name}));
         const run_dependency_tests = ci.run(dependency_tests);
         run_dependency_tests.has_side_effects = true;
         vaxis_test_step.dependOn(&run_dependency_tests.step);
@@ -966,7 +971,7 @@ pub fn build(b: *std.Build) void {
             const cpu_manifest = b.addWriteFiles().add("ci-cpu.json", ci_cpu);
             ci_build.dependOn(&b.addInstallBinFile(cpu_manifest, "ci-cpu.json").step);
         }
-        var collection: CiCollection = .{ .b = b, .destination = ci_build, .part = ci_part, .unit = tests };
+        var collection: CiCollection = .{ .b = b, .destination = ci_build, .part = ci_part, .unit = tests, .ci = ci };
         var names = std.mem.splitScalar(u8, selected, ',');
         while (names.next()) |name| {
             const root = b.top_level_steps.get(name) orelse @panic("Unknown CI target");
@@ -1066,6 +1071,7 @@ const CiCollection = struct {
     destination: *std.Build.Step,
     part: CiPart,
     unit: []const *std.Build.Step.Compile,
+    ci: CiArtifacts,
     visited: std.AutoHashMapUnmanaged(*std.Build.Step, void) = .empty,
     reached_unit: bool = false,
 
@@ -1081,29 +1087,54 @@ const CiCollection = struct {
                 .unit => unit,
                 .rest => !unit,
             };
-            if (emit) collection.destination.dependOn(&b.addInstallBinFile(compile.getEmittedBin(), ciName(b, compile)).step);
+            if (emit) collection.destination.dependOn(&b.addInstallBinFile(compile.getEmittedBin(), collection.ci.name(compile)).step);
             return;
         }
         for (source.dependencies.items) |dependency| collection.collect(dependency);
     }
 };
 
-fn ciName(b: *std.Build, compile: *std.Build.Step.Compile) []const u8 {
-    // Test roots can use Zig's default executable name; distinguish their
-    // source-owned roots without changing normal compilation or cache keys.
-    return if (compile.kind == .@"test")
-        b.fmt("{s}-{s}", .{ compile.name, std.fs.path.stem(compile.root_module.root_source_file.?.src_path.sub_path) })
-    else
-        compile.name;
-}
+const CiNames = struct {
+    generated: std.AutoHashMapUnmanaged(*std.Build.Step.Compile, []const u8) = .empty,
+    owners: std.StringHashMapUnmanaged(*std.Build.Step.Compile) = .empty,
+};
 
 const CiArtifacts = struct {
     b: *std.Build,
     directory: ?[]const u8,
+    names: *CiNames,
+
+    fn registerGenerated(ci: CiArtifacts, compile: *std.Build.Step.Compile, artifact: []const u8) void {
+        const root = compile.root_module.root_source_file orelse @panic("Generated CI test has no root");
+        switch (root) {
+            .generated => {},
+            else => @panic("Explicit generated CI name requires a generated root"),
+        }
+        const entry = ci.names.generated.getOrPut(ci.b.allocator, compile) catch @panic("OOM");
+        if (entry.found_existing) @panic("Duplicate generated CI artifact registration");
+        entry.value_ptr.* = artifact;
+    }
+
+    fn name(ci: CiArtifacts, compile: *std.Build.Step.Compile) []const u8 {
+        // Generated roots are registered by their owner, not inferred from
+        // a transient cache path. Unregistered roots fail closed.
+        const artifact = if (compile.kind != .@"test") compile.name else artifact: {
+            const root = compile.root_module.root_source_file orelse @panic("CI test has no root");
+            break :artifact switch (root) {
+                .src_path => |source_path| ci.b.fmt("{s}-{s}", .{ compile.name, std.fs.path.stem(source_path.sub_path) }),
+                .generated => ci.names.generated.get(compile) orelse @panic("Unregistered generated CI test root"),
+                else => @panic("Unsupported CI test root"),
+            };
+        };
+        const entry = ci.names.owners.getOrPut(ci.b.allocator, artifact) catch @panic("OOM");
+        if (entry.found_existing and entry.value_ptr.* != compile) @panic("CI artifact name collision");
+        entry.value_ptr.* = compile;
+        return artifact;
+    }
 
     fn path(ci: CiArtifacts, compile: *std.Build.Step.Compile) std.Build.LazyPath {
         return if (ci.directory) |directory|
-            .{ .cwd_relative = ci.b.pathJoin(&.{ directory, ciName(ci.b, compile) }) }
+            .{ .cwd_relative = ci.b.pathJoin(&.{ directory, ci.name(compile) }) }
         else
             compile.getEmittedBin();
     }
