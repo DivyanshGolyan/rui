@@ -71,6 +71,7 @@ pub const Drawn = struct {
     draft_anchor: usize = 0,
     commands: ?slash_commands.Shown = null,
     spins: bool = false,
+    notice_visible: bool = false,
 };
 
 /// Paint directly into the invocation backend's current grid. No I/O, output
@@ -130,6 +131,11 @@ pub fn draw(window: vaxis.Window, scratch: Allocator, state: *const State, draft
         try composer(&painter, state, draft, &input, .{ .start = at.commands.end, .end = hinted });
         painter.at(hinted);
         try hints(&painter, state, draft, at.commands.len() != 0);
+        if (state.notice) |*notice| {
+            result.notice_visible = state.prompt == null and state.shownPicker() == null and
+                std.mem.indexOfScalar(u8, notice.text(), '\n') == null and
+                gwidth.gwidth(notice.firstLine(), caps.width) <= width -| 2;
+        }
         if (hinted + 1 < height) {
             const notice = &state.notice.?;
             var rest = std.mem.splitScalar(u8, notice.text(), '\n');
@@ -1042,6 +1048,7 @@ const Rendered = struct {
     draft_anchor: usize,
     commands: ?slash_commands.Shown,
     spins: bool,
+    notice_visible: bool,
     cursor: ?Cursor,
     const Cursor = struct { row: u16, column: u16 };
 
@@ -1100,7 +1107,7 @@ fn sizedRender(state: *State, draft: Draft, width: u16, height: u16, caps: Caps,
     const window = backend.window().child(.{ .width = width, .height = height });
     const facts = try draw(window, backend.scratch(), state, draft, caps, frame);
     const vx = &backend.storage.?.vx;
-    return .{ .backend = backend, .width = width, .height = height, .caps = caps, .draft_anchor = facts.draft_anchor, .commands = facts.commands, .spins = facts.spins, .cursor = if (vx.screen.cursor_vis) .{ .row = vx.screen.cursor.row, .column = vx.screen.cursor.col } else null };
+    return .{ .backend = backend, .width = width, .height = height, .caps = caps, .draft_anchor = facts.draft_anchor, .commands = facts.commands, .spins = facts.spins, .notice_visible = facts.notice_visible, .cursor = if (vx.screen.cursor_vis) .{ .row = vx.screen.cursor.row, .column = vx.screen.cursor.col } else null };
 }
 
 fn expectNotice(state: *State, expected: ?[]const u8) !void {
@@ -1160,6 +1167,26 @@ const kind_cases = [_]struct { state: WorkState, heading: []const u8, unicode: [
     .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .heading = " Stopped or failed", .unicode = "  × Write the notes                                                          3h", .ascii = "  x Write the notes                                                          3h", .colour = .failure, .stoppable = false },
     .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .heading = " Stopped or failed", .unicode = "  ■ Write the notes                                                          2d", .ascii = "  # Write the notes                                                          2d", .colour = .normal, .stoppable = false },
 };
+
+test "overview receipt does not credit a hidden or clipped notice" {
+    var state: State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+    defer state.deinit();
+    var notice: view.Notice = .{ .colour = .normal };
+    const text = "Upgrade installed; Host ready";
+    @memcpy(notice.bytes[0..text.len], text);
+    notice.len = text.len;
+    state.notice = notice;
+    var tiny = try sizedRender(&state, .{}, 5, 5, .{}, 0);
+    defer tiny.deinit();
+    try std.testing.expect(!tiny.notice_visible);
+    var narrow = try sizedRender(&state, .{}, 12, 24, .{}, 0);
+    defer narrow.deinit();
+    try std.testing.expect(!narrow.notice_visible);
+    var full = try sizedRender(&state, .{}, 80, 24, .{}, 0);
+    defer full.deinit();
+    try std.testing.expect(full.notice_visible);
+}
 
 test "every work state follows the rules table, in Unicode and ASCII" {
     comptime std.debug.assert(kind_cases.len == std.enums.values(Kind).len);
@@ -3462,7 +3489,7 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
         " /setup [OPTIONS]      future defaults",
         " /unarchive            restore the selected Session without restarting work",
         " /undo                 restore the last Session archived here",
-        " /upgrade              check stable Rui; install restarts this Store's Host",
+        " /upgrade              install stable Rui; may restart this Store's Host",
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
     try std.testing.expect(std.mem.indexOf(u8, shown, label) == null);
     // The line under the input says Esc closes it, over held settings or a

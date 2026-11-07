@@ -52,7 +52,7 @@ pub const Ticket = struct {
 
 /// Proof that every byte of one frame was written and flushed. Only `renderPrepared`
 /// returns it, after its final flush; `presented` applies it once.
-pub const Delivered = struct { frame: u64 };
+pub const Delivered = struct { frame: u64, notice: bool = false };
 
 /// What a receipt changed. Completed reading revokes the frame, so the next
 /// one draws the choice.
@@ -957,7 +957,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     };
     try out.writeAll(encoded);
     try out.flush();
-    return .{ .frame = self.frames };
+    return .{ .frame = self.frames, .notice = layout.notice.length != 0 };
 }
 
 fn drawChoice(self: *const Self, window: vaxis.Window, width: u16) void {
@@ -1200,6 +1200,24 @@ test "the input keeps the bottom rows under a rule while content starts at the t
         _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .session = session }, &.{});
         try std.testing.expectEqualStrings(expected, rowText(screen, 23, &storage));
     }
+}
+
+test "notice receipt credits only a whole delivered notice" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const notice = "Upgrade installed; Host activation cancelled; exit to inspect the receipt";
+    const small: std.posix.winsize = .{ .row = 3, .col = 12, .xpixel = 0, .ypixel = 0 };
+    const clipped = try Test.render(screen, &out.writer, small, "draft", 5, .{ .status = "Idle", .notice = notice }, &.{});
+    try std.testing.expect(!clipped.notice);
+    const large: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
+    const shown = try Test.render(screen, &out.writer, large, "draft", 5, .{ .status = "Idle", .notice = notice }, &.{});
+    try std.testing.expect(shown.notice);
 }
 
 test "a draft past its cap scrolls inside the input and the rule counts what it hides" {
