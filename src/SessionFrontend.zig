@@ -5919,6 +5919,7 @@ test "delayed permission queued inspection and Message input retain separate aut
                 const body_at = (std.mem.indexOf(u8, received, "\r\n\r\n") orelse return error.InvalidRequest) + 4;
                 try std.testing.expectEqualStrings(expected, received[body_at..]);
             }
+            std.debug.print("PERMISSION-DIAG route={s} body=[{s}]\n", .{ route, received[(std.mem.indexOf(u8, received, "\r\n\r\n") orelse return error.InvalidRequest) + 4 ..] });
             return peer;
         }
         fn reply(peer: std.Io.net.Stream, body: []const u8, content_type: []const u8) !void {
@@ -6011,6 +6012,14 @@ test "delayed permission queued inspection and Message input retain separate aut
             return frontend.reader.completed();
         }
     }.done);
+    if (self.reader.result.?) |_| {
+        std.debug.print("PERMISSION-DIAG worker=success\n", .{});
+    } else |err| {
+        std.debug.print("PERMISSION-DIAG worker={s}\n", .{@errorName(err)});
+    }
+    var diagnostic_bytes: [256]u8 = undefined;
+    const diagnostic_count = try scratch.readPositionalAll(io, &diagnostic_bytes, 0);
+    std.debug.print("PERMISSION-DIAG phase={s} cancelled={} work_action={?d} result_action={?d} action_len={d} scratch_len={d} scratch=[{s}]\n", .{ @tagName(self.reading.phase), self.reader.cancellation.stopped.load(.acquire), self.job.result.work.work.first_action, self.job.result.action, try action.length(io), try scratch.length(io), diagnostic_bytes[0..diagnostic_count] });
     try std.testing.expectEqual(@as(?u64, 10), self.job.result.action);
     try std.testing.expect(self.submission.view() == null and held.screen.consent == null);
 
