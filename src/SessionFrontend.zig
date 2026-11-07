@@ -926,13 +926,13 @@ fn driveActive(self: *Self) !void {
                 continue;
             };
             if (ready) try self.showUpgrade();
-            if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
+            if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
             _ = try self.step(16);
             continue;
         }
         if (self.upgrade_blocked) {
             if (self.notice == null) self.notice = upgrade_recovery;
-            if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
+            if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
             _ = try self.step(16);
             continue;
         }
@@ -950,7 +950,7 @@ fn driveActive(self: *Self) !void {
                 self.withdrawDecided();
             }
             if (self.upgrade_reobserving and self.reader.thread == null) try self.launch(self.freeze(.activity), reads.scan);
-            if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
+            if (self.dirty or self.terminal.screen.stale()) if (try self.draw()) break;
             _ = try self.step(16);
             continue;
         }
@@ -2733,9 +2733,40 @@ test "ordinary input service waits boundedly while the output pump never waits f
 }
 
 test "completed detail return hands queued input to the next owner before any old-owner read" {
+    try expectCompletedReturn(null);
+}
+
+test "every upgrade drive branch hands input back immediately after its frozen frame" {
+    for (0..3) |hold| try expectCompletedReturn(@intCast(hold));
+}
+
+fn expectCompletedReturn(hold: ?u2) !void {
     const held = try HeldFrontend.create();
     defer held.destroy();
     held.self.poll_at = std.math.maxInt(i96); // No Host scan in this input/output fixture.
+    const Gate = struct {
+        release: std.Io.Event = .unset,
+        fn run(raw: *anyopaque, task: *Task) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            gate.release.waitUncancelable(task.io);
+        }
+        fn notReady(_: *anyopaque, _: UpgradeHandoff) !bool {
+            return false;
+        }
+    };
+    var gate: Gate = .{};
+    defer {
+        gate.release.set(std.testing.io);
+        held.self.reader.join() catch unreachable;
+    }
+    if (hold) |kind| {
+        held.self.upgrade_requested = kind == 0;
+        held.self.upgrade_blocked = kind == 1;
+        held.self.upgrade_reobserving = kind == 2;
+        held.self.lender.upgrade = Gate.notReady;
+        // An isolated borrower prevents reobservation from launching a Host read.
+        if (kind == 2) try held.self.reader.start(std.testing.io, &gate, Gate.run);
+    }
     const backend = held.screen.backend;
     const stream = &held.terminal.stream;
     const tail = "z\x03\x1b[";
@@ -2746,6 +2777,12 @@ test "completed detail return hands queued input to the next owner before any ol
         fn step(raw: *anyopaque) !void {
             const credit: *@This() = @ptrCast(@alignCast(raw));
             if (!credit.injected) {
+                // The selected held branch is already writing. Release its hold
+                // before the actual input path accepts Esc, like a completed
+                // borrower becoming returnable during that frozen frame.
+                credit.held.self.upgrade_requested = false;
+                credit.held.self.upgrade_blocked = false;
+                credit.held.self.upgrade_reobserving = false;
                 const escape = "\x1b[27u";
                 try std.testing.expect(std.c.write(credit.held.pipes[0][1], escape, escape.len) == escape.len);
                 credit.injected = true;
