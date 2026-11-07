@@ -2798,23 +2798,42 @@ test "completed Action inspection waits for the selector decoder in the active o
             if (std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return error.FcntlFailed;
         }
 
-        fn readable(fd: std.posix.fd_t, deadline: std.Io.Clock.Timestamp) !void {
-            try test_poll.waitUntil(std.testing.io, deadline, fd, struct {
-                fn ready(socket: std.posix.fd_t) !bool {
-                    var fds = [_]std.posix.pollfd{.{ .fd = socket, .events = std.posix.POLL.IN, .revents = 0 }};
+        fn ready(fd: std.posix.fd_t, events: i16, deadline: std.Io.Clock.Timestamp) !void {
+            const Watch = struct { fd: std.posix.fd_t, events: i16 };
+            try test_poll.waitUntil(std.testing.io, deadline, Watch{ .fd = fd, .events = events }, struct {
+                fn check(watch: Watch) !bool {
+                    var fds = [_]std.posix.pollfd{.{ .fd = watch.fd, .events = watch.events, .revents = 0 }};
                     return try std.posix.poll(&fds, 0) != 0;
                 }
-            }.ready);
+            }.check);
+        }
+
+        fn writeAll(fd: std.posix.fd_t, bytes: []const u8, deadline: std.Io.Clock.Timestamp) !void {
+            var written: usize = 0;
+            while (written < bytes.len) {
+                try ready(fd, std.posix.POLL.OUT, deadline);
+                const count = std.c.write(fd, bytes.ptr + written, bytes.len - written);
+                if (count < 0) switch (std.posix.errno(count)) {
+                    .INTR, .AGAIN => continue,
+                    else => return error.FixtureWriteFailed,
+                };
+                if (count == 0) return error.UnexpectedEof;
+                written += @intCast(count);
+            }
         }
 
         fn readRequest(fd: std.posix.fd_t, deadline: std.Io.Clock.Timestamp, request: []u8) ![]const u8 {
             var used: usize = 0;
             while (true) {
                 if (used == request.len) return error.RequestTooLarge;
-                try readable(fd, deadline);
-                const count = try std.posix.read(fd, request[used..]);
+                try ready(fd, std.posix.POLL.IN, deadline);
+                const count = std.c.read(fd, request.ptr + used, request.len - used);
+                if (count < 0) switch (std.posix.errno(count)) {
+                    .INTR, .AGAIN => continue,
+                    else => return error.FixtureReadFailed,
+                };
                 if (count == 0) return error.UnexpectedEof;
-                used += count;
+                used += @intCast(count);
                 if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
                     const start = (std.mem.indexOf(u8, request[0..end], "Content-Length: ") orelse return error.InvalidRequest) + "Content-Length: ".len;
                     const finish = (std.mem.indexOf(u8, request[start .. end + 2], "\r\n") orelse return error.InvalidRequest) + start;
@@ -2824,9 +2843,9 @@ test "completed Action inspection waits for the selector decoder in the active o
         }
 
         fn respond(listener: *std.Io.net.Server, body: []const u8) !void {
-            // One deadline covers connection readiness and every request read.
+            // One deadline covers connection, request, and response.
             const deadline = test_poll.after(std.testing.io, .fromSeconds(2));
-            try readable(listener.socket.handle, deadline);
+            try ready(listener.socket.handle, std.posix.POLL.IN, deadline);
             const peer = try listener.accept(std.testing.io);
             defer peer.close(std.testing.io);
             try nonblocking(peer.socket.handle);
@@ -2834,9 +2853,9 @@ test "completed Action inspection waits for the selector decoder in the active o
             const received = try readRequest(peer.socket.handle, deadline, &request);
             try std.testing.expectStringStartsWith(received, "POST /v1/inspect-session HTTP/1.1\r\n");
             var header: [256]u8 = undefined;
-            var writer = peer.writer(std.testing.io, &.{});
-            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len}));
-            try writer.interface.writeAll(body);
+            const headers = try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len});
+            try writeAll(peer.socket.handle, headers, deadline);
+            try writeAll(peer.socket.handle, body, deadline);
         }
     };
     const io = std.testing.io;
@@ -2851,6 +2870,28 @@ test "completed Action inspection waits for the selector decoder in the active o
     try std.testing.expectEqual(@as(isize, fragment.len), std.c.write(partial[1], fragment, fragment.len));
     var partial_buffer: [128]u8 = undefined;
     try std.testing.expectError(error.Timeout, Host.readRequest(partial[0], test_poll.after(io, .fromMilliseconds(10)), &partial_buffer));
+    // A full nonblocking sink must obey the same fixed write deadline.
+    var blocked: [2]c_int = undefined;
+    try std.testing.expect(std.c.pipe(&blocked) == 0);
+    defer for (blocked) |fd| {
+        _ = std.c.close(fd);
+    };
+    try Host.nonblocking(blocked[1]);
+    const block: [4096]u8 = @splat('x');
+    var filled: usize = 0;
+    const fill_deadline = test_poll.after(io, .fromSeconds(2));
+    while (filled < 16 * 1024 * 1024) {
+        if (fill_deadline.durationFromNow(io).raw.nanoseconds <= 0) return error.Timeout;
+        const count = std.c.write(blocked[1], &block, block.len);
+        if (count < 0) switch (std.posix.errno(count)) {
+            .INTR => continue,
+            .AGAIN => break,
+            else => return error.FixtureWriteFailed,
+        };
+        if (count == 0) return error.UnexpectedEof;
+        filled += @intCast(count);
+    } else return error.TestUnexpectedResult;
+    try std.testing.expectError(error.Timeout, Host.writeAll(blocked[1], "x", test_poll.after(io, .fromMilliseconds(10))));
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
