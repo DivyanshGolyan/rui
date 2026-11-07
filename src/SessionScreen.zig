@@ -2842,12 +2842,25 @@ test "typed saved-file loading preserves raw provenance through prepend Message 
     _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
     var storage: [128]u8 = undefined;
     var escaped = false;
-    for (0..size.row) |row| if (std.mem.eql(u8, rowText(screen, @intCast(row), &storage), "\\x1b[31m            \\xff")) {
+    for (0..size.row) |row| if (std.mem.eql(u8, rowText(screen, @intCast(row), &storage), "\\x1b[31m           │\\xff")) {
         escaped = true;
     };
     try std.testing.expect(escaped);
-    // No raw source SGR/OSC becomes a style/link in the selected frame.
     const cells = Test.window(screen);
+    try std.testing.expectEqual(@as(u16, 40), cells.width);
+    try std.testing.expectEqual(@as(u16, 39), screen.textLayout().width);
+    // Two 19-cell columns share one divider, independent of the viewport rail.
+    try std.testing.expectEqualStrings("─", cells.readCell(18, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("┼", cells.readCell(19, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", cells.readCell(20, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings(" ", cells.readCell(18, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("│", cells.readCell(19, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("\\", cells.readCell(20, 2).?.char.grapheme);
+    const projection = screen.browsing.projection(screen.textLayout());
+    try std.testing.expectEqual(Viewport.Position{ .offset = 0, .row = 1 }, projection.position(1));
+    try std.testing.expectEqual(Viewport.Position{ .offset = 12 }, projection.position(2));
+    try std.testing.expectEqualStrings(raw ++ "newer\n", screen.browsing.text.text());
+    // No raw source SGR/OSC becomes a style/link in the selected frame.
     for (0..size.row) |row| for (0..size.col) |col| try std.testing.expectEqualStrings("", cells.readCell(@intCast(col), @intCast(row)).?.link.uri);
 }
 
