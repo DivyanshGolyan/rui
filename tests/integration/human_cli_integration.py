@@ -1346,7 +1346,7 @@ def conversation_content(frame, cells, rail_rows):
             if y < rail_rows else raw_rows[y] for y, row in enumerate(cells)]
 
 
-def plain_conversation_content(frame, cells):
+def plain_conversation_content(frame, cells, *, draft=""):
     """The no-call/no-queue, one-row-composer fixtures ONLY.
 
     Raw one-line Sending/Sent status and the named provider clock are positive
@@ -1354,7 +1354,7 @@ def plain_conversation_content(frame, cells):
     No source wrapping or row census is recomputed here.
     """
     rows = frame.split("\n")
-    assert len(rows) == len(cells) and rows[-2] == "›" and rows[-3] == "─" * 80, frame
+    assert len(rows) == len(cells) and rows[-2] == "›" + (" " + draft if draft else "") and rows[-3] == "─" * 80, frame
     status_text = "".join(cell.data for cell in cells[-4][:79]).rstrip()
     status = int(status_text in ("Sending…", "Sent"))
     if status:
@@ -1383,6 +1383,61 @@ def assert_submitted_feedback(frame, cells, times):
             assert len(row) == 79 and row[-5:] in times and not row[3:-5].strip(" "), (row, times)
     if rows[composer].strip() == "›":
         assert "› x" in map(untimed, history) or {"Sending…", "Sent"} & set(history), frame
+
+
+def message_feedback(frames, text):
+    """Every accepted-Message frame, including finished pages without Sent."""
+    for frame, cells in frames:
+        composer_row = frame.split("\n")[-2]
+        draft = composer_row.removeprefix("› ") if composer_row != "›" else ""
+        assert text.startswith(draft), ("unexpected pending Message draft", text, frame)
+        rows = plain_conversation_content(frame, cells, draft=draft)
+        composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
+        history = rows[:composer]
+        if rows[composer].strip() == "›":
+            assert f"› {text}" in map(untimed, history) or {"Sending…", "Sent"} & set(history), (text, frame)
+
+
+def message_feedback_cases():
+    from terminal_screen import ScreenCapture
+    for text in ("BBB", "CCC"):
+        for status in ("", "Sending…", "Sent"):
+            for work in (False, True):
+                rows = [""] * 24
+                rows[0] = "unrelated prior source ▐"
+                rows[1] = "› " + text + " " * 69 + "11:42"
+                if work: rows[2] = "• Waiting · 42s"
+                if status: rows[20] = status
+                rows[21:] = ["─" * 80, "›", "Session s"]
+                rail = 21 - int(bool(status)) - int(work)
+                rows = [row.ljust(79) + "▐" if y < rail else row for y, row in enumerate(rows)]
+                capture = ScreenCapture(80, 24)
+                capture.feed(terminal_frame(rows, (23, 3)))
+                message_feedback([(capture.completed, capture.completed_cells)], text)
+                # Typing and Enter can be separate commits: source feedback is
+                # required once the composer clears, not before admission.
+                for prefix in (text[:1], text[:2], text):
+                    typing = rows.copy()
+                    typing[1] = " " * 79 + "▐"
+                    typing[-2] = "› " + prefix
+                    pending = ScreenCapture(80, 24)
+                    pending.feed(terminal_frame(typing, (23, 3 + len(prefix))))
+                    message_feedback([(pending.completed, pending.completed_cells)], text)
+                # The actual finished consumer MUST succeed without Sent, and
+                # still reject loss/corruption of that accepted Message.
+                if not status:
+                    for fault in ("missing", "other-message"):
+                        bad = rows.copy()
+                        bad[1] = ("" if fault == "missing" else "› WRONG" + " " * 67 + "11:42").ljust(79) + "▐"
+                        rejected = ScreenCapture(80, 24)
+                        rejected.feed(terminal_frame(bad, (23, 3)))
+                        try:
+                            message_feedback([(rejected.completed, rejected.completed_cells)], text)
+                        except AssertionError as error:
+                            assert error.args[0] == (text, rejected.completed), error
+                        else:
+                            raise AssertionError(("accepted Message feedback lost", text, fault))
+    print("BBB/CCC feedback: actual tuple consumer, finished without Sent, all six rail profiles and missing/other source rejection passed", flush=True)
 
 
 def conversation_body(frame, columns, cursor, *, cells, queued, call=None, work=None):
@@ -1658,19 +1713,160 @@ def return_to_live(master, key=b"\x1b", timeout=15, *, input_fd=None):
 LIVE_CLOCK = re.compile(r"^((?:  )?[•!?] .+ · )(?:retry \d+ in )?\d+[hms](?: \d+[ms])?$", re.M)
 
 
+def clock_key(frame, cells):
+    """Comparison only: keep raw cells except a proved conversation clock.
+
+    Inspection/full-width/wide-entry and unknown composer shapes retain the
+    old key. No body boundary or navigation fact is inferred from the rail.
+    """
+    old = LIVE_CLOCK.sub(r"\1", frame)
+    rows = frame.split("\n")
+    if (not live_or_back_frame(frame) or not cells or len(rows) != len(cells)
+            or any(len(row) != 80 for row in cells) or len(rows) < 4
+            or rows[-3] != "─" * 80 or not rows[-2].startswith("›") or reason_shown(rows[-1])):
+        return old
+    rule = len(rows) - 3
+    # A whole Action can be bottom-aligned without a top heading. Its
+    # full-width cells have no conversation rail; keep the old key there too.
+    if not any(row[79].data == "▐" for row in cells[:rule]):
+        return old
+    rail_rows = next((y for y, row in enumerate(cells) if row[79].data != "▐"), len(cells))
+    assert 0 < rail_rows <= rule, ("clock rail extent", frame)
+    assert all(row[79].data != "▐" for row in cells[rail_rows:rule]), ("noncontiguous clock rail", frame)
+    conversation_content(frame, cells, rail_rows)
+    key = rows.copy()
+    for y in range(rail_rows):
+        clock = "".join(cell.data for cell in cells[y][:79]).rstrip(" ")
+        if LIVE_CLOCK.fullmatch(clock):
+            # Exact clock syntax consumes ALL non-padding content. Preserve
+            # its label (including literal ▐); only elapsed+ASCII padding vary.
+            key[y] = LIVE_CLOCK.sub(r"\1", clock) + "▐"
+    return "\n".join(key)
+
+
 def settle_screen(master, quiet=1.0, timeout=15):
     """Drain frames until none but a live clock's tick arrives for `quiet`
     seconds; return the screen. A ticking clock never goes quiet for a full
     second, so ticks alone must not keep the screen unsettled."""
     deadline = time.monotonic() + timeout
-    still = LIVE_CLOCK.sub(r"\1", current_screen(master))
+    capture = terminal_capture(master)
+    still = clock_key(current_screen(master), capture.completed_cells)
     quiet_until = time.monotonic() + quiet
     while (frame := next_frame(master, max(0, quiet_until - time.monotonic()))) is not None:
-        if LIVE_CLOCK.sub(r"\1", frame) != still:
-            still = LIVE_CLOCK.sub(r"\1", frame)
+        key = clock_key(frame, capture.completed_cells)
+        if key != still:
+            still = key
             quiet_until = time.monotonic() + quiet
         assert time.monotonic() < deadline, ("screen never settled", current_screen(master))
     return current_screen(master)
+
+
+def clock_key_cases():
+    """Hand-authored cells; the actual settle consumer uses this same key."""
+    from terminal_screen import ScreenCapture
+    from types import FunctionType, SimpleNamespace
+
+    def capture_rows(rows, columns=80):
+        capture = ScreenCapture(columns, len(rows))
+        capture.feed(terminal_frame(rows, (len(rows) - 1, 7)))
+        return capture
+
+    def clock_rows(elapsed, *, held=False, queue=False, status=False):
+        rows = [""] * 24
+        rows[:3] = ["BODY ▐", "literal · 42s ▐", ("  • Held call" if held else "• Waiting") + " · " + elapsed]
+        rail = 20 - int(queue or status)
+        if queue: rows[20] = "› QUEUED-SOURCE".ljust(72) + "3 queued"
+        elif status: rows[20] = "Sent"
+        rows[21:] = ["─" * 80, "› keep", "Session s"]
+        return [row.ljust(79) + "▐" if y < rail else row for y, row in enumerate(rows)]
+
+    for held in (False, True):
+        for queue in (False, True):
+            for status in (False, True):
+                for before, after in (("9s", "10s"), ("59s", "1m 0s"), ("59m 59s", "1h 0m")):
+                    a, b = (capture_rows(clock_rows(value, held=held, queue=queue, status=status)) for value in (before, after))
+                    assert clock_key(a.completed, a.completed_cells) == clock_key(b.completed, b.completed_cells)
+                    # Only the recognized clock changes; all other raw cells,
+                    # timestamps, source literals and chrome remain significant.
+                    for old, new in (("BODY ▐", "BODY changed ▐"), ("literal · 42s ▐", "literal · 43s ▐"),
+                                     ("› keep", "› changed"), ("Session s", "Important notice"),
+                                     (" · " + after, " · " + after + " EXTRA")):
+                        rows = clock_rows(after, held=held, queue=queue, status=status)
+                        rail = 20 - int(queue or status)
+                        rows = [(row[:79].rstrip().replace(old, new).ljust(79) + "▐") if y < rail else row.replace(old, new)
+                                for y, row in enumerate(rows)]
+                        c = capture_rows(rows)
+                        assert clock_key(c.completed, c.completed_cells) != clock_key(a.completed, a.completed_cells), (old, new)
+    rows = clock_rows("9s")
+    baseline = capture_rows(rows)
+    for suffix in (" EXTRA", "\u00a0", "\u2002", " ▐"):
+        nonclock = rows.copy()
+        nonclock[2] = ("• Waiting · 9s" + suffix).ljust(79) + "▐"
+        c = capture_rows(nonclock)
+        assert clock_key(c.completed, c.completed_cells) != clock_key(baseline.completed, baseline.completed_cells), ("non-padding source ignored", suffix)
+    for fault in ("missing", "moved", "wrong-column", "old-grid"):
+        bad = rows.copy()
+        if fault == "missing": bad[1] = bad[1][:-1]
+        elif fault == "moved": bad[0], bad[20] = "", " " * 79 + "▐"
+        elif fault == "wrong-column": bad[1] = "literal".ljust(78) + "▐ "
+        c = capture_rows(bad)
+        frame = c.completed if fault != "old-grid" else c.completed.replace("BODY", "OLD-BODY")
+        try:
+            clock_key(frame, c.completed_cells)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(("invalid clock rail/grid accepted", fault))
+    for heading in ("Browsing · Esc returns", "Action requires attention", "Message · Esc returns"):
+        full = rows.copy()
+        full[0] = heading
+        c = capture_rows(full)
+        assert clock_key(c.completed, c.completed_cells) == LIVE_CLOCK.sub(r"\1", c.completed)
+    full = [row[:79].rstrip() for row in rows]
+    full[-3] = "─" * 80
+    full[-1] = REASON + " · esc back to the choice"
+    full[1] = "code".ljust(79) + "▐"
+    c = capture_rows(full)
+    assert clock_key(c.completed, c.completed_cells) == LIVE_CLOCK.sub(r"\1", c.completed)
+    for columns in (100, 2048):
+        wide = ["• Waiting · 9s", "literal ▐"] + [""] * 19 + ["─" * columns, "› keep", "Session s"]
+        c = capture_rows(wide, columns)
+        assert clock_key(c.completed, c.completed_cells) == LIVE_CLOCK.sub(r"\1", c.completed)
+    # Unknown/multiline composer shape retains the previous full-frame key.
+    full = rows.copy()
+    full[21] = "› multi"
+    c = capture_rows(full)
+    assert clock_key(c.completed, c.completed_cells) == LIVE_CLOCK.sub(r"\1", c.completed)
+
+    # Invoke the ACTUAL settle code with deterministic read/clock effects.
+    # No sleep or real deadline change; prove a tick doesn't renew quiet, and
+    # the returned value is the raw committed frame, never its comparison key.
+    for source_changed in (False, True):
+        captures = [capture_rows(clock_rows(value)) for value in ("9s", "10s", "11s")]
+        if source_changed:
+            changed = clock_rows("11s")
+            changed[0] = "CHANGED SOURCE ▐".ljust(79) + "▐"
+            captures[-1] = capture_rows(changed)
+        capture = SimpleNamespace(completed=captures[0].completed, completed_cells=captures[0].completed_cells)
+        now = SimpleNamespace(value=0.0)
+        waits = []
+        pending = iter(captures[1:])
+        def read_frame(master, timeout):
+            assert master == 123
+            waits.append(timeout)
+            next_capture = next(pending, None)
+            if next_capture is None:
+                return None
+            now.value += 0.1
+            capture.completed, capture.completed_cells = next_capture.completed, next_capture.completed_cells
+            return capture.completed
+        effects = {**settle_screen.__globals__, "time": SimpleNamespace(monotonic=lambda: now.value),
+                   "terminal_capture": lambda master: capture, "current_screen": lambda master: capture.completed,
+                   "next_frame": read_frame}
+        settle = FunctionType(settle_screen.__code__, effects, argdefs=settle_screen.__defaults__)
+        assert settle(123, quiet=0.5, timeout=15) == captures[-1].completed
+        assert all(abs(actual - expected) < 1e-9 for actual, expected in zip(waits, (0.5, 0.4, 0.5 if source_changed else 0.3))) and len(waits) == 3, waits
+    print("clock key: actual settle deadline/raw return, elapsed-width changes, source/rail faults and unchanged inspected/wide contexts passed", flush=True)
 
 
 def raw_export(master, screen):
@@ -4576,49 +4772,80 @@ def incomplete_input_case(home, store, session, endpoint, host):
     print("incomplete input: all four native deadlines, delayed output, exact restoration and no dispatch passed", flush=True)
 
 
-def wait_for_listed_call(tty):
-    # A matching Bash projection supplies the unresolved row's clock. The
-    # command stays held until after traversal; a bare heading can precede claim.
+def listed_call_ready(capture, queued):
+    # Reject unclaimed/generic/finished/other headings before interpreting any
+    # chrome. A candidate is admitted ONLY through the full current grid proof.
     running = re.compile(r"  • Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
-    tty.wait(predicate=lambda: any(running.fullmatch(row) for row in tty.capture.completed.splitlines()), timeout=30)
+    if not any(running.fullmatch("".join(cell.data for cell in row[:79]).rstrip())
+               for row in capture.completed_cells):
+        return False
+    conversation_body(capture.completed, capture.screen.columns,
+                      (capture.screen.cursor.x, capture.screen.cursor.y),
+                      cells=capture.completed_cells, queued=queued, call="Held call")
+    return True
+
+
+def wait_for_listed_call(tty, queued):
+    # Same 30s claim barrier: exact two-space unresolved timed Held call,
+    # plus its current queue/composer/rail, never accumulated or generic work.
+    tty.wait(predicate=lambda: listed_call_ready(tty.capture, queued), timeout=30)
 
 
 def listed_call_readiness_cases():
     """A heading may precede claim; only the current running row is a barrier."""
     from terminal_screen import ScreenCapture
+    queued = "› QUEUED-SOURCE".ljust(72) + "3 queued"
+
+    def rows_for(call):
+        rows = ["BODY-FIRST", "BODY-LAST", call] + [""] * 17
+        rows += [queued, "─" * 80, "›", "Session s"]
+        return [row.ljust(79) + "▐" if y < 19 else row for y, row in enumerate(rows)]
 
     class OfferedFrames:
         def __init__(self, elapsed):
             self.capture = ScreenCapture(80, 24)
-            self.frames = (
-                "  • Held call\n• Queued · 0s",
-                "• Held call · 42s",
-                "  ✓ Held call · 42s",
-                "  • Other call · 42s",
-                "prefix • Held call · 42s",
-                "  • Held call · 42s extra",
-                "  • Held call · " + elapsed,
-            )
+            self.frames = tuple(rows_for(call) for call in (
+                "  • Held call", "• Held call · 42s", "  ✓ Held call · 42s",
+                "  • Other call · 42s", "prefix • Held call · 42s",
+                "  • Held call · 42s extra", "  • Held call · " + elapsed,
+            ))
             self.offered = None
             # Accumulated output already contains a timed row: it is not current.
-            self.frame("  • Held call · 99s")
+            self.frame(rows_for("  • Held call · 99s"))
             self.frame(self.frames[0])
 
-        def frame(self, text):
-            self.capture.feed(("\x1b[?2026h\x1b[H\x1b[2J" + text.replace("\n", "\r\n") + "\x1b[?2026l").encode())
+        def frame(self, rows):
+            self.capture.feed(terminal_frame(rows, (23, 3)))
 
         def wait(self, marker=None, *, predicate=None, timeout=15):
             assert timeout == 30, timeout
-            for self.offered, frame in enumerate(self.frames):
-                self.frame(frame)
+            for self.offered, rows in enumerate(self.frames):
+                self.frame(rows)
                 if (predicate() if predicate is not None else self.capture.reached(marker)):
                     return self.capture.completed
             raise AssertionError(("running listed call was not accepted", self.capture.completed))
 
     for elapsed in ("0s", "2m 3s", "1h 2m"):
         tty = OfferedFrames(elapsed)
-        wait_for_listed_call(tty)
+        wait_for_listed_call(tty, queued)
         assert tty.offered == len(tty.frames) - 1, ("listed call accepted before current running row", tty.capture.completed)
+    for fault in ("rail", "queue", "cursor", "ambiguous", "gap", "old-grid"):
+        tty = OfferedFrames("42s")
+        rows = rows_for("  • Held call · 42s")
+        if fault == "rail": rows[2] = rows[2][:-1]
+        elif fault == "queue": rows[-4] = "wrong queue"
+        elif fault == "ambiguous": rows[0] = rows[2]
+        elif fault == "gap": rows[3] = "unexpected source below call".ljust(79) + "▐"
+        tty.frame(rows)
+        if fault == "cursor": tty.capture.screen.cursor.x = 3
+        if fault == "old-grid": tty.capture.completed = tty.capture.completed.replace("BODY-FIRST", "OLD-BODY")
+        try:
+            ready = listed_call_ready(tty.capture, queued)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(("invalid current call geometry accepted", fault, ready))
+    print("listed call: actual railed row, current grid/queue/cursor/body and exact unresolved 30s barrier passed", flush=True)
 
 
 def renderer_cases():
@@ -4631,6 +4858,8 @@ def renderer_cases():
     listed_call_readiness_cases()
     conversation_protocol_cases()
     conversation_rail_cases()
+    message_feedback_cases()
+    clock_key_cases()
 
     # Every-frame oracles see each synchronized commit, not just the newest one after a read.
     control, seen = ScreenCapture(), []
@@ -5363,14 +5592,6 @@ def renderer_cases():
             tty.finish()
         print("renderer: a submitted Message shows as sending or in full from Enter on", flush=True)
 
-        def feedback(frames, text):
-            for frame in frames:
-                rows = frame.rstrip("\n").split("\n")
-                composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
-                history = rows[:composer]
-                if rows[composer].strip() == "›":
-                    assert f"› {text}" in map(untimed, history) or {"Sending…", "Sent"} & set(history), (text, frame)
-
         def held_pages():
             """Once holding is set, Activity page requests reach the Host only
             after release, so the page then read holds everything until then."""
@@ -5397,7 +5618,7 @@ def renderer_cases():
         with terminal(session) as tty:
             os.write(tty.master, b"AAA\n")
             fixture.wait_for(tty.draining(holding[b"AAA"].is_set), "the AAA content read was never held", timeout=10)
-            frames = tty.every_frame()
+            frames = tty.every_frame(with_cells=True)
             sent = len(proxy.mutations)
             def accepted():
                 rows = tty.capture.completed.split("\n")
@@ -5412,7 +5633,7 @@ def renderer_cases():
             for response in unused:
                 endpoint.responses.remove(response)
             tty.wait(markers[0] if unused else markers[1])
-            feedback(frames, "BBB")
+            message_feedback(frames, "BBB")
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
@@ -5432,11 +5653,11 @@ def renderer_cases():
                 fixture.wait_for(lambda: fixture.completed_observation(store, key), "backlog answer", timeout=20)
             fixture.wait_for(lambda: fixture.command("session", "inspect", "--store", store, "--session", session)["work"]["state"]["kind"] == "finished", "backlog settled", timeout=20)
             marker = answer("caught up")
-            frames = tty.every_frame()
+            frames = tty.every_frame(with_cells=True)
             tty.send("CCC\n", predicate=lambda: "Sent" in tty.capture.completed)
             release.set()
             tty.wait(marker, timeout=20)
-            feedback(frames, "CCC")
+            message_feedback(frames, "CCC")
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
@@ -6336,11 +6557,11 @@ def renderer_cases():
                 queue_three(tty)
                 first_release.set()
                 tty.wait("LONG-04399", timeout=60)
-                wait_for_listed_call(tty)
-                assert waiting(tty, "BIG-START", "3 queued"), tty.capture.completed
                 # This fixture uses only single-cell precomposed Latin text:
                 # fixed80-column expectation, NOT a second Unicode fitter.
                 queued_row = ("› " + big[:68] + "…").ljust(72) + "3 queued"
+                wait_for_listed_call(tty, queued_row)
+                assert waiting(tty, "BIG-START", "3 queued"), tty.capture.completed
                 shown = traverse(tty, queued=queued_row, call="Held call")
                 assert "Start of conversation" in shown and shown.count("DRIVER-QUESTION") == 1, shown
                 assert "EQUAL-CONTENT" not in shown and "BIG-START" not in shown and "Queued" not in shown, shown

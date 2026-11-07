@@ -2525,10 +2525,44 @@ test "live and transcript chrome have identical cells with calls queue work draf
         var row: [256]u8 = undefined;
         try std.testing.expectEqualStrings("Important notice", rowText(screen, rows - 1, &row));
     };
+    // Clock comparison may observe a nonempty one-row draft and a call,
+    // queue or status. Its rail is a physical contiguous prefix, not a body
+    // boundary; the clock and blank gap both remain inside that prefix.
+    for ([_]bool{ false, true }) |colour| for ([_]bool{ false, true }) |queued| for ([_][]const u8{ "", "Sent" }) |status| for ([_]bool{ false, true }) |call| {
+        screen.colour = colour;
+        _ = screen.backend.setPolicy(.{ .depth = if (colour) .indexed else .none, .width = screen.backend.widthMethod() });
+        try screen.latest();
+        screen.live.text.clear();
+        try screen.append("BODY ▐\nliteral · 42s ▐");
+        var held: View.Live = .{ .count = 1, .total = 1 };
+        held.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
+        try held.entries[0].presentation.description.?.set("Held call");
+        const running: protocol.WorkState = if (call)
+            .{ .bash = .{ .since = 100, .call = 0, .description = held.entries[0].presentation.description, .running = 1, .approvals = 0 } }
+        else
+            .{ .working = .{ .since = 100 } };
+        const chrome: Footer = .{ .queued = if (queued) .{ .waiting = .{ .line = "QUEUED-SOURCE", .count = 3 }, .status = "" } else null, .status = status, .live = work_line.of(&test_words, &running, 7, 142_000) };
+        for ([_]bool{ false, true }) |transcript| {
+            if (transcript) try screen.beginTranscript(0);
+            _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 }, "keep", 4, chrome, if (call) &held else &.{});
+            const raw = &screen.backend.storage.?.vx.screen_last;
+            const rail_rows: u16 = 20 - @as(u16, @intFromBool(queued or status.len != 0));
+            try std.testing.expectEqual(rail_rows, screen.height);
+            for (0..24) |y| try std.testing.expectEqual(y < rail_rows, std.mem.eql(u8, raw.readCell(79, @intCast(y)).?.char.grapheme, "▐"));
+            var row: [256]u8 = undefined;
+            try std.testing.expectEqualStrings(if (call) "  • Held call · 42s" else "• Waiting · 42s", rowText(screen, 2, &row));
+            try std.testing.expect(2 < rail_rows);
+            for (3..rail_rows) |y| try std.testing.expectEqualStrings("", rowText(screen, @intCast(y), &row));
+            try std.testing.expectEqualStrings("▐", raw.readCell(5, 0).?.char.grapheme);
+            try std.testing.expectEqualStrings("› keep", rowText(screen, 22, &row));
+            try std.testing.expectEqualStrings(if (queued) "› QUEUED-SOURCE                                                         3 queued" else status, rowText(screen, 20, &row));
+            try std.testing.expectEqual(@as(usize, 80 * "─".len), rowText(screen, 21, &row).len);
+        }
+    };
     // The submitted-feedback observer has no calls/queue and one input row.
     // Pin EVERY one-line status/work variant's raw extent, timestamp cells
     // and literal body glyph without rowText's existing rail suppression.
-    for ([_]bool{ false, true }) |colour| for ([_][]const u8{ "", "Sending…", "Sent" }) |status| for ([_]bool{ false, true }) |working| {
+    for ([_]bool{ false, true }) |colour| for ([_][]const u8{ "", "Sending…", "Sent" }) |status| for ([_]bool{ false, true }) |working| for ([_][]const u8{ "", "keep" }) |draft| {
         screen.colour = colour;
         _ = screen.backend.setPolicy(.{ .depth = if (colour) .indexed else .none, .width = screen.backend.widthMethod() });
         try screen.latest();
@@ -2538,7 +2572,7 @@ test "live and transcript chrome have identical cells with calls queue work draf
         const size_: std.posix.winsize = .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 };
         for ([_]bool{ false, true }) |transcript| {
             if (transcript) try screen.beginTranscript(0);
-            _ = try Test.render(screen, &out.writer, size_, "", 0, .{ .status = status, .live = if (working) work_line.of(&test_words, &waiting, 7, 142_000) else null }, &.{});
+            _ = try Test.render(screen, &out.writer, size_, draft, draft.len, .{ .status = status, .live = if (working) work_line.of(&test_words, &waiting, 7, 142_000) else null }, &.{});
             const rail_rows: u16 = 21 - @as(u16, @intFromBool(status.len != 0)) - @as(u16, @intFromBool(working));
             try std.testing.expectEqual(rail_rows, screen.height);
             const raw = &screen.backend.storage.?.vx.screen_last;
