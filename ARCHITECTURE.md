@@ -502,7 +502,12 @@ It does not change authored instructions, their content identity, the revision-o
 Normal defaults offer/load `skill` even with no skills; an explicit restricted tool set remains authoritative, and routing hints are conditional on availability.
 
 The model `skill` tool accepts `invoke` with a name or `reload` without one.
-Native `session send` accepts repeatable `--skill NAME` alongside stdin text. The wire retains the exclusive legacy `skill` form and adds an ordered `skills` vector alongside literal text; these are explicit intent, not slash-text parsing. The captured text is admitted as an ordinary User Message.
+Native `session send` accepts repeatable `--skill NAME` alongside stdin text.
+The wire retains the exclusive legacy `skill` form and adds an ordered `skills` vector alongside literal text; these are explicit intent, not slash-text parsing.
+The captured text is admitted as an ordinary User Message.
+Both terminal composers own selected byte ranges; only an explicit drawn-row Enter or Tab creates attachment intent.
+Sealed input projects distinct names in first textual order, while the Host resolves them against one catalog snapshot and captures the batch before atomic admission.
+Catalog suggestions are bounded metadata-only reads with copied query scope and joined ownership, not a frontend filesystem reader or persistent active-skill registry.
 Invocation reads the selected advertised absolute path anew, returning the complete raw UTF-8 `SKILL.md`, including frontmatter and trailing bytes, with its absolute path.
 The result is ordinary immutable conversation content, with no added authority, tools or permissions.
 Sibling resources remain accessible through the Session's existing tools and permission rules.
@@ -2706,7 +2711,9 @@ A stop shows the Messages that waited just before it, searching the Activity row
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 
-Wire version 11 adds ordered skill names with text, authored Message content metadata and selection, and bounded skill suggestions. Live transports require wire 11. Recovery accepts canonical wire 10 saved configure, message, session-stop, session-archive, model-interruption and permission-decision records, without rewriting their bytes; the old grammar rejects the new skills field.
+Wire version 11 adds ordered skill names with text, authored Message content metadata and selection, and bounded skill suggestions.
+Live transports require wire 11.
+Recovery accepts canonical wire 10 saved configure, message, session-stop, session-archive, model-interruption and permission-decision records, without rewriting their bytes; the old grammar rejects the new skills field.
 Wire version 10 adds explicit native skill invocation and idle catalog reload intent, typed capture refusals and reload acknowledgements; different versions refuse each other rather than silently discarding the new intent.
 Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.
 Wire version 8 dropped the `proposal_page`, `proposal_field` and `person_message` requests, added the Activity page's `kinds`, `limit` and `received` rows, renamed its `outcome` rows to `turn_ended`, each naming its `ending`, and marked a done Turn's answer `final` on its assistant row, after version 7 dropped the page's `read_through` and `beyond_unseen` fields and the `mark_read` request (the "new since you looked" feature, removed 2026-11-03), version 6 added the `label` on the Session a Message row names as sender or target, version 5 added the pages' `hosted_call` items, version 4 added each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.

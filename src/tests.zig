@@ -1,4 +1,5 @@
 test {
+    _ = @import("SkillMenu.zig");
     _ = @import("Installation.zig");
     _ = @import("release_candidate.zig");
     _ = @import("upgrade_process.zig");
