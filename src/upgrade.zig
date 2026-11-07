@@ -68,7 +68,7 @@ pub const Check = struct {
     host: HostLifecycle.Observation,
     home: []const u8,
     store: []const u8,
-    running_executable: []const u8,
+    running_executable: [:0]const u8,
     path: installation_path.Observation = .{ .state = .unavailable },
 
     pub fn deinit(self: *Check, allocator: std.mem.Allocator) void {
@@ -102,10 +102,16 @@ pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []cons
     errdefer candidate.deinit(allocator);
     var host = try HostLifecycle.observe(allocator, init.io, home, store, cancellation);
     errdefer host.deinit(allocator);
+    return ownCheck(init, allocator, home, store, selected, candidate, host);
+}
+
+/// Takes the observed values only on success; the caller owns them on error.
+fn ownCheck(init: std.process.Init, allocator: std.mem.Allocator, home: []const u8, store: []const u8, selected: Installation.Selection, candidate: release.ReleaseCandidate, host: HostLifecycle.Observation) !Check {
     const owned_home = try allocator.dupe(u8, home);
     errdefer allocator.free(owned_home);
     const owned_store = try allocator.dupe(u8, store);
     errdefer allocator.free(owned_store);
+    // Preserve the allocation's sentinel in Check so deinit frees it too.
     const executable = try std.process.executablePathAlloc(init.io, allocator);
     errdefer allocator.free(executable);
     const path_observation = installation_path.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "") catch installation_path.Observation{ .state = .unavailable };
@@ -248,6 +254,40 @@ pub fn writeResult(writer: *std.Io.Writer, result: *const Result) !void {
             try writer.writeAll(". Do not restore/reset the Store or replay uncertain requests.\n");
         },
         else => try writer.writeAll("\n"),
+    }
+}
+
+test "upgrade Check owns the executable path at its exact allocation length" {
+    const allocator = std.testing.allocator;
+    var environment = try std.testing.environ.createMap(allocator);
+    defer environment.deinit();
+    try environment.put("PATH", "");
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &.{} }, .environ = .empty }, .arena = &arena, .gpa = allocator, .io = std.testing.io, .environ_map = &environment, .preopens = .empty };
+    const candidate: release.ReleaseCandidate = .{ .version = .{ .schema = 1, .patch = 0 }, .tag = "", .archive_name = "", .archive_url = "", .checksum_url = "", .sha256 = @splat(0) };
+
+    // Exercise the same Check construction and deinit as a successful check,
+    // using real executablePathAlloc and the safety-checking test allocator.
+    var checked = try ownCheck(init, allocator, "/synthetic/rui-test-home", "/synthetic/store", .absent, candidate, .absent);
+    defer checked.deinit(allocator);
+    try std.testing.expect(checked.running_executable.len != 0);
+    try std.testing.expectEqual(@as(u8, 0), checked.running_executable[checked.running_executable.len]);
+
+    // Each of home, store and sentinel path can fail. The production
+    // construction must release every earlier allocation on error.
+    for (0..3) |index| {
+        // Values supplied by the caller remain its responsibility on error.
+        var selected: Installation.Selection = .{ .source = try allocator.dupe(u8, "/owned/build") };
+        defer selected.deinit(allocator);
+        var owned_candidate = candidate;
+        owned_candidate.tag = try allocator.dupe(u8, "v0.1.0");
+        defer owned_candidate.deinit(allocator);
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = index });
+        try std.testing.expectError(error.OutOfMemory, ownCheck(init, failing.allocator(), "/synthetic/rui-test-home", "/synthetic/store", selected, owned_candidate, .absent));
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        try std.testing.expectEqualStrings("/owned/build", selected.source);
+        try std.testing.expectEqualStrings("v0.1.0", owned_candidate.tag);
     }
 }
 
