@@ -80,7 +80,9 @@ fn advanceWith(self: *Self, worker: ClientTask.Run) !bool {
 }
 
 fn joinWorker(self: *Self) void {
-    self.task.join() catch |err| self.failure = err;
+    self.task.join() catch |err| {
+        self.failure = err;
+    };
 }
 
 fn finish(self: *Self) void {
@@ -119,7 +121,10 @@ pub fn status(self: *const Self) []const u8 {
         const retained = self.cleanup.any();
         if (self.result) |*result| return switch (result.installation) {
             .installed => resultStatus("Upgrade installed", result.activation, retained),
-            .unchanged => resultStatus("Upgrade installation unchanged", result.activation, retained),
+            .unchanged => switch (result.activation) {
+                .not_needed, .already_ready, .ready => resultStatus("Upgrade up to date", result.activation, retained),
+                else => resultStatus("Upgrade installation unchanged", result.activation, retained),
+            },
         };
         if (self.failure != null) {
             if (self.cancelling) return if (retained) "Upgrade cancelled; cleanup retained" else "Upgrade cancelled";
@@ -131,13 +136,13 @@ pub fn status(self: *const Self) []const u8 {
     }
     if (self.cancelling) return "Upgrade cancellation requested; waiting for outcome";
     return switch (self.phase.load(.acquire)) {
-        .checking => "Upgrade: checking release and installation",
-        .preparing => "Upgrade: preparing and verifying",
-        .publishing => "Upgrade: publishing; cancellation is not rollback",
-        .stopping => "Upgrade: stopping Host",
-        .awaiting_retirement => "Upgrade: waiting for Host retirement",
-        .starting => "Upgrade: starting Host",
-        .verifying => "Upgrade: verifying Host compatibility",
+        .checking => "Upgrade: checking release and installation · Esc cancels",
+        .preparing => "Upgrade: preparing and verifying · Esc cancels",
+        .publishing => "Upgrade: publishing; Esc cancels, not rollback",
+        .stopping => "Upgrade: stopping Host · Esc cancels",
+        .awaiting_retirement => "Upgrade: waiting for Host retirement · Esc cancels",
+        .starting => "Upgrade: starting Host · Esc cancels",
+        .verifying => "Upgrade: verifying Host compatibility · Esc cancels",
         .finished => "Upgrade: finishing",
     };
 }
@@ -166,12 +171,21 @@ pub fn writeSummary(self: *const Self, writer: *std.Io.Writer) !void {
     if (!self.finished) return;
     if (self.failure) |err| try writer.print(" ({s})", .{@errorName(err)});
     if (self.result == null and self.failure == null and !self.cancelling) {
-        if (self.checked) |*checked| try writer.print(" ({s})", .{@tagName(checked.selected)});
+        if (self.checked) |*checked| switch (checked.selected) {
+            .source, .unknown_managed, .absent => try writer.writeAll("; use the release installer"),
+            .ineligible => try writer.writeAll("; use its installer or package manager"),
+            .released => {},
+        };
     }
-    if (self.cleanup.any()) {
-        try writer.writeAll("\n");
-        try self.cleanup.write(writer);
-    }
+    if (self.cleanup.any()) try writer.writeAll("; exit to see retained cleanup paths");
+}
+
+/// The concise but durable installation and activation receipt for an ordinary
+/// exit or a subsequent command. The full check remains in writeReport.
+pub fn writeReceipt(self: *const Self, writer: *std.Io.Writer) !void {
+    std.debug.assert(!self.started or self.finished);
+    if (self.result) |*result| try upgrade.writeResult(writer, result);
+    try self.cleanup.write(writer);
 }
 
 /// Read only after finished/settle; always render the actual publication and
@@ -275,12 +289,30 @@ test "joined installation cancellation retains the actual publication receipt" {
     try job.writeReport(&writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Installed Rui. Complete build: /synthetic/installed") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "publication was not rolled back") != null);
+    var receipt_bytes: [4096]u8 = undefined;
+    var receipt = std.Io.Writer.fixed(&receipt_bytes);
+    try job.writeReceipt(&receipt);
+    try std.testing.expect(std.mem.indexOf(u8, receipt.buffered(), "Installed Rui. Complete build: /synthetic/installed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, receipt.buffered(), "publication was not rolled back") != null);
     var summary_bytes: [256]u8 = undefined;
     var summary = std.Io.Writer.fixed(&summary_bytes);
     try job.writeSummary(&summary);
     try std.testing.expectEqualStrings("Upgrade installed; activation cancelled", summary.buffered());
     // Fixture strings are static, not owned allocations.
     job.result = null;
+}
+
+test "upgrade status distinguishes verified current from superseded or cancelled" {
+    var result = test_result;
+    result.installation = .{ .unchanged = .{ .operation_build = "/synthetic/installed", .selected_after = "/synthetic/installed" } };
+    var job: Self = .{ .started = true, .finished = true, .result = result };
+    job.result.?.activation = .not_needed;
+    try std.testing.expectEqualStrings("Upgrade up to date; activation not needed", job.status());
+    job.result.?.activation = .superseded;
+    try std.testing.expectEqualStrings("Upgrade installation unchanged; activation superseded", job.status());
+    job.result.?.activation = .cancelled;
+    try std.testing.expectEqualStrings("Upgrade installation unchanged; activation cancelled", job.status());
+    job.result = null; // static fixture storage
 }
 
 test "cleanup report retains copied paths and the worker error" {
@@ -296,7 +328,7 @@ test "cleanup report retains copied paths and the worker error" {
     var summary = std.Io.Writer.fixed(&summary_bytes);
     try job.writeSummary(&summary);
     try std.testing.expect(std.mem.indexOf(u8, summary.buffered(), "ReleaseChecksumMismatch") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary.buffered(), "$'/synthetic/retained-stage'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary.buffered(), "exit to see retained cleanup paths") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "ReleaseChecksumMismatch") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "AccessDenied") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "$'/synthetic/retained-stage'") != null);
