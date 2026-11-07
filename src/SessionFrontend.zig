@@ -2791,24 +2791,48 @@ const HeldFrontend = struct {
 
 test "completed Action inspection waits for the selector decoder in the active owner" {
     const Host = struct {
-        fn respond(listener: *std.Io.net.Server, body: []const u8) !void {
-            var fds = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
-            if (try std.posix.poll(&fds, 2000) == 0) return error.TestUnexpectedResult;
-            const peer = try listener.accept(std.testing.io);
-            defer peer.close(std.testing.io);
-            var request: [4096]u8 = undefined;
+        fn nonblocking(fd: std.posix.fd_t) !void {
+            const flags = std.c.fcntl(fd, std.c.F.GETFL);
+            if (flags < 0) return error.FcntlFailed;
+            const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+            if (std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return error.FcntlFailed;
+        }
+
+        fn readable(fd: std.posix.fd_t, deadline: std.Io.Clock.Timestamp) !void {
+            try test_poll.waitUntil(std.testing.io, deadline, fd, struct {
+                fn ready(socket: std.posix.fd_t) !bool {
+                    var fds = [_]std.posix.pollfd{.{ .fd = socket, .events = std.posix.POLL.IN, .revents = 0 }};
+                    return try std.posix.poll(&fds, 0) != 0;
+                }
+            }.ready);
+        }
+
+        fn readRequest(fd: std.posix.fd_t, deadline: std.Io.Clock.Timestamp, request: []u8) ![]const u8 {
             var used: usize = 0;
             while (true) {
-                const count = try std.posix.read(peer.socket.handle, request[used..]);
+                if (used == request.len) return error.RequestTooLarge;
+                try readable(fd, deadline);
+                const count = try std.posix.read(fd, request[used..]);
                 if (count == 0) return error.UnexpectedEof;
                 used += count;
                 if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
-                    const start = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
-                    const finish = std.mem.indexOf(u8, request[start..end], "\r\n").? + start;
-                    if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
+                    const start = (std.mem.indexOf(u8, request[0..end], "Content-Length: ") orelse return error.InvalidRequest) + "Content-Length: ".len;
+                    const finish = (std.mem.indexOf(u8, request[start .. end + 2], "\r\n") orelse return error.InvalidRequest) + start;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) return request[0..used];
                 }
             }
-            try std.testing.expectStringStartsWith(request[0..used], "POST /v1/inspect-session HTTP/1.1\r\n");
+        }
+
+        fn respond(listener: *std.Io.net.Server, body: []const u8) !void {
+            // One deadline covers connection readiness and every request read.
+            const deadline = test_poll.after(std.testing.io, .fromSeconds(2));
+            try readable(listener.socket.handle, deadline);
+            const peer = try listener.accept(std.testing.io);
+            defer peer.close(std.testing.io);
+            try nonblocking(peer.socket.handle);
+            var request: [4096]u8 = undefined;
+            const received = try readRequest(peer.socket.handle, deadline, &request);
+            try std.testing.expectStringStartsWith(received, "POST /v1/inspect-session HTTP/1.1\r\n");
             var header: [256]u8 = undefined;
             var writer = peer.writer(std.testing.io, &.{});
             try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len}));
@@ -2816,6 +2840,17 @@ test "completed Action inspection waits for the selector decoder in the active o
         }
     };
     const io = std.testing.io;
+    // A peer that sends only part of its declared body cannot hold the test.
+    var partial: [2]c_int = undefined;
+    try std.testing.expect(std.c.pipe(&partial) == 0);
+    defer for (partial) |fd| {
+        _ = std.c.close(fd);
+    };
+    try Host.nonblocking(partial[0]);
+    const fragment = "POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\nx";
+    try std.testing.expectEqual(@as(isize, fragment.len), std.c.write(partial[1], fragment, fragment.len));
+    var partial_buffer: [128]u8 = undefined;
+    try std.testing.expectError(error.Timeout, Host.readRequest(partial[0], test_poll.after(io, .fromMilliseconds(10)), &partial_buffer));
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
