@@ -281,8 +281,29 @@ pub fn build(b: *std.Build) void {
     const production_safe = addRui(b, target, .ReleaseSafe, "rui-release-safe-check", pinned_transport);
     const release_safe = if (pr_ci) addRui(b, target, .ReleaseSafe, "rui-pr-check", pinned_transport) else production_safe;
     if (pr_ci) release_safe.use_llvm = false;
+    // A hard-filtered owner test is run only by the isolated terminal fixture,
+    // which supplies and owns its private Host. Portable test-logic stays free
+    // of Host startup and does not execute this integration driver.
+    const held_history_owner = b.addTest(.{
+        .name = "terminal-held-history-owner",
+        .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+        .filters = &.{"held history status real Host"},
+    });
+    configureSqlite(b, held_history_owner);
+    configureYaml(b, held_history_owner);
+    configureBashPlatform(b, held_history_owner);
+    configureHostLaunch(b, held_history_owner);
+    configureTerminalEditor(b, held_history_owner);
+    configureTransport(b, held_history_owner, target, pinned_transport);
+    configureOpenApi(b, held_history_owner);
     const terminal_restoration = b.addSystemCommand(&.{"env"});
     terminal_restoration.addPrefixedFileArg("RUI_TEST_TERMINAL_NOTICE=", ci.path(terminal_notice));
+    terminal_restoration.addPrefixedFileArg("RUI_TEST_HELD_OWNER=", ci.path(held_history_owner));
     terminal_restoration.addArg("python3");
     terminal_restoration.addFileArg(b.path("tests/integration/terminal_restoration_integration.py"));
     terminal_restoration.addFileArg(ci.path(release_safe));
@@ -708,7 +729,9 @@ pub fn build(b: *std.Build) void {
     format.addFileArg(b.path("build.zig"));
     format.addDirectoryArg(b.path("src"));
     const release_small = addRui(b, target, .ReleaseSmall, "rui-release-small-check", pinned_transport);
-    const fast_integrations = b.addSystemCommand(&.{"sh"});
+    const fast_integrations = b.addSystemCommand(&.{"env"});
+    fast_integrations.addPrefixedFileArg("RUI_TEST_HELD_OWNER=", ci.path(held_history_owner));
+    fast_integrations.addArg("sh");
     fast_integrations.addFileArg(b.path("tests/integration/check.sh"));
     fast_integrations.addFileArg(ci.path(release_safe));
     fast_integrations.addFileArg(ci.path(debug));
@@ -748,7 +771,9 @@ pub fn build(b: *std.Build) void {
         "Run routine native tests and process integrations serially (long witnesses are separate)",
     );
     const check_part = b.option(enum { all, execution, callers }, "check-part", "Isolated full-check part (default all)") orelse .all;
-    const process_integrations = b.addSystemCommand(&.{"sh"});
+    const process_integrations = b.addSystemCommand(&.{"env"});
+    process_integrations.addPrefixedFileArg("RUI_TEST_HELD_OWNER=", ci.path(held_history_owner));
+    process_integrations.addArg("sh");
     process_integrations.addFileArg(b.path("tests/integration/check.sh"));
     process_integrations.addFileArg(ci.path(release_safe));
     process_integrations.addFileArg(ci.path(debug));
