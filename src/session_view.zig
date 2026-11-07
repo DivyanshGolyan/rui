@@ -1030,7 +1030,7 @@ pub fn renderPermissionArguments(io: std.Io, scratch: std.Io.File, sink: anytype
 
 /// Arguments remain exact JSON, not a Bash command or a schema interpretation.
 /// Like Bash, render to the Action file in full: SessionScreen applies its
-/// viewport bound and refuses consent when that file is only a preview.
+/// viewport bound and labels a truncated preview without changing its identity.
 fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
@@ -1853,15 +1853,15 @@ test "MCP approval renders object arguments and adopts the same Allow once and D
         try screen.adopt(std.testing.io, action, 7, true);
         try std.testing.expect(screen.consent.?.presentation == .complete);
         var pending = screen.consent.?;
-        var projection = Consent.project(pending, .{ .action_page = true, .read = true }, false);
+        var projection = Consent.project(pending, .{ .action_page = true }, false);
         try std.testing.expect(Consent.offered(pending, projection.approval).? == .allow_once);
         pending.highlight = .deny;
-        projection = Consent.project(pending, .{ .action_page = true, .read = true }, false);
+        projection = Consent.project(pending, .{ .action_page = true }, false);
         try std.testing.expect(Consent.offered(pending, projection.approval).? == .deny);
     }
 }
 
-test "MCP approval marks argument lines escapes controls and refuses a viewport preview" {
+test "MCP approval marks argument lines escapes controls and offers a previewed Action" {
     const Screen = @import("SessionScreen.zig");
     const Consent = @import("session_consent.zig");
     const Viewport = @import("ConversationViewport.zig");
@@ -1907,9 +1907,9 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     try std.testing.expect(sink.offset > Viewport.capacity);
     try screen.adopt(std.testing.io, action, 9, true);
     try std.testing.expect(screen.consent.?.presentation == .preview);
-    const projection = Consent.project(screen.consent, .{ .action_page = true, .read = true }, false);
-    try std.testing.expect(projection.approval == .preview);
-    try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
+    const projection = Consent.project(screen.consent, .{ .action_page = true }, false);
+    try std.testing.expect(projection.approval == .choice);
+    try std.testing.expectEqual(Consent.Choice.allow_once, Consent.offered(screen.consent, projection.approval).?);
 }
 
 test "queued received Messages retain sources and time without repeated labels; exclusion keeps its warning" {

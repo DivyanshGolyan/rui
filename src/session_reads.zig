@@ -198,7 +198,7 @@ pub const Target = union(enum) {
 };
 
 /// Action identity frozen when the inspection command is admitted.
-pub const ActionTarget = union(enum) { none, stale, captured: u64 };
+pub const ActionTarget = union(enum) { none, no_action, stale, captured: u64 };
 
 pub const Job = struct {
     init: std.process.Init = undefined,
@@ -418,7 +418,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     if (job.action_target != .none) {
         const target: ?u64 = switch (job.action_target) {
             .none => unreachable,
-            .stale => null,
+            .no_action, .stale => null,
             .captured => |action| if (try View.actionTool(task.requests(), job.store, job.session, action, job.files.scratch) != null) action else null,
         };
         try job.files.inspection.setLength(task.io, 0);
@@ -436,6 +436,8 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
                 try out.interface.print(" --action {d}\n", .{action});
             }
             job.result.inspected_action = action;
+        } else if (job.action_target == .no_action) {
+            try out.interface.writeAll("No Action selected; no successor selected and no decision sent.\n");
         } else try out.interface.writeAll("Action no longer available; no successor selected and no decision sent.\n");
         try out.flush();
         job.result.rendering = true;
@@ -1764,6 +1766,26 @@ test "a Host command writes its page and inherits no saved terminal descriptor" 
     try std.testing.expectEqual(@as(?c_int, null), Probe.leaked);
     var bytes: [16]u8 = undefined;
     try std.testing.expectEqualStrings("page\n", bytes[0..try page.readPositionalAll(io, &bytes, 0)]);
+}
+
+test "an unavailable admitted Action never runs a current-first command" {
+    const Probe = struct {
+        fn command(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, _: []u8) anyerror!void {
+            return error.UnexpectedCurrentFirst;
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const page = try tmp.dir.createFile(io, "inspection", .{ .read = true });
+    defer page.close(io);
+    var interrupted: client.Cancellation = .{};
+    var job: Job = .{ .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = undefined, .actions = undefined }, .command = Probe.command, .interrupted = &interrupted, .action_target = .no_action };
+    var task: Task = .{ .io = io };
+    try runCommand(&job, &task);
+    var bytes: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("No Action selected; no successor selected and no decision sent.\n", bytes[0..try page.readPositionalAll(io, &bytes, 0)]);
+    try std.testing.expect(job.result.inspected_action == null);
 }
 
 test "the Session line takes archive and other facts from Current and reads again after a change" {

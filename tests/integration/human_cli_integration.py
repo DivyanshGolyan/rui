@@ -8161,24 +8161,21 @@ def main(selected="all", *, held_owner=None):
             current_action = fixture.command("session", "inspect", "--store", store, "--session", interactive)
             action_id = current_action["actionable_permissions"][0]["action"]
             assert [item["action"] for item in current_action["actionable_permissions"]] == [action_id], current_action
+            records = home / ".config/rui/requests"
+            before_inspection = set(records.glob("*.json"))
             terminal_step(master, "/inspect-action", "Approval paused · Esc returns to Action")
             inspection = settle_screen(master, quiet=0.5)
-            # The JSON string wraps across page rows; rejoin as for exports.
-            rows = inspection.split("\n")
-            start = next(index for index, row in enumerate(rows) if row.startswith("Arguments: "))
-            shown_arguments = rows[start].removeprefix("Arguments: ")
-            previous = rows[start]
-            for row in rows[start + 1:]:
-                if not row or row.startswith("Approval paused"):
-                    break
-                shown_arguments += ("" if len(previous) >= 80 else " ") + row
-                previous = row
-            # Later page rows may follow the string without a blank row.
-            assert json.JSONDecoder().raw_decode(shown_arguments)[0] == padded_arguments, inspection
+            # The page offers the exact immutable-ID export, not an implicit
+            # decision. Its full JSON is checked on the actual export path.
+            assert "Exact Action inspection in your shell:" in inspection, inspection
+            assert str(action_id) in inspection and "\u202e" not in inspection, inspection
+            assert counter.read_text() == "x", "inspection approved an Action"
+            assert set(records.glob("*.json")) == before_inspection, "inspection sent a decision"
             action_ready(ready_read, master)
-            assert "\\r  " in inspection and "\u202e" not in inspection, inspection
-            exact = json.loads(run(home, "action", "inspect", "--store", store, "--session", interactive,
-                "--action", action_id))
+            exported = run(home, "action", "inspect", "--store", store, "--session", interactive,
+                "--action", action_id)
+            exact = terminal_safe_json(exported)
+            assert "\\r  " in exported and "\u202e" not in exported, exported
             assert exact == {"action": action_id, "call_id": control_call, "arguments": padded_arguments}, exact
             mismatch = admit(home, "action", "allow", "--store", store, "--session", session,
                 "--action", action_id, expect=3)
