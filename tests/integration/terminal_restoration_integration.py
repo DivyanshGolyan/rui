@@ -2536,10 +2536,10 @@ int main(int argc, char **argv) {
 def visible_stream_handoff_cases(state, library):
     """A command during held visible output waits, then runs once."""
     marker = "VISIBLE-CANCEL-PREFIX"
-    # The marker opens and closes the content: views from the top (history,
-    # details) and from the end (opening, live) both draw it first.
+    # The marker opens and closes the content: views from the top (details)
+    # and from the end (opening, live) both draw it first.
     long = marker + "\n" + "complete saved content\n" * 240 + marker + "\nVISIBLE-END"
-    for phase in ("opening", "activity", "history", "details", "interrupt", "completion", "permission"):
+    for phase in ("opening", "activity", "details", "interrupt", "completion", "permission"):
         root = state / f"visible-{phase}"
         root.mkdir()
         home, store = root / "home", root / "store"
@@ -2547,13 +2547,6 @@ def visible_stream_handoff_cases(state, library):
         text = json.dumps({"cmd": "echo " + marker + " # " + "x" * 6000, "timeout_ms": 1000, "description": "Print visible permission marker"})
         responses = [fixture.sse_tool_calls("visible", [("bash", "visible-call", text)])] if phase == "permission" else [
             fixture.sse_answer("visible", "visible-r", "visible-m", long)[0]]
-        if phase == "history":
-            # One target in the oldest response, outside the opening viewport.
-            # Short pages put that target at history's top instead of hiding it
-            # behind hundreds of lines of the long-stream fixture.
-            responses = [fixture.sse_answer(f"short-{i}", f"short-{i}-r", f"short-{i}-m",
-                f"{marker} history target" if i == 0 else f"history {i}\nOPENING-READY")[0]
-                for i in range(8)]
         endpoint = fixture.SuccessEndpoint(responses)
         thread = threading.Thread(target=endpoint.serve_forever)
         thread.start()
@@ -2577,39 +2570,11 @@ def visible_stream_handoff_cases(state, library):
                     "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_FAULT": "visible-stream", "RUI_TERMINAL_STREAM_ARM": str(arm)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             if phase != "opening":
-                ready = "VISIBLE-END" if phase == "details" else "OPENING-READY" if phase == "history" else "› "
+                ready = "VISIBLE-END" if phase == "details" else "› "
                 human.read_terminal(master, ready, composer=True)
-                capture = human.terminal_capture(master)
-                generation = capture.generation
-                if phase == "history":
-                    assert marker not in capture.completed, ("history target was already visible before arming", capture.completed)
                 arm.touch()
-                os.write(master, (f"/{phase}\n" if phase in ("history", "details") else "produce content\n").encode())
-            if phase == "history":
-                capture = human.terminal_capture(master)
-                raw = bytearray()
-                def feed(chunk):
-                    raw.extend(chunk)
-                    del raw[:-65536]
-                    capture.feed(chunk)
-                try:
-                    fixture.wait_for(human.draining(master, lambda: log.exists() and
-                        "visible-frame-closed" in log.read_text() and capture.generation > generation, feed=feed),
-                        "armed marker frame intercepted")
-                except host_process.WaitTimeout as error:
-                    # Retain only bounded actual bytes and screen; never fabricate a
-                    # marker or promote an unclosed frame to committed evidence.
-                    probe = b"<no probe log>"
-                    if log.exists():
-                        with log.open("rb") as source:
-                            probe = source.read(4096)
-                    raise AssertionError(("history marker gate timed out", bytes(raw), capture.completed,
-                        generation, capture.generation, probe)) from error
-                assert f"{marker} history target" in capture.completed and human.looking_back(capture.completed), capture.completed
-                events = log.read_text().splitlines()
-                assert events.index("visible-prefix-written") < events.index("visible-frame-closed"), events
-            else:
-                human.read_terminal(master, marker)
+                os.write(master, (f"/{phase}\n" if phase == "details" else "produce content\n").encode())
+            human.read_terminal(master, marker)
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             if phase == "completion":
                 # A live page shows whole: its marker frame already ends the
@@ -2683,6 +2648,197 @@ def visible_stream_handoff_cases(state, library):
                 lambda: stop_process(caller, timeout=5) if caller is not None else None,
                 lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
                 lambda: os.close(master), lambda: os.close(slave),
+                lambda: fixture.stop_host(host) if host is not None else None,
+                endpoint.shutdown, endpoint.server_close, join_endpoint,
+            )
+
+
+def held_history_owner_case(state, binary):
+    """The filtered native owner test uses a private, provider-free real Host."""
+    assert binary, "visible-stream requires RUI_TEST_HELD_OWNER"
+    binary = pathlib.Path(binary)
+    assert binary.is_absolute() and binary.is_file(), ("invalid held owner artifact", binary)
+    root = state / "held-history-owner"
+    root.mkdir(mode=0o700)
+    home, store = root / "home", root / "store"
+    home.mkdir(mode=0o700)
+    host = fixture.start_host(store, None)
+    try:
+        session = human.admit(home, "session", "configure", "--store", store,
+            "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol")["admission"]["answer"]["session"]
+        # An idle stop is a canonical, provider-free activity record. It
+        # gives the real history reader something to show without launching a model.
+        seed = human.admit(home, "session", "stop", "--store", store, "--session", session)["admission"]
+        assert seed["answer"]["status"] == "accepted", seed
+        assert seed["answer"]["selection"]["turn"] is None, seed
+        assert seed["completion"]["status"] == "completed", seed
+        result = subprocess.run([str(binary)], env={**os.environ, "HOME": str(home),
+            "RUI_TEST_HELD_STORE": str(store), "RUI_TEST_HELD_SESSION": session,
+            "RUI_TEST_HELD_HOME": str(home)}, capture_output=True, timeout=60)
+        output = result.stdout + result.stderr
+        assert result.returncode == 0, (result.returncode, output[-8192:])
+        assert output.count(b"held-history-owner: real status completed") == 1, output[-8192:]
+        print("held history owner: real Host status dispatch and input custody passed", flush=True)
+    finally:
+        fixture.stop_host(host)
+
+
+def visible_history_backpressure_cases(state, library):
+    """Committed oldest history precedes actual PTY EAGAIN, not a marker hook."""
+    for blocked in (True, False):
+        root = state / ("visible-history-blocked" if blocked else "visible-history-unblocked")
+        root.mkdir(mode=0o700)
+        home, store = root / "home", root / "store"
+        home.mkdir(mode=0o700)
+        marker = "HISTORY-OLDEST-ONLY-2741"
+        responses = [fixture.sse_answer(f"history-{i}", f"history-{i}-r", f"history-{i}-m",
+            marker if i == 0 else f"compact history answer {i}")[0] for i in range(8)]
+        endpoint = fixture.SuccessEndpoint(responses)
+        thread = threading.Thread(target=endpoint.serve_forever)
+        thread.start()
+        host = caller = None
+        master, slave = open_pty(rows=24)
+        output_master, output_slave = open_pty(rows=24)
+        original = termios.tcgetattr(slave)
+        flags = {fd: fcntl.fcntl(fd, fcntl.F_GETFL) for fd in (slave, output_slave)}
+        arm, log = root / "arm", root / "probe.log"
+        capture = human.terminal_capture(output_master)
+        raw = bytearray()
+        phase = "seed history"
+
+        def feed(chunk):
+            raw.extend(chunk)
+            del raw[:-65536]
+            capture.feed(chunk)
+
+        def probe():
+            if not log.exists():
+                return b""
+            with log.open("rb") as source:
+                return source.read(4096)
+
+        def wait_screen(predicate, description):
+            nonlocal phase
+            phase = description
+            fixture.wait_for(human.draining(output_master, predicate, feed=feed), description, timeout=15)
+
+        def history_ready():
+            return (not capture.synchronized and human.history_selected(capture.completed,
+                capture.screen.cursor.x, capture.screen.cursor.y))
+
+        def oldest_ready():
+            return history_ready() and human.exact_railed_row(capture, marker)
+
+        def records():
+            return {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
+
+        def permission():
+            return fixture.command("session", "inspect", "--store", store,
+                "--session", session)["session"]["permission_mode"]
+
+        try:
+            host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
+            session = human.admit(home, "session", "configure", "--store", store,
+                "--workspace", root, "--provider", "codex", "--model", "gpt-6-sol",
+                "--permission-mode", "ask")["admission"]["answer"]["session"]
+            for i in range(8):
+                admission = human.admit(home, "session", "send", "--store", store,
+                    "--to", session, input=f"saved history input {i}")
+                fixture.wait_for(lambda: fixture.completed_observation(store, admission["request"]),
+                    "saved compact history answer")
+            assert len(endpoint.requests) == 8
+            caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store),
+                "--", session], stdin=slave, stdout=output_slave, stderr=subprocess.PIPE,
+                env={**os.environ, "HOME": str(home), "TERM": "xterm-256color",
+                    os_semantics.PRELOAD: str(library), "RUI_TERMINAL_FAULT": "renderer-backpressure",
+                    "RUI_TERMINAL_PROBE": str(log), "RUI_TERMINAL_BACKPRESSURE_ARM": str(arm)})
+            wait_screen(lambda: capture.draft("", 2), "history opening composer")
+            assert not human.exact_railed_row(capture, marker), ("oldest answer already in opening", capture.completed)
+            generation = capture.generation
+            os.write(master, b"/history\n")
+            wait_screen(lambda: capture.generation > generation and history_ready(), "real history command committed")
+            for page in range(24):
+                if oldest_ready():
+                    break
+                generation = capture.generation
+                previous = capture.completed
+                os.write(master, b"\x1b[5~")
+                wait_screen(lambda: capture.generation > generation and capture.completed != previous and history_ready(),
+                    f"history PgUp {page + 1} committed")
+            assert oldest_ready(), capture.completed
+            before = records()
+            assert permission() == "ask"
+            if blocked:
+                arm.touch()
+            generation = capture.generation
+            assert os.write(master, b"x") == 1  # Force a real redraw of this history frame.
+            if blocked:
+                phase = "history redraw actual kernel EAGAIN"
+                fixture.wait_for(lambda: b"output-blocked\n" in probe(), phase)
+            else:
+                wait_screen(lambda: capture.generation > generation and capture.draft("x", 3) and
+                    human.looking_back(capture.completed) and human.exact_railed_row(capture, marker),
+                    "unblocked history draft redraw")
+                assert b"output-blocked\n" not in probe(), probe()
+            command = b"\x15/configure --permission-mode bypass\n"
+            phase = "queued Configure while history output held" if blocked else "unblocked Configure"
+            assert os.write(master, command) == len(command)
+            if blocked:
+                # Canonical reads happen with credit still withheld. The independent
+                # owner test proves dispatch/input custody, without a timing claim here.
+                assert permission() == "ask"
+                assert records() == before, "held history captured a pending command"
+                assert len(endpoint.requests) == 8, "held history restarted provider work"
+                assert caller.poll() is None and probe().count(b"output-blocked\n") == 1
+                assert capture.generation == generation, "blocked history redraw committed"
+                termios.tcflow(output_slave, termios.TCOON)
+            wait_screen(lambda: "Configured." in capture.completed.split("\n") and capture.draft("", 2),
+                "Configure accepted notice after history")
+            assert permission() == "bypass"
+            after = records()
+            assert all(after.get(path) == content for path, content in before.items())
+            added = set(after) - set(before)
+            assert len(added) == 1, ("Configure capture count", added)
+            captured, = added
+            record = json.loads(after[captured])
+            assert record["kind"] == "configure", record
+            observed = fixture.command("request", "inspect", "--store", store, "--key", record["key"])
+            assert observed["observation"]["status"] == "accepted", observed
+            assert observed["observation"]["revision"] == "2", observed
+            assert len(endpoint.requests) == 8, "history Configure restarted provider work"
+            phase = "exit history terminal"
+            os.write(master, b"\x03")
+            tail, errors = human.terminal_exit(caller, output_master)
+            feed(tail)
+            assert caller.returncode == 0 and not errors, (caller.returncode, errors[-4096:])
+            assert records() == after, "history Configure captured more than once"
+            assert len(endpoint.requests) == 8, "history exit restarted provider work"
+            assert probe().count(b"output-blocked\n") == int(blocked), probe()
+            assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
+            for fd, expected in flags.items():
+                assert_file_flags(fcntl.fcntl(fd, fcntl.F_GETFL), expected)
+            print("visible history: " + ("actual kernel EAGAIN defers Configure until TCOON" if blocked
+                else "unblocked negative runs Configure without output credit release") +
+                "; one accepted capture, no provider rerun", flush=True)
+        finally:
+            if sys.exception() is not None:
+                preserve_failure_metadata(root / "history-failure.json", lambda: {
+                    "phase": phase, "blocked": blocked, "raw_hex": bytes(raw).hex(),
+                    "screen": capture.completed, "generation": capture.generation,
+                    "probe": probe().decode(errors="replace"),
+                    "returncode": caller.poll() if caller is not None else None})
+
+            def join_endpoint():
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+
+            dispose_all(
+                lambda: termios.tcflow(output_slave, termios.TCOON),
+                lambda: stop_process(caller, timeout=5) if caller is not None else None,
+                lambda: termios.tcflush(output_slave, termios.TCOFLUSH),
+                lambda: termios.tcflush(slave, termios.TCIFLUSH),
+                lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
+                *(lambda fd=fd: os.close(fd) for fd in (master, slave, output_master, output_slave)),
                 lambda: fixture.stop_host(host) if host is not None else None,
                 endpoint.shutdown, endpoint.server_close, join_endpoint,
             )
@@ -3321,7 +3477,7 @@ def native_notice_cases(state):
             dispose_all(lambda: os.close(reader), lambda: os.close(writer))
 
 
-def main(selected=None):
+def main(selected=None, *, held_owner=None):
     state = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-terminal-restoration."))
     home = state / "home"
     home.mkdir()
@@ -3402,9 +3558,15 @@ def main(selected=None):
         if selected == "startup":
             completed = True
             return
+        if selected == "held-history-owner":
+            held_history_owner_case(state, held_owner)
+            completed = True
+            return
         if selected in (None, "visible-stream"):
             visible_stream_hook_boundary(state, library)
             visible_stream_handoff_cases(state, library)
+            visible_history_backpressure_cases(state, library)
+            held_history_owner_case(state, held_owner)
         if selected == "visible-stream":
             completed = True
             return
@@ -3429,5 +3591,6 @@ def main(selected=None):
 
 
 if __name__ == "__main__":
+    held_owner = os.environ.get("RUI_TEST_HELD_OWNER")
     host_process.enter()
-    main(sys.argv[2] if len(sys.argv) == 3 else None)
+    main(sys.argv[2] if len(sys.argv) == 3 else None, held_owner=held_owner)

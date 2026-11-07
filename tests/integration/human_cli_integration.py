@@ -6828,7 +6828,7 @@ def renderer_cases():
         resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
 
 
-def main(selected="all"):
+def main(selected="all", *, held_owner=None):
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
@@ -6898,7 +6898,7 @@ def main(selected="all"):
     if selected == "persistent-permission":
         return
     if selected == "all" and not split_callers:
-        terminal_restoration_integration.main()
+        terminal_restoration_integration.main(held_owner=held_owner)
         canonical_failure_integration.main()
     if selected == "caller-core":
         selected = "all"
@@ -8391,5 +8391,6 @@ def main(selected="all"):
 
 
 if __name__ == "__main__":
+    held_owner = os.environ.get("RUI_TEST_HELD_OWNER")
     host_process.enter()
-    main(sys.argv[2] if len(sys.argv) == 3 else "all")
+    main(sys.argv[2] if len(sys.argv) == 3 else "all", held_owner=held_owner)

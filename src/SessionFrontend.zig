@@ -2809,6 +2809,186 @@ const HeldFrontend = struct {
     }
 };
 
+test "held history status real Host" {
+    var phase: []const u8 = "setup";
+    errdefer std.debug.print("held-history-owner failed: {s}\n", .{phase});
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.store = held.environ.get("RUI_TEST_HELD_STORE") orelse return error.SkipZigTest;
+    self.session = held.environ.get("RUI_TEST_HELD_SESSION") orelse return error.MissingHeldSession;
+    self.home = held.environ.get("RUI_TEST_HELD_HOME") orelse return error.MissingHeldHome;
+    self.init.gpa = std.testing.allocator;
+    self.init.environ_map = &held.environ;
+    held.screen.home = self.home;
+    self.status = @import("cli.zig").sessionStatus;
+    self.submission.store = self.store;
+    self.submission.session = self.session;
+    self.submission.environment = .{ .map = &held.environ };
+
+    var files: [6]std.Io.File = undefined;
+    var opened: usize = 0;
+    defer for (files[0..opened]) |file| file.close(std.testing.io);
+    for ([_][]const u8{ "scratch", "action", "inspection", "status", "actions0", "actions1" }) |name| {
+        files[opened] = try held.tmp.dir.createFile(std.testing.io, name, .{ .read = true });
+        opened += 1;
+    }
+    self.files = .{ .scratch = files[0], .action = files[1], .inspection = files[2], .status = files[3], .actions = .{ files[4], files[5] } };
+    defer {
+        self.reader.cancel();
+        // On failure preserve the assertion or read error that led here;
+        // success below proves there is no borrower left to join.
+        self.reader.join() catch {};
+    }
+
+    // Populate history through a real joined borrower, never a synthetic
+    // completion or page. Python owns the private Store and its live Host.
+    phase = "activity scan";
+    self.reading.opening = true;
+    try self.launch(self.freeze(.activity), reads.scan);
+    const Ready = struct {
+        fn done(frontend: *Self) !bool {
+            return frontend.reader.completed();
+        }
+    };
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), self, Ready.done);
+    try self.settleReader();
+    phase = "nonempty history";
+    try std.testing.expect(held.screen.live.text.text().len != 0);
+    phase = "open transcript";
+    try self.beginTranscript();
+    try std.testing.expect(held.screen.view == .transcript);
+
+    const Gate = struct {
+        held: *HeldFrontend,
+        deadline: i96,
+        released: bool = false,
+        queued_while_held: bool = false,
+        injected: bool = false,
+        history_delivered: bool = false,
+        pumps: usize = 0,
+        history_frame: ?u64 = null,
+        status_scans: usize = 0,
+        target_frame: ?u64 = null,
+        target_deliveries: usize = 0,
+
+        fn drain(gate: *@This()) void {
+            var sink: [65536]u8 = undefined;
+            while (std.c.read(gate.held.pipes[1][0], &sink, sink.len) > 0) {}
+        }
+
+        fn step(raw: *anyopaque) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            const frontend = &gate.held.self;
+            if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= gate.deadline) return error.TestUnexpectedResult;
+            gate.pumps += 1;
+            if (!gate.injected) {
+                try std.testing.expect(gate.held.terminal.writing);
+                const command = "/status\r";
+                try std.testing.expect(std.c.write(gate.held.pipes[0][1], command, command.len) == command.len);
+                gate.injected = true;
+            }
+            try pump(frontend);
+            if (gate.released) {
+                gate.drain();
+                return;
+            }
+            const ticket = gate.held.screen.ticket.?;
+            if (ticket.delivered) {
+                std.debug.print("held-history-owner: premature presentation credit\n", .{});
+                return error.EarlyPresentation;
+            }
+            if (frontend.inspection.status_requested) {
+                std.debug.print("held-history-owner: premature status dispatch\n", .{});
+                return error.EarlyDispatch;
+            }
+            try std.testing.expect(!gate.held.screen.backend.idle());
+            try std.testing.expect(gate.held.screen.view == .transcript);
+            try std.testing.expect(!frontend.job.open_status and !frontend.job.watch_status);
+            try std.testing.expectEqual(@as(usize, 0), gate.status_scans);
+            if (gate.history_frame) |frame| try std.testing.expectEqual(frame, ticket.frame) else gate.history_frame = ticket.frame;
+            var fds = [_]std.posix.pollfd{.{ .fd = gate.held.pipes[0][0], .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 0) != 0 or frontend.input.pending() != .none) return;
+            try std.testing.expectEqualStrings("/status", frontend.input.queuedCommand().?);
+            gate.queued_while_held = true;
+            gate.released = true;
+            gate.drain();
+        }
+
+        fn observed(raw: *anyopaque, _: protocol.session_work.Work, _: []const u8, opening: bool) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            const frontend = &gate.held.self;
+            try std.testing.expect(gate.released and gate.history_delivered and !opening);
+            try std.testing.expect(frontend.reader.thread == null);
+            try std.testing.expect(frontend.job.open_status and frontend.job.result.status);
+            try std.testing.expect(!frontend.inspection.status_requested);
+            try std.testing.expect(frontend.input.queuedCommand() == null);
+            try std.testing.expect(frontend.statusShown());
+            gate.status_scans += 1;
+            try std.testing.expectEqual(@as(usize, 1), gate.status_scans);
+        }
+
+        fn service(raw: *anyopaque) !bool {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            const frontend = &gate.held.self;
+            if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= gate.deadline) return error.TestUnexpectedResult;
+            if (gate.released and !gate.history_delivered) {
+                const history = gate.held.screen.ticket.?;
+                try std.testing.expect(history.delivered);
+                try std.testing.expectEqual(gate.history_frame.?, history.frame);
+                try std.testing.expect(!frontend.inspection.status_requested);
+                try std.testing.expectEqualStrings("/status", frontend.input.queuedCommand().?);
+                gate.history_delivered = true;
+            }
+            if (!frontend.statusShown()) return false;
+            const ticket = gate.held.screen.ticket.?;
+            // The prior history receipt cannot authorize this target. Stop
+            // only after the real status frame is fully accepted and credited
+            // in its own scope, before another scan or redraw can start.
+            if (ticket.frame == gate.history_frame.? or !ticket.delivered) return false;
+            try std.testing.expectEqual(ticket.scope, gate.held.screen.scope);
+            try std.testing.expect(gate.held.screen.backend.idle());
+            try std.testing.expect(!gate.held.terminal.writing);
+            try std.testing.expect(frontend.reader.thread == null);
+            try std.testing.expectEqual(@as(usize, 1), gate.status_scans);
+            try std.testing.expectEqualStrings(frontend.session, frontend.inspection.sessions[frontend.inspection.status.?].session.slice());
+            try std.testing.expect(std.mem.indexOf(u8, gate.held.screen.browsing.text.text(), "This Session") != null);
+            gate.target_frame = ticket.frame;
+            gate.target_deliveries += 1;
+            try std.testing.expectEqual(@as(usize, 1), gate.target_deliveries);
+            // Real terminal input ends the owner, not an assigned Outcome or
+            // a fake reader result. The target was delivered before this key.
+            const detach = "\x04";
+            try std.testing.expect(std.c.write(gate.held.pipes[0][1], detach, detach.len) == detach.len);
+            try pump(frontend);
+            return error.TestUnexpectedResult;
+        }
+    };
+    var gate: Gate = .{ .held = held, .deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 10 * std.time.ns_per_s };
+    held.terminal.pump = .{ .context = &gate, .step = Gate.step };
+    self.lender = quiet_overview;
+    self.lender.context = &gate;
+    self.lender.observed = Gate.observed;
+    self.lender.service = Gate.service;
+    // The active owner reaches its own blocked history draw before the
+    // pump injects input. Only /status makes the next live scan due.
+    self.poll_at = std.math.maxInt(i96);
+    phase = "hold output";
+    try held.hold("");
+    phase = "drive active";
+    try std.testing.expectError(error.InteractiveInterrupted, self.driveActive());
+    phase = "post-drive checks";
+    try std.testing.expect(gate.released and gate.queued_while_held and gate.pumps != 0);
+    try std.testing.expect(gate.history_delivered);
+    try std.testing.expectEqual(@as(?Outcome, .detached), self.leaving);
+    try std.testing.expectEqual(@as(usize, 1), gate.status_scans);
+    try std.testing.expectEqual(@as(usize, 1), gate.target_deliveries);
+    try std.testing.expectEqual(gate.target_frame.?, held.screen.ticket.?.frame);
+    try std.testing.expect(held.screen.ticket.?.delivered);
+    try std.testing.expect(self.reader.thread == null and self.input.queuedCommand() == null);
+    std.debug.print("held-history-owner: real status completed\n", .{});
+}
+
 /// Each byte through the frontend's one stream, as `step` delivers it.
 fn sendKeys(frontend: *Self, bytes: []const u8) !void {
     for (bytes) |byte| {
