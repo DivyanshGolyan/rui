@@ -1745,6 +1745,15 @@ test "conversation source edge and rail retain full physical width" {
             const cells = Test.window(screen);
             var diagnostic: [512]u8 = undefined;
             std.debug.print("EDGE live color={} cols={d} edge={s} geometry={d}x{d} scroll={d} height={d} row0=[{s}]\n", .{ colour, columns, edge, screen.backend.geometry().cols, screen.backend.geometry().rows, screen.live.scroll.scroll.y, screen.height, rowText(screen, 0, &diagnostic) });
+            const source = screen.live.text.text();
+            const projection = screen.live.projection(screen.textLayout());
+            std.debug.print("EDGE detail source_len={d} source=[{s}] tail=[{s}] layout_width={d} rows={d} x={d} y={d}\n", .{ source.len, source, source[source.len -| 16..], screen.textLayout().width, projection.total, screen.live.scroll.scroll.x, screen.live.scroll.scroll.y });
+            std.debug.print("EDGE row1=[{s}]\n", .{rowText(screen, 1, &diagnostic)});
+            for (columns -| 10..columns) |column| {
+                const first = cells.readCell(@intCast(column), 0).?;
+                const second = cells.readCell(@intCast(column), 1).?;
+                std.debug.print("EDGE cell x={d} row0=[{s}] width0={d} row1=[{s}] width1={d}\n", .{ column, first.char.grapheme, first.char.width, second.char.grapheme, second.char.width });
+            }
             try std.testing.expectEqualStrings(edge, cells.readCell(columns - 2, 0).?.char.grapheme);
             const rail = cells.readCell(columns - 1, 0).?.char.grapheme;
             try std.testing.expect(std.mem.eql(u8, rail, "│") or std.mem.eql(u8, rail, "▐"));
@@ -1913,6 +1922,13 @@ test "partial Action source glyphs survive edge and resize" {
         for (0..8) |column| {
             const cell = diagnostic_cells.readCell(@intCast(column), 0).?;
             std.debug.print("WIDE cell={d} glyph=[{s}] cell_width={d}\n", .{ column, cell.char.grapheme, cell.char.width });
+        }
+        if (std.mem.indexOf(u8, case.source, "中") != null) {
+            // Test the physical continuation separately from rowText's string
+            // concatenation; retain the original string assertion below.
+            try std.testing.expectEqualStrings("中", diagnostic_cells.readCell(5, 0).?.char.grapheme);
+            try std.testing.expectEqualStrings(" ", diagnostic_cells.readCell(6, 0).?.char.grapheme);
+            try std.testing.expectEqualStrings("…", diagnostic_cells.readCell(7, 0).?.char.grapheme);
         }
         try std.testing.expectEqualStrings(case.first, rowText(screen, 0, &row));
         _ = screen.browse(true, false);
