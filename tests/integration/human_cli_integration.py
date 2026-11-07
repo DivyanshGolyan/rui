@@ -1442,6 +1442,19 @@ def overview_cases():
         # Enter opens the selected Session; Esc returns.
         os.write(master, b"\n")
         read_terminal(master, "Flaky test fixed.", composer=True)
+        # Escape and a following arrow share a decoder prefix. Returning to
+        # the overview must not lose ESC [ / ESC O and type the final B.
+        # A printable suffix is a barrier: its frame proves the arrow's last
+        # byte was processed, rather than accepting an earlier empty frame.
+        for sequence, end in ((b"\x1b[B", b""), (b"\x1bOB", b""),
+                              (b"\x1b[200~", b"\x1b[201~")):
+            listed = overview_frame(master, lambda frame: "handoff-marker" in frame,
+                keys=b"\x1b" + sequence + b"handoff-marker" + end)
+            assert any(row.strip() == "› handoff-marker" for row in listed.splitlines()), listed
+            assert len(list(records.glob("*.json"))) == 1, "returning started a Session"
+            overview_frame(master, lambda frame: "handoff-marker" not in frame, keys=b"\x1b")
+            os.write(master, b"\n")
+            read_terminal(master, "Flaky test fixed.", composer=True)
         overview_frame(master, lambda frame: "lane four" in frame, keys=b"\x1b")
         notice = leave_overview(master)
         assert "Detached. Host work continues." in notice and "Resume:" not in notice, notice

@@ -563,6 +563,20 @@ class TerminalScreen:
             self.capture.feed(data)
             self.tail.extend(data)
             del self.tail[:-16384]
+        return bool(data)
+
+    def wait_for_exit(self, description):
+        def exited():
+            self.read_output()
+            return self.process.poll() is not None
+
+        wait_for(exited, description)
+        # The child can exit between the last read and poll. Its slave stays
+        # open for collection; drain to EAGAIN or EOF, with a finite cap.
+        for _ in range(256):
+            if not self.read_output():
+                return
+        raise AssertionError("terminal output did not drain after child exit")
 
     def observe(self):
         self.read_output()
@@ -600,6 +614,55 @@ def terminal_setup(c):
     return configured["answer"]["session"], credential.read_bytes()
 
 
+def terminal_check_cases(root, binary, releases, artifacts):
+    """Only a held read-only check: no archive request, installation or restart."""
+    for entry in ("overview", "conversation"):
+        prompt = " › " if entry == "overview" else "› "
+        with case(root, binary, releases, f"terminal-check-{entry}") as c:
+            c.old_selection()
+            host, previous = c.start_host()
+            session, credential = terminal_setup(c)
+            gate = releases.gates["/latest"] = Gate()
+            request_start = len(releases.requests)
+            args = ([str(binary), "--store", str(c.store), "--provider", "codex", "--model", "gpt-6-luna"]
+                    if entry == "overview" else [str(binary), "session", "resume", "--store", str(c.store), "--", session])
+            with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
+                screen = TerminalScreen(master, process)
+                screen.contains("›")
+                screen.send("/upgrade\r")
+                screen.until(gate.entered.is_set, "held metadata check")
+                screen.contains("Upgrade: checking")
+                screen.send("\x1b[?2027;3$y\x1b[200~XYZ\x1b[201~\x1b[DQ")
+                wait_for(screen.observe, "draft editing during held check",
+                         ready=lambda _: screen.capture.draft("/upgradeXYQZ", len(prompt) + 11, prompt=prompt))
+                screen.send("\x1b")
+                screen.contains("Upgrade cancelled")
+                wait_for(screen.observe, "retained draft after check cancellation",
+                         ready=lambda _: screen.capture.draft("/upgradeXYQZ", len(prompt) + 11, prompt=prompt))
+                # The arrow left Z after the caret; Ctrl-U alone only
+                # deletes to the line start. Move to the end before clearing.
+                screen.send("\x05\x15")
+                # The overview paints its placeholder only for an empty
+                # draft; the conversation renders an empty prompt instead.
+                empty_row = "Type a task to start a Session" if entry == "overview" else ""
+                wait_for(screen.observe, "cleared edited draft before Unicode paste",
+                         ready=lambda _: screen.capture.draft(empty_row, len(prompt), prompt=prompt))
+                screen.send("\x1b[200~A❤️B\x1b[201~")
+
+                def unicode_draft(_):
+                    capture = screen.capture
+                    cursor = capture.screen.cursor
+                    return (not capture.synchronized and "A❤" in capture.screen.display[cursor.y]
+                            and cursor.x == len(prompt) + 4)
+
+                wait_for(screen.observe, "Unicode report survives check cancellation", ready=unicode_draft)
+                screen.save(artifacts, f"{entry}-held-check-cancelled")
+                c.assert_unchanged()
+                assert host.poll() is None and c.status()["instance"] == previous["instance"]
+                assert releases.archive_path not in releases.requests[request_start:]
+                assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+
+
 def terminal_cases(root, binary, releases, artifacts):
     for entry in ("overview", "conversation"):
         prompt = " › " if entry == "overview" else "› "
@@ -617,32 +680,52 @@ def terminal_cases(root, binary, releases, artifacts):
                 screen = TerminalScreen(master, process)
                 screen.contains("›")
                 screen.send("/upgrade\r")
-                screen.contains("enter Install")
-                screen.save(artifacts, f"{entry}-offer")
+                screen.until(gate.entered.is_set, "terminal installation archive gate without a second Enter")
+                screen.save(artifacts, f"{entry}-automatic-install")
                 assert c.link.resolve() == c.original and c.status()["instance"] == previous["instance"]
-                screen.send("\r")
-                screen.until(gate.entered.is_set, "terminal installation archive gate")
                 screen.contains("preparing")
+                # Terminal replies and editing stay in the same invocation
+                # while the command works; there is no temporary screen.
+                screen.send("\x1b[?2027;3$y\x1b[200~XYZ\x1b[201~\x1b[DQ")
+                wait_for(screen.observe, "draft edited during upgrade",
+                         ready=lambda _: screen.capture.draft("/upgradeXYQZ", len(prompt) + 11, prompt=prompt))
                 # Escape must interrupt the running task, not send a Message or
                 # wait for the server to finish downloading the archive.
                 screen.send("\x1b")
                 wait_for(screen.observe, "cancelled terminal preparation", timeout=15,
-                         ready=lambda text: "enter Install" in text or "Upgrade closed" in text or "Cancelled" in text)
+                         ready=lambda text: "Upgrade cancelled" in text)
                 gate.release.set()
                 c.assert_unchanged()
                 assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
-                # Reopen explicitly; no automatic retry or uncertain replay.
-                screen.send("\x1b")
+                # Retry explicitly; no automatic retry or uncertain replay.
                 screen.contains("›")
-                wait_for(screen.observe, "retained /upgrade draft after cancellation",
+                wait_for(screen.observe, "retained edited draft after cancellation",
+                         ready=lambda _: screen.capture.draft("/upgradeXYQZ", len(prompt) + 11, prompt=prompt))
+                # The arrow left Z after the caret; Ctrl-U alone only
+                # deletes to the line start. Move to the end before clearing.
+                screen.send("\x05\x15")
+                # The overview paints its placeholder only for an empty
+                # draft; the conversation renders an empty prompt instead.
+                empty_row = "Type a task to start a Session" if entry == "overview" else ""
+                wait_for(screen.observe, "cleared edited draft before Unicode paste",
+                         ready=lambda _: screen.capture.draft(empty_row, len(prompt), prompt=prompt))
+                screen.send("\x1b[200~A❤️B\x1b[201~")
+
+                def unicode_draft(_):
+                    capture = screen.capture
+                    cursor = capture.screen.cursor
+                    row = capture.screen.display[cursor.y]
+                    # pyte drops text after VS16; the cursor is the width oracle.
+                    return not capture.synchronized and "A❤" in row and cursor.x == len(prompt) + 4
+
+                wait_for(screen.observe, "Unicode width after upgrade cancellation", ready=unicode_draft)
+                screen.send("\x05\x15/upgrade")
+                wait_for(screen.observe, "exact retry command before submission",
                          ready=lambda _: screen.capture.draft("/upgrade", len(prompt) + 8, prompt=prompt))
-                screen.send("\x15/upgrade\r")
-                screen.contains("enter Install")
                 screen.send("\r")
-                screen.contains("Activation: ready;")
+                screen.contains("Upgrade installed; Host ready")
                 screen.save(artifacts, f"{entry}-installed")
                 proof_ready(c, previous, old_host)
-                screen.send("\x1b")
                 screen.contains("›")
                 wait_for(screen.observe, "retained /upgrade draft after installation",
                          ready=lambda _: screen.capture.draft("/upgrade", len(prompt) + 8, prompt=prompt))
@@ -668,13 +751,11 @@ def cancel_after_publication(root, binary, releases, artifacts):
             screen = TerminalScreen(master, process)
             screen.contains("›")
             screen.send("/upgrade\r")
-            screen.contains("enter Install")
-            screen.send("\r")
             screen.until(lambda: c.link.resolve() != c.original, "publication before terminal cancellation")
             installed = c.link.resolve()
             assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
             screen.send("\x1b")
-            screen.contains("cancelled after installation; publication was not rolled back")
+            screen.contains("Upgrade installed; activation cancelled")
             screen.save(artifacts, "cancel-after-publication")
             assert c.link.resolve() == installed and installed.exists()
             assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
@@ -694,15 +775,11 @@ def signal_during_check(root, binary, releases, artifacts):
             screen.contains("›")
             screen.send("/upgrade\r")
             screen.until(gate.entered.is_set, "metadata check held before terminal signal")
-            screen.contains("Read-only check")
+            screen.contains("Upgrade: checking")
             screen.save(artifacts, "signal-during-check")
             process.send_signal(signal.SIGINT)
 
-            def exited():
-                screen.read_output()
-                return process.poll() is not None
-
-            wait_for(exited, "terminal restoration and exit during held upgrade check")
+            screen.wait_for_exit("terminal restoration and exit during held upgrade check")
             assert not gate.release.is_set(), "terminal required metadata peer release before exiting"
             assert b"\x1b[?1049l" in screen.tail, "alternate screen not restored on signal"
             assert b"\x1b[?25h" in screen.tail, "cursor not restored on signal"
@@ -725,19 +802,13 @@ def signal_after_publication(root, binary, releases, artifacts):
             screen = TerminalScreen(master, process)
             screen.contains("›")
             screen.send("/upgrade\r")
-            screen.contains("enter Install")
-            screen.send("\r")
             screen.until(lambda: c.link.resolve() != c.original, "publication before SIGINT")
             installed = c.link.resolve()
             assert installed.exists() and gate.exists()
             assert host.poll() is None and c.status()["instance"] == previous["instance"]
             process.send_signal(signal.SIGINT)
 
-            def exited():
-                screen.read_output()
-                return process.poll() is not None
-
-            wait_for(exited, "joined publication receipt and terminal exit after SIGINT")
+            screen.wait_for_exit("joined publication receipt and terminal exit after SIGINT")
             output = bytes(screen.tail)
             restored = output.rfind(b"\x1b[?1049l")
             receipt = output.find(b"Installed Rui. Complete build:")
@@ -800,16 +871,12 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                     assert releases.requests[start:] == [], "latest discovery ran before selected probe completed"
                     if action == "escape":
                         screen.send("\x1b")
-                        screen.contains("Upgrade check failed: Cancelled")
+                        screen.contains("Upgrade cancelled")
                         screen.save(artifacts, "selected-version-escape")
                     else:
                         process.send_signal(signal.SIGINT)
 
-                        def exited():
-                            screen.read_output()
-                            return process.poll() is not None
-
-                        wait_for(exited, "SIGINT exit while selected version child is gated")
+                        screen.wait_for_exit("SIGINT exit while selected version child is gated")
                         assert b"\x1b[?1049l" in screen.tail, "selected-probe signal did not restore terminal"
                         if artifacts is not None:
                             (artifacts / "selected-version-sigint.txt").write_text(screen.capture.plain)
@@ -850,8 +917,6 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
                 screen = TerminalScreen(master, process)
                 screen.contains("›")
                 screen.send("/upgrade\r")
-                screen.contains("enter Install")
-                screen.send("\r")
                 screen.until(gate.entered.is_set, "real archive request after stage creation")
                 stages = list(parent.glob("install.*"))
                 assert len(stages) == 1 and stages[0].is_dir(), stages
@@ -860,24 +925,15 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
                 # remove that directory after checksum validation rejects it.
                 parent.chmod(0o500)
                 gate.release.set()
-                screen.contains("Upgrade result")
-                # Check details can occupy the initial viewport; the retained
-                # receipt must remain reachable through the panel's real scroll.
-                screen.send("\x1b[6~")
-                panel = screen.contains("cleanup also failed (AccessDenied)")
-                assert shown("installation failed (ReleaseChecksumMismatch)", panel), panel
-                assert shown(str(retained), panel), ("panel lost retained cleanup custody", panel)
+                screen.contains("Upgrade install failed; cleanup retained")
+                # Full retained-path custody is emitted after terminal restoration.
                 assert retained.is_dir(), "cleanup receipt did not identify an existing retained stage"
                 assert c.link.resolve() == c.original
                 assert host.poll() is None and c.status()["instance"] == previous["instance"]
-                screen.save(artifacts, "dual-failure-panel")
+                screen.save(artifacts, "dual-failure-notice")
                 process.send_signal(signal.SIGINT)
 
-                def exited():
-                    screen.read_output()
-                    return process.poll() is not None
-
-                wait_for(exited, "restored primary and retained cleanup receipt after SIGINT")
+                screen.wait_for_exit("restored primary and retained cleanup receipt after SIGINT")
                 output = bytes(screen.tail)
                 restored = output.rfind(b"\x1b[?1049l")
                 assert restored >= 0, "dual-failure SIGINT did not restore the terminal"
@@ -963,14 +1019,9 @@ def tmux_cases(root, binary, releases, artifacts):
                 reached("›")
                 command("send-keys", "-t", "upgrade:0.0", "-l", "/upgrade")
                 command("send-keys", "-t", "upgrade:0.0", "Enter")
-                offer = reached("enter Install")
-                save("offer", offer)
-                assert c.link.resolve() == c.original
-                command("send-keys", "-t", "upgrade:0.0", "Enter")
-                installed = reached("Activation: ready;")
+                installed = reached("Upgrade installed; Host ready")
                 save("installed", installed)
                 proof_ready(c, previous, old_host)
-                command("send-keys", "-t", "upgrade:0.0", "Escape")
                 reached("›")
                 assert "/upgrade" in reached("› /upgrade")
                 command("send-keys", "-t", "upgrade:0.0", "C-u")
@@ -1009,12 +1060,14 @@ def main():
             print(f"upgrade native: {suite.__name__} passed", flush=True)
         cancel_selected_version_check(root, binary, releases, artifacts)
         print("upgrade native: Escape and SIGINT reaped selected version probes before discovery", flush=True)
+        terminal_check_cases(root, binary, releases, artifacts)
+        print("upgrade native: both held terminal checks preserved input without installation", flush=True)
         terminal_cases(root, binary, releases, artifacts)
         print("upgrade native: both terminal /upgrade entry points passed", flush=True)
         cancel_after_publication(root, binary, releases, artifacts)
         print("upgrade native: cancellation after publication preserved installation and Host", flush=True)
         terminal_cleanup_dual_failure(root, binary, releases, artifacts)
-        print("upgrade native: real checksum/cleanup dual failure retained panel and restored custody", flush=True)
+        print("upgrade native: real checksum/cleanup dual failure retained status and restored custody", flush=True)
         signal_after_publication(root, binary, releases, artifacts)
         print("upgrade native: SIGINT after publication preserved and reported the installed receipt", flush=True)
         signal_during_check(root, binary, releases, artifacts)

@@ -73,8 +73,17 @@ saved_requests: reads.SavedRequests = .{},
 recover_line: [slash_commands_shared.recover_line_bytes]u8 = undefined,
 reader: Task = .{},
 upgrade_requested: bool = false,
+upgrade_job: UpgradePanel = .{},
+upgrade_running: bool = false,
+upgrade_shown: []const u8 = "",
+upgrade_note: [768]u8 = undefined,
+upgrade_note_len: usize = 0,
+upgrade_note_shown: bool = false,
+upgrade_note_revision: u64 = 0,
+upgrade_report: ?std.Io.Writer.Allocating = null,
 upgrade_blocked: bool = false,
 upgrade_reobserving: bool = false,
+upgrade_reobserve_draining: bool = false,
 // The reader's only context; the UI reads its result after join.
 job: Job = .{},
 // When the next live read may start.
@@ -322,7 +331,7 @@ pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []co
 /// the screen's list was the previous Session's, at revisions this input
 /// counts again.
 fn startInput(self: *Self) void {
-    self.input.init();
+    self.input.init(&self.terminal.stream);
     self.input.complete(.{ .context = self, .add = tabCompletion });
     self.terminal.screen.commands = null;
 }
@@ -334,6 +343,7 @@ fn startInput(self: *Self) void {
 /// a failure or recovery to show is instead the ending of a normal `leave`.
 pub fn back(self: *Self) ?(anyerror!Outcome) {
     std.debug.assert(self.leaving == .returned);
+    if (self.upgrade_job.started and !self.upgrade_job.finished) return .detached;
     const plan = departure.exit(self.settle({}), null, self.submission.view() != null);
     if (plan.failure) |err| return err;
     if (plan.recovery_before_notice or self.reading.pending_diagnostic != null) return .detached;
@@ -358,6 +368,32 @@ pub const Departure = struct {
 /// the guidance that follows restoration. The caller prints the Detached notice.
 pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
     std.debug.assert(!self.terminal.active);
+    const unfinished_upgrade = self.upgrade_job.started and !self.upgrade_job.finished;
+    self.upgrade_job.settle();
+    const fatal = (if (ended) |outcome| outcome == .interrupted else |_| true) or std.meta.isError(restored) or unfinished_upgrade;
+    var receipt_failure: ?anyerror = null;
+    if (self.upgrade_report) |*report| {
+        self.terminal.receipt(report.written()) catch |err| {
+            receipt_failure = err;
+        };
+        report.deinit();
+        self.upgrade_report = null;
+    }
+    if (self.upgrade_job.started and (fatal or unfinished_upgrade or self.upgrade_job.result != null or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible)) {
+        var out: std.Io.Writer.Allocating = .init(self.init.gpa);
+        defer out.deinit();
+        const detailed = fatal or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible;
+        const rendered = if (detailed) self.upgrade_job.writeReport(&out.writer) else self.upgrade_job.writeReceipt(&out.writer);
+        if (rendered) |_| {
+            self.terminal.receipt(out.written()) catch |err| {
+                receipt_failure = receipt_failure orelse err;
+            };
+        } else |err| {
+            receipt_failure = receipt_failure orelse err;
+        }
+    }
+    self.upgrade_job.deinit();
+    if (receipt_failure) |err| stderr.diagnostic("rui: Upgrade receipt output incomplete ({s}); retained cleanup paths may be missing.\n", .{@errorName(err)});
     const settled = self.settle(restored);
     self.submission.close();
     if (self.reading.pending_diagnostic != null) {
@@ -378,7 +414,7 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
     };
     const action_view = self.terminal.screen.action_view != null;
     return .{
-        .end = if (plan.failure) |err| err else ended,
+        .end = receiptEnd(ended, plan.failure, receipt_failure),
         .action = if (action_view) self.live.work.first_action else null,
         // Never a main-screen notice before confirmed restoration.
         .failure_notice = action_view and !std.meta.isError(restored),
@@ -386,7 +422,23 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
     };
 }
 
+// Existing departure/restore failures take precedence over output failure.
+fn receiptEnd(ended: anyerror!Outcome, prior: ?anyerror, receipt_failure: ?anyerror) anyerror!Outcome {
+    if (prior) |err| return err;
+    _ = ended catch |err| return err;
+    if (receipt_failure) |err| return err;
+    return ended;
+}
+
+test "departure preserves earlier failure and propagates receipt output failure" {
+    try std.testing.expectError(error.TerminalRestoreFailed, receiptEnd(.detached, error.TerminalRestoreFailed, error.UpgradeReceiptOutputFailed));
+    try std.testing.expectError(error.Cancelled, receiptEnd(error.Cancelled, null, error.UpgradeReceiptOutputFailed));
+    try std.testing.expectError(error.UpgradeReceiptOutputFailed, receiptEnd(.detached, null, error.UpgradeReceiptOutputFailed));
+    try std.testing.expectEqual(Outcome.detached, try receiptEnd(.detached, null, null));
+}
+
 fn stop(self: *Self) void {
+    self.upgrade_job.cancel();
     // A running command observes exit as an interruption, exactly as a signal.
     if (self.inspection.command_running) self.interrupted.requestStop();
     self.reader.cancel();
@@ -406,52 +458,62 @@ fn settle(self: *Self, restored: anyerror!void) Settled {
 }
 
 test "run returns detached on Ctrl-D and leaves the lent terminal begun, with no notice written" {
-    var environ = try std.testing.environ.createMap(std.testing.allocator);
-    defer environ.deinit();
-    const screen = try std.testing.allocator.create(Screen);
-    defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const store = root[0..try tmp.dir.realPath(std.testing.io, &root)];
-    const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
-    defer page.close(std.testing.io);
-    var input: [2]c_int = undefined;
-    var output: [2]c_int = undefined;
-    try std.testing.expect(std.c.pipe(&input) == 0);
-    try std.testing.expect(std.c.pipe(&output) == 0);
-    defer for (input ++ output) |fd| {
-        _ = std.c.close(fd);
-    };
-    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    _ = std.c.fcntl(output[0], std.c.F.SETFL, std.c.fcntl(output[0], std.c.F.GETFL) | nonblock);
-    try std.testing.expectEqual(@as(isize, 1), std.c.write(input[1], "\x04", 1));
-    var terminal: Terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = input[0], .output = output[1] };
-    var init: std.process.Init = undefined;
-    init.io = std.testing.io;
-    init.gpa = std.testing.allocator;
-    init.environ_map = &environ;
-    var interrupted: client.Cancellation = .{};
-    const self = try std.testing.allocator.create(Self);
-    defer std.testing.allocator.destroy(self);
-    const files: Files = .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } };
-    const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted, quiet_overview);
-    try std.testing.expectEqual(Outcome.detached, outcome);
-    try std.testing.expect(terminal.active and terminal.pump == null);
-    var written: [65536]u8 = undefined;
-    const count = @max(std.c.read(output[0], &written, written.len), 0);
-    try std.testing.expect(std.mem.indexOf(u8, written[0..@intCast(count)], "Detached") == null);
-    // The caller's part: nothing has restored the terminal, so only the
-    // borrowers run stopped are joined here.
-    self.reader.join() catch {};
-    _ = self.submission.join();
-    self.submission.close();
+    for ([_][]const u8{ "", "\x1b[", "\x1bO" }) |prefix| {
+        var environ = try std.testing.environ.createMap(std.testing.allocator);
+        defer environ.deinit();
+        const screen = try std.testing.allocator.create(Screen);
+        defer std.testing.allocator.destroy(screen);
+        try screen.init(std.testing.io, &environ, false);
+        defer screen.deinit();
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const store = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+        const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+        defer page.close(std.testing.io);
+        var input: [2]c_int = undefined;
+        var output: [2]c_int = undefined;
+        try std.testing.expect(std.c.pipe(&input) == 0);
+        try std.testing.expect(std.c.pipe(&output) == 0);
+        defer for (input ++ output) |fd| {
+            if (fd >= 0) _ = std.c.close(fd);
+        };
+        const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+        _ = std.c.fcntl(output[0], std.c.F.SETFL, std.c.fcntl(output[0], std.c.F.GETFL) | nonblock);
+        const keys: []const u8 = if (prefix.len == 0) "\x04" else "B\x04";
+        try std.testing.expectEqual(@as(isize, @intCast(keys.len)), std.c.write(input[1], keys.ptr, keys.len));
+        // A lost prefix would type B, so Ctrl-D would edit instead of detach.
+        // EOF makes that failure deterministic rather than an input wait.
+        _ = std.c.close(input[1]);
+        input[1] = -1;
+        var terminal: Terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = input[0], .output = output[1] };
+        const now = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+        for (prefix) |byte| _ = terminal.stream.feed(byte, now);
+        var init: std.process.Init = undefined;
+        init.io = std.testing.io;
+        init.gpa = std.testing.allocator;
+        init.environ_map = &environ;
+        var interrupted: client.Cancellation = .{};
+        const self = try std.testing.allocator.create(Self);
+        defer std.testing.allocator.destroy(self);
+        const files: Files = .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } };
+        const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted, quiet_overview);
+        try std.testing.expectEqual(Outcome.detached, outcome);
+        try std.testing.expectEqualStrings("", self.input.composition().bytes);
+        try std.testing.expectEqual(TerminalInput.Pending.none, terminal.stream.pending());
+        try std.testing.expect(self.input.stream == &terminal.stream);
+        try std.testing.expect(terminal.active and terminal.pump == null);
+        var written: [65536]u8 = undefined;
+        const count = @max(std.c.read(output[0], &written, written.len), 0);
+        try std.testing.expect(std.mem.indexOf(u8, written[0..@intCast(count)], "Detached") == null);
+        // The caller's part: nothing has restored the terminal, so only the
+        // borrowers run stopped are joined here.
+        self.reader.join() catch {};
+        _ = self.submission.join();
+        self.submission.close();
+    }
 }
 
-/// Exit interrupted a Host command before its output was shown. That output
-/// can name a saved request to recover, so it follows restoration on stderr.
 fn commandOutputGuide(self: *const Self) void {
     // Failed restoration may leave fd 2 pointing at this same scratch file.
     // Drop optional guidance rather than append the page to itself.
@@ -507,7 +569,8 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
     };
     inline for (cases) |case| {
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
-        self.input.init();
+        var stream: TerminalInput = .{};
+        self.input.init(&stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .accepted = .{ .kind = case[0], .key = key.* } };
         self.submission.close(); // Releasing capture custody cannot erase acceptance.
         var bytes: [512]u8 = undefined;
@@ -646,7 +709,8 @@ fn unknownCommand(self: *Self, text: []const u8) void {
 
 test "frontend answers local and unknown commands in place and keeps Host commands for inspection" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
-    self.input.init();
+    var stream: TerminalInput = .{};
+    self.input.init(&stream);
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
     const cases = .{
         .{ "/foo bar", "! Unknown command /foo · /help" },
@@ -686,7 +750,8 @@ test "frontend answers local and unknown commands in place and keeps Host comman
 
 test "frontend /model shows the Session's model and sign-in within 60 columns and offers no pick" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
-    self.input.init();
+    var stream: TerminalInput = .{};
+    self.input.init(&stream);
     for ([_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" }) |id| for ([_]?protocol.Provider{ .codex, .openai, null }) |provider| {
         self.line = .{ .read = .{ .revision = 1, .end = 1 }, .provider = provider };
         try self.line.model.set(id);
@@ -709,7 +774,8 @@ test "frontend /model shows the Session's model and sign-in within 60 columns an
 
 test "frontend lists the efforts of the Session's model once it is read, the one in force marked" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
-    self.input.init();
+    var stream: TerminalInput = .{};
+    self.input.init(&stream);
     for ("/effort ") |byte| _ = self.input.feed(byte);
     try std.testing.expectEqualStrings("/effort ", self.input.composition().bytes);
     try std.testing.expect(self.nextCommands(null) == null);
@@ -740,7 +806,8 @@ test "frontend consumed canonical reader and admission failures survive external
     for ([_]bool{ false, true }) |admission| {
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
         self.init.io = std.testing.io;
-        self.input.init();
+        var stream: TerminalInput = .{};
+        self.input.init(&stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         const failure: anyerror = blk: {
             if (admission) {
@@ -770,7 +837,8 @@ test "Esc goes back to the overview only when the joined reader leaves nothing t
     for ([_]struct { Task.Run, ?anyerror }{ .{ Worker.read, null }, .{ Worker.fail, error.CanonicalStoreFailure } }) |case| {
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .leaving = .returned };
         self.init.io = std.testing.io;
-        self.input.init();
+        var stream: TerminalInput = .{};
+        self.input.init(&stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         // The reader is still running as Esc returns.
         try self.reader.start(std.testing.io, &self, case[0]);
@@ -793,7 +861,8 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
     for ([_]ReadPhase{ .activity, .permission, .history, .details }) |phase| {
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .reading = .{ .phase = phase } };
         self.init.io = std.testing.io;
-        self.input.init();
+        var stream: TerminalInput = .{};
+        self.input.init(&stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = self.input.submitText("current original B") } };
         try self.reader.start(std.testing.io, &self, Worker.read);
         try self.submission.task.start(std.testing.io, &self, Worker.admit);
@@ -817,7 +886,13 @@ fn upgradeHeld(self: *const Self) bool {
 }
 
 fn quiesceUpgrade(self: *Self) !bool {
-    self.notice = "Upgrade: waiting for Client borrowers; draft and original retained.";
+    if (!self.upgrade_running) {
+        const waiting = "Upgrade: waiting for client work · Esc cancels";
+        @memcpy(self.upgrade_note[0..waiting.len], waiting);
+        self.upgrade_note_len = waiting.len;
+        self.upgrade_note_shown = false;
+        self.upgrade_note_revision +%= 1;
+    }
     self.submission.retry = null;
     self.submission.cancel();
     if (self.submission.task.thread != null and self.submission.task.completed()) {
@@ -835,10 +910,50 @@ fn quiesceUpgrade(self: *Self) !bool {
     return lender_ready and self.reader.thread == null and self.submission.task.thread == null;
 }
 
-fn showUpgrade(self: *Self) !void {
-    const outcome = try UpgradePanel.run(self.init, self.store, self.terminal, &self.input.stream, self.interrupted);
+/// Keep completed receipts for the restored terminal, even across retries.
+pub fn keepUpgrade(self: *Self) !void {
+    if (!self.upgrade_job.started) return;
+    if (self.upgrade_job.result != null or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible) {
+        if (self.upgrade_report == null) self.upgrade_report = .init(self.init.gpa);
+        if (self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible)
+            try self.upgrade_job.writeReport(&self.upgrade_report.?.writer)
+        else
+            try self.upgrade_job.writeReceipt(&self.upgrade_report.?.writer);
+    }
+    self.upgrade_job.deinit();
+}
+
+fn advanceUpgrade(self: *Self) !void {
+    if (!self.upgrade_running) {
+        try self.keepUpgrade();
+        try self.upgrade_job.begin(self.init, self.store);
+        self.upgrade_running = true;
+        self.upgrade_shown = "";
+    }
+    const done = try self.upgrade_job.advance();
+    const status = self.upgrade_job.status();
+    if (done or !std.mem.eql(u8, status, self.upgrade_shown)) {
+        self.upgrade_shown = status;
+        var out = std.Io.Writer.fixed(&self.upgrade_note);
+        self.upgrade_job.writeSummary(&out) catch {};
+        const summary = out.buffered();
+        self.upgrade_note_len = std.mem.indexOfScalar(u8, summary, '\n') orelse summary.len;
+        self.upgrade_note_shown = false;
+        self.upgrade_note_revision +%= 1;
+        self.dirty = true;
+    }
+    if (!done) return;
+    const outcome = self.upgrade_job.outcome;
+    self.upgrade_running = false;
     self.upgrade_requested = false;
     self.applyUpgrade(outcome);
+    // applyUpgrade updates the hold; the joined job owns the actual result.
+    var out = std.Io.Writer.fixed(&self.upgrade_note);
+    self.upgrade_job.writeSummary(&out) catch {};
+    const summary = out.buffered();
+    self.upgrade_note_len = std.mem.indexOfScalar(u8, summary, '\n') orelse summary.len;
+    self.upgrade_note_shown = false;
+    self.upgrade_note_revision +%= 1;
     if (self.lender.upgrade) |handoff| {
         _ = try handoff(self.lender.context, if (self.upgrade_blocked) .incompatible else .ready);
     }
@@ -858,7 +973,7 @@ fn applyUpgrade(self: *Self, outcome: UpgradePanel.Outcome) void {
             self.upgrade_reobserving = false;
         },
     }
-    self.notice = if (self.upgrade_blocked) upgrade_recovery else "Upgrade closed; draft and original retained. No work was resent.";
+    if (self.upgrade_blocked) self.notice = upgrade_recovery;
     self.dirty = true;
 }
 
@@ -894,7 +1009,7 @@ fn driveActive(self: *Self) !void {
         const size = self.terminal.geometry();
         if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
         if (self.upgrade_requested) {
-            const ready = self.quiesceUpgrade() catch |err| {
+            const ready = if (self.upgrade_running) true else self.quiesceUpgrade() catch |err| {
                 if (err == error.CanonicalStoreFailure) return err;
                 self.upgrade_requested = false;
                 self.upgrade_blocked = true;
@@ -906,7 +1021,7 @@ fn driveActive(self: *Self) !void {
                 if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
                 continue;
             };
-            if (ready) try self.showUpgrade();
+            if (ready) try self.advanceUpgrade();
             if (self.dirty or self.terminal.screen.stale()) _ = try self.draw();
             _ = try self.step(16);
             continue;
@@ -919,7 +1034,10 @@ fn driveActive(self: *Self) !void {
         }
         if (self.upgrade_reobserving) {
             if (self.reader.thread != null and self.reader.completed()) {
+                const draining = self.upgrade_reobserve_draining;
+                var settled = true;
                 self.settleReader() catch |err| {
+                    settled = false;
                     if (err == error.CanonicalStoreFailure) return err;
                     self.upgrade_blocked = true;
                     self.upgrade_reobserving = false;
@@ -928,6 +1046,8 @@ fn driveActive(self: *Self) !void {
                     self.notice = writer.buffered();
                     if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, .incompatible);
                 };
+                self.upgrade_reobserve_draining = false;
+                if (draining and settled) self.upgrade_reobserving = true;
                 self.withdrawDecided();
             }
             if (self.upgrade_reobserving and self.reader.thread == null) try self.launch(self.freeze(.activity), reads.scan);
@@ -1096,12 +1216,16 @@ fn drawFrame(self: *Self) !void {
     } else null;
     // The overview's stop prompt or notice, else the conversation's own.
     const said = self.lender.line(self.lender.context, self.live.work.state.asOf(now_ms));
-    const notice = said.text orelse self.notice;
+    const notice = said.text orelse self.notice orelse if (self.upgrade_note_len != 0) self.upgrade_note[0..self.upgrade_note_len] else null;
     var facts = self.line.facts(&self.hint, self.session);
     if (facts) |*shown| shown.stop = said.stoppable;
     self.dirty = false;
     // Reading completes only after delivery; the receipt stales the frame.
-    _ = screen.presented(try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view));
+    const notice_revision = self.upgrade_note_revision;
+    const rendered_upgrade = said.text == null and self.notice == null and !screen.actionVisible() and self.upgrade_note_len != 0;
+    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
+    _ = screen.presented(delivered);
+    if (delivered.notice and rendered_upgrade and notice_revision == self.upgrade_note_revision) self.upgrade_note_shown = true;
 }
 
 /// The list above the draft as it is now, after `previous`: the commands
@@ -1556,9 +1680,9 @@ fn olderWanted(self: *const Self) bool {
 }
 
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
-    const stream = &self.input.stream;
+    const stream = &self.terminal.stream;
     const pending = stream.pending();
-    const read = (self.terminal.next(self.init.io, stream, wait) catch |err| switch (err) {
+    const read = (self.terminal.next(self.init.io, wait) catch |err| switch (err) {
         error.InputDeadline => {
             const expired = try stream.expire();
             if (expired != .none) {
@@ -1599,6 +1723,23 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
 /// the Action, may use it. The input row the latest frame shows takes the
 /// input.
 fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
+    if (!self.upgrade_requested and self.upgrade_note_shown) self.upgrade_note_len = 0;
+    if (self.upgrade_requested and decoded == .event and !decoded.event.pasted and decoded.event.event == .key_press) {
+        const key = decoded.event.event.key_press;
+        if (key.codepoint == vaxis.Key.escape or (key.mods.ctrl and key.codepoint == 'c') or key.codepoint == 3) {
+            if (self.upgrade_running) self.upgrade_job.cancel() else {
+                self.upgrade_requested = false;
+                self.upgrade_reobserving = !self.upgrade_blocked;
+                self.upgrade_reobserve_draining = self.reader.thread != null;
+                self.poll_at = 0;
+                self.reading.prepared_action = null;
+                self.notice = "Upgrade cancelled; draft and original retained.";
+                if (self.lender.upgrade) |handoff| _ = try handoff(self.lender.context, if (self.upgrade_blocked) .incompatible else .ready);
+            }
+            self.dirty = true;
+            return;
+        }
+    }
     const screen = self.terminal.screen;
     const offer = screen.spendOffer();
     const selected = Editor.select(conversation_keys, decoded);
@@ -2059,7 +2200,8 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
         for (1..6) |fail_at| {
             var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .reading = .{ .phase = phase } };
             self.init.io = std.testing.io;
-            self.input.init();
+            var stream: TerminalInput = .{};
+            self.input.init(&stream);
             try self.reader.start(std.testing.io, &self, Worker.fail);
             try self.settleReader(); // Preparation is recoverable, not fatal.
             try std.testing.expect(self.reading.pending_diagnostic != null);
@@ -2070,7 +2212,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             // Exercise the actual Task reset, also performed before spawn can fail.
             try self.reader.start(std.testing.io, &self, Worker.idle);
             try self.reader.join();
-            self.input.init();
+            self.input.init(&stream);
             self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
             self.stop();
             const settled = self.settle({});
@@ -2133,7 +2275,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         self.live.view = result.live;
         self.live.cursor = result.cursor;
         self.reading.opening = false;
-        self.upgrade_reobserving = false;
+        if (!self.upgrade_reobserve_draining) self.upgrade_reobserving = false;
         if (self.reading.phase == .permission) {
             self.reading.prepared_action = result.action;
             self.reading.prepared_summary = result.summary;
@@ -2440,7 +2582,7 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
         var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page, .actions = .{ actions, actions } }, .command = undefined, .terminal = &terminal, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         self.init.io = std.testing.io;
-        self.input.init();
+        self.input.init(&self.terminal.stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         try screen.latest();
         screen.action_view = .{ .io = std.testing.io, .file = page };
@@ -3624,7 +3766,7 @@ test "a details page read before a Message was sent never covers it" {
             _ = self.submission.join();
             self.submission.close();
             self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .input = &self.input, .environment = .empty };
-            self.input.init();
+            self.input.init(&self.terminal.stream);
         }
         Worker.release.store(true, .release);
         while (!self.reader.completed()) std.Thread.yield() catch {};
@@ -4057,7 +4199,7 @@ test "upgrade command stays local and preserves the actual draft cursor and orig
     screen.* = .{ .colour = false };
     var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
     self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false };
-    self.input.init();
+    self.input.init(&self.terminal.stream);
     const original = self.input.submitText("original indeterminate model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('K'), .retry = @splat('K') };
     _ = self.input.append("/upgrade");
@@ -4078,13 +4220,29 @@ test "upgrade command stays local and preserves the actual draft cursor and orig
     try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
 }
 
+test "cancelling a quiescing upgrade keeps the draft without starting a worker" {
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = undefined };
+    self.* = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .upgrade_requested = true };
+    self.input.init(&terminal.stream);
+    _ = self.input.append("unsent draft");
+    const before = self.input.composition();
+    try self.inputEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } }, .pasted = false } });
+    try std.testing.expect(!self.upgrade_requested and !self.upgrade_job.started);
+    try std.testing.expect(self.upgrade_reobserving);
+    try std.testing.expectEqualStrings("unsent draft", self.input.composition().bytes);
+    try std.testing.expectEqual(before.cursor, self.input.composition().cursor);
+}
+
 test "upgrade outcomes retain Unicode draft cursor selection and unresolved original until safe reobservation" {
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
     inline for (std.enums.values(UpgradePanel.Outcome)) |outcome| {
         for ([_]bool{ false, true }) |blocked| {
             self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .upgrade_blocked = blocked };
-            self.input.init();
+            var stream: TerminalInput = .{};
+            self.input.init(&stream);
             const original = self.input.submitText("the original request");
             self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('H') };
             for ("next é!\x1b[D") |byte| _ = self.input.feed(byte);
@@ -4116,7 +4274,7 @@ test "upgrade quiescing reobservation and protocol holds refuse a fresh Message 
     var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
     for (0..3) |hold| {
         self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false }, .upgrade_requested = hold == 0, .upgrade_reobserving = hold == 1, .upgrade_blocked = hold == 2 };
-        self.input.init();
+        self.input.init(&self.terminal.stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         _ = self.input.append("never send before safe reattachment");
         try self.draftEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }, null);
@@ -4522,6 +4680,23 @@ test "upgrade holds refuse archive shortcuts confirmations and slash commands wi
         try std.testing.expect(held.self.input.queuedCommand() == null);
         try std.testing.expect(held.self.reader.thread == null and held.self.submission.task.thread == null);
     };
+}
+
+test "a pre-cancellation activity result cannot release upgrade reobservation" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.reading.phase = .activity;
+    self.upgrade_reobserving = true;
+    self.upgrade_reobserve_draining = true;
+    self.job.result = .{ .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try self.applyReader(.complete);
+    try std.testing.expect(self.upgrade_reobserving and self.upgradeHeld());
+    // The next activity snapshot is launched only after the old borrower
+    // joins; only that fresh observation may reopen admission.
+    self.upgrade_reobserve_draining = false;
+    try self.applyReader(.complete);
+    try std.testing.expect(!self.upgrade_reobserving);
 }
 
 test "upgrade reobservation retains a refused archive command from the completion list" {
