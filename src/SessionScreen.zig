@@ -740,6 +740,7 @@ pub const Footer = struct {
     notice: []const u8 = "",
     /// The list above the input for the draft, with its highlighted row.
     commands: ?slash_commands.Shown = null,
+    attachments: []const @import("skill_completion.zig").Range = &.{},
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
     queued: ?Queued = null,
@@ -769,12 +770,31 @@ fn drawCommands(self: *const Self, window: vaxis.Window, layout: *const Frame, s
         text.reverse = index == highlight;
         const cells = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(index - first)), .height = 1 });
         _ = cells.printSegment(.{ .text = entry.shown, .style = text }, .{ .wrap = .none });
-        if (entry.description.len != 0 and column < cells.width) _ = cells.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = entry.description, .style = self.style(.quiet) }, .{ .wrap = .none });
+        if (column < cells.width) {
+            const description = cells.child(.{ .x_off = @intCast(column) });
+            if (list.containsSkills()) {
+                _ = description.print(&.{
+                    .{ .text = if (entry.kind == .skill) "Skill: " else "Command: ", .style = self.style(.quiet) },
+                    .{ .text = entry.description, .style = self.style(.quiet) },
+                }, .{ .wrap = .none });
+            } else if (entry.description.len != 0) {
+                _ = description.printSegment(.{ .text = entry.description, .style = self.style(.quiet) }, .{ .wrap = .none });
+            }
+        }
     }
     if (rows == total or rows == layout.list_height) return;
     const text = std.fmt.bufPrint(overflow, slash_commands.more, .{total - rows}) catch unreachable;
     _ = window.child(.{ .y_off = layout.list_row + @as(u16, @intCast(rows)), .height = 1 }).printSegment(.{ .text = text, .style = self.style(.quiet) }, .{ .wrap = .none });
 }
+
+const DraftSpans = struct {
+    spans: draft_layout.Spans,
+
+    pub fn next(self: *DraftSpans) ?vaxis.Segment {
+        const span = self.spans.next() orelse return null;
+        return .{ .text = span.text, .style = if (span.attached) .{ .ul_style = .single } else .{} };
+    }
+};
 
 /// A transient source reflow coordinate, never navigation or delivery state.
 pub const Reflow = struct { anchor: Position, resized: bool };
@@ -916,7 +936,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
             _ = window.child(.{ .y_off = row, .height = 1, .width = 2 }).printSegment(.{ .text = if (first) "› " else "  ", .style = self.style(.user) }, .{});
             const parts = line.gutter();
             _ = window.child(.{ .x_off = 2, .y_off = row, .height = 1 }).print(&.{ .{ .text = parts[0] }, .{ .text = parts[1] }, .{ .text = parts[2] } }, .{ .wrap = .none });
-            _ = window.child(.{ .x_off = 2 + line.prefixCells(), .y_off = row, .height = 1 }).print(&.{.{ .text = draft[line.start..line.end] }}, .{ .wrap = .none });
+            _ = window.child(.{ .x_off = 2 + line.prefixCells(), .y_off = row, .height = 1 }).printIterator(DraftSpans{ .spans = .{ .text = draft, .attachments = footer.attachments, .position = line.start, .end = line.end } }, .{ .wrap = .none });
         }
     }
     const line_row = size.row - layout.line_height;
@@ -3112,4 +3132,62 @@ test "borrowed layouts retain wrapped rows unless their own wrapping layout chan
             try std.testing.expectEqual(expected_transcript, screen.browsing.anchor(screen.textLayout()));
         }
     }
+}
+
+test "inline skill screen selected cells preserve draft and caret" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const raw = "hello /skill /other";
+    const attachments = [_]@import("skill_completion.zig").Range{.{ .start = 6, .end = 12 }};
+    for ([_]u16{ 80, 12 }) |width| {
+        const size: std.posix.winsize = .{ .row = 24, .col = width, .xpixel = 0, .ypixel = 0 };
+        _ = try Test.render(screen, &out.writer, size, raw, raw.len, .{}, &.{});
+        const cursor = screen.backend.storage.?.vx.screen.cursor;
+        var baseline: [24][80]u8 = undefined;
+        for (0..24) |y| for (0..width) |x| {
+            const cell = Test.window(screen).readCell(@intCast(x), @intCast(y)).?;
+            baseline[y][x] = if (cell.char.grapheme.len == 1) cell.char.grapheme[0] else 0;
+        };
+        _ = try Test.render(screen, &out.writer, size, raw, raw.len, .{ .attachments = &attachments }, &.{});
+        try std.testing.expectEqual(cursor.row, screen.backend.storage.?.vx.screen.cursor.row);
+        try std.testing.expectEqual(cursor.col, screen.backend.storage.?.vx.screen.cursor.col);
+        var marked: usize = 0;
+        for (0..24) |y| for (0..width) |x| {
+            const cell = Test.window(screen).readCell(@intCast(x), @intCast(y)).?;
+            const byte = if (cell.char.grapheme.len == 1) cell.char.grapheme[0] else 0;
+            try std.testing.expectEqual(baseline[y][x], byte);
+            if (cell.style.ul_style == .single) {
+                try std.testing.expect(marked < 6);
+                try std.testing.expectEqual("/skill"[marked], byte);
+                marked += 1;
+            }
+        };
+        try std.testing.expectEqual(@as(usize, 6), marked);
+        try std.testing.expectEqualStrings("hello /skill /other", raw);
+    }
+}
+
+test "inline skill screen collision rows show distinct roles" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var list: slash_commands.List = .{ .typed = "/" };
+    list.entries[0] = .{ .word = "/same", .shown = "/same", .description = "builtin", .kind = .command };
+    list.entries[1] = .{ .word = "/same", .shown = "/same", .description = "custom", .kind = .skill };
+    list.count = 2;
+    _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 }, "/", 1, .{ .commands = .{ .list = list, .revision = 0 } }, &.{});
+    var buffer: [256]u8 = undefined;
+    try std.testing.expect(screenHas(screen, "Command: builtin", &buffer));
+    try std.testing.expect(screenHas(screen, "Skill: custom", &buffer));
 }
