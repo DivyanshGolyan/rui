@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 
-from driver import DirectPty, defer_signals, history_rows
+from driver import DirectPty, cell_rows, defer_signals, history_rows
 from host_process import canonical_fixture_root, dispose_all
 import model_fixture as model
 import codex_integration as codex
@@ -204,6 +204,34 @@ def recovery(fixture, row):
     tty.finish()
 
 
+def lookback(screen):
+    """A transcript has a footer; a selected inspection has a heading."""
+    lines = screen.splitlines()
+    return bool(lines and lines[-1].startswith("Looking back · ")
+                and lines[-1].endswith("Ctrl-End: latest"))
+
+
+def inspection(screen, session):
+    lines = screen.splitlines()
+    return bool(lines and lines[0].startswith("Browsing · ")
+                and f" Status · {session}" in screen)
+
+
+def assert_history_anchor(capture, first, browsing):
+    assert lookback(capture.completed) == browsing, "navigation view changed before ordered marker"
+    assert not capture.completed.startswith("Browsing"), "inspection replaced conversation"
+    # At 80x24 the rule, composer and footer take three rows. In live the
+    # 21st source row is the fixture's final answer marker, not a History line.
+    count = 21 if browsing else 20
+    expected = [f"History line {number:03d}" for number in range(first, first + count)]
+    actual = history_rows(capture)
+    assert actual == expected, ("navigation history anchor/distance", actual, expected)
+    cells = capture.completed_cells
+    source = cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)
+    ending = sum(line.strip() == "TD4 history end" for line in source)
+    assert ending == (0 if browsing else 1), ("navigation end marker", ending)
+
+
 def navigation(fixture, row):
     # A real completed answer supplies enough history for page and wheel input
     # to move the viewport; an empty Session cannot distinguish ignored keys.
@@ -220,36 +248,38 @@ def navigation(fixture, row):
         # ordered editor observation, not a kernel-arrival timestamp.
         tty.send(b"~")
         tty.draft("~", 3)
-        assert tty.screen.completed.startswith("Browsing") == browsing, "navigation view changed before ordered marker"
-        # 24 terminal rows minus heading, the rule, the composer and the
-        # Session line leave 20 history rows. These literal fixture anchors
-        # are independent of Rui's viewport.
-        expected = [f"History line {number:03d}" for number in range(first, first + 20)]
-        actual = [line.strip() for line in tty.screen.completed.splitlines()
-                  if line.strip().startswith("History line ")]
-        assert actual == expected, ("navigation history anchor/distance", actual, expected)
+        assert_history_anchor(tty.screen, first, browsing)
         tty.send(b"\x15")
         tty.draft("", 2)
     history(80, False)
     generation = tty.screen.generation
     chunks(tty, row["chunks"])
-    tty.wait(lambda: tty.screen.completed.startswith("Browsing"), label="navigation entered browsing", after=generation)
     if row.get("status"):
-        tty.marker(" Status · ")
-        tty.marker(f" · {fixture.session}")
-        tty.marker(" Work")
+        tty.wait(lambda: inspection(tty.screen.completed, fixture.session),
+                 label="navigation entered inspection", after=generation)
+        tty.marker("This Session")
         tty.marker("Permissions     ")
+        # Long Folder and Store rows can wrap, so Work belongs below the fold.
+        if not tty.screen.reached(" Work"):
+            generation = tty.screen.generation
+            tty.send(b"\x1b[6~")
+            tty.marker(" Work", after=generation)
+        tty.marker(" Work")
+        tty.marker("Idle")
     else:
+        tty.wait(lambda: lookback(tty.screen.completed),
+                 label="navigation entered lookback", after=generation)
         history(row["first_history"], True)
         for step in row.get("middle", []):
             generation = tty.screen.generation
             chunks(tty, step["chunks"])
-            tty.wait(lambda: tty.screen.completed.startswith("Browsing"),
+            tty.wait(lambda: lookback(tty.screen.completed),
                      label="navigation intermediate movement", after=generation)
             history(step["first_history"], True)
     generation = tty.screen.generation
     chunks(tty, row["return_chunks"])
-    tty.wait(lambda: not tty.screen.completed.startswith("Browsing") and tty.screen.draft("", 2),
+    tty.wait(lambda: not lookback(tty.screen.completed)
+             and not tty.screen.completed.startswith("Browsing") and tty.screen.draft("", 2),
              label="navigation returned to live empty composer", after=generation)
     history(80, False)
     tty.marker("TD4 history end")

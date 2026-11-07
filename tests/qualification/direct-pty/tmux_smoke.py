@@ -158,7 +158,12 @@ def smoke(fixture, row):
         terminal.call("send-keys", "-t", "td4:0.0", "-H", *(f"{byte:02x}" for byte in payload))
     if row["name"] == "tmux-status":
         terminal.wait(lambda text: "Browsing" in text and " Status · " in text and f" · {fixture.session}" in text
-                      and "Permissions     " in text and " Work" in text, "status page")
+                      and "This Session" in text and "Permissions     " in text, "status page")
+        # Work follows settings; wrapping can place it below the viewport.
+        if " Work" not in (fixture.output / "pane.txt").read_text():
+            terminal.call("send-keys", "-t", "td4:0.0", "-H", "1b", "5b", "36", "7e")
+        terminal.wait(lambda text: "Browsing" in text and " Work" in text and "Idle" in text,
+                      "status work section")
         terminal.call("send-keys", "-t", "td4:0.0", "Escape")
         terminal.wait(lambda text: "Browsing" not in text and "›" in text, "status returned to live")
         assert_submitted(fixture.endpoint.requests, [])
