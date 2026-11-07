@@ -1,125 +1,79 @@
 # Rui
 
-Rui (रुई, Hindi for cotton) runs coding-agent conversations on your machine.
-Ask it to investigate a project or run Bash commands, and it saves every message, decision and result in SQLite.
-Close the terminal and the work keeps running in the background.
-Come back later to the same conversation.
+Rui is a memory-efficient agent runtime.
+Build applications that run multiple agents without starting a separate runtime process for each one.
+Give agents work, connect your tools, and collect their results through a TypeScript client.
 
-If Rui crashes, it recovers the saved work.
-It never reruns a command whose outcome it cannot confirm.
+**100 waiting agents.
+2.5 MB of private memory.**
 
-## Status
+![Private memory at 0, 1, 10, and 100 waiting agents for Rui, pi, fx, Codex app-server, and OpenCode, from the published Linux benchmark.](docs/assets/waiting-agent-memory.svg)
 
-Rui is in development.
-It supports Codex sign-in, interactive conversations, scripts, optional Bash approval and saved-result recovery.
-A file-editing tool and structured answers are not available yet.
+Source: the [published Linux model-wait benchmark](https://divyanshgolyan.com/posts/hundred-agents/) at [Rui revision 5014980](https://github.com/DivyanshGolyan/rui/commit/50149807908283e044e3573f1b251d6a2f21e854).
+See the [data and method](docs/waiting-agent-memory.md) for measurement scope and versions.
 
-Rui supports Apple Silicon macOS and x86-64 Linux.
-Builds for ARM64 Linux and Intel macOS are experimental.
-On both supported platforms, a live `gpt-6-luna` conversation, approved Bash and restart recovery have passed.
-Other models, live credential refresh and the full mixed-workload qualification have not.
-See [test results and limitations](tests/qualification/README.md#current-checks-and-qualification).
+## Get started with TypeScript
 
-Before you use Rui on a project, know its limits:
+[Follow the TypeScript quickstart](docs/integrating-rui.md) to run a Session and read its answer.
 
-- Commands run with your user's full access.
-  The project directory is not a sandbox, and a detached subprocess or blocked I/O can outlast a stop request.
-- If a crash leaves a command's outcome unknown, Rui reports it as indeterminate and does not rerun it.
-  Rui does not promise recovery from an OS crash or power loss.
-- Full tool output is temporary.
-  Saved results and excerpts remain after Rui drops it.
+The client launches a child Host:
 
-## Install
+```ts
+import { Rui } from "rui";
+const rui = await Rui.connect({
+	database: "./app-rui-store",
+	provider: {
+		baseUrl: "https://api.openai.com/v1",
+		key: process.env.OPENAI_API_KEY!,
+	},
+});
+```
 
-You need an Apple Silicon Mac with macOS 15 or newer, or x86-64 Linux with glibc 2.34 or newer, such as Ubuntu 22.04, Debian 12 or RHEL 9.
+Use Node.js 22.6+ and matching client and binary tarballs from [GitHub releases](https://github.com/DivyanshGolyan/rui/releases).
+A TypeScript Host uses an OpenAI-compatible Responses API key, not the terminal's ChatGPT sign-in.
+Provider usage may incur charges.
+
+## How it works
+
+Your application talks over a local socket to one shared Host that runs the Sessions.
+The Host shares networking and execution capacity and saves conversation state in SQLite or MySQL.
+Connect built-in tools or MCP servers, coordinate agents, and follow their activity through the client.
+See the [Host guide](docs/host.md) for capacity and lifecycle.
+
+## Try it in your terminal
+
+<a id="install"></a>
+
+The standalone binary supports Apple Silicon macOS 15+ and x86-64 Linux with glibc 2.34+.
+ARM64 Linux and Intel macOS builds are experimental.
 
 ```sh
 curl -fsSL https://github.com/DivyanshGolyan/rui/releases/latest/download/install.sh | sh
 ```
 
-The installer puts `rui` in `~/.local/bin` and checks the download's SHA-256 digest.
-If `~/.local/bin` is not on your `PATH`, it prints the line to add to your shell profile.
+The installer checks SHA-256 and installs in `~/.local/bin`.
+Follow its `PATH` instructions if your shell cannot find `rui`.
+See [upgrade and activation](docs/host.md#upgrade-and-activation) before updating saved work.
 
-Run `rui upgrade --check` to inspect the latest published stable release without installing it or starting a Host.
-Run `rui upgrade` to update an eligible released installation under `~/.local` and, only if the selected Store already has a running supported Host, restart that Host.
-A selected source build or managed build with unknown release identity is not upgraded automatically; run the standalone release installer above to deliberately switch it to a release.
-Package-provided and custom binaries remain their application's responsibility.
-The restart affects every Session in that Store and can interrupt work.
-For an eligible installation with no running Host, Upgrade only installs.
-The terminal's `/upgrade` panel offers Install and Cancel in both the overview and conversation.
-Installation and activation are separate: an unsupported or application-owned Host launch is not blindly stopped and is reported as installed but not activated.
-The manual release installer above and source installation remain install-only.
+<a id="start-a-conversation"></a>
 
-Updates keep saved work and sign-in; retained earlier builds are not an unconditional rollback after a Store migration.
-The target build's schema determines compatibility, not version punctuation: supported SQLite formats are backed up and migrated at Host startup, while MySQL schema changes are operator-owned.
-If target compatibility facts are unavailable, compatibility is unknown until startup validates it.
-Run `rui --version` to see what you have.
+Enable Codex device code authorization in ChatGPT security settings, or ask your workspace admin to allow it.
+Then run `rui auth login codex`, follow the printed link, and keep the code private.
+Run `rui` in your project directory.
+For API-key setup instead, see the [Host guide](docs/host.md#run-in-the-foreground).
 
-## Start a conversation
+Bash runs with your full privileges, without a sandbox, and defaults to running without approval (`bypass`).
+[Approval settings](docs/using-rui.md#approve-bash-commands) apply per Session and do not automatically propagate to agents it starts.
+See the [terminal guide](docs/using-rui.md) or [scripting guide](docs/scripting.md) for your next step.
 
-1. Sign in once with your ChatGPT account.
-   Rui uses OpenAI's device code login, which you must enable first.
-   Turn on device code authorization for Codex in your ChatGPT security settings.
-   On a workspace account, an admin allows it in the workspace permissions instead.
-   Then run:
+## Documentation
 
-	```sh
-	rui auth login codex     # or: rui auth login openai, to use an OpenAI API key
-	```
+<a id="status"></a>
+Rui is in development.
 
-	Open the link it prints, sign in and enter the code.
-	Never share the code.
-	See [OpenAI's Codex sign-in guide](https://learn.chatgpt.com/docs/auth) if the setting is missing.
-
-2. Go to your project and start Rui:
-
-	```sh
-	cd /path/to/your/project
-	rui
-	```
-
-3. Type a request at the `›` prompt, such as `Investigate the failing test`.
-
-Bash runs in your terminal's environment, so the agent finds the tools your shell finds.
-A tool you install or a venv you activate reaches the agent with your next message.
-The environment stays in memory and is never saved.
-
-By default, Bash runs without asking.
-To approve each command, enter `/configure --permission-mode ask` before your first request.
-Rui then shows each command above an Allow once / Deny choice: ← and → pick one, and Enter confirms it.
-
-To leave, type `/exit` or press Ctrl+C.
-Work continues in the background.
-Run `rui` again to see your unarchived conversations and press Enter on one to return to it.
-
-## Archive a conversation
-
-In the overview, select a Session and enter `/archive`.
-If it has work, confirm **Stop and archive**.
-Rui waits for the stop to complete before it hides the Session.
-
-Use `/sessions archived` to find archived Sessions, or `/sessions all` to show both views.
-Enter `/unarchive` to restore a Session without starting work.
-Sending a new Message to an archived Session also restores it.
-Archive keeps the conversation history and files.
-
-## Skills
-
-Rui discovers `SKILL.md` skills in your repository's `.agents/skills` and the Host user's `~/.agents/skills`; repository names win collisions.
-Use `/skill NAME` to read one into the conversation and `/reload-skills` to refresh the advertised catalog without starting a model turn.
-Skills are ordinary conversation content, grant no permissions and execute nothing on load.
-See [terminal commands](docs/using-rui.md#skills) or [scripted invocation](docs/scripting.md#invoke-and-reload-skills).
-
-## Build from source
-
-See [Developing Rui](docs/development.md) to build and install from source, run tests, or try Rui without a provider account.
-
-## Learn more
-
-- [Using the terminal conversation](docs/using-rui.md): commands, scrolling, Sessions, models and context compaction.
-- [Using Rui from scripts and agents](docs/scripting.md): one-shot commands, results, approvals and recovery.
-- [Running the Host](docs/host.md): the background process, its Store and failed-response diagnostics.
-- [Start fresh after a Store format change](docs/store-reset.md).
-- [Architecture](ARCHITECTURE.md): behavior, ownership and recovery, including the planned V1 contract.
-- [Verification](VERIFICATION.md): required checks and what they prove.
-- [Research](research/README.md), [contributing rules](AGENTS.md) and [third-party notices](THIRD_PARTY_NOTICES.md).
+- [TypeScript integration](docs/integrating-rui.md), [terminal guide](docs/using-rui.md), and [scripting guide](docs/scripting.md).
+- <a id="run-your-first-swarm"></a>[Agent coordination](docs/scripting.md#agents-calling-rui) to start investigators and collect their reports.
+- <a id="skills"></a>[Skills](docs/using-rui.md#skills) and <a id="archive-a-conversation"></a>[archive controls](docs/using-rui.md#archive-sessions).
+- <a id="build-from-source"></a>[Development and source builds](docs/development.md), including contribution setup and provider-free examples.
+- <a id="learn-more"></a>[Architecture](ARCHITECTURE.md), [Verification](VERIFICATION.md), and [Research](research/README.md).
+- [Store format reset](docs/store-reset.md), [contributing rules](AGENTS.md), and [third-party notices](THIRD_PARTY_NOTICES.md).
