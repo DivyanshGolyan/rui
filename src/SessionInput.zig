@@ -186,6 +186,12 @@ pub fn submitText(self: *Self, text: []const u8) Ticket {
     return self.seal(true);
 }
 
+/// Retain a nonempty command unchanged while a new draft is edited.
+pub fn sealCommand(self: *Self) Ticket {
+    std.debug.assert(self.submitted == null and self.composition().bytes.len != 0);
+    return self.seal(true);
+}
+
 fn seal(self: *Self, literal: bool) Ticket {
     self.serial += 1;
     self.submitted = .{ .bank = self.active, .literal = literal };
@@ -640,4 +646,19 @@ test "selected skill SessionInput allocation failure retains original and next b
     defer allocator.free(names);
     try std.testing.expectEqualStrings("old", names[0]);
     try input.release(ticket);
+}
+
+test "seal command retains original name while editing next draft" {
+    var stream: TerminalInput = .{};
+    var input: Self = undefined;
+    input.init(&stream);
+    for ("/skill demo") |byte| _ = input.feed(byte);
+    const name = input.composition().bytes[7..];
+    const ticket = input.sealCommand();
+    for ("next draft") |byte| _ = input.feed(byte);
+    try std.testing.expectEqualStrings("/skill demo", try input.message(ticket));
+    try std.testing.expectEqualStrings("demo", name);
+    try input.release(ticket);
+    try std.testing.expectError(error.NoSubmission, input.message(ticket));
+    try std.testing.expectEqualStrings("next draft", input.composition().bytes);
 }
