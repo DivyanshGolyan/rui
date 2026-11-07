@@ -322,7 +322,7 @@ pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []co
 /// the screen's list was the previous Session's, at revisions this input
 /// counts again.
 fn startInput(self: *Self) void {
-    self.input.init();
+    self.input.init(&self.terminal.stream);
     self.input.complete(.{ .context = self, .add = tabCompletion });
     self.terminal.screen.commands = null;
 }
@@ -406,52 +406,62 @@ fn settle(self: *Self, restored: anyerror!void) Settled {
 }
 
 test "run returns detached on Ctrl-D and leaves the lent terminal begun, with no notice written" {
-    var environ = try std.testing.environ.createMap(std.testing.allocator);
-    defer environ.deinit();
-    const screen = try std.testing.allocator.create(Screen);
-    defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const store = root[0..try tmp.dir.realPath(std.testing.io, &root)];
-    const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
-    defer page.close(std.testing.io);
-    var input: [2]c_int = undefined;
-    var output: [2]c_int = undefined;
-    try std.testing.expect(std.c.pipe(&input) == 0);
-    try std.testing.expect(std.c.pipe(&output) == 0);
-    defer for (input ++ output) |fd| {
-        _ = std.c.close(fd);
-    };
-    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-    _ = std.c.fcntl(output[0], std.c.F.SETFL, std.c.fcntl(output[0], std.c.F.GETFL) | nonblock);
-    try std.testing.expectEqual(@as(isize, 1), std.c.write(input[1], "\x04", 1));
-    var terminal: Terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = input[0], .output = output[1] };
-    var init: std.process.Init = undefined;
-    init.io = std.testing.io;
-    init.gpa = std.testing.allocator;
-    init.environ_map = &environ;
-    var interrupted: client.Cancellation = .{};
-    const self = try std.testing.allocator.create(Self);
-    defer std.testing.allocator.destroy(self);
-    const files: Files = .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } };
-    const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted, quiet_overview);
-    try std.testing.expectEqual(Outcome.detached, outcome);
-    try std.testing.expect(terminal.active and terminal.pump == null);
-    var written: [65536]u8 = undefined;
-    const count = @max(std.c.read(output[0], &written, written.len), 0);
-    try std.testing.expect(std.mem.indexOf(u8, written[0..@intCast(count)], "Detached") == null);
-    // The caller's part: nothing has restored the terminal, so only the
-    // borrowers run stopped are joined here.
-    self.reader.join() catch {};
-    _ = self.submission.join();
-    self.submission.close();
+    for ([_][]const u8{ "", "\x1b[", "\x1bO" }) |prefix| {
+        var environ = try std.testing.environ.createMap(std.testing.allocator);
+        defer environ.deinit();
+        const screen = try std.testing.allocator.create(Screen);
+        defer std.testing.allocator.destroy(screen);
+        try Screen.Test.init(screen, std.testing.io, &environ, false);
+        defer Screen.Test.deinit(screen);
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const store = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+        const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
+        defer page.close(std.testing.io);
+        var input: [2]c_int = undefined;
+        var output: [2]c_int = undefined;
+        try std.testing.expect(std.c.pipe(&input) == 0);
+        try std.testing.expect(std.c.pipe(&output) == 0);
+        defer for (input ++ output) |fd| {
+            if (fd >= 0) _ = std.c.close(fd);
+        };
+        const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+        _ = std.c.fcntl(output[0], std.c.F.SETFL, std.c.fcntl(output[0], std.c.F.GETFL) | nonblock);
+        const keys: []const u8 = if (prefix.len == 0) "\x04" else "B\x04";
+        try std.testing.expectEqual(@as(isize, @intCast(keys.len)), std.c.write(input[1], keys.ptr, keys.len));
+        // A lost prefix would type B, so Ctrl-D would edit instead of detach.
+        // EOF makes that failure deterministic rather than an input wait.
+        _ = std.c.close(input[1]);
+        input[1] = -1;
+        var terminal: Terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = input[0], .output = output[1] };
+        const now = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+        for (prefix) |byte| _ = terminal.stream.feed(byte, now);
+        var init: std.process.Init = undefined;
+        init.io = std.testing.io;
+        init.gpa = std.testing.allocator;
+        init.environ_map = &environ;
+        var interrupted: client.Cancellation = .{};
+        const self = try std.testing.allocator.create(Self);
+        defer std.testing.allocator.destroy(self);
+        const files: Files = .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } };
+        const outcome = try self.run(init, store, "k7m2qx", store, files, undefined, undefined, undefined, &terminal, &interrupted, quiet_overview);
+        try std.testing.expectEqual(Outcome.detached, outcome);
+        try std.testing.expectEqualStrings("", self.input.composition().bytes);
+        try std.testing.expectEqual(TerminalInput.Pending.none, terminal.stream.pending());
+        try std.testing.expect(self.input.stream == &terminal.stream);
+        try std.testing.expect(terminal.active and terminal.pump == null);
+        var written: [65536]u8 = undefined;
+        const count = @max(std.c.read(output[0], &written, written.len), 0);
+        try std.testing.expect(std.mem.indexOf(u8, written[0..@intCast(count)], "Detached") == null);
+        // The caller's part: nothing has restored the terminal, so only the
+        // borrowers run stopped are joined here.
+        self.reader.join() catch {};
+        _ = self.submission.join();
+        self.submission.close();
+    }
 }
 
-/// Exit interrupted a Host command before its output was shown. That output
-/// can name a saved request to recover, so it follows restoration on stderr.
 fn commandOutputGuide(self: *const Self) void {
     // Failed restoration may leave fd 2 pointing at this same scratch file.
     // Drop optional guidance rather than append the page to itself.
@@ -1556,9 +1566,9 @@ fn olderWanted(self: *const Self) bool {
 }
 
 fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
-    const stream = &self.input.stream;
+    const stream = &self.terminal.stream;
     const pending = stream.pending();
-    const read = (self.terminal.next(self.init.io, stream, wait) catch |err| switch (err) {
+    const read = (self.terminal.next(self.init.io, wait) catch |err| switch (err) {
         error.InputDeadline => {
             const expired = try stream.expire();
             if (expired != .none) {
@@ -1579,7 +1589,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     var decoded = stream.feed(read.byte, read.at);
     while (decoded != .none) : (decoded = stream.next()) switch (decoded) {
         .report => |report| switch (report) {
-            .width => |method| self.terminal.screen.setWidth(method),
+            .width => |method| self.terminal.widthReported(method),
             .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
             .focus => |focused| self.terminal.focused = focused,
             // The overview sends the records once a listing steps it.

@@ -1,7 +1,6 @@
 //! Native adapter actor: no Host, frontend or syscall interposition.
 const std = @import("std");
 const Terminal = @import("SessionTerminal.zig");
-const Input = @import("TerminalInput.zig");
 const Editor = @import("TerminalEditor.zig");
 const keymap = @import("keymap.zig");
 
@@ -33,10 +32,10 @@ fn replay(io: std.Io, terminal: *Terminal) !void {
     var storage: [128]u8 = undefined;
     @memcpy(storage[0..8], "headTAIL");
     var editor: Editor = .{ .buffer = &storage, .length = 8, .cursor = 4 };
-    var input: Input = .{};
+    const input = &terminal.stream;
     std.debug.print("ready\n", .{});
     while (true) {
-        const read = terminal.next(io, &input, 10) catch |err| switch (err) {
+        const read = terminal.next(io, 10) catch |err| switch (err) {
             error.InputDeadline => {
                 if (try input.expire() != .none) std.debug.print("expired escape\n", .{});
                 continue;

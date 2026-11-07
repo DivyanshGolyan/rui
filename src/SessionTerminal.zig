@@ -18,6 +18,8 @@ flags: [2]c_int,
 output: c_int = 1,
 /// The terminal's input descriptor; tests supply a pipe.
 input: c_int = 0,
+/// The invocation's byte decoder survives every screen and draft reset.
+stream: Input = .{},
 screen: *Screen,
 active: bool = true,
 result: anyerror!void = {},

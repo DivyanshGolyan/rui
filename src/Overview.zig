@@ -945,9 +945,9 @@ fn saveDefault(self: *Self, binding: view.Default) !void {
 /// key once the stream says it expired.
 fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
     for (0..bytes) |count| {
-        const read = (self.terminal.next(self.init.io, &self.input, if (count == 0) wait else 0) catch |err| switch (err) {
+        const read = (self.terminal.next(self.init.io, if (count == 0) wait else 0) catch |err| switch (err) {
             error.InputDeadline => {
-                const expired = try self.input.expire();
+                const expired = try self.terminal.stream.expire();
                 if (expired != .none) {
                     if (try self.compose(expired)) |next| return next;
                 }
@@ -955,8 +955,8 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
             },
             else => return err,
         }) orelse return null;
-        var decoded = self.input.feed(read.byte, read.at);
-        while (decoded != .none) : (decoded = self.input.next()) switch (decoded) {
+        var decoded = self.terminal.stream.feed(read.byte, read.at);
+        while (decoded != .none) : (decoded = self.terminal.stream.next()) switch (decoded) {
             .event => |value| switch (value.event) {
                 // An answer applies whenever it comes; a late one repaints.
                 .color_report => |report| if (report.kind == .bg) {
@@ -966,7 +966,7 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
             },
             .report => |report| switch (report) {
                 .width => |method| {
-                    self.terminal.screen.setWidth(method);
+                    self.terminal.widthReported(method);
                     self.caps.width = method;
                 },
                 .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
@@ -3362,7 +3362,7 @@ fn pressKey(rig: *Rig, bytes: []const u8) !?Ending {
     const Expiry = struct {
         fn done(overview: *Self) !bool {
             if (try overview.readInput(0, 1) != null) return error.TestUnexpectedResult;
-            return overview.input.pending() == .none;
+            return overview.terminal.stream.pending() == .none;
         }
     };
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), rig.overview, Expiry.done);
