@@ -5390,8 +5390,12 @@ test "failed quiescence retires its old reader before blocked retry" {
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), self, Workers.ready);
     try sendKeys(self, "/upgrade\r");
     try std.testing.expect(self.upgrade_requested);
-    try held.hold("\x1b[27u");
-    try self.driveActive();
+    // Escape cannot return while the protocol hold makes commandActive true.
+    // A real Ctrl-D detaches; the pumped writer reports that interruption.
+    try held.hold("\x04");
+    try std.testing.expectError(error.InteractiveInterrupted, self.driveActive());
+    try std.testing.expectEqual(@as(?Outcome, .detached), self.leaving);
+    try std.testing.expect(held.pumps != 0);
     try std.testing.expect(self.reader.thread == null and self.submission.task.thread == null);
     try std.testing.expect(self.reader.cancellation.stopped.load(.acquire));
     try std.testing.expect(!self.upgrade_reobserve_draining and !self.upgrade_reobserving);
@@ -5513,8 +5517,12 @@ test "old reader failure preserves the primary quiescence notice" {
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), self, Worker.done);
     var credit: Credit = .{ .held = held };
     held.terminal.pump = .{ .context = &credit, .step = Credit.step };
-    try held.hold("\x1b[27u");
-    try self.driveActive();
+    // Escape cannot return while the protocol hold makes commandActive true.
+    // A real Ctrl-D detaches; the pumped writer reports that interruption.
+    try held.hold("\x04");
+    try std.testing.expectError(error.InteractiveInterrupted, self.driveActive());
+    try std.testing.expectEqual(@as(?Outcome, .detached), self.leaving);
+    try std.testing.expect(held.pumps != 0);
     try std.testing.expect(credit.observed);
     try std.testing.expect(self.reader.thread == null and !self.upgrade_reobserve_draining);
     try std.testing.expect(self.upgrade_blocked and !self.upgrade_reobserving);
@@ -5552,12 +5560,16 @@ test "blocked upgrade cancellation drains a real old reader in the active loop" 
     try sendKeys(self, "/upgrade\r");
     try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
     try std.testing.expect(!self.upgrade_requested);
-    // Clear only this refused command so the driven loop can leave on Escape.
+    // Clear the refused command after its retention was verified.
     self.input.clear();
     gate.release.set(std.testing.io);
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), self, Gate.completed);
-    try held.hold("\x1b[27u");
-    try self.driveActive();
+    // Escape cannot return while the protocol hold makes commandActive true.
+    // A real Ctrl-D detaches; the pumped writer reports that interruption.
+    try held.hold("\x04");
+    try std.testing.expectError(error.InteractiveInterrupted, self.driveActive());
+    try std.testing.expectEqual(@as(?Outcome, .detached), self.leaving);
+    try std.testing.expect(held.pumps != 0);
     try std.testing.expect(self.reader.thread == null and !self.upgrade_reobserve_draining);
     try std.testing.expect(self.upgrade_blocked and !self.upgrade_reobserving);
     self.leaving = null;
