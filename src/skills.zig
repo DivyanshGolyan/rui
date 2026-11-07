@@ -1206,7 +1206,6 @@ test "skills invocation capture retains only final max-body bytes in the request
     const owner = @import("session_skills.zig");
     const protocol = @import("protocol.zig");
     const store = @import("store.zig");
-    const fixtures = @import("store/testing.zig");
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -1221,9 +1220,9 @@ test "skills invocation capture retains only final max-body bytes in the request
     defer initial_memory.deinit();
     const initial = try owner.captureInitial(initial_memory.allocator(), allocator, io, root, null);
     var storage: store.Store = undefined;
-    try fixtures.testingStore(&.{ .engine = .sqlite }, &storage, &tmp, io);
+    try store.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, io, .{});
     defer storage.close() catch unreachable;
-    var create = try fixtures.completeConfiguration("capture-memory-create", "", root, "model-a");
+    var create = try store.testingCompleteConfiguration("capture-memory-create", "", root, "model-a");
     const session = storage.configureWithInitialSkills(&create, null, initial, .{}).accepted.session;
     const raw = try allocator.alloc(u8, max_skill_bytes);
     defer allocator.free(raw);
