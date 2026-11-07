@@ -1323,6 +1323,13 @@ test "the running call's row carries the clock, in its place, and other work end
     }
     const size: std.posix.winsize = .{ .row = 12, .col = 52, .xpixel = 0, .ypixel = 0 };
     var buffer: [256]u8 = undefined;
+    // Unresolved headings can precede claim. The queued footer is current work,
+    // but neither call row has a running clock until a matching Bash is claimed.
+    const pending: protocol.WorkState = .{ .pending = .{ .since = 130 } };
+    _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &pending, 7, 142_000) }, &calls);
+    try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 2, &buffer));
+    try std.testing.expectEqualStrings("• Run zig build", rowText(screen, 3, &buffer));
+    try std.testing.expectEqualStrings("• Queued · 12s", rowText(screen, 4, &buffer));
     for ([_]u64{ 1, 2 }, [_][2][]const u8{ .{ "• Run zig build · 42s", "• Run zig build" }, .{ "• Run zig build", "• Run zig build · 42s" } }) |ordinal, rows| {
         const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = ordinal, .description = calls.entries[ordinal].presentation.description, .running = 2, .approvals = 0 } };
         _ = try screen.render(&out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
