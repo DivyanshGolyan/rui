@@ -3115,7 +3115,19 @@ test "typed saved-file loading preserves raw provenance through prepend Message 
     try std.testing.expectEqual(Viewport.Position{ .offset = 0, .row = 1 }, projection.position(1));
     try std.testing.expectEqual(Viewport.Position{ .offset = 12 }, projection.position(2));
     try std.testing.expectEqualStrings(raw ++ "newer\n", screen.browsing.text.text());
-    // No raw source SGR/OSC becomes a style/link in the selected frame.
+    const rail = screen.browsing.scroll.vertical_scrollbar.?;
+    try std.testing.expectEqual(@as(u16, 1), rail.character.width);
+    try std.testing.expectEqualStrings("▐", rail.character.grapheme);
+    try std.testing.expectEqualStrings("│", rail.track_character.?.grapheme);
+    const rail_column = cells.width - rail.character.width;
+    try std.testing.expectEqual(@as(u16, 39), rail_column);
+    // Scrollbar.draw paints no thumb when all content fits in the body.
+    try std.testing.expect(projection.total +| screen.browsing.blank_tail <= screen.height);
+    try std.testing.expectEqual(@as(usize, 0), screen.browsing.scroll.scroll.y);
+    for (0..screen.height) |row| {
+        try std.testing.expectEqualStrings(rail.track_character.?.grapheme, cells.readCell(rail_column, @intCast(row)).?.char.grapheme);
+    }
+    // The retained raw SGR and invalid byte never produce a link in this frame.
     for (0..size.row) |row| for (0..size.col) |col| try std.testing.expectEqualStrings("", cells.readCell(@intCast(col), @intCast(row)).?.link.uri);
 }
 
