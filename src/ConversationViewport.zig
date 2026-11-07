@@ -2875,7 +2875,10 @@ test "typed literal mixed prefixes preserve hidden URI authority and escape only
     var storage: [128]u8 = undefined;
     try std.testing.expectEqualStrings("label h|x", screen.row(0, &storage));
     try std.testing.expectEqualStrings("---|---", screen.row(1, &storage));
-    try std.testing.expectEqualStrings("\\x1b[31m             \\xff", screen.row(2, &storage));
+    try std.testing.expectEqualStrings("\\x1b[31m            │\\xff", screen.row(2, &storage));
+    try std.testing.expectEqualStrings("│", screen.screen.readCell(20, 2).?.char.grapheme);
+    try std.testing.expectEqualStrings("", screen.screen.readCell(20, 2).?.link.uri);
+    try std.testing.expectEqualStrings("", screen.screen.readCell(21, 2).?.link.uri);
     try std.testing.expectEqualStrings(uri, screen.screen.readCell(0, 0).?.link.uri);
     try std.testing.expectEqualStrings("", screen.screen.readCell(6, 0).?.link.uri);
     const layout: Layout = .{ .width = 40, .method = .wcwidth };
