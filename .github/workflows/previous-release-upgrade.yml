@@ -1,7 +1,13 @@
 name: Previous installed-release upgrade
-# Every main-tip stable candidate runs by explicit dispatch.
+# Internal candidate acceptance, also available for manual diagnosis.
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      candidate-ref:
+        description: Immutable tested source commit, not a mutable PR ref
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -24,9 +30,20 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-15]
     steps:
+      - name: Validate immutable candidate
+        env:
+          CANDIDATE_REF: ${{ inputs.candidate-ref || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_REF" =~ ^[0-9a-f]{40}$ ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.candidate-ref || github.sha }}
           persist-credentials: false
+      - name: Verify checked-out candidate
+        env:
+          CANDIDATE_REF: ${{ inputs.candidate-ref || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_REF"
       - uses: ./.github/actions/setup
         with:
           publish-caches: 'false'
@@ -79,24 +96,3 @@ jobs:
           include-hidden-files: true
           retention-days: 3
           if-no-files-found: ignore
-  completion:
-    needs: upgrade
-    if: ${{ always() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && !github.event.repository.private }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - name: Wake Auto-land after this qualification finishes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        # A lost wake skips this promotion until the next one. A repeated wake
-        # is harmless: Auto-land's writer is serialized and rechecks evidence.
-        run: |
-          for delay in 10 30 ''; do
-            gh workflow run auto-land.yml --repo "$GITHUB_REPOSITORY" --ref main -f completed_run="$GITHUB_RUN_ID" && exit 0
-            test -n "$delay" || exit 1
-            echo "::warning::Auto-land wake failed; retrying in ${delay}s"
-            sleep "$delay"
-          done

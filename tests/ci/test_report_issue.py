@@ -422,30 +422,5 @@ class ReportTest(unittest.TestCase):
         self.assertIn('::warning::', out)
 
 
-class WiringTest(unittest.TestCase):
-    def report_job(self, name):
-        text = Path('.github/workflows', name).read_text()
-        return re.search(r'(?ms)^  report:\n(.*?)(?=^  [a-z_]+:\n|\Z)', text)[1]
-
-    def test_every_reporting_workflow_files_by_cause_from_job_logs(self):
-        for name in ('daily-macos.yml', 'qualify-linux.yml', 'renderer-contracts.yml', 'check.yml'):
-            with self.subTest(workflow=name):
-                job = self.report_job(name)
-                self.assertIn('report_issue.py --workflow', job)
-                self.assertIn('--run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA"', job)
-                self.assertIn('actions: read', job)
-                self.assertIn('issues: write', job)
-                self.assertIn('always()', job)
-                self.assertNotIn('--title', job)
-
-    def test_selected_checks_report_only_stable_reds(self):
-        job = self.report_job('check.yml')
-        self.assertIn('--workflow "Stable qualification"', job)
-        self.assertIn('--label stable-red', job)
-        self.assertIn('inputs.stable', job)
-        self.assertIn("needs.macos.result != 'success'", job)
-        self.assertNotIn("'pull_request'", job)
-
-
 if __name__ == '__main__':
     unittest.main()

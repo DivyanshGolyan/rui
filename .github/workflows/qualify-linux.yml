@@ -13,8 +13,6 @@ on:
         options: [native, resources, all, footprint]
         default: native
         required: true
-  schedule:
-    - cron: '13 6 * * *'
 permissions:
   contents: read
   actions: read
@@ -24,26 +22,6 @@ jobs:
     uses: ./.github/workflows/qualify-macos.yml
     with:
       platform: linux
-      ref: ${{ inputs.ref || github.sha }}
-      # Full native acceptance is the daily backstop. Resource campaigns remain
-      # explicit until platform counters and shared-runner behavior qualify.
+      ref: ${{ inputs.ref }}
       # Linux cannot qualify macOS footprint. Never mask a resource gate's exit.
-      suite: ${{ inputs.suite || 'native' }}
-  report:
-    needs: qualify
-    # Daily runs on main catch drift and flakes after landing; red files issues by cause.
-    if: ${{ always() && !github.event.repository.private && github.event_name == 'schedule' && needs.qualify.result != 'success' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      issues: write
-      actions: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: File each failure under its cause
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 -B tests/ci/report_issue.py --workflow "Daily Linux qualification" --run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA"
+      suite: ${{ inputs.suite }}

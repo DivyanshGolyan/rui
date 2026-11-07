@@ -26,7 +26,7 @@ MAC_PATHS = (
     "src/h2/*",
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",
     "build.zig", "build.zig.zon",
-    ".github/actions/setup/*", ".github/workflows/daily-macos.yml", ".github/workflows/qualify-macos.yml",
+    ".github/actions/setup/*", ".github/workflows/qualify-macos.yml",
     "tests/ci/qualification.py",
     "install.sh", "release/*",
 )
