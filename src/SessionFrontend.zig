@@ -2789,6 +2789,146 @@ const HeldFrontend = struct {
     }
 };
 
+test "completed Action inspection waits for the selector decoder in the active owner" {
+    const Host = struct {
+        fn respond(listener: *std.Io.net.Server, body: []const u8) !void {
+            var fds = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 2000) == 0) return error.TestUnexpectedResult;
+            const peer = try listener.accept(std.testing.io);
+            defer peer.close(std.testing.io);
+            var request: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const count = try std.posix.read(peer.socket.handle, request[used..]);
+                if (count == 0) return error.UnexpectedEof;
+                used += count;
+                if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                    const start = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                    const finish = std.mem.indexOf(u8, request[start..end], "\r\n").? + start;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
+                }
+            }
+            try std.testing.expectStringStartsWith(request[0..used], "POST /v1/inspect-session HTTP/1.1\r\n");
+            var header: [256]u8 = undefined;
+            var writer = peer.writer(std.testing.io, &.{});
+            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len}));
+            try writer.interface.writeAll(body);
+        }
+    };
+    const io = std.testing.io;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    var directory = try @import("socket_fixture.zig").Directory.init();
+    defer directory.cleanup();
+    const root = directory.root[0..directory.root_len];
+    var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    const paths = lease.paths;
+    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    }
+    const scratch = try held.tmp.dir.createFile(io, "inspection-current", .{ .read = true });
+    defer scratch.close(io);
+    const inspection = try held.tmp.dir.createFile(io, "inspection-output", .{ .read = true });
+    defer inspection.close(io);
+    const action = try held.adopt(4);
+    defer action.close(io);
+    self.files = .{ .scratch = scratch, .action = action, .inspection = inspection };
+    self.store = root;
+    self.session = "k7m2qx";
+    self.poll_at = std.math.maxInt(i96);
+    defer {
+        self.reader.cancel();
+        self.reader.join() catch {};
+    }
+    try held.settle();
+    try sendKeys(self, "/inspect-action\r");
+    try std.testing.expect(self.inspection.queued_action == .captured);
+    try std.testing.expectEqual(@as(u64, 10), self.inspection.queued_action.captured);
+    try self.startQueuedCommand();
+    try sendKeys(self, "retained\x07");
+    try held.settle();
+    try std.testing.expectEqual(ConsentPolicy.Row.selector, held.screen.inputRow());
+    try std.testing.expectEqual(ConsentPolicy.Approval.held, held.screen.selected.approval);
+
+    const reference = "{\"type\":\"text\",\"bytes\":\"13\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}";
+    const current = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"revision\":\"17\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"approval\",\"since\":\"1\"},\"turn\":\"7\",\"operation\":\"19\",\"first_action\":\"10\",\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"1\",\"unresolved\":[{\"action\":\"10\",\"parent_operation\":\"19\",\"call_ordinal\":\"0\",\"tool\":\"bash\",\"permission_revision\":\"23\",\"authorization\":\"pending\",\"call_id\":" ++ reference ++ ",\"arguments\":" ++ reference ++ ",\"presentation\":{\"description\":\"Run parser tests\",\"code\":\"pending_permission\",\"publication_position\":null}}],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[{\"action\":\"10\",\"permission_revision\":\"23\"}],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+    try Host.respond(&listener, current);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), self, struct {
+        fn done(frontend: *Self) bool {
+            return frontend.reader.completed();
+        }
+    }.done);
+    var fds = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&fds, 0));
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(held.pipes[0][1], "\xc3", 1));
+    try std.testing.expectEqual(ConsentPolicy.Service.byte, try self.step(0));
+    try std.testing.expect(self.input.pending() != .none);
+
+    const Gate = struct {
+        held: *HeldFrontend,
+        visits: usize = 0,
+        sent: bool = false,
+        tail_verified: bool = false,
+        delivered: bool = false,
+        listener: *std.Io.net.Server,
+        deadline: i96,
+        fn service(raw: *anyopaque) !bool {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            const frontend = &gate.held.self;
+            if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= gate.deadline) return error.TestUnexpectedResult;
+            var sink: [65536]u8 = undefined;
+            while (std.c.read(gate.held.pipes[1][0], &sink, sink.len) > 0) {}
+            if (!gate.sent) {
+                try std.testing.expect(frontend.reader.thread != null and frontend.reader.completed());
+                try std.testing.expect(frontend.input.pending() != .none);
+                try std.testing.expectEqual(ConsentPolicy.Row.selector, gate.held.screen.inputRow());
+                try std.testing.expectEqual(@as(u64, 10), gate.held.screen.consent.?.action);
+                try std.testing.expect(frontend.submission.view() == null);
+                gate.visits += 1;
+                if (gate.visits == 2) {
+                    try std.testing.expectEqual(@as(isize, 1), std.c.write(gate.held.pipes[0][1], "\xa9", 1));
+                    gate.sent = true;
+                }
+            } else if (!gate.tail_verified and frontend.input.pending() == .none and frontend.reader.thread != null) {
+                try std.testing.expectEqualStrings("! Command still running. Input ignored.", frontend.notice.?);
+                try std.testing.expectEqualStrings("retained", frontend.input.composition().bytes);
+                try std.testing.expect(frontend.submission.view() == null);
+                gate.tail_verified = true;
+            } else if (frontend.reader.thread == null and gate.held.screen.view == .inspection) {
+                const ticket = gate.held.screen.ticket orelse return false;
+                if (!ticket.delivered or ticket.scope != gate.held.screen.scope) return false;
+                try std.testing.expectEqual(@as(?u64, 10), frontend.inspection.shown_action);
+                try std.testing.expectEqualStrings("retained", frontend.input.composition().bytes);
+                try std.testing.expect(frontend.input.pending() == .none);
+                try std.testing.expectEqual(@as(u64, 10), gate.held.screen.consent.?.action);
+                try std.testing.expect(frontend.submission.view() == null);
+                try std.testing.expect(std.mem.indexOf(u8, gate.held.screen.browsing.text.text(), "--action 10") != null);
+                var pending = [_]std.posix.pollfd{.{ .fd = gate.listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+                try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pending, 0));
+                gate.delivered = true;
+                try std.testing.expectEqual(@as(isize, 1), std.c.write(gate.held.pipes[0][1], "\x04", 1));
+                try pump(frontend);
+                return error.TestUnexpectedResult;
+            }
+            return false;
+        }
+    };
+    var gate: Gate = .{ .held = held, .listener = &listener, .deadline = std.Io.Clock.awake.now(io).nanoseconds + 10 * std.time.ns_per_s };
+    self.lender = quiet_overview;
+    self.lender.context = &gate;
+    self.lender.service = Gate.service;
+    try std.testing.expectError(error.InteractiveInterrupted, self.driveActive());
+    try std.testing.expectEqual(@as(usize, 2), gate.visits);
+    try std.testing.expect(gate.sent and gate.tail_verified and gate.delivered);
+    try std.testing.expectEqual(@as(?Outcome, .detached), self.leaving);
+    try std.testing.expect(self.reader.thread == null);
+}
+
 test "queued Action inspection and copy never follow a successor" {
     const held = try HeldFrontend.create();
     defer held.destroy();
