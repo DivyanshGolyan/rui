@@ -2476,6 +2476,45 @@ test "live and transcript chrome have identical cells with calls queue work draf
         _ = try Test.render(screen, &out.writer, size, draft, draft.len, .{ .notice = "Important notice" }, &calls);
         try std.testing.expectEqualStrings("Important notice", rowText(screen, 15, &row));
     };
+
+    // Pin the actual source/chrome boundary independently of the viewport's
+    // capacity: a short body leaves blank rows BELOW its live call, while the
+    // queued preview stays immediately above the rule.
+    for ([_]u16{ 24, 200 }) |rows| for ([_]bool{ false, true }) |colour| {
+        screen.colour = colour;
+        _ = screen.backend.setPolicy(.{ .depth = if (colour) .indexed else .none, .width = screen.backend.widthMethod() });
+        try screen.latest();
+        screen.live.text.clear();
+        try screen.append("BODY-FIRST\nBODY-LAST");
+        var held: View.Live = .{ .count = 1, .total = 1 };
+        held.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
+        try held.entries[0].presentation.description.?.set("Held call");
+        const running: protocol.WorkState = .{ .bash = .{ .since = 100, .call = 0, .description = held.entries[0].presentation.description, .running = 1, .approvals = 0 } };
+        const chrome: Footer = .{ .queued = .{ .waiting = .{ .line = "QUEUED-SOURCE", .count = 3 }, .status = "" }, .live = work_line.of(&test_words, &running, 7, 142_000) };
+        for ([_]bool{ false, true }) |transcript| {
+            if (transcript) try screen.beginTranscript(0);
+            _ = screen.presented(try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, chrome, &held));
+            var row: [256]u8 = undefined;
+            try std.testing.expectEqual(@as(u16, 2), screen.drawn.rows);
+            try std.testing.expect(screen.height > screen.drawn.rows);
+            try std.testing.expectEqualStrings("BODY-FIRST", rowText(screen, 0, &row));
+            try std.testing.expectEqualStrings("BODY-LAST", rowText(screen, 1, &row));
+            try std.testing.expectEqualStrings("  • Held call · 42s", rowText(screen, 2, &row));
+            for (3..rows - 4) |y| try std.testing.expectEqualStrings("", rowText(screen, @intCast(y), &row));
+            try std.testing.expectEqualStrings("› QUEUED-SOURCE                                                         3 queued", rowText(screen, rows - 4, &row));
+            try std.testing.expectEqual(@as(usize, 80 * "─".len), rowText(screen, rows - 3, &row).len);
+            try std.testing.expectEqualStrings("›", rowText(screen, rows - 2, &row));
+            if (transcript) try std.testing.expectEqualStrings("Looking back · Ctrl-End: latest", rowText(screen, rows - 1, &row));
+        }
+        const waiting: protocol.WorkState = .{ .working = .{ .since = 100 } };
+        _ = try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .queued = chrome.queued, .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &.{});
+        var work_row: [256]u8 = undefined;
+        try std.testing.expectEqual(@as(u16, 2), screen.drawn.rows);
+        try std.testing.expectEqualStrings("• Waiting · 42s", rowText(screen, 2, &work_row));
+        _ = try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "keep", 4, .{ .notice = "Important notice", .queued = chrome.queued, .live = chrome.live }, &held);
+        var row: [256]u8 = undefined;
+        try std.testing.expectEqualStrings("Important notice", rowText(screen, rows - 1, &row));
+    };
 }
 
 test "idle clock redraw cost stays bounded over retained text populations" {
