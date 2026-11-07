@@ -6,7 +6,7 @@ import os
 import pathlib
 import pty
 from terminal_process import COLUMNS, ROWS, open_pty
-from terminal_screen import ScreenCapture, shown
+from terminal_screen import ScreenCapture, cell_rows, shown
 import re
 import select
 import shutil
@@ -485,7 +485,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     human.read_terminal(master, "accepted work remains accepted",
                         timeout=deadline - time.monotonic(), composer=True)
                     while True:
-                        os.write(master, b"/status\n")
+                        os.write(master, human.fixture_command("/status").encode())
                         status = human.read_terminal(master, f" Status · {session}",
                             timeout=deadline - time.monotonic(), composer=True)
                         # /status exposes unresolved frontend custody, independently
@@ -531,7 +531,7 @@ def interactive_cases(state, binding=False, null_code=False):
                                     timeout=deadline - time.monotonic(), composer=True)
                             elif "› " not in output.split("denied tool saved", 1)[1]:
                                 output += human.read_terminal(master, "› ", timeout=deadline - time.monotonic())
-                        os.write(master, b"/status\n")
+                        os.write(master, human.fixture_command("/status").encode())
                         diagnostic = human.read_terminal(master, f"Last submission error: {reason}", composer=True)
                         assert key in diagnostic and "Ctrl-R retries this exact original" in diagnostic, diagnostic
                         # No ordinary no-op may retry an unresolved submission.
@@ -549,7 +549,7 @@ def interactive_cases(state, binding=False, null_code=False):
                         if route == "/v1/message":
                             output += human.await_screen(master, human.CHOICE)
                             output += human.action_ready(ready_read, master)
-                    os.write(master, b"/exit\n")
+                    os.write(master, human.fixture_command("/exit").encode())
                 # Supply output credit during the original exit budget for
                 # fatal cleanup and recoverable explicit detachment alike.
                 try:
@@ -734,12 +734,14 @@ def permission_read_cases(state):
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), details_session],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
-            os.write(master, b"/details\n")
+            os.write(master, human.fixture_command("/details").encode())
             human.read_terminal(master, "host_busy", timeout=10)
             output = human.current_screen(master)
             # The transcript keeps the whole diagnostic, wrapped at the width;
             # the notice under the input names only what failed.
-            assert "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy" in " ".join(output.split()), output
+            cells = human.terminal_capture(master).completed_cells
+            diagnostic = " ".join(cell_rows(cells, 0, len(cells), 0, COLUMNS - 1))
+            assert "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy" in " ".join(diagnostic.split()), output
             assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Details unavailable; draft retained.", output
             assert caller.poll() is None, output
             os.write(master, b"\x03")
