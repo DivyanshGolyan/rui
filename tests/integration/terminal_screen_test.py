@@ -132,6 +132,79 @@ class ScreenCaptureTests(unittest.TestCase):
         self.assertEqual(len(raw), capture.received_bytes)
 
 
+
+class CanonicalDetailsConsumerTests(unittest.TestCase):
+    """Exercise the canonical fixture's actual assertion against committed cells."""
+
+    def capture(self, rows=None, columns=80):
+        if rows is None:
+            rows = self.rows()
+        screen = ScreenCapture(columns, len(rows))
+        frame = "\x1b[?2026h\x1b[2J" + "".join(
+            f"\x1b[{index + 1};1H{row}" for index, row in enumerate(rows)
+        ) + "\x1b[49;2H\x1b[?2026l"
+        screen.feed(frame.encode())
+        return screen
+
+    def rows(self):
+        transcript = ["" for _ in range(47)]
+        transcript[1] = "! Details unavailable; draft retained. HTTP 503; type: busy; code:"
+        transcript[2] = "  host_busy"
+        transcript[3] = "literal ▐ in source"
+        return [row.ljust(79) + "▐" for row in transcript] + [
+            "─" * 80, "›", "! Details unavailable; draft retained."
+        ]
+
+    def check(self, screen):
+        from canonical_failure_integration import assert_details_unavailable
+        assert_details_unavailable(screen)
+
+    def test_exact_diagnostic_and_footer_on_committed_physical_screen(self):
+        screen = self.capture()
+        before, cells = screen.completed, screen.completed_cells
+        self.check(screen)
+        self.assertIn("literal ▐ in source", screen.completed)
+        self.assertEqual(before, screen.completed)
+        self.assertIs(cells, screen.completed_cells)
+
+    def test_corrupt_diagnostic_chrome_and_geometry_are_rejected(self):
+        for fault in ("status", "type", "code", "missing continuation", "separated continuation",
+                      "footer only", "literal rail in diagnostic", "rail missing", "rail moved", "footer", "rule", "draft", "geometry"):
+            with self.subTest(fault=fault):
+                rows = self.rows()
+                if fault == "status": rows[1] = rows[1].replace("503", "500")
+                elif fault == "type": rows[1] = rows[1].replace("busy", "idle")
+                elif fault == "code": rows[2] = rows[2].replace("host_busy", "host_idle")
+                elif fault == "missing continuation": rows[2] = "".ljust(79) + "▐"
+                elif fault == "separated continuation": rows[3], rows[2] = rows[2], rows[3]
+                elif fault == "footer only":
+                    rows[1] = "".ljust(79) + "▐"
+                    rows[2] = "".ljust(79) + "▐"
+                    rows[-1] = "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy"
+                elif fault == "literal rail in diagnostic": rows[2] = rows[2].replace("  host_busy", "  ▐ host_busy")
+                elif fault == "rail missing": rows[1] = rows[1][:-1] + " "
+                elif fault == "rail moved": rows[1] = rows[1][:-2] + "▐ "
+                elif fault == "footer": rows[-1] = "! Details unavailable."
+                elif fault == "rule": rows[-3] = "─" * 79
+                elif fault == "draft": rows[-2] = "› draft"
+                elif fault == "geometry": rows.pop(3)
+                with self.assertRaises(AssertionError):
+                    self.check(self.capture(rows))
+
+    def test_old_or_uncommitted_frame_is_not_current_evidence(self):
+        screen = self.capture()
+        bad = self.rows()
+        bad[2] = "".ljust(79) + "▐"
+        next_frame = "\x1b[?2026h\x1b[2J" + "".join(
+            f"\x1b[{index + 1};1H{row}" for index, row in enumerate(bad)
+        )
+        screen.feed(next_frame.encode())
+        with self.assertRaises(AssertionError):
+            self.check(screen)
+        screen.feed(b"\x1b[?2026l")
+        with self.assertRaises(AssertionError):
+            self.check(screen)
+
 if __name__ == "__main__":
     host_process.enter()
     unittest.main()

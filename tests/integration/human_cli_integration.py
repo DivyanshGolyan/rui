@@ -716,6 +716,18 @@ def frame_source(master, screen, *, rail=True):
     return "\n".join(row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, columns - int(rail)))
 
 
+def exact_railed_row(capture, text):
+    """Find an exact source row only in the current committed cell grid."""
+    cells = capture.completed_cells
+    columns = capture.screen.columns
+    assert cells and columns > 1 and all(len(row) == columns for row in cells), "invalid frame geometry"
+    for row in cells:
+        if cell_rows([row], 0, 1, 0, columns - 1)[0].rstrip(" ") == text:
+            assert row[-1].data == "▐", "missing physical transcript rail"
+            return True
+    return False
+
+
 def shown(text, screen):
     from terminal_screen import shown as wrapped
     return wrapped(text, screen)
@@ -1600,6 +1612,19 @@ def conversation_protocol_cases():
         capture = ScreenCapture(80, len(rows))
         capture.feed(terminal_frame(rows, (len(rows) - 1, 3)))
         return capture
+    # Exercise the actual committed cell observer: content rail glyphs are
+    # not chrome, and a missing or displaced physical rail cannot pass.
+    rail = capture_rows(["Saved heading".ljust(79) + "▐", "literal ▐".ljust(79) + "▐", "›"])
+    assert exact_railed_row(rail, "Saved heading")
+    assert exact_railed_row(rail, "literal ▐")
+    assert not exact_railed_row(rail, "literal")
+    for bad in ("Saved heading".ljust(80), "Saved heading".ljust(78) + "▐ "):
+        broken = capture_rows([bad, "›"])
+        try:
+            accepted = exact_railed_row(broken, "Saved heading")
+        except AssertionError:
+            accepted = False
+        assert not accepted, "invalid physical rail accepted"
     for label in LOOKBACK_LABELS:
         assert looking_back("body\n" + label)
         assert not looking_back(label + "\nnotice takes priority")
@@ -1975,77 +2000,124 @@ def settle_screen(master, quiet=1.0, timeout=15):
     return current_screen(master)
 
 
+def transcript_source(capture, screen):
+    """Source rectangle for the settled single-composer transcript fixture."""
+    assert screen == capture.completed, "transcript source needs the current committed frame"
+    cells = capture.completed_cells
+    columns = capture.screen.columns
+    assert len(cells) >= 3 and columns > 1 and all(len(row) == columns for row in cells), "invalid frame geometry"
+    rows = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, columns)]
+    assert rows[-3] == "─" * columns, ("unexpected transcript rule", screen)
+    for index, row in enumerate(cells[:-3]):
+        assert row[-1].data == "▐", ("missing physical transcript rail", index, screen)
+    source = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells) - 3, 0, columns - 1)]
+    return "\n".join(source + rows[-3:])
+
+
 def raw_export(master, screen, *, rail=True):
-    """The printed raw export command, rejoined across word-wrapped rows.
+    """Read the displayed invocation from this exact committed cell grid.
 
-    Word wrap consumes the space at a soft break; a row filled to the edge
-    broke inside a word instead (a long hex identity), so it joins directly.
+    A filled physical source row wraps within a word; a shorter one wraps at
+    a space. The transcript rail is a separate cell, never command data.
+    Inspection pages use the full physical width instead.
     """
-    lines = frame_source(master, screen, rail=rail).split("\n")
-    columns = terminal_capture(master).screen.columns - int(rail)
-    start = next(index for index, line in enumerate(lines) if line.lstrip(" ").startswith("Raw export: "))
+    capture = terminal_capture(master)
+    assert screen == capture.completed, "raw export needs the current committed frame"
+    cells = capture.completed_cells
+    columns = capture.screen.columns
+    assert columns > int(rail) and cells and all(len(row) == columns for row in cells), "invalid frame geometry"
+    width = columns - int(rail)
+    lines = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, width)]
+    starts = [i for i, line in enumerate(lines) if line.lstrip(" ").startswith("Raw export: ")]
+    assert len(starts) == 1, ("missing or ambiguous raw export", screen)
+    start = starts[0]
     command = lines[start].lstrip(" ").removeprefix("Raw export: ")
-    previous = lines[start]
-    for line in lines[start + 1:]:
+    for index in range(start, len(lines)):
+        if rail:
+            assert cells[index][-1].data == "▐", ("missing physical transcript rail", index, screen)
+        full = cells[index][width - 1].data != " "
         if re.search(r"--ordinal [0-9]+$", command):
-            break
-        command += ("" if len(previous) == columns else " ") + line
-        previous = line
-    assert re.search(r"--ordinal [0-9]+$", command), screen
-    return command
-
-
-def drawn_style(master, text, offset=0):
-    """Cell style where the latest committed frame draws `text`."""
-    return terminal_capture(master).style(text, offset)
+            # A digit at the right edge may continue on the next row. Only a
+            # blank following row disambiguates an exactly-full final row.
+            if full:
+                assert index + 1 < len(lines) and not lines[index + 1], ("ambiguous ordinal at edge", screen)
+            return command
+        assert index + 1 < len(lines) and lines[index + 1], ("incomplete raw export", screen)
+        command += ("" if full else " ") + lines[index + 1]
+    raise AssertionError(("incomplete raw export", screen))
 
 
 def raw_export_oracles():
-    """Literal source geometry, not a command reconstructed from its expected bytes."""
+    """Exercise reconstruction against real committed cells, not display text."""
     master, slave = open_pty()
     try:
         capture = terminal_capture(master)
-
         def draw(rows, columns, rail="▐"):
             width = columns - int(rail is not None)
             assert all(len(row) <= width for row in rows), rows
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
             capture.resize(columns, 24)
-            capture.feed(terminal_frame([row.ljust(width) + (rail or "") for row in rows], (2, 23)))
+            capture.feed(terminal_frame([row.ljust(width) + (rail or "") for row in rows], (len(rows) + 1, 1)))
             return raw_export(master, capture.completed, rail=rail is not None)
-
         expected = "rui session read-conversation --store-hex 616263 --session k7m2qx --position 6 --ordinal 0"
         assert draw(["Raw export: " + expected], 512) == expected
-        wrapped = ["Raw export: rui session", "read-conversation --store-hex",
-                   "012345678901234567890123456789012345678",
-                   "90123 --session k7m2qx --position 6", "--ordinal 0"]
-        assert draw(wrapped, 40) == ("rui session read-conversation --store-hex "
-            "01234567890123456789012345678901234567890123 --session k7m2qx --position 6 --ordinal 0")
-        inspection = ["Raw export: rui session", "read-conversation --store-hex",
-                      "0123456789012345678901234567890123456789",
-                      "0123 --session k7m2qx --position 6", "--ordinal 0"]
-        assert draw(inspection, 40, rail=None) == ("rui session read-conversation --store-hex "
-            "01234567890123456789012345678901234567890123 --session k7m2qx --position 6 --ordinal 0")
         assert draw(["Raw export: " + expected], 512, rail=None) == expected
-        # A literal rail inside source data is not decoration to strip.
+        transcript = ["Raw export: rui session", "read-conversation --store-hex",
+            "012345678901234567890123456789012345678", "90123 --session k7m2qx --position 6", "--ordinal 0"]
+        expected_wrap = ("rui session read-conversation --store-hex "
+            "01234567890123456789012345678901234567890123 --session k7m2qx --position 6 --ordinal 0")
+        assert draw(transcript, 40) == expected_wrap
+        inspection = ["Raw export: rui session", "read-conversation --store-hex",
+            "0123456789012345678901234567890123456789", "0123 --session k7m2qx --position 6", "--ordinal 0"]
+        assert draw(inspection, 40, rail=None) == expected_wrap
         assert draw(["Raw export: rui --literal ▐ --ordinal 0"], 80) == "rui --literal ▐ --ordinal 0"
+        def reject(action):
+            try:
+                action()
+            except (AssertionError, StopIteration):
+                return
+            raise AssertionError("corrupt raw export accepted")
         try:
             raw_export(master, capture.completed + "\n")
         except AssertionError as failure:
-            assert str(failure) == "frame source needs the supplied current committed frame", failure
+            assert str(failure) == "raw export needs the current committed frame", failure
         else:
             raise AssertionError("stale raw export frame was accepted")
-        # The ordinal's digit exists only in the rail, never in the source.
-        try:
-            draw(["Raw export: rui --ordinal "], 40, rail="0")
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError("raw export borrowed its ordinal from the rail")
+        reject(lambda: draw(["Raw export: rui --ordinal "], 40, rail="0"))
+        reject(lambda: draw(["Raw export: rui --ordinal 0"], 40, rail=" "))
+        reject(lambda: draw(["Raw export: rui --ordinal 0", "Raw export: rui --ordinal 1"], 80))
+        reject(lambda: draw(["Raw export: rui --ordinal "], 40))
+        # A digit at the edge may have a further digit on the next row.
+        edge = "Raw export: rui --ordinal 1".rjust(39)
+        reject(lambda: draw([edge, "2"], 40))
+        assert draw([edge, ""], 40) == "rui --ordinal 1"
+        # A settled transcript owns its rail on every source row, while the
+        # rule, composer and footer remain full-width screen chrome.
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
+        capture.resize(40, 24)
+        body = ["literal ▐".ljust(39) + "▐"] + [" " * 39 + "▐"] * 20
+        rows = body + ["─" * 40, "›", "Looking back"]
+        capture.feed(terminal_frame(rows, (23, 3)))
+        source = transcript_source(capture, capture.completed)
+        assert source.split("\n")[0] == "literal ▐", source
+        assert source.split("\n")[-3:] == ["─" * 40, "›", "Looking back"], source
+        reject(lambda: transcript_source(capture, capture.completed + "\n"))
+        rows[1] = " " * 40
+        capture.feed(terminal_frame(rows, (23, 3)))
+        reject(lambda: transcript_source(capture, capture.completed))
+        rows[1] = " " * 39 + "▐"
+        rows[-3] = "─" * 39
+        capture.feed(terminal_frame(rows, (23, 3)))
+        reject(lambda: transcript_source(capture, capture.completed))
     finally:
         forget_terminal(master)
         dispose_all(lambda: os.close(master), lambda: os.close(slave))
-    print("raw export oracles: exact narrow/512-column source, wrapped hex, literal rail and stale/rail-only negatives passed", flush=True)
+    print("raw export cells: exact wraps, full-width inspection, literal rail and malformed/stale/ambiguous negatives passed", flush=True)
+
+
+def drawn_style(master, text, offset=0):
+    """Cell style where the latest committed frame draws `text`."""
+    return terminal_capture(master).style(text, offset)
 
 
 def terminal_step(master, command, marker, *, composer=False):
@@ -2820,6 +2892,17 @@ def persistent_opening_case():
             "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
         message = admit(home, "session", "send", "--to", session, input="literal **user** é")
         fixture.wait_for(lambda: fixture.completed_observation(store, message["request"]), "opening saved answer")
+        # The Host's page is an independent source for the exported identity;
+        # this is the only assistant answer in the Session at this point.
+        from control_integration import raw_request
+        page_request = json.dumps({"version": host_process.WIRE_VERSION, "kind": "conversation_page",
+            "store": str(store), "session": session, "end": "0", "before_position": "0", "before_ordinal": "0"}).encode()
+        head, body = raw_request(host.rui_ready_fields["socket"], "/v1/conversation-page", page_request)
+        assert head.startswith(b"HTTP/1.1 200 "), (head, body)
+        page = json.loads(body)
+        answers = [item for item in page["items"] if item["kind"] == "assistant"]
+        assert not page["more"] and len(answers) == 1, page
+        answer_identity = (answers[0]["position"], answers[0]["ordinal"])
         assert run(home, "request", "read-result", "--store", store, "--key", message["request"]) == large_answer
         assert run(home, "request", "read-result", message["request"]) == large_answer
         master, slave = open_pty()
@@ -2834,11 +2917,10 @@ def persistent_opening_case():
         # The last row is the Session line, which names this unlabelled
         # Session by its first Message.
         assert output.rsplit("\n", 1)[1].startswith("literal **user** é · "), output
-        output = output.rsplit("\n", 1)[0]
+        output = transcript_source(terminal_capture(master), output).rsplit("\n", 1)[0]
         assert output.count("literal **user** é") == 1, ("opening lost or duplicated User", output)
         assert "\n› literal **user** é" in output, output
-        source_rows = frame_source(master, current_screen(master)).split("\n")
-        assert "Saved heading" in source_rows and "# Saved heading" not in output, output
+        assert exact_railed_row(terminal_capture(master), "Saved heading") and "# Saved heading" not in output, output
         assert all(noise not in output for noise in ("You:", "Assistant:", "Rui:", "item_id:", "call_id:", "Capturing original", "Original reserved request")), output
         assert output.count("Saved heading") == 1, ("opening bypassed assistant renderer", output)
         assert output.count("saved bold é") == 1 and "**saved" not in output, output
@@ -2943,7 +3025,8 @@ def persistent_opening_case():
             # cancellation; a new Up must not hide a lost command.
             history_top(master, (fixture_command("/history") + fixture_command(handoff)).encode())
             output = scroll_until(master, b"\x1b[5~", "Start of conversation")
-            shown = current_screen(master)
+            shown_frame = current_screen(master)
+            shown = transcript_source(terminal_capture(master), shown_frame)
             assert "Start of conversation" in shown, ("queued history lost its scroll", handoff, shown)
             assert shown.index("Start of conversation") < shown.index("literal **user** é") < shown.index("saved user 01"), \
                 ("queued history consumed an unestablished opening cursor", handoff, shown)
@@ -2968,9 +3051,10 @@ def persistent_opening_case():
         # Session's first Message; the checks below are about the rows above.
         def above_line(frames):
             return "\n".join(row for row in frames.split("\n") if not row.startswith("literal **user** é · "))
-        output = read_terminal(master, "› ")
-        assert "\nliteral **user** é · " in output, output
-        output = above_line(output)
+        read_terminal(master, "› ")
+        opening_frame = current_screen(master)
+        assert "\nliteral **user** é · " in opening_frame, opening_frame
+        output = above_line(transcript_source(terminal_capture(master), opening_frame))
         assert "saved user 09" in output and "literal **user** é" not in output, output
         assert output.index("saved user 08") < output.index("saved answer 08") < output.index("saved user 09"), output
         message = admit(home, "session", "send", "--to", session, input="late input")
@@ -3045,14 +3129,16 @@ def persistent_opening_case():
         os.write(master, b"\x05\x15")
         read_terminal(master, "› ", composer=True)
         scroll_until(master, b"\x1b[5~", "Start of conversation")
-        recovered = above_line(current_screen(master))
+        recovered_frame = current_screen(master)
+        recovered = above_line(transcript_source(terminal_capture(master), recovered_frame))
         assert recovered.count("literal **user** é") == 1 and "Historical item omitted" in recovered, recovered
         assert "Saved heading" not in recovered and "OPENING-COMPLETE" not in recovered, "oversized historical content leaked"
         assert recovered.index("Start of conversation") < recovered.index("literal **user** é") < recovered.index("Historical item omitted") < recovered.index("saved user 01"), recovered
-        export = raw_export(master, current_screen(master))
+        export = raw_export(master, recovered_frame)
         command = shlex.split(export)
         assert command[0:4] == ["rui", "session", "read-conversation", "--store-hex"] and bytes.fromhex(command[4]) == str(store).encode(), export
         assert command[5:7] == ["--session", session] and "--session-hex" not in command, export
+        assert command[7:] == ["--position", answer_identity[0], "--ordinal", answer_identity[1]], (command, answer_identity)
         assert all(32 <= ord(char) < 127 for char in export), "raw export printed terminal controls"
         executables = state / "bin"
         executables.mkdir()
@@ -6894,7 +6980,7 @@ def renderer_cases():
         resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
 
 
-def main(selected="all"):
+def main(selected="all", *, held_owner=None):
     import canonical_failure_integration
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
@@ -6964,7 +7050,7 @@ def main(selected="all"):
     if selected == "persistent-permission":
         return
     if selected == "all" and not split_callers:
-        terminal_restoration_integration.main()
+        terminal_restoration_integration.main(held_owner=held_owner)
         canonical_failure_integration.main()
     if selected == "caller-core":
         selected = "all"
@@ -8459,5 +8545,6 @@ def main(selected="all"):
 
 
 if __name__ == "__main__":
+    held_owner = os.environ.get("RUI_TEST_HELD_OWNER")
     host_process.enter()
-    main(sys.argv[2] if len(sys.argv) == 3 else "all")
+    main(sys.argv[2] if len(sys.argv) == 3 else "all", held_owner=held_owner)
