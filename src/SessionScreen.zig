@@ -2804,50 +2804,93 @@ test "quote draft screen fence opacity does not promote code markers" {
 }
 
 test "typed saved-file loading preserves raw provenance through prepend Message overlay and safe rich paint" {
+    var checkpoint: []const u8 = "start";
+    errdefer std.debug.print("SAVED DIAGNOSTIC checkpoint={s}\n", .{checkpoint});
     const io = std.testing.io;
+    checkpoint = "01: var environ = try std.testing.environ.createMap(std.testing.allocator);";
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
+    checkpoint = "02: const screen = try std.testing.allocator.create(Self);";
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
+    checkpoint = "03: try Test.init(screen, io, &environ, false);";
     try Test.init(screen, io, &environ, false);
     defer Test.deinit(screen);
+    var frame_ready = false;
+    errdefer {
+        std.debug.print("SAVED DIAGNOSTIC failing checkpoint={s}\n", .{checkpoint});
+        std.debug.print("SAVED DIAGNOSTIC retained source={any}\n", .{screen.browsing.text.text()});
+        if (frame_ready) {
+            const diagnostic_window = Test.window(screen);
+            var diagnostic_storage: [128]u8 = undefined;
+            for (0..diagnostic_window.height) |diagnostic_row| {
+                std.debug.print("SAVED DIAGNOSTIC row={d} bytes={any}\n", .{ diagnostic_row, rowText(screen, @intCast(diagnostic_row), &diagnostic_storage) });
+                for (0..diagnostic_window.width) |diagnostic_col| {
+                    const cell = diagnostic_window.readCell(@intCast(diagnostic_col), @intCast(diagnostic_row)).?;
+                    if (!std.mem.eql(u8, cell.char.grapheme, " ") or cell.link.uri.len != 0) {
+                        std.debug.print("SAVED DIAGNOSTIC cell=({d},{d}) glyph={any} style={any} link={any}\n", .{ diagnostic_col, diagnostic_row, cell.char.grapheme, cell.style, cell.link.uri });
+                    }
+                }
+            }
+        }
+    }
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    checkpoint = "04: const file = try tmp.dir.createFile(io, \"older\", .{ .read = true });";
     const file = try tmp.dir.createFile(io, "older", .{ .read = true });
     defer file.close(io);
     const raw = "h|x\n---|---\n\x1b[31m|\xff\n";
+    checkpoint = "05: try file.writePositionalAll(io, raw, 0);";
     try file.writePositionalAll(io, raw, 0);
     var marks: OutputBlocks.Capture = .{};
+    checkpoint = "06: try std.testing.expect(marks.reserve(.{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } }));";
     try std.testing.expect(marks.reserve(.{ .start = 0, .end = raw.len, .header_end = 4, .delimiter_end = 12, .complete_end = raw.len, .data = .{ .table = .{ .count = 2, .alignment = @splat(.left) } } }));
+    checkpoint = "07: try screen.append(\"newer\\n\");";
     try screen.append("newer\n");
     const size: std.posix.winsize = .{ .row = 16, .col = 40, .xpixel = 0, .ypixel = 0 };
+    checkpoint = "08: _ = screen.presented(try Test.render(screen, &out.writer, size, \"\", 0, .{}, &.{}));";
     _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    frame_ready = true;
+    checkpoint = "09: try screen.beginTranscript(0);";
     try screen.beginTranscript(0);
+    checkpoint = "10: _ = try screen.prependPreparedFile(io, file, &marks);";
     _ = try screen.prependPreparedFile(io, file, &marks);
+    checkpoint = "11: try std.testing.expectEqual(@as(u6, 1), screen.browsing.text.blocks.count);";
     try std.testing.expectEqual(@as(u6, 1), screen.browsing.text.blocks.count);
+    checkpoint = "12: try std.testing.expectEqualStrings(raw ++ \"newer\\n\", screen.browsing.text.text());";
     try std.testing.expectEqualStrings(raw ++ "newer\n", screen.browsing.text.text());
+    checkpoint = "13: try std.testing.expectEqual(@as(u32, raw.len), screen.browsing.text.blocks.items[0].complete_end);";
     try std.testing.expectEqual(@as(u32, raw.len), screen.browsing.text.blocks.items[0].complete_end);
     const retained = screen.browsing.text.blocks.items[0];
     // An actual overlay borrows staging; the transcript underneath keeps its
     // independent provenance and source when the overlay is dismissed.
+    checkpoint = "14: const overlay = try tmp.dir.createFile(io, \"message\", .{ .read = true });";
     const overlay = try tmp.dir.createFile(io, "message", .{ .read = true });
     defer overlay.close(io);
+    checkpoint = "15: try overlay.writePositionalAll(io, \"Message body already escaped\\n\", 0);";
     try overlay.writePositionalAll(io, "Message body already escaped\n", 0);
+    checkpoint = "16: try screen.showMessage(io, overlay);";
     try screen.showMessage(io, overlay);
+    checkpoint = "17: try screen.leaveMessage();";
     try screen.leaveMessage();
+    checkpoint = "18: try std.testing.expectEqualDeep(retained, screen.browsing.text.blocks.items[0]);";
     try std.testing.expectEqualDeep(retained, screen.browsing.text.blocks.items[0]);
     screen.browsing.scroll.scroll.y = 0;
+    checkpoint = "19: _ = screen.presented(try Test.render(screen, &out.writer, size, \"\", 0, .{}, &.{}));";
     _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    frame_ready = true;
     var storage: [128]u8 = undefined;
     var escaped = false;
     for (0..size.row) |row| if (std.mem.eql(u8, rowText(screen, @intCast(row), &storage), "\\x1b[31m            \\xff")) {
         escaped = true;
     };
+    checkpoint = "20: try std.testing.expect(escaped);";
     try std.testing.expect(escaped);
     // No raw source SGR/OSC becomes a style/link in the selected frame.
     const cells = Test.window(screen);
+    checkpoint = "21: for (0..size.row) |row| for (0..size.col) |col| try std.testing.expectEqualStrings(\"\", cells.readCell(@intCast(col), @intCast(row)).?.link.uri);";
     for (0..size.row) |row| for (0..size.col) |col| try std.testing.expectEqualStrings("", cells.readCell(@intCast(col), @intCast(row)).?.link.uri);
 }
 
