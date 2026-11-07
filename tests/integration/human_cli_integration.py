@@ -1289,6 +1289,13 @@ def next_frame(master, timeout=3, *, capture=None):
     return capture.completed
 
 
+def observe_for(master, seconds, *, capture):
+    """Collect the existing observation window, including frames showing no cue."""
+    deadline = time.monotonic() + seconds
+    while (remaining := deadline - time.monotonic()) > 0:
+        next_frame(master, remaining, capture=capture)
+
+
 def scroll_until(master, key, marker, *, presses=40, capture=None):
     """Press `key` until the committed screen shows `marker`; return frames.
 
@@ -1586,6 +1593,31 @@ def conversation_protocol_cases():
         assert LIVE_CLOCK.sub(r"\1", prefix + "• Held call · 42s") == prefix + "• Held call · "
     assert not LIVE_LINE.search(" • Held call · 42s")
     print("conversation protocol: exact footer, history selection before asynchronous Start, 24/200-row body/chrome, six rejected corruptions and fitted every-frame equality passed", flush=True)
+
+
+def observation_window_cases():
+    """Real byte collection into one existing capture; no app, PTY or mocks."""
+    from terminal_screen import ScreenCapture
+    reader, writer = os.pipe()
+    try:
+        capture = ScreenCapture(20, 4)
+        capture.feed(terminal_frame(["OLD", "", "", ""], (3, 2)))
+        snapshots = []
+        capture.listener = lambda screen, x, y: snapshots.append(capture.completed_cells)
+        os.write(writer, terminal_frame(["SELECTED", "", "", ""], (3, 2)) +
+                 terminal_frame(["Start", "SOURCE", "FORBIDDEN LATE", ""], (3, 2)))
+        # Writing bytes alone changes no committed observation. A negative
+        # assertion here would falsely accept the uncollected late frame.
+        assert cell_rows(capture.completed_cells, 0, 1, 0, 20)[0].rstrip(" ") == "OLD"
+        observe_for(reader, 0.01, capture=capture)
+        assert [cell_rows(cells, 0, 1, 0, 20)[0].rstrip(" ") for cells in snapshots] == ["SELECTED", "Start"]
+        rows = cell_rows(capture.completed_cells, 0, 4, 0, 20)
+        assert rows[0].rstrip(" ") == "Start" and rows[1].rstrip(" ") == "SOURCE", rows
+        assert any("FORBIDDEN LATE" in row for row in rows), rows
+    finally:
+        os.close(reader)
+        os.close(writer)
+    print("observation window: actual pending bytes, every commit, canonical source and late negative cue collected", flush=True)
 
 
 def cell_value_cases():
@@ -4684,6 +4716,7 @@ def renderer_cases():
 
     conversation_protocol_cases()
     cell_value_cases()
+    observation_window_cases()
 
     # Every-frame oracles see each synchronized commit, not just the newest one after a read.
     control, seen = ScreenCapture(), []
@@ -4787,6 +4820,9 @@ def renderer_cases():
             # the current-frame acceptance fact is shared with direct PTYs.
             return self.send("/history\n", predicate=lambda: history_selected(
                 self.capture.completed, self.capture.screen.cursor.x, self.capture.screen.cursor.y))
+
+        def observe_for(self, seconds):
+            observe_for(self.master, seconds, capture=self.capture)
 
         def ready(self, descriptor, until=lambda: True):
             """Return once an offered frame shows what `until` accepts. Rui
@@ -5053,7 +5089,7 @@ def renderer_cases():
                 tty.send(recover, "Original confirmed")
                 assert len(proxy.exchanges) == 2 and proxy.exchanges[1][0] == saved
                 assert json.loads(saved)["text"]["value"] == "original é"
-                fixture.wait_for(lambda: len(endpoint.requests) == before + 1, "original renderer request")
+                fixture.wait_for(tty.draining(lambda: len(endpoint.requests) == before + 1), "original renderer request")
                 submitted("original é")
                 assert tty.capture.draft("next cafXé!", 11), tty.capture.completed
                 marker = answer(f"retained {name}")
@@ -5678,7 +5714,7 @@ def renderer_cases():
             time.sleep(0.3)
             released[1].set()
             tty.wait("Recent conversation — tool details", timeout=20)
-            time.sleep(1.5)
+            tty.observe_for(1.5)
             assert "Recent conversation — tool details" in tty.capture.completed, tty.capture.completed
             for frame in frames:
                 assert " Status · " not in frame, frame
@@ -5698,8 +5734,8 @@ def renderer_cases():
             tty.history_top()
             for _ in range(3):
                 os.write(tty.master, b"\x1b[5~")
-                time.sleep(0.3)
-            time.sleep(1)
+                tty.observe_for(0.3)
+            tty.observe_for(1)
             shown = tty.capture.completed
             assert shown.index("Start of conversation") < shown.index("› fresh start") < shown.index(marker), shown
             for frame in frames:
@@ -5770,7 +5806,7 @@ def renderer_cases():
             tty.wait("› later 8", timeout=20)
             release_reply.set()
             tty.wait(predicate=lambda: "Sending…" not in tty.capture.completed, timeout=10)
-            time.sleep(1)
+            tty.observe_for(1)
             tty.wait(predicate=lambda: "Sent" not in tty.capture.completed.rstrip("\n").split("\n")[-4:], timeout=5)
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
@@ -6083,8 +6119,7 @@ def renderer_cases():
                 holding.clear()
                 release.set()
                 fixture.wait_for(lambda: proxy.exchanges, "the superseded content read", timeout=20)
-                time.sleep(1)  # Its settlement would draw the page now.
-                tty.send("\x1b[A", predicate=lambda: True)  # Reads what was drawn.
+                tty.observe_for(1)  # Include any page its settlement would draw.
                 shown = tty.capture.completed
                 assert "Message ·" not in shown and looking_back(shown), shown
             finally:
@@ -6291,7 +6326,7 @@ def renderer_cases():
                 tty.wait("REPLY-04399", timeout=30)
                 # The queued Message is now applied, and its own answer held.
                 fixture.wait_for(lambda: len(endpoint.requests) > requests + 1, "second model request", timeout=20)
-                time.sleep(1)  # Scans read its row; nothing more shows.
+                tty.observe_for(1)  # Collect the scans even when no answer may show.
                 assert "SILENT-SECOND-DONE" not in tty.capture.completed
                 shown = traverse(tty)
                 assert "Start of conversation" in shown and "Earlier rows left this view." not in shown, shown
