@@ -144,7 +144,11 @@ fn paneLayout(kind: ViewKind, columns: u16, method: vaxis.gwidth.Method, home: [
 }
 
 pub fn textLayout(self: *const Self) Viewport.Layout {
-    return paneLayout(self.view, self.backend.geometry().cols, self.backend.widthMethod(), self.home);
+    var layout = paneLayout(self.view, self.backend.geometry().cols, self.backend.widthMethod(), self.home);
+    // The partial marker has its own cell: source measurement, navigation
+    // and paint all share the remaining width, so no source cell is lost.
+    if (self.actionVisible() and !self.preview_complete) layout.width -|= 1;
+    return layout;
 }
 
 // An overlay does not lend its full-width layout to the retained transcript.
@@ -710,6 +714,7 @@ pub const Footer = struct {
     /// A command is running: a read Action's choice is held.
     command: bool = false,
     status: []const u8 = "",
+    status_essential: bool = false,
     notice: []const u8 = "",
     /// The list above the input for the draft, with its highlighted row.
     commands: ?slash_commands.Shown = null,
@@ -811,6 +816,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
         .cursor = if (selector) 0 else cursor,
         .draft_anchor = if (selector) 0 else self.draft_anchor,
         .status = status,
+        .status_essential = footer.status_essential,
         .notice = footer.notice,
         .command_rows = if (selector) 0 else if (footer.commands) |commands| commands.rows() else 0,
         .calls = calls[0..if (selected) 0 else live.count],
@@ -835,7 +841,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     self.height = layout.height;
     const conversation = self.view == .live or self.view == .transcript;
     document.scroll.vertical_scrollbar = if (conversation) .{ .character = .{ .grapheme = "▐", .width = 1 }, .track_character = .{ .grapheme = "│", .width = 1 }, .fg = self.style(.normal), .bg = self.style(.quiet) } else null;
-    const body = window.child(.{ .y_off = layout.navigation_height, .height = layout.height });
+    const body = window.child(.{ .y_off = layout.navigation_height, .height = layout.height, .width = self.textLayout().width });
     document.scroll.draw(body, .{ .cols = self.textLayout().width, .rows = projection.total +| document.blank_tail });
     try layout.observe(projection, document.scroll.scroll.y, frame_input);
     if (!selector) self.draft_anchor = layout.draft_lines[0].start;
@@ -843,7 +849,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     self.commands = footer.commands;
     if (self.commands) |*commands| commands.drew(layout.list_height != 0);
     _ = try layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet), .{});
-    try projection.paint(&document.scroll, window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = layout.height - layout.document_offset }), self.colour, self.backend.scratch());
+    try projection.paint(&document.scroll, window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = layout.height - layout.document_offset, .width = self.textLayout().width }), self.colour, self.backend.scratch());
     if (layout.document_offset != 0) {
         // The conversation's latest rows fill the rows above a whole Action;
         // they are context, never read rows of the Action.
@@ -893,8 +899,8 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
             _ = window.child(.{ .x_off = 2 + line.prefixCells(), .y_off = row, .height = 1 }).print(&.{.{ .text = draft[line.start..line.end] }}, .{ .wrap = .none });
         }
     }
-    // If the heading cannot fit, mark the Action source itself as partial.
-    // This leaves the choice and draft untouched in the same geometry.
+    // If the heading cannot fit, mark the reserved source-edge cell as partial.
+    // The shared source layout leaves that cell free, even for wide graphemes.
     if (self.actionVisible() and !self.preview_complete and layout.navigation_height == 0 and layout.height != 0) {
         _ = window.child(.{ .x_off = size.col - 1, .y_off = layout.navigation_height, .width = 1, .height = 1 }).printSegment(.{ .text = "…", .style = self.style(.quiet) }, .{ .wrap = .none });
     }
@@ -923,7 +929,9 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
         .frame = self.frames,
         .scope = self.scope,
         .action = if (!self.actionVisible()) null else if (self.consent) |pending| pending.action else null,
-        .shown = if (self.selected.approval == .reason and !says_deny) null else ConsentPolicy.offered(self.consent, self.selected.approval),
+        // A choice beside a status or notice is not a presentation of the
+        // requested Action if the frame had no room for any Action row.
+        .shown = if ((self.actionVisible() and layout.document_rows == 0) or (self.selected.approval == .reason and !says_deny)) null else ConsentPolicy.offered(self.consent, self.selected.approval),
         .inputs = self.inputs,
         .live_first = if (self.view == .live) .{ .offset = self.live.text.origin + if (layout.first.order(.end) == .eq) @as(usize, 0) else layout.first.offset, .row = layout.first.row } else null,
     };
@@ -1696,8 +1704,8 @@ test "prepared Action preserves selected inspection until explicit return" {
             const tiny: std.posix.winsize = .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 };
             _ = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
             const cells = Test.window(screen);
-            // The cue replaces only the final source cell, not either
-            // choice or its highlight.
+            // The cue occupies its reserved edge, not a source cell or
+            // either choice or its highlight.
             var row: [32]u8 = undefined;
             try std.testing.expectEqualStrings("Run Bas…", rowText(screen, 0, &row));
             try std.testing.expectEqualStrings("› A   D", rowText(screen, 1, &row));
@@ -1708,6 +1716,112 @@ test "prepared Action preserves selected inspection until explicit return" {
         screen.consent = null;
         try screen.adopt(io, action, 6, true);
         try std.testing.expect(screen.actionVisible());
+    }
+}
+
+test "tiny Action preserves source custody and requires an actual source row" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const action = try tmp.dir.createFile(io, "edge-action", .{ .read = true });
+    defer action.close(io);
+    const source = "ABCDEFGH\n";
+    const tiny: std.posix.winsize = .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 };
+    for ([_]bool{ false, true }) |preview| {
+        screen.releaseAction();
+        screen.consent = null;
+        try action.setLength(io, 0);
+        try action.writePositionalAll(io, source, 0);
+        if (preview) {
+            const block: [4096]u8 = @splat('x');
+            var offset: u64 = source.len;
+            while (offset <= Viewport.capacity) {
+                const count = @min(block.len, Viewport.capacity + 1 - offset);
+                try action.writePositionalAll(io, block[0..count], offset);
+                offset += count;
+            }
+        }
+        try screen.adopt(io, action, 7, true);
+        var raw: [source.len]u8 = undefined;
+        try std.testing.expectEqual(source.len, try action.readPositionalAll(io, &raw, 0));
+        try std.testing.expectEqualStrings(source, &raw);
+        var row: [64]u8 = undefined;
+        const first = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
+        try std.testing.expectEqualStrings(if (preview) "ABCDEFG…" else "ABCDEFGH", rowText(screen, 0, &row));
+        try std.testing.expectEqualStrings("› A   D", rowText(screen, 1, &row));
+        try std.testing.expect(screen.presented(first));
+        try std.testing.expect(screen.promptCompleted(.empty, false, false));
+        try std.testing.expectEqual(ConsentPolicy.Choice.allow_once, screen.offered().?.choice);
+        // The intentional compact cue occupies a reserved cell, never the
+        // Action file or its retained source, including the eighth source cell.
+        try std.testing.expectEqual(source.len, try action.readPositionalAll(io, &raw, 0));
+        try std.testing.expectEqualStrings(source, &raw);
+        try std.testing.expect(std.mem.startsWith(u8, screen.browsing.text.text(), source));
+
+        if (preview) {
+            // The eighth literal is not painted over: the same measured
+            // source wraps it to the next navigable row.
+            _ = screen.browse(true, false);
+            _ = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
+            try std.testing.expectEqualStrings("H      …", rowText(screen, 0, &row));
+            _ = screen.browse(false, false);
+        }
+        // Routine work/status yields to the source and immediately available
+        // choice. It is not a prerequisite to scroll or dismiss the preview.
+        const routine = try Test.render(screen, &out.writer, tiny, "", 0, .{ .status = "Busy" }, &.{});
+        try std.testing.expectEqualStrings(if (preview) "ABCDEFG…" else "ABCDEFGH", rowText(screen, 0, &row));
+        try std.testing.expectEqualStrings("› A   D", rowText(screen, 1, &row));
+        try std.testing.expect(screen.presented(routine));
+        _ = screen.promptCompleted(.empty, false, false);
+        try std.testing.expectEqual(ConsentPolicy.Choice.allow_once, screen.offered().?.choice);
+        // An essential status consumes the only source row. Its delivered
+        // choice cannot authorize a decision about an Action not on screen.
+        const status = try Test.render(screen, &out.writer, tiny, "", 0, .{ .status = "!retain", .status_essential = true }, &.{});
+        try std.testing.expectEqualStrings("!retain", rowText(screen, 0, &row));
+        try std.testing.expectEqualStrings("› A   D", rowText(screen, 1, &row));
+        try std.testing.expect(screen.presented(status));
+        try std.testing.expect(!screen.promptCompleted(.empty, false, false));
+        try std.testing.expect(screen.offered() == null);
+
+        const choice_notice = try Test.render(screen, &out.writer, tiny, "", 0, .{ .notice = "!hold" }, &.{});
+        try std.testing.expectEqualStrings("› A   D", rowText(screen, 0, &row));
+        try std.testing.expectEqualStrings("!hold", rowText(screen, 1, &row));
+        try std.testing.expect(screen.presented(choice_notice));
+        try std.testing.expect(!screen.promptCompleted(.empty, false, false));
+        try std.testing.expect(screen.offered() == null);
+
+        screen.moveRow(.draft);
+        const reason = try Test.render(screen, &out.writer, tiny, "x", 1, .{}, &.{});
+        try std.testing.expectEqualStrings(if (preview) "ABCDEFG…" else "ABCDEFGH", rowText(screen, 0, &row));
+        try std.testing.expectEqualStrings("› x", rowText(screen, 1, &row));
+        try std.testing.expect(screen.presented(reason));
+        // The reason's explicit denial hint also cannot fit here.
+        try std.testing.expect(!screen.promptCompleted(.empty, false, false));
+        try std.testing.expect(screen.offered() == null);
+        const reason_status = try Test.render(screen, &out.writer, tiny, "x", 1, .{ .status = "Busy" }, &.{});
+        try std.testing.expectEqualStrings(if (preview) "ABCDEFG…" else "ABCDEFGH", rowText(screen, 0, &row));
+        try std.testing.expectEqualStrings("› x", rowText(screen, 1, &row));
+        try std.testing.expect(screen.presented(reason_status));
+        try std.testing.expect(!screen.promptCompleted(.empty, false, false));
+        try std.testing.expect(screen.offered() == null);
+        // A retained notice similarly leaves no source next to a reason;
+        // it is not discarded to manufacture decision authority.
+        const notice = try Test.render(screen, &out.writer, tiny, "x", 1, .{ .notice = "!hold" }, &.{});
+        try std.testing.expectEqualStrings("› x", rowText(screen, 0, &row));
+        try std.testing.expectEqualStrings("!hold", rowText(screen, 1, &row));
+        try std.testing.expect(screen.presented(notice));
+        try std.testing.expect(!screen.promptCompleted(.empty, false, false));
+        try std.testing.expect(screen.offered() == null);
+        try std.testing.expectEqual(source.len, try action.readPositionalAll(io, &raw, 0));
+        try std.testing.expectEqualStrings(source, &raw);
     }
 }
 
