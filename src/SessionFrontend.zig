@@ -2911,7 +2911,7 @@ test "completed Action inspection waits for the selector decoder in the active o
                 var pending = [_]std.posix.pollfd{.{ .fd = gate.listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
                 try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pending, 0));
                 gate.delivered = true;
-                try std.testing.expectEqual(@as(isize, 1), std.c.write(gate.held.pipes[0][1], "\x04", 1));
+                try std.testing.expectEqual(@as(isize, 1), std.c.write(gate.held.pipes[0][1], "\x03", 1));
                 try pump(frontend);
                 return error.TestUnexpectedResult;
             }
