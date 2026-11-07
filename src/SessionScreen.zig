@@ -2524,6 +2524,29 @@ test "live and transcript chrome have identical cells with calls queue work draf
         _ = try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "keep", 4, .{ .notice = "Important notice", .queued = chrome.queued, .live = chrome.live }, &held);
         var row: [256]u8 = undefined;
         try std.testing.expectEqualStrings("Important notice", rowText(screen, rows - 1, &row));
+
+        // A full body places the SAME call just outside the rail, unlike the
+        // short body's call above. Rail ownership cannot decide call readiness.
+        try screen.latest();
+        screen.live.text.clear();
+        for (0..rows - 5) |index| {
+            if (index != 0) try screen.append("\n");
+            try screen.append("FULL-BODY");
+        }
+        for ([_]bool{ false, true }) |transcript| {
+            if (transcript) try screen.beginTranscript(0);
+            _ = screen.presented(try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, chrome, &held));
+            const full = &screen.backend.storage.?.vx.screen_last;
+            try std.testing.expectEqual(rows - 5, screen.height);
+            try std.testing.expectEqual(rows - 5, screen.drawn.rows);
+            for (0..rows) |y| try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, full.readCell(79, @intCast(y)).?.char.grapheme, "▐"));
+            try std.testing.expectEqualStrings("FULL-BODY", rowText(screen, rows - 6, &row));
+            try std.testing.expectEqualStrings("  • Held call · 42s", rowText(screen, rows - 5, &row));
+            try std.testing.expectEqualStrings(" ", full.readCell(79, rows - 5).?.char.grapheme);
+            try std.testing.expectEqualStrings("› QUEUED-SOURCE                                                         3 queued", rowText(screen, rows - 4, &row));
+            try std.testing.expectEqualStrings("›", rowText(screen, rows - 2, &row));
+            if (transcript) try std.testing.expectEqualStrings("Looking back · Ctrl-End: latest", rowText(screen, rows - 1, &row));
+        }
     };
     // Conversation source reserves ONE physical column at either width.
     // Semantic observers select cells, without reconstructing chrome layout.

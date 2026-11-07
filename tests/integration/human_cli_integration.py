@@ -1686,15 +1686,18 @@ def cell_value_cases():
             rejects(lambda: assert_editor_submission(cells_for(bad, columns)))
         inspected = cells_for(["Browsing · Esc returns", "literal".ljust(columns - 1) + "▐"], columns)
         assert cell_rows(inspected, 1, 2, 0, columns)[0].endswith("▐")
-    # Readiness's sole policy: the current exact unresolved clock and its
-    # physical last cell. Full queue/body geometry is a SEPARATE visual proof.
+    # Readiness owns ONLY the current exact unresolved clock in content
+    # columns. A short body's call overlaps the rail; a full body's does not.
+    # Full queue/body/rail geometry remains a SEPARATE visual proof.
     for elapsed in ("0s", "2m 3s", "1h 2m"):
         old = cells_for(["  • Held call · 99s".ljust(79) + "▐"])
         assert listed_call_ready(old)
-        for label in ("  • Held call", "• Held call · 42s", "  ✓ Held call · 42s", "  • Other call · 42s", "prefix • Held call · 42s", "  • Held call · 42s extra"):
-            assert not listed_call_ready(cells_for([label.ljust(79) + "▐"]))
-        assert listed_call_ready(cells_for([("  • Held call · " + elapsed).ljust(79) + "▐"]))
-    assert not listed_call_ready(cells_for(["  • Held call · 42s"]))
+        for edge in ("▐", " "):
+            for label in ("  • Held call", "• Held call · 42s", "  ✓ Held call · 42s", "  • Other call · 42s", "prefix • Held call · 42s", "  • Held call · 42s extra"):
+                assert not listed_call_ready(cells_for([label.ljust(79) + edge]))
+            assert listed_call_ready(cells_for([("  • Held call · " + elapsed).ljust(79) + edge]))
+        assert not listed_call_ready(cells_for([""]))  # Never reuse the old clock.
+    assert listed_call_ready(cells_for(["  • Held call · 42s"]))
     assert not listed_call_ready(cells_for(["  • Held call · 42s".ljust(78) + "▐ "]))
     # Comparison remains a pure key: no copied globals, fake clock or IO mocks.
     for left, right in (("9s", "10s"), ("59s", "1m 0s"), ("59m 59s", "1h 0m")):
@@ -4697,8 +4700,8 @@ def incomplete_input_case(home, store, session, endpoint, host):
 
 def listed_call_ready(cells):
     running = re.compile(r"  • Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
-    return any(running.fullmatch(row.rstrip(" ")) and cells[y][-1].data == "▐"
-               for y, row in enumerate(cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)))
+    return any(running.fullmatch(row.rstrip(" "))
+               for row in cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1))
 
 
 def wait_for_listed_call(tty):
