@@ -390,6 +390,7 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
 /// it in the draft (with a space when another word may follow), what the
 /// row shows, and what the word does.
 pub const Entry = struct {
+    kind: enum { command, skill } = .command,
     word: []const u8,
     shown: []const u8,
     description: []const u8,
@@ -462,6 +463,11 @@ pub const List = struct {
         return .{ .rest = std.mem.trimEnd(u8, entry.word, " ")[self.typed.len..], .runs = true };
     }
 
+    pub fn containsSkills(self: *const List) bool {
+        for (self.shown()) |entry| if (entry.kind == .skill) return true;
+        return false;
+    }
+
     /// The first of `rows` rows that keep the highlighted entry in view.
     pub fn firstShown(self: *const List, highlight: usize, rows: usize) usize {
         const fit = named(self.count, rows);
@@ -477,6 +483,23 @@ pub const List = struct {
         return widest + 2;
     }
 };
+
+/// Bounded visual choices. Reserve half the rows for each kind when both
+/// match, so a broad command menu cannot hide every skill match.
+/// Entry text remains borrowed from the caller through display and selection.
+pub fn withSkills(commands: ?List, typed: []const u8, skills: []const Entry) ?List {
+    if (skills.len == 0) return commands;
+    const command_count = if (commands) |list| list.count else 0;
+    const keep_commands = @min(command_count, List.capacity - @as(usize, @min(skills.len, List.capacity / 2)));
+    const keep_skills = @min(skills.len, List.capacity - keep_commands);
+    var combined: List = .{ .typed = typed };
+    if (commands) |list| for (list.shown()[0..keep_commands]) |entry| combined.add(entry);
+    for (skills[0..keep_skills]) |entry| {
+        std.debug.assert(entry.kind == .skill);
+        combined.add(entry);
+    }
+    return combined;
+}
 
 /// The list built for one draft revision, and what the latest frame did
 /// with a list: the one value Enter, Esc, the arrows and Tab act on. A key
@@ -1031,4 +1054,44 @@ test "archive and upgrade retain separate local command identities after merge" 
     const restored = overview.parse("/undo").command;
     try std.testing.expectEqual(.undo, restored.name);
     try std.testing.expect(conversation.parse("/undo") == .unknown);
+}
+
+test "inline skills list preserves command collisions as distinct choices" {
+    var commands: List = .{ .typed = "/co" };
+    commands.add(.{ .word = "/copy", .shown = "/copy", .description = "copy output" });
+    const skills = [_]Entry{.{ .kind = .skill, .word = "/copy", .shown = "/copy", .description = "skill guidance", .runs = false }};
+    const merged = withSkills(commands, "/co", &skills).?;
+    try std.testing.expectEqual(@as(usize, 2), merged.count);
+    try std.testing.expectEqual(.command, merged.entries[0].kind);
+    try std.testing.expectEqual(.skill, merged.entries[1].kind);
+    try std.testing.expectEqualStrings("py", merged.completion(1));
+    try std.testing.expect(!merged.enter(1).runs);
+    try std.testing.expect(merged.containsSkills());
+}
+
+test "inline skills list reserves bounded space without starving either kind" {
+    var commands: List = .{ .typed = "/" };
+    var skills: [List.capacity]Entry = undefined;
+    for (&skills) |*entry| {
+        commands.add(.{ .word = "/command", .shown = "/command", .description = "" });
+        entry.* = .{ .kind = .skill, .word = "/skill", .shown = "/skill", .description = "", .runs = false };
+    }
+    for (0..List.capacity + 1) |command_count| for (0..List.capacity + 1) |skill_count| {
+        commands.count = command_count;
+        const merged = withSkills(commands, "/", skills[0..skill_count]).?;
+        const expected = @min(command_count + skill_count, List.capacity);
+        try std.testing.expectEqual(expected, merged.count);
+        var actual_commands: usize = 0;
+        var actual_skills: usize = 0;
+        for (merged.shown()) |entry| switch (entry.kind) {
+            .command => actual_commands += 1,
+            .skill => actual_skills += 1,
+        };
+        if (command_count != 0) try std.testing.expect(actual_commands != 0);
+        if (skill_count != 0) try std.testing.expect(actual_skills != 0);
+    };
+    const skills_only = withSkills(null, "/", &skills).?;
+    try std.testing.expectEqual(List.capacity, skills_only.count);
+    try std.testing.expect(!skills_only.enter(0).runs);
+    try std.testing.expect(withSkills(null, "/", &.{}) == null);
 }
