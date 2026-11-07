@@ -677,20 +677,18 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         .history => |history| self.requestHistory(history),
         .inspection => {
             self.inspection.queued_action = .none;
-            if (slash_commands.parse(text) == .command and slash_commands.parse(text).command.name == .@"inspect-action") {
-                const screen = self.terminal.screen;
-                if (screen.consent) |pending| {
-                    const ticket = screen.ticket;
-                    self.inspection.queued_action = if (screen.actionVisible() and ticket != null and ticket.?.delivered and ticket.?.action != null and ticket.?.action.? == pending.action)
-                        .{ .captured = pending.action }
-                    else
-                        .stale;
-                }
+            const command = slash_commands.parse(text);
+            const screen = self.terminal.screen;
+            if (command == .command and command.command.name == .@"inspect-action") {
+                // Inspection is not a decision: capture the selected immutable
+                // identity now, not when the asynchronous worker eventually runs.
+                self.inspection.queued_action = if (screen.actionVisible() and screen.consent != null)
+                    .{ .captured = screen.consent.?.action }
+                else
+                    .no_action;
             }
-            if (std.mem.eql(u8, text, "/copy") and self.terminal.screen.view == .inspection and self.inspection.shown_action != null) {
-                const screen = self.terminal.screen;
-                const ticket = screen.ticket;
-                self.inspection.queued_action = if (ticket != null and ticket.?.delivered and ticket.?.scope == screen.scope and screen.consent != null and screen.consent.?.action == self.inspection.shown_action.?)
+            if (command == .command and command.command.name == .copy and command.command.argument.len == 0 and screen.view == .inspection and self.inspection.shown_action != null) {
+                self.inspection.queued_action = if (screen.consent != null and screen.consent.?.action == self.inspection.shown_action.?)
                     .{ .captured = self.inspection.shown_action.? }
                 else
                     .stale;
@@ -1065,10 +1063,14 @@ fn currentActionTarget(target: reads.ActionTarget, consent: ?ConsentPolicy.Pendi
     return target;
 }
 
+fn queuedInspectionKind(parsed: Inspection, target: reads.ActionTarget) Inspection {
+    return if (parsed == .copy and parsed.copy == .answer and target != .none) .{ .copy = .action } else parsed;
+}
+
 fn startQueuedCommand(self: *Self) !void {
     if (self.reader.thread == null) if (self.input.takeCommand()) |text| {
         const parsed_kind = parse(text).inspection;
-        const kind: Inspection = if (std.mem.eql(u8, text, "/copy") and self.inspection.queued_action != .none) .{ .copy = .action } else parsed_kind;
+        const kind = queuedInspectionKind(parsed_kind, self.inspection.queued_action);
         try self.leaveFor(kind);
         self.inspection.kind = kind;
         // The worker borrows its own copy; the editor may queue another.
@@ -2577,6 +2579,7 @@ fn showInspection(self: *Self) !void {
             try self.files.inspection.setLength(self.init.io, 0);
             try self.files.inspection.writePositionalAll(self.init.io, stale, 0);
             self.job.result.inspected_action = null;
+            self.inspection.shown_action = null;
         }
     }
     const size = (try self.files.inspection.stat(self.init.io)).size;
@@ -2994,6 +2997,72 @@ test "queued Action inspection and copy never follow a successor" {
     try std.testing.expectEqualStrings("Action no longer available; no successor selected and no decision sent.\n", output[0..size]);
     try std.testing.expect(self.inspection.shown_action == null);
     try std.testing.expectEqual(@as(u64, 0xb), held.screen.consent.?.action);
+}
+
+test "inspection captures the selected Action at command admission" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const file = try held.adopt(4);
+    defer file.close(std.testing.io);
+    try held.settle();
+    const self = &held.self;
+    // One burst moves focus from the choice to the draft and changes scope.
+    // Inspection is not approval and must still capture the selected Action.
+    try sendKeys(self, "/inspect-action\r");
+    try std.testing.expect(self.inspection.queued_action == .captured);
+    try std.testing.expectEqual(@as(u64, 0xa), self.inspection.queued_action.captured);
+    held.screen.withdrawAction();
+    try held.screen.adopt(std.testing.io, file, 0xb, true);
+    try std.testing.expect(currentActionTarget(self.inspection.queued_action, held.screen.consent) == .stale);
+}
+
+test "inspection takes the selected identity at Enter across layout and replacement" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const file = try held.adopt(4);
+    defer file.close(std.testing.io);
+    try held.settle();
+    try sendKeys(&held.self, "/inspect-");
+    held.screen.invalidateLayout();
+    held.screen.withdrawAction();
+    try held.screen.adopt(std.testing.io, file, 0xb, false);
+    try sendKeys(&held.self, "action\r");
+    try std.testing.expect(held.self.inspection.queued_action == .captured);
+    try std.testing.expectEqual(@as(u64, 0xb), held.self.inspection.queued_action.captured);
+}
+
+test "inspection without an Action never selects a later successor" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try sendKeys(&held.self, "/inspect-action\r");
+    try std.testing.expect(held.self.inspection.queued_action == .no_action);
+    const file = try held.adopt(4);
+    defer file.close(std.testing.io);
+    try std.testing.expect(currentActionTarget(held.self.inspection.queued_action, held.screen.consent) == .no_action);
+}
+
+test "bare copy with spaces captures inspection identity, explicit copy words do not" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const file = try held.adopt(4);
+    defer file.close(std.testing.io);
+    const page = try held.tmp.dir.createFile(std.testing.io, "inspect-page", .{ .read = true });
+    defer page.close(std.testing.io);
+    try page.writePositionalAll(std.testing.io, "inspection\n", 0);
+    try held.screen.showFile(std.testing.io, page, false);
+    held.self.inspection.shown_action = 0xa;
+    try held.self.slashCommand("/copy   ");
+    try std.testing.expect(held.self.inspection.queued_action == .captured);
+    try std.testing.expectEqual(@as(u64, 0xa), held.self.inspection.queued_action.captured);
+    try std.testing.expectEqual(reads.Copy.action, queuedInspectionKind(parse("/copy   ").inspection, held.self.inspection.queued_action).copy);
+    _ = held.self.input.takeCommand();
+    try held.self.slashCommand("/copy code");
+    try std.testing.expect(held.self.inspection.queued_action == .none);
+    try std.testing.expectEqual(reads.Copy.code, queuedInspectionKind(parse("/copy code").inspection, held.self.inspection.queued_action).copy);
+    _ = held.self.input.takeCommand();
+    try held.self.slashCommand("/copy file");
+    try std.testing.expect(held.self.inspection.queued_action == .none);
+    try std.testing.expectEqual(reads.Copy.file, queuedInspectionKind(parse("/copy file").inspection, held.self.inspection.queued_action).copy);
 }
 
 test "held history status real Host" {

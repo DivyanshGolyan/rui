@@ -246,7 +246,7 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
         try self.heading.append(if (input.action_visible) (if (input.preview_complete) "Action · PgUp/PgDn" else "Action truncated · /inspect-action for exact content") else if (input.action_pending) "Browsing · Esc returns to Action" else "Browsing · Esc returns");
         if (try rows(&self.heading, layout) > heading_height) {
             self.heading.clear();
-            try self.heading.append(if (input.action_visible) (if (input.preview_complete) "Action" else if (input.width >= "Action truncated".len) "Action truncated" else if (input.width >= "Truncated".len) "Truncated" else "Action") else if (input.width < "Esc · Action".len) "Esc" else if (input.action_pending) "Esc · Action" else "Esc returns");
+            try self.heading.append(if (input.action_visible) (if (input.preview_complete) "Action" else if (input.width >= "Action truncated".len) "Action truncated" else if (input.width >= "Truncated".len) "Truncated" else "Partial") else if (input.width < "Esc · Action".len) "Esc" else if (input.action_pending) "Esc · Action" else "Esc returns");
         }
     }
     const budget = available - self.live_height;
@@ -725,6 +725,23 @@ test "long Action layout preserves source position across navigation and resize"
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(usize, 70 * "command line\n".len), frame.first.offset);
     input.preview_complete = false;
+    try frame.plan(&document, input);
+    try std.testing.expect(std.mem.indexOf(u8, frame.heading.text(), "truncated") != null);
+}
+
+test "truncated Action disclosure cannot disappear in small geometry" {
+    var document: Viewport.Document = .{};
+    try document.append("preview\n");
+    var frame: Self = undefined;
+    var input: Input = .{ .width = 8, .height = 12, .cursor = 0, .status = "", .calls = &.{}, .total_calls = 0, .selected = true, .action_visible = true, .preview_complete = false };
+    try frame.plan(&document, input);
+    try std.testing.expectEqualStrings("Partial", frame.heading.text());
+    input.height = 2;
+    try frame.plan(&document, input);
+    try std.testing.expectEqual(@as(u16, 0), frame.navigation_height);
+    try std.testing.expectEqual(@as(u16, 1), frame.height);
+    input.width = 80;
+    input.height = 24;
     try frame.plan(&document, input);
     try std.testing.expect(std.mem.indexOf(u8, frame.heading.text(), "truncated") != null);
 }

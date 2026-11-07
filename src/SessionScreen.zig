@@ -893,6 +893,11 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
             _ = window.child(.{ .x_off = 2 + line.prefixCells(), .y_off = row, .height = 1 }).print(&.{.{ .text = draft[line.start..line.end] }}, .{ .wrap = .none });
         }
     }
+    // If the heading cannot fit, mark the Action source itself as partial.
+    // This leaves the choice and draft untouched in the same geometry.
+    if (self.actionVisible() and !self.preview_complete and layout.navigation_height == 0 and layout.height != 0) {
+        _ = window.child(.{ .x_off = size.col - 1, .y_off = layout.navigation_height, .width = 1, .height = 1 }).printSegment(.{ .text = "…", .style = self.style(.quiet) }, .{ .wrap = .none });
+    }
     const line_row = size.row - layout.line_height;
     // Whether the line under the input says Enter denies: only then does a
     // reason's frame offer the denial.
@@ -1686,6 +1691,18 @@ test "prepared Action preserves selected inspection until explicit return" {
             _ = try Test.render(screen, &out.writer, size, "kept draft", 10, .{}, &.{});
             try std.testing.expectEqualStrings("    Allow once    › Deny", rowText(screen, 10, &storage));
             try std.testing.expect(Test.window(screen).readCell(18, 10).?.style.reverse);
+        }
+        if (oversized) {
+            const tiny: std.posix.winsize = .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 };
+            _ = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
+            const cells = Test.window(screen);
+            // The cue replaces only the final source cell, not either
+            // choice or its highlight.
+            var row: [32]u8 = undefined;
+            try std.testing.expectEqualStrings("Run Bas…", rowText(screen, 0, &row));
+            try std.testing.expectEqualStrings("› A   D", rowText(screen, 1, &row));
+            try std.testing.expect(cells.readCell(0, 1).?.style.reverse);
+            try std.testing.expect(!cells.readCell(6, 1).?.style.reverse);
         }
         screen.releaseAction();
         screen.consent = null;
