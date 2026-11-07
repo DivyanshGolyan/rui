@@ -1802,7 +1802,13 @@ def command_interruption_cases(state, library, only=None):
                         before_forward=before_forward if case == "configure-inflight" else None)
                 elif case == "configure-canonical":
                     proxy = canonical.ReplyProxy(host, "/v1/configure")
-                os.write(master, command.encode() + b"\n")
+                # A bare slash command is also a skill candidate. Dismiss its
+                # metadata menu explicitly so Enter tests the command, even
+                # while the asynchronous catalog read is pending. Arguments
+                # put the cursor outside that candidate; Ctrl-G there would
+                # instead act on the pending Action.
+                dismiss = b"\x07" if " " not in command else b""
+                os.write(master, command.encode() + dismiss + b"\n")
                 if route is None:
                     fixture.wait_for(lambda: log.exists() and "capture-sync-held" in log.read_text(), "Configure pre-send sync")
                 elif route:
