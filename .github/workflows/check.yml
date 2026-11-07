@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
+      change_kind: ${{ steps.select.outputs.change_kind }}
       candidate_ref: ${{ steps.select.outputs.candidate_ref }}
       targets: ${{ steps.select.outputs.targets }}
       native_targets: ${{ steps.select.outputs.native_targets }}
@@ -59,11 +60,25 @@ jobs:
           python3 - <<'PY'
           import json, os, sys
           sys.path.insert(0, 'tests/ci')
+          from docs_only import ChangeKind, classify
           from qualification import shards, split_build
           from select_tests import CHECK_COVERS
           p = json.load(open('selection.json'))
+          kind = (classify(p['base'], p['head']) if os.environ['EVENT_NAME'] == 'pull_request'
+                  else ChangeKind.NORMAL)
+          # Future selector obligations must not be erased by the path allowlist.
+          if any(p[key] for key in ('targets', 'native_targets', 'native_required', 'mac_required',
+                                    'server_targets', 'cache_execution_checks', 'linux_memory_checks', 'manual_checks')):
+              kind = ChangeKind.NORMAL
+          p['change_kind'] = kind.value
           ready_pr = os.environ['EVENT_NAME'] == 'pull_request' and p['phase'] == 'review'
-          if ready_pr:
+          if kind == ChangeKind.DOCUMENTATION:
+              p['targets'] = []
+              p['native_targets'] = []
+              p['cache_execution_checks'] = False
+              p['linux_memory_checks'] = False
+              p['retry'] = False
+          elif ready_pr:
               # Qualify the tested source tree, not the later final squash SHA.
               # check-full already contains the core native acceptance suites.
               native = (set(p['native_targets']) - CHECK_COVERS) | {'admission-debug-integration'}
@@ -82,6 +97,7 @@ jobs:
               p['targets'] = [t for t in p['targets'] if t != 'stack-frames']
           p['native_required'] = bool(p['native_targets'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              print('change_kind=' + kind.value, file=f)
               print('candidate_ref=' + os.environ['CANDIDATE_REF'], file=f)
               print('targets=' + json.dumps(p['targets']), file=f)
               print('native_targets=' + json.dumps(p['native_targets']), file=f)
@@ -98,8 +114,8 @@ jobs:
               print('Selection (not acceptance):\n```json\n' + json.dumps(p, indent=2) + '\n```', file=f)
           PY
   policy:
-    # Lint/test policy alongside selection; it must not delay native allocation.
-    if: ${{ !github.event.repository.private }}
+    needs: plan
+    if: ${{ !github.event.repository.private && needs.plan.outputs.change_kind == 'normal' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -451,7 +467,6 @@ jobs:
           cc -shared -fPIC -pthread -Wall -Wextra -Werror tests/qualification/linux-memory/malloc_probe.c -o "$RUNNER_TEMP/rui-malloc-probe.so"
           rm "$RUNNER_TEMP/rui-malloc-probe.so"
   linux:
-    # Policy is required even for documentation-only changes.
     needs: [plan, policy, linux_build, linux_build_unit, linux_codegen, linux_suites, macos_typecheck]
     if: ${{ always() && !github.event.repository.private }}
     runs-on: ubuntu-24.04
@@ -459,6 +474,7 @@ jobs:
     steps:
       - name: Require every selected Linux part
         env:
+          CHANGE_KIND: ${{ needs.plan.outputs.change_kind }}
           TARGETS: ${{ needs.plan.outputs.targets }}
           PLAN_RESULT: ${{ needs.plan.result }}
           POLICY_RESULT: ${{ needs.policy.result }}
@@ -471,6 +487,19 @@ jobs:
           TYPECHECK_RESULT: ${{ needs.macos_typecheck.result }}
         run: |
           test "$PLAN_RESULT" = success
+          case "${CHANGE_KIND-normal}" in
+            documentation)
+              test "$POLICY_RESULT" = skipped
+              test "$TARGETS" = '[]'
+              test "$SPLIT" = false
+              test "$CODEGEN" = false
+              for result in "$BUILD_RESULT" "$UNIT_RESULT" "$CODEGEN_RESULT" "$NATIVE_RESULT" "$TYPECHECK_RESULT"; do
+                test "$result" = skipped
+              done
+              exit 0 ;;
+            normal) ;;
+            *) echo 'Invalid change kind' >&2; exit 1 ;;
+          esac
           test "$POLICY_RESULT" = success
           if [ "$CODEGEN" = true ]; then test "$CODEGEN_RESULT" = success; else test "$CODEGEN_RESULT" = skipped; fi
           if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
@@ -551,7 +580,7 @@ jobs:
           test "$NATIVE_RESULT" = success
   previous_release_upgrade:
     needs: plan
-    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && needs.plan.outputs.change_kind == 'normal' }}
     uses: ./.github/workflows/previous-release-upgrade.yml
     with:
       candidate-ref: ${{ needs.plan.outputs.candidate_ref }}
@@ -564,6 +593,15 @@ jobs:
     steps:
       - name: Require candidate acceptance
         env:
+          CHANGE_KIND: ${{ needs.plan.outputs.change_kind }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          NATIVE_TARGETS: ${{ needs.plan.outputs.native_targets }}
+          LINUX_MATRIX: ${{ needs.plan.outputs.linux_matrix }}
+          MACOS_MATRIX: ${{ needs.plan.outputs.macos_matrix }}
+          LINUX_SPLIT: ${{ needs.plan.outputs.linux_split }}
+          MACOS_SPLIT: ${{ needs.plan.outputs.macos_split }}
+          CODEGEN: ${{ needs.plan.outputs.linux_codegen }}
+          LINUX_MEMORY: ${{ needs.plan.outputs.linux_memory }}
           DRAFT: ${{ github.event.pull_request.draft }}
           PLAN_RESULT: ${{ needs.plan.result }}
           POLICY_RESULT: ${{ needs.policy.result }}
@@ -577,11 +615,29 @@ jobs:
           set -euo pipefail
           test "$DRAFT" = false
           test "$PLAN_RESULT" = success
-          test "$POLICY_RESULT" = success
           test "$LINUX_RESULT" = success
-          test "$NATIVE" = true
-          test "$MACOS_RESULT" = success
-          test "$UPGRADE_RESULT" = success
+          case "$CHANGE_KIND" in
+            documentation)
+              test "$POLICY_RESULT" = skipped
+              test "$NATIVE" = false
+              test "$MACOS_RESULT" = skipped
+              test "$UPGRADE_RESULT" = skipped
+              test "$CACHE_SELECTED" = false
+              test "$TARGETS" = '[]'
+              test "$NATIVE_TARGETS" = '[]'
+              test "$LINUX_MATRIX" = '{"include": []}'
+              test "$MACOS_MATRIX" = '{"include": []}'
+              test "$LINUX_SPLIT" = false
+              test "$MACOS_SPLIT" = false
+              test "$CODEGEN" = false
+              test "$LINUX_MEMORY" = false ;;
+            normal)
+              test "$POLICY_RESULT" = success
+              test "$NATIVE" = true
+              test "$MACOS_RESULT" = success
+              test "$UPGRADE_RESULT" = success ;;
+            *) echo 'Missing or invalid change kind' >&2; exit 1 ;;
+          esac
           case "$CACHE_SELECTED" in
             true) test "$CACHE_RESULT" = success ;;
             false) test "$CACHE_RESULT" = skipped ;;

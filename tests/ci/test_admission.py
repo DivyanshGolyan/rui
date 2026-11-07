@@ -35,6 +35,61 @@ def step_script(text, name):
     return textwrap.dedent(match[1])
 
 
+def documentation_env():
+    return dict(CHANGE_KIND='documentation', POLICY_RESULT='skipped', MACOS_RESULT='skipped',
+                UPGRADE_RESULT='skipped', NATIVE='false', TARGETS='[]', NATIVE_TARGETS='[]',
+                LINUX_MATRIX='{"include": []}', MACOS_MATRIX='{"include": []}',
+                LINUX_SPLIT='false', MACOS_SPLIT='false', CODEGEN='false', LINUX_MEMORY='false')
+
+
+class PlanFixture:
+    def __enter__(self):
+        self.scratch = tempfile.TemporaryDirectory()
+        self.root = Path(self.scratch.name)
+        self.repo = self.root / 'repo'
+        self.repo.mkdir()
+        self.git('init', '-q', '-b', 'main')
+        self.write('.git/info/exclude', 'selection.json\n__pycache__/\n')
+        for name in ('select_tests.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py'):
+            self.write('tests/ci/' + name, (ROOT / 'tests/ci' / name).read_text())
+        self.write('build.zig', (ROOT / 'build.zig').read_text())
+        self.write('README.md', 'Base. Another sentence on one line.\n')
+        self.base = self.commit()
+        return self
+
+    def __exit__(self, *args):
+        self.scratch.cleanup()
+
+    def git(self, *args):
+        return subprocess.check_output(['git', *args], cwd=self.repo, stderr=subprocess.PIPE,
+                                       text=True).strip()
+
+    def write(self, name, content):
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    def commit(self):
+        self.git('add', '-A')
+        self.git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-qm', 'fixture')
+        return self.git('rev-parse', 'HEAD')
+
+    def run(self, base=None, candidate=None, event='pull_request', phase='review'):
+        self.output = self.root / 'output'
+        self.output.write_text('')
+        script = step_script(job(CHECK.read_text(), 'plan'), 'Select existing targets')
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', BASE=base or self.base, PHASE=phase, EVENT_NAME=event,
+                   GITHUB_REF_NAME='5/merge', CANDIDATE_REF=candidate or self.git('rev-parse', 'HEAD'),
+                   GITHUB_OUTPUT=str(self.output), GITHUB_STEP_SUMMARY=str(self.root / 'summary'))
+        return subprocess.run(['bash', '-c', script], cwd=self.repo, env=env,
+                              capture_output=True, text=True)
+
+    def plan(self, test, **kwargs):
+        result = self.run(**kwargs)
+        test.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return dict(line.split('=', 1) for line in self.output.read_text().splitlines())
+
+
 class AdmissionTest(unittest.TestCase):
     def test_cold_native_compile_budget_does_not_extend_runtime_deadlines(self):
         text = CHECK.read_text()
@@ -65,7 +120,7 @@ class AdmissionTest(unittest.TestCase):
         self.assertEqual(checks['required_status_checks'], [{'context': 'admission', 'integration_id': 15368}])
 
     def admission(self, **changes):
-        env = dict(DRAFT='false', PLAN_RESULT='success', POLICY_RESULT='success',
+        env = dict(CHANGE_KIND='normal', DRAFT='false', PLAN_RESULT='success', POLICY_RESULT='success',
                    LINUX_RESULT='success', MACOS_RESULT='success', UPGRADE_RESULT='success',
                    NATIVE='true', CACHE_SELECTED='false', CACHE_RESULT='skipped')
         env.update(changes)
@@ -97,6 +152,89 @@ class AdmissionTest(unittest.TestCase):
             for result in results:
                 with self.subTest(selected=selected, result=result):
                     self.assertNotEqual(self.admission(CACHE_SELECTED=selected, CACHE_RESULT=result).returncode, 0)
+
+    def test_unknown_or_missing_kind_never_admits(self):
+        for kind in ('', 'docs', 'NORMAL', 'unknown'):
+            with self.subTest(kind=kind):
+                self.assertNotEqual(self.admission(CHANGE_KIND=kind).returncode, 0)
+                self.assertNotEqual(self.admission(**dict(documentation_env(), CHANGE_KIND=kind)).returncode, 0)
+
+    def test_documentation_admission_rejects_every_inconsistent_control_or_result(self):
+        env = documentation_env()
+        self.assertEqual(self.admission(**env).returncode, 0)
+        expected = dict(env, DRAFT='false', PLAN_RESULT='success', LINUX_RESULT='success',
+                        CACHE_SELECTED='false', CACHE_RESULT='skipped')
+        for key, good in expected.items():
+            if key.endswith('_RESULT'):
+                alternatives = ('success', 'skipped', 'failure', 'cancelled', 'queued', 'pending', 'in_progress', '')
+            elif key in ('TARGETS', 'NATIVE_TARGETS'):
+                alternatives = ('', '["check"]', '[ ]', 'null')
+            elif key.endswith('_MATRIX'):
+                alternatives = ('', '{}', '{"include": [{"targets": ["check"]}]}', 'null')
+            else:
+                alternatives = ('', 'true', 'false', 'unknown')
+            for value in alternatives:
+                if value == good:
+                    continue
+                with self.subTest(key=key, value=value):
+                    self.assertNotEqual(self.admission(**dict(env, **{key: value})).returncode, 0)
+        script = step_script(job(CHECK.read_text(), 'admission'), 'Require candidate acceptance')
+        for key in expected:
+            missing = dict(expected)
+            del missing[key]
+            with self.subTest(missing=key):
+                self.assertNotEqual(subprocess.run(['bash', '-c', script], env=missing,
+                    capture_output=True, text=True).returncode, 0)
+
+    def test_documentation_linux_requires_exact_skips_and_controls(self):
+        script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
+        env = dict(CHANGE_KIND='documentation', PLAN_RESULT='success', POLICY_RESULT='skipped',
+                   TARGETS='[]', SPLIT='false', CODEGEN='false', BUILD_RESULT='skipped',
+                   UNIT_RESULT='skipped', CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped',
+                   TYPECHECK_RESULT='skipped')
+
+        def run(values):
+            return subprocess.run(['bash', '-euc', script], env=values,
+                                  capture_output=True, text=True).returncode
+
+        self.assertEqual(run(env), 0)
+        for key, good in env.items():
+            values = ('success', 'skipped', 'failure', 'cancelled', 'queued', 'pending', 'in_progress', '') if key.endswith('_RESULT') else ('', 'unknown', 'true', '["check"]')
+            for value in values:
+                if value == good:
+                    continue
+                with self.subTest(key=key, value=value):
+                    self.assertNotEqual(run(dict(env, **{key: value})), 0)
+            missing = dict(env)
+            del missing[key]
+            with self.subTest(missing=key):
+                self.assertNotEqual(run(missing), 0)
+
+    def test_linux_legacy_default_cannot_admit_an_explicit_unknown_kind(self):
+        script = step_script(job(CHECK.read_text(), 'linux'), 'Require every selected Linux part')
+        env = dict(PLAN_RESULT='success', POLICY_RESULT='success', TARGETS='[]', SPLIT='false',
+                   CODEGEN='false', BUILD_RESULT='skipped', UNIT_RESULT='skipped',
+                   CODEGEN_RESULT='skipped', NATIVE_RESULT='skipped', TYPECHECK_RESULT='skipped')
+        self.assertEqual(subprocess.run(['bash', '-euc', script], env=env).returncode, 0)
+        for kind in ('', 'docs', 'unknown'):
+            with self.subTest(kind=kind):
+                self.assertNotEqual(subprocess.run(['bash', '-euc', script],
+                    env=dict(env, CHANGE_KIND=kind), capture_output=True).returncode, 0)
+
+    def test_documentation_routing_is_plan_owned_without_new_heavy_checks(self):
+        text = CHECK.read_text()
+        policy = job(text, 'policy')
+        self.assertIn('needs: plan', policy)
+        self.assertIn("needs.plan.outputs.change_kind == 'normal'", policy)
+        self.assertIn("needs.plan.outputs.change_kind == 'normal'", job(text, 'previous_release_upgrade'))
+        for name in ('macos_build', 'macos_suites', 'macos'):
+            self.assertIn("needs.plan.outputs.native == 'true'", job(text, name))
+        for name in ('plan', 'linux', 'admission'):
+            body = job(text, name)
+            for forbidden in ('sentence_lines', 'pip install', 'npm ', 'actions/setup-node',
+                              'uses: ./.github/actions/setup', 'actionlint', 'unittest discover'):
+                self.assertNotIn(forbidden, body)
+        self.assertNotIn('paths-ignore', text)
 
     def test_admission_always_runs_for_every_pr_and_waits_for_required_parts(self):
         text = job(CHECK.read_text(), 'admission')
@@ -181,32 +319,39 @@ class StrictPathTest(unittest.TestCase):
 
 class CandidatePlanTest(unittest.TestCase):
     def test_ready_plan_preserves_owner_selection_and_core_superset(self):
-        from select_tests import CHECK_COVERS, select
+        from qualification import shards, split_build
+        from select_tests import CHECK_COVERS
         available = set(re.findall(r'b\.step\(\s*"([a-z0-9-]+)"', (ROOT / 'build.zig').read_text()))
-        script = textwrap.dedent(re.search(
-            r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", CHECK.read_text())[1])
-        with tempfile.TemporaryDirectory() as scratch:
-            root = Path(scratch)
-            (root / 'tests').symlink_to(ROOT / 'tests', target_is_directory=True)
-            for path in ('README.md', 'src/store.zig', 'build.zig', 'src/os/descriptor_limit.zig',
-                         'src/AnswerRenderer.zig', 'tests/ci/stack_frames.py'):
-                for event, phase in (('pull_request', 'review'),
-                                             ('pull_request', 'development'),
-                                             ('workflow_dispatch', 'review')):
+        with PlanFixture() as fixture:
+            for path in ('README.md', 'docs/guide.md', 'docs/assets/diagram.svg',
+                         'src/store.zig', 'build.zig', 'src/os/descriptor_limit.zig',
+                         'src/AnswerRenderer.zig', 'tests/ci/unknown_policy.py',
+                         '.github/workflows/check.yml', 'unknown.txt'):
+                fixture.git('reset', '--hard', fixture.base)
+                content = ((ROOT / path).read_text() + '\n// fixture change\n' if path == 'build.zig'
+                           else 'Changed. Two sentences on one line.\n')
+                fixture.write(path, content)
+                candidate = fixture.commit()
+                for event, phase in (('pull_request', 'review'), ('pull_request', 'development'),
+                                     ('workflow_dispatch', 'review')):
                     with self.subTest(path=path, event=event, phase=phase):
                         selection = select([path], phase, available)
-                        (root / 'selection.json').write_text(json.dumps(selection))
-                        (root / 'output').write_text('')
-                        result = subprocess.run(['python3', '-B', '-c', script], cwd=root,
-                            env=dict(os.environ, EVENT_NAME=event,
-                                     GITHUB_REF_NAME='main', CANDIDATE_REF='a' * 40,
-                                     GITHUB_OUTPUT=str(root / 'output'), GITHUB_STEP_SUMMARY=str(root / 'summary')),
-                            capture_output=True, text=True)
-                        self.assertEqual(result.returncode, 0, result.stderr)
-                        output = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
+                        output = fixture.plan(self, candidate=candidate, event=event, phase=phase)
+                        docs = event == 'pull_request' and path in (
+                            'README.md', 'docs/guide.md', 'docs/assets/diagram.svg')
+                        self.assertEqual(output['change_kind'], 'documentation' if docs else 'normal')
+                        self.assertEqual(output['candidate_ref'], candidate)
+                        if docs:
+                            self.assert_documentation_plan(output)
+                            continue
                         codegen = event == 'pull_request' and bool({'check', 'stack-frames'} & set(selection['targets']))
                         linux = [t for t in selection['targets'] if not (codegen and t == 'stack-frames')]
                         self.assertEqual(json.loads(output['targets']), linux)
+                        self.assertEqual(json.loads(output['linux_matrix']), shards(linux))
+                        self.assertEqual(output['linux_split'], str(split_build(linux)).lower())
+                        self.assertEqual(output['linux_codegen'], str(codegen).lower())
+                        self.assertEqual(output['cache_execution'], str(selection['cache_execution_checks']).lower())
+                        self.assertEqual(output['linux_memory'], str(selection['linux_memory_checks']).lower())
                         required = event == 'pull_request' and phase == 'review'
                         if required:
                             expected = (set(selection['native_targets']) - CHECK_COVERS) | {'admission-debug-integration'}
@@ -215,64 +360,110 @@ class CandidatePlanTest(unittest.TestCase):
                             self.assertEqual(json.loads(output['native_targets']), sorted(expected))
                             self.assertEqual(output['native'], 'true')
                             self.assertEqual(output['retry'], 'false')
-                            self.assertTrue(json.loads(output['macos_matrix'])['include'])
+                            self.assertEqual(json.loads(output['macos_matrix']), shards(sorted(expected), 'macos'))
                             self.assertFalse({'check', 'check-full'} <= expected)
                         else:
                             self.assertEqual(json.loads(output['native_targets']), [])
                             self.assertEqual(output['native'], 'false')
 
+    def assert_documentation_plan(self, output):
+        self.assertEqual(output['change_kind'], 'documentation')
+        for key in ('targets', 'native_targets'):
+            self.assertEqual(output[key], '[]', key)
+        for key in ('linux_matrix', 'macos_matrix'):
+            self.assertEqual(output[key], '{"include": []}', key)
+        for key in ('native', 'retry', 'linux_split', 'macos_split', 'linux_codegen',
+                    'linux_memory', 'cache_execution'):
+            self.assertEqual(output[key], 'false', key)
+
     def test_executed_plan_uses_pinned_tree_and_recomputes_after_base_change(self):
-        # Admission qualifies this tested source tree, not the later final squash SHA.
-        script = step_script(job(CHECK.read_text(), 'plan'), 'Select existing targets')
-        with tempfile.TemporaryDirectory() as scratch:
-            root = Path(scratch)
-            repo = root / 'repo'
-            repo.mkdir()
+        with PlanFixture() as fixture:
+            fixture.write('src/history_memo.zig', 'changed owner\n')
+            retarget = fixture.commit()
+            fixture.write('README.md', 'Candidate. Same line.\n')
+            candidate = fixture.commit()
+            mixed = fixture.plan(self, base=fixture.base, candidate=candidate)
+            docs = fixture.plan(self, base=retarget, candidate=candidate)
+            self.assert_documentation_plan(docs)
+            self.assertEqual(mixed['change_kind'], 'normal')
+            self.assertEqual(mixed['native'], 'true')
+            self.assertEqual(mixed['retry'], 'false')
+            self.assertTrue({'check', 'admission-debug-integration', 'test-logic'} <=
+                            set(json.loads(mixed['native_targets'])))
+            self.assertNotEqual(mixed['targets'], docs['targets'])
+            # Retargeting from docs to a wider base restores native acceptance.
+            self.assertEqual(fixture.plan(self, base=fixture.base, candidate=candidate), mixed)
+            fixture.git('checkout', '-q', '--detach', retarget)
+            self.assertNotEqual(fixture.run(candidate=candidate).returncode, 0)
 
-            def git(*args):
-                return subprocess.run(['git', *args], cwd=repo, check=True,
-                                      capture_output=True, text=True).stdout.strip()
+    def test_plan_checks_whitespace_and_invalid_base(self):
+        with PlanFixture() as fixture:
+            fixture.write('README.md', 'Trailing whitespace.  \n')
+            candidate = fixture.commit()
+            failed = fixture.run(candidate=candidate)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn('trailing whitespace', failed.stdout)
+            self.assertNotEqual(fixture.run(base='missing-ref', candidate=candidate).returncode, 0)
 
-            def commit(message):
-                git('add', '-A')
-                git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', message)
-                return git('rev-parse', 'HEAD')
+    def test_empty_deleted_asset_and_draft_plans(self):
+        with PlanFixture() as fixture:
+            empty = fixture.plan(self)
+            self.assertEqual(empty['change_kind'], 'normal')
+            self.assertEqual(empty['native'], 'true')
+            (fixture.repo / 'README.md').unlink()
+            deleted = fixture.commit()
+            self.assert_documentation_plan(fixture.plan(self, candidate=deleted))
+            fixture.git('reset', '--hard', fixture.base)
+            fixture.write('docs/images/screen.png', 'asset\n')
+            asset = fixture.commit()
+            output = fixture.plan(self, candidate=asset, phase='development')
+            self.assert_documentation_plan(output)
+            # Draft classification does not make draft admission succeed.
+            self.assertNotEqual(AdmissionTest().admission(**documentation_env(), DRAFT='true').returncode, 0)
 
-            git('init', '-q', '-b', 'main')
-            (repo / 'tests').symlink_to(ROOT / 'tests', target_is_directory=True)
-            (repo / 'build.zig').write_text((ROOT / 'build.zig').read_text())
-            (repo / 'README.md').write_text('base\n')
-            base = commit('base')
-            (repo / 'src').mkdir()
-            (repo / 'src/history_memo.zig').write_text('changed owner\n')
-            retarget = commit('owner')
-            (repo / 'README.md').write_text('candidate\n')
-            candidate = commit('candidate')
-            env = dict(os.environ, PHASE='review', STABLE='false', EVENT_NAME='pull_request',
-                       GITHUB_REF_NAME='5/merge', GITHUB_SHA=candidate, CANDIDATE_REF=candidate,
-                       GITHUB_OUTPUT=str(root / 'output'), GITHUB_STEP_SUMMARY=str(root / 'summary'))
-
-            def plan(base_ref):
-                (root / 'output').write_text('')
-                result = subprocess.run(['bash', '-c', script], cwd=repo, env=dict(env, BASE=base_ref),
-                                        capture_output=True, text=True)
+    def test_documentation_plan_flows_through_real_linux_and_admission_scripts(self):
+        workflow = CHECK.read_text()
+        linux = step_script(job(workflow, 'linux'), 'Require every selected Linux part')
+        admission = step_script(job(workflow, 'admission'), 'Require candidate acceptance')
+        with PlanFixture() as fixture:
+            fixture.write('README.md', 'First sentence. Second sentence.\n')
+            candidate = fixture.commit()
+            output = fixture.plan(self, candidate=candidate)
+            # Resolve the real step's output expressions, rather than duplicating the plan values.
+            results = dict(plan='success', policy='skipped', linux='success', macos='skipped',
+                           previous_release_upgrade='skipped', cache_execution='skipped',
+                           linux_build='skipped', linux_build_unit='skipped', linux_codegen='skipped',
+                           linux_suites='skipped', macos_typecheck='skipped')
+            for name, script in (('linux', linux), ('admission', admission)):
+                body = job(workflow, name)
+                env = {}
+                for key, expression in re.findall(r'(?m)^          ([A-Z_]+): \$\{\{ (.*?) \}\}$', body):
+                    if expression.startswith('needs.plan.outputs.'):
+                        env[key] = output[expression.removeprefix('needs.plan.outputs.')]
+                    elif expression == 'github.event.pull_request.draft':
+                        env[key] = 'false'
+                    else:
+                        env[key] = results[expression.split('.')[1]]
+                self.assertTrue(env)
+                result = subprocess.run(['bash', '-euc', script], env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                return dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
 
-            old_base, new_base = plan(base), plan(retarget)
-            for output in (old_base, new_base):
-                self.assertEqual(output['candidate_ref'], candidate)
+    def test_future_selector_obligations_veto_documentation(self):
+        for key, value in (('targets', ['test-logic']), ('native_targets', ['test-logic']),
+                           ('native_required', True), ('mac_required', True),
+                           ('server_targets', ['test-logic']), ('cache_execution_checks', True),
+                           ('linux_memory_checks', True), ('manual_checks', ['diagnostic'])):
+            with self.subTest(obligation=key), PlanFixture() as fixture:
+                path = fixture.repo / 'tests/ci/select_tests.py'
+                source = path.read_text().replace('    result["base"] = base',
+                    f'    result[{key!r}] = {value!r}\n    result["base"] = base')
+                path.write_text(source)
+                baseline = fixture.commit()
+                fixture.write('README.md', 'Changed documentation.\n')
+                candidate = fixture.commit()
+                output = fixture.plan(self, base=baseline, candidate=candidate)
+                self.assertEqual(output['change_kind'], 'normal')
                 self.assertEqual(output['native'], 'true')
-                self.assertEqual(output['retry'], 'false')
-                self.assertTrue({'check', 'admission-debug-integration'} <= set(json.loads(output['native_targets'])))
-            self.assertIn('test-logic', json.loads(old_base['native_targets']))
-            self.assertNotIn('test-logic', json.loads(new_base['native_targets']))
-            self.assertNotEqual(old_base['targets'], new_base['targets'])
-            # A mutable merge ref advancing cannot silently select or execute another tree.
-            git('checkout', '-q', '--detach', retarget)
-            result = subprocess.run(['bash', '-c', script], cwd=repo, env=dict(env, BASE=base),
-                                    capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
 
     def test_pr_base_retarget_and_draft_changes_rebuild_the_candidate(self):
         on = CHECK.read_text().split('\npermissions:', 1)[0]
