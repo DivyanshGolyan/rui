@@ -559,6 +559,58 @@ test "skills validates name byte grammar and Unicode character description bound
     try std.testing.expectError(error.SkillFrontmatterTooLarge, frontmatter(oversized));
 }
 
+test "skills truncates long descriptions at Unicode boundaries" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "a", "é", "雪", "😀" }) |character| {
+        for ([_]usize{ 1, 1023, 1024, 1025, 1400 }) |count| {
+            const description = try allocator.alloc(u8, count * character.len);
+            defer allocator.free(description);
+            for (0..count) |index| @memcpy(description[index * character.len ..][0..character.len], character);
+            const raw = try std.fmt.allocPrint(allocator, "---\nname: demo\ndescription: \"{s}\"\n---\n", .{description});
+            defer allocator.free(raw);
+            const expected = if (count <= 1024)
+                try allocator.dupe(u8, description)
+            else
+                try std.mem.concat(allocator, u8, &.{ description[0 .. 1023 * character.len], "…" });
+            defer allocator.free(expected);
+            try expectMetadata(raw, expected);
+        }
+    }
+}
+
+test "skills discovery truncates descriptions but invocation preserves full source" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try fixturePath(allocator, tmp.dir);
+    defer allocator.free(root);
+    try tmp.dir.createDirPath(io, ".git");
+    const description = try allocator.alloc(u8, 1223);
+    defer allocator.free(description);
+    @memset(description, 'x');
+    try fixtureSkill(tmp.dir, ".agents/skills/demo", "demo", description);
+    const catalog = try discover(allocator, io, root, null);
+    defer catalog.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), catalog.entries.len);
+    const expected = try std.mem.concat(allocator, u8, &.{ description[0..1023], "…" });
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, catalog.entries[0].description);
+    const encoded = try encodeCatalog(allocator, catalog);
+    defer allocator.free(encoded);
+    const decoded = try decodeCatalog(allocator, encoded);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqualStrings(expected, decoded.entries[0].description);
+    const full_source = try std.fmt.allocPrint(allocator, "---\nname: demo\ndescription: {s}\n---\nfull body\n", .{description});
+    defer allocator.free(full_source);
+    const invoked = try invocation(allocator, io, catalog.entries[0]);
+    defer allocator.free(invoked);
+    try std.testing.expect(std.mem.endsWith(u8, invoked, full_source));
+    const unchanged = try readSkill(allocator, io, catalog.entries[0]);
+    defer allocator.free(unchanged);
+    try std.testing.expectEqualStrings(full_source, unchanged);
+}
+
 fn fixturePath(allocator: Allocator, dir: std.Io.Dir) ![]const u8 {
     const buffer = try allocator.alloc(u8, std.fs.max_path_bytes);
     defer allocator.free(buffer);
