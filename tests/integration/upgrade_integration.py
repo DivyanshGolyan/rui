@@ -565,6 +565,19 @@ class TerminalScreen:
             del self.tail[:-16384]
         return bool(data)
 
+    def wait_for_exit(self, description):
+        def exited():
+            self.read_output()
+            return self.process.poll() is not None
+
+        wait_for(exited, description)
+        # The child can exit between the last read and poll. Its slave stays
+        # open for collection; drain to EAGAIN or EOF, with a finite cap.
+        for _ in range(256):
+            if not self.read_output():
+                return
+        raise AssertionError("terminal output did not drain after child exit")
+
     def observe(self):
         self.read_output()
         assert self.process.poll() is None, (self.process.returncode, self.capture.completed)
@@ -766,11 +779,7 @@ def signal_during_check(root, binary, releases, artifacts):
             screen.save(artifacts, "signal-during-check")
             process.send_signal(signal.SIGINT)
 
-            def exited():
-                screen.read_output()
-                return process.poll() is not None
-
-            wait_for(exited, "terminal restoration and exit during held upgrade check")
+            screen.wait_for_exit("terminal restoration and exit during held upgrade check")
             assert not gate.release.is_set(), "terminal required metadata peer release before exiting"
             assert b"\x1b[?1049l" in screen.tail, "alternate screen not restored on signal"
             assert b"\x1b[?25h" in screen.tail, "cursor not restored on signal"
@@ -799,11 +808,7 @@ def signal_after_publication(root, binary, releases, artifacts):
             assert host.poll() is None and c.status()["instance"] == previous["instance"]
             process.send_signal(signal.SIGINT)
 
-            def exited():
-                screen.read_output()
-                return process.poll() is not None
-
-            wait_for(exited, "joined publication receipt and terminal exit after SIGINT")
+            screen.wait_for_exit("joined publication receipt and terminal exit after SIGINT")
             output = bytes(screen.tail)
             restored = output.rfind(b"\x1b[?1049l")
             receipt = output.find(b"Installed Rui. Complete build:")
@@ -871,11 +876,7 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                     else:
                         process.send_signal(signal.SIGINT)
 
-                        def exited():
-                            screen.read_output()
-                            return process.poll() is not None
-
-                        wait_for(exited, "SIGINT exit while selected version child is gated")
+                        screen.wait_for_exit("SIGINT exit while selected version child is gated")
                         assert b"\x1b[?1049l" in screen.tail, "selected-probe signal did not restore terminal"
                         if artifacts is not None:
                             (artifacts / "selected-version-sigint.txt").write_text(screen.capture.plain)
@@ -932,19 +933,7 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
                 screen.save(artifacts, "dual-failure-notice")
                 process.send_signal(signal.SIGINT)
 
-                def exited():
-                    screen.read_output()
-                    return process.poll() is not None
-
-                wait_for(exited, "restored primary and retained cleanup receipt after SIGINT")
-                # The child may exit after exited() reads but before it polls.
-                # Its slave remains open here: collect every queued raw byte
-                # before checking the restored receipt, stopping at EAGAIN.
-                for _ in range(256):
-                    if not screen.read_output():
-                        break
-                else:
-                    raise AssertionError("terminal output did not drain after child exit")
+                screen.wait_for_exit("restored primary and retained cleanup receipt after SIGINT")
                 output = bytes(screen.tail)
                 restored = output.rfind(b"\x1b[?1049l")
                 assert restored >= 0, "dual-failure SIGINT did not restore the terminal"
