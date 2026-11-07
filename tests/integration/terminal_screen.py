@@ -33,20 +33,26 @@ def shown(text, screen):
 
 
 def assert_details_unavailable(capture, *, columns, rows):
-    """Check this fixture's transcript and footer in one committed cell grid."""
+    """Check the fixed 80x50 details fixture's committed physical cells.
+
+    These are fixture-specific captured coordinates, not a generic transcript
+    rectangle or an inference about the renderer's hidden scroll state.
+    """
     cells = capture.completed_cells
     raw = capture.completed
     assert capture.generation and not capture.synchronized, raw
+    assert (columns, rows) == (80, 50), raw
     assert len(cells) == rows and all(len(row) == columns for row in cells), raw
-    transcript_end = rows - 3
-    assert all(row[-1].data == "▐" for row in cells[:transcript_end]), raw
-    footer = cell_rows(cells, transcript_end, rows, 0, columns)
-    assert [row.rstrip(" ") for row in footer] == [
-        "─" * columns, "›", "! Details unavailable; draft retained."
-    ], raw
-    transcript = "\n".join(row.rstrip(" ") for row in
-        cell_rows(cells, 0, transcript_end, 0, columns - 1))
-    assert shown("! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy", transcript), raw
+    assert all(row[79].data == "│" for row in cells[:47]), raw
+    diagnostic = [[cell.data for cell in row] for row in cells[1:3]]
+    assert diagnostic == [list(row) for row in [
+        "! Details unavailable; draft retained. HTTP 503; type: busy; code:".ljust(79) + "│",
+        "  host_busy".ljust(79) + "│",
+    ]], raw
+    footer = [[cell.data for cell in row] for row in cells[47:50]]
+    assert footer == [list(row) for row in [
+        "─" * 80, "›".ljust(80), "! Details unavailable; draft retained.".ljust(80)
+    ]], raw
 
 
 class CombiningScreen(pyte.Screen):
