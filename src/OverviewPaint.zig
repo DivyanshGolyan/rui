@@ -125,7 +125,7 @@ pub fn draw(window: vaxis.Window, scratch: Allocator, state: *const State, draft
     if (fits) {
         painter.at(at.input);
         try ruleLine(&painter, input.view);
-        if (at.commands.len() != 0) try commandLines(&painter, &result.commands.?, at.commands);
+        if (at.commands.len() != 0) try commandLines(&painter, &result.commands.?, at.commands, draft.skill_choices);
         const hinted = height - hintRows(state);
         try composer(&painter, state, draft, &input, .{ .start = at.commands.end, .end = hinted });
         painter.at(hinted);
@@ -169,6 +169,7 @@ fn cellStyle(caps: Caps, wanted: Style) vaxis.Style {
         },
         .bold = wanted.bold,
         .reverse = wanted.reverse,
+        .ul_style = if (wanted.underline) .single else .off,
     };
 }
 
@@ -176,24 +177,36 @@ fn cellStyle(caps: Caps, wanted: Style) vaxis.Style {
 /// description, quiet, at one column, the highlighted row on the selection
 /// ground. When more match than rows fit, the last row counts the rest and
 /// the rows follow the highlight.
-fn commandLines(painter: *RowPaint, drawn: *const slash_commands.Shown, lines: view.Layout.Rows) error{OutOfMemory}!void {
+fn commandLines(painter: *RowPaint, drawn: *const slash_commands.Shown, lines: view.Layout.Rows, choices: ?slash_commands.SkillChoices) error{OutOfMemory}!void {
     const listed = &drawn.list;
     const highlight = drawn.highlight;
-    const shown = slash_commands.named(listed.count, lines.len());
-    const first = listed.firstShown(highlight, lines.len());
+    var total = listed.count;
+    if (listed.containsSkills()) if (choices) |metadata| {
+        var skill_count: usize = 0;
+        for (listed.shown()) |entry| if (entry.kind == .skill) {
+            skill_count += 1;
+        };
+        total += metadata.total -| skill_count;
+    };
+    const shown = slash_commands.named(total, lines.len());
+    const first = @min((highlight + 1) -| shown, listed.count - shown);
     const room = painter.width -| 2;
     const column = listed.descriptionColumn();
     for (listed.shown()[first..][0..shown], first.., lines.start..) |entry, index, row| {
         painter.at(@intCast(row));
         painter.begin(index == highlight);
         _ = try painter.put(1, entry.shown, room, .{ .colour = .strong });
-        if (entry.description.len != 0 and room > column) _ = try painter.put(1 + column, entry.description, room - column, .{ .colour = .quiet });
+        if (room > column) {
+            const role = if (entry.kind == .skill) try std.fmt.allocPrint(painter.arena, "skill · {s}", .{entry.description}) else entry.description;
+            const description = if (lines.len() == 1 and total > 1) try std.fmt.allocPrint(painter.arena, "{s} · " ++ slash_commands.more, .{ role, total - 1 }) else role;
+            _ = try painter.put(1 + column, description, room - column, .{ .colour = .quiet });
+        }
         try painter.finish();
     }
     if (shown == lines.len()) return;
     painter.at(@intCast(lines.start + shown));
     painter.begin(false);
-    _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, slash_commands.more, .{listed.count - shown}), room, .{ .colour = .quiet });
+    _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, slash_commands.more, .{total - shown}), room, .{ .colour = .quiet });
     try painter.finish();
 }
 /// A single direct row in the borrowed vaxis window. Source bytes are cleaned
@@ -231,6 +244,7 @@ const RowPaint = struct {
         if (self.selected) result.background = .selection;
         if (self.caps.depth == .none) return .{
             .bold = result.bold or result.background == .band,
+            .underline = result.underline,
             .reverse = result.background == .band or result.background == .selection,
         };
         return result;
@@ -581,7 +595,13 @@ fn composer(painter: *RowPaint, state: *const State, draft: Draft, input: *const
             _ = try painter.put(column, part, part.len, style);
             column += @intCast(part.len);
         }
-        _ = try painter.put(column, draft.bytes[line.start..line.end], room - line.prefixCells(), style);
+        var spans: draft_layout.Spans = .{ .text = draft.bytes, .attachments = draft.attachments, .position = line.start, .end = line.end };
+        const end_column = @as(usize, column) + room - line.prefixCells();
+        while (spans.next()) |span| {
+            var decorated = style;
+            decorated.underline = span.attached;
+            column += @intCast(try painter.put(column, span.text, end_column -| column, decorated));
+        }
         try painter.finish();
     }
 }
@@ -619,9 +639,11 @@ fn hints(painter: *RowPaint, state: *const State, draft: Draft, listed: bool) er
         const suffix = try std.fmt.allocPrint(painter.arena, " {s} {s}", .{ dot, esc_does.? });
         const used = try painter.put(1, text.written(), room -| painter.measure(suffix), .{ .colour = .quiet });
         _ = try painter.put(1 + used, suffix, room -| used, .{ .colour = .quiet });
+    } else if (draft.attachments.len != 0) {
+        _ = try painter.put(1, try std.fmt.allocPrint(painter.arena, "{d} attached skill{s} {s} enter start {s} {s}", .{ draft.attachments.len, if (draft.attachments.len == 1) "" else "s", dot, dot, esc_does.? }), room, .{ .colour = .quiet });
     } else if (draft.bytes.len != 0) {
         // What Enter and Esc do to this draft, as `enter` and `compose` read it.
-        const slashed = draft.bytes[0] == '/' and !std.mem.startsWith(u8, draft.bytes, "//");
+        const slashed = !draft.leadingSkill() and draft.bytes[0] == '/' and !std.mem.startsWith(u8, draft.bytes, "//");
         const enter_does: []const u8 = if (!slashed) "enter start " else if (commands.parse(draft.bytes) == .command) "enter run " else "";
         const text = try std.fmt.allocPrint(painter.arena, "{s}{s}{s}", .{ enter_does, if (enter_does.len != 0) try std.fmt.allocPrint(painter.arena, "{s} ", .{dot}) else "", esc_does.? });
         _ = try painter.put(1, text, room, .{ .colour = .quiet });
@@ -3705,4 +3727,44 @@ test "archive state and confirmation paint through the actual shared backend" {
     try std.testing.expect(std.mem.indexOf(u8, pending, "[Archiving] second") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "Stopping and archiving") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "Stop and archive bbbbbb?") != null);
+}
+
+test "inline overview paint underlines only attached ASCII ranges through existing wrapped draft painter" {
+    const Range = @import("skill_completion.zig").Range;
+    const text = "é /review, next /review.";
+    const ranges = [_]Range{ .{ .start = 3, .end = 10 }, .{ .start = 17, .end = 24 } };
+    for ([_]u16{ 14, 40, 80 }) |width| {
+        for ([_]Caps{ .{}, .{ .depth = .none } }) |caps| {
+            var state = try testState();
+            defer state.deinit();
+            var rendered = try sizedRender(&state, .{ .bytes = text, .cursor = text.len, .attachments = &ranges }, width, 24, caps, 0);
+            defer rendered.deinit();
+            var underlined: usize = 0;
+            for (0..rendered.height) |row| {
+                for (0..rendered.width) |column| {
+                    const cell = rendered.cell(column, row);
+                    if (cell.style.ul_style == .off) continue;
+                    try std.testing.expectEqual(@as(usize, 1), cell.char.grapheme.len);
+                    try std.testing.expect(std.mem.indexOfScalar(u8, "/review", cell.char.grapheme[0]) != null);
+                    underlined += 1;
+                }
+            }
+            try std.testing.expectEqual(@as(usize, 14), underlined);
+        }
+    }
+}
+
+test "inline overview paint shows skill role and total metadata beyond bounded choices" {
+    var state = try testState();
+    defer state.deinit();
+    const skills = [_]slash_commands.Entry{.{ .kind = .skill, .word = "review", .shown = "/review", .description = "Review work", .runs = false }};
+    var rendered = try sizedRender(&state, .{ .bytes = "ask /rev", .cursor = 8, .skill_choices = .{ .entries = &skills, .generation = 1, .total = 25 } }, 80, 24, .{}, 0);
+    defer rendered.deinit();
+    var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer text.deinit();
+    try rendered.write(&text.writer);
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "skill · Review work") != null);
+    // Even one drawn row retains its role and counts omitted metadata.
+    try std.testing.expect(std.mem.indexOf(u8, text.written(), "+24 more") != null);
+    try std.testing.expectEqual(@as(usize, 1), rendered.commands.?.list.count);
 }
