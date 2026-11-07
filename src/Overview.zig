@@ -624,6 +624,7 @@ fn drain(fd: c_int) void {
 /// Steps the core with one event and queues the jobs it asks for. Opening a
 /// Session and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
+    self.state.upgrade_busy = self.upgrade_requested or self.upgrade_cancel_draining;
     const effects = try view.step(&self.state, value);
     // An older read may settle after cancellation; its view event cannot
     // release admission before that borrower is drained and a fresh list runs.
@@ -4277,6 +4278,16 @@ test "upgrade quiescence settles accepted queued and running archive mutations b
         try std.testing.expect(!try overview.quiesceUpgrade());
         try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &Gate.entered, test_poll.isSet);
         try std.testing.expect(!try overview.quiesceUpgrade());
+        // A real accepted archive borrower is still held: a second command
+        // is refused, then Escape starts draining that same borrower.
+        try std.testing.expect(try rig.press("/upgrade\n") == null);
+        try std.testing.expectEqualStrings("/upgrade", overview.composerDraft().bytes);
+        try std.testing.expectEqualStrings(view.upgrade_busy_notice, overview.state.notice.?.text());
+        try std.testing.expect(try rig.press("\x03") == null);
+        try std.testing.expect(!overview.upgrade_requested and overview.upgrade_cancel_draining);
+        try std.testing.expect(try rig.press("\n") == null);
+        try std.testing.expectEqualStrings("/upgrade", overview.composerDraft().bytes);
+        try std.testing.expectEqualStrings(view.upgrade_busy_notice, overview.state.notice.?.text());
         try std.testing.expectEqual(@as(usize, 1), overview.state.request_count);
         try std.testing.expectEqual(@as(@FieldType(view.Request, "status"), .pending), overview.state.requests[0].status);
         // A fresh opposite intent is not another accepted job to drain.
@@ -4294,6 +4305,12 @@ test "upgrade quiescence settles accepted queued and running archive mutations b
         try view.writeDeparture(&overview.state, null, &writer);
         try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "original-archive-handle") != null);
         try std.testing.expect(overview.worker.thread == null);
+        // Service the drained cancellation before an explicit fresh retry.
+        _ = try service(overview);
+        try std.testing.expect(!overview.upgrade_cancel_draining);
+        try std.testing.expect(try rig.press("\n") == null);
+        try std.testing.expect(overview.upgrade_requested);
+        try std.testing.expectEqualStrings("", overview.composerDraft().bytes);
     };
 }
 

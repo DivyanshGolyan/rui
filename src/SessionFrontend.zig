@@ -658,6 +658,10 @@ fn slashCommand(self: *Self, text: []const u8) !void {
     }
     switch (parsed) {
         .upgrade => {
+            if (self.upgradeBusy()) {
+                self.notice = "! Upgrade still settling; retry /upgrade after it finishes. Draft retained.";
+                return;
+            }
             self.upgrade_requested = true;
             // This local command is accepted now, before quiescing or any
             // asynchronous work. Never clear a later draft at completion.
@@ -888,8 +892,12 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
 
 const upgrade_recovery = "! Host requests paused after Upgrade; draft and original retained. /upgrade or use the selected Rui in a new terminal.";
 
+fn upgradeBusy(self: *const Self) bool {
+    return self.upgrade_requested or self.upgrade_reobserving or self.upgrade_reobserve_draining;
+}
+
 fn upgradeHeld(self: *const Self) bool {
-    return self.upgrade_requested or self.upgrade_blocked or self.upgrade_reobserving;
+    return self.upgrade_blocked or self.upgradeBusy();
 }
 
 fn quiesceUpgrade(self: *Self) !bool {
@@ -1928,6 +1936,16 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
 fn commandLine(self: *Self) !void {
     if (self.shownCommands()) |shown| {
         const taken = shown.list.enter(shown.highlight);
+        // A refused suggestion must not even append its completion: the
+        // newer draft belongs to the person until the old job has settled.
+        const draft = self.input.composition().bytes;
+        const upgrade = "/upgrade";
+        if (taken.runs and self.upgradeBusy() and draft.len <= upgrade.len and
+            std.mem.startsWith(u8, upgrade, draft) and std.mem.eql(u8, upgrade[draft.len..], taken.rest))
+        {
+            self.notice = "! Upgrade still settling; retry /upgrade after it finishes. Draft retained.";
+            return;
+        }
         switch (self.input.append(taken.rest)) {
             .refused => |why| self.notice = refusedNotice(why),
             else => if (taken.runs) {
@@ -5303,6 +5321,62 @@ test "upgrade holds refuse archive shortcuts confirmations and slash commands wi
         try std.testing.expect(held.self.input.queuedCommand() == null);
         try std.testing.expect(held.self.reader.thread == null and held.self.submission.task.thread == null);
     };
+}
+
+test "upgrade busy refusal keeps the exact incomplete suggestion" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try sendKeys(&held.self, "/up");
+    try held.settle();
+    held.self.upgrade_requested = true;
+    const revision = held.self.input.revision;
+    try sendKeys(&held.self, "\r");
+    try std.testing.expectEqualStrings("/up", held.self.input.composition().bytes);
+    try std.testing.expectEqual(revision, held.self.input.revision);
+    try std.testing.expect(std.mem.indexOf(u8, held.self.notice.?, "still settling") != null);
+}
+
+test "upgrade retries wait for a real pre-cancel borrower to join" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const Gate = struct {
+        release: std.Io.Event = .unset,
+        fn run(raw: *anyopaque, task: *Task) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            gate.release.waitUncancelable(task.io);
+        }
+    };
+    var gate: Gate = .{};
+    defer {
+        gate.release.set(std.testing.io);
+        if (self.reader.thread != null) self.reader.join() catch unreachable;
+    }
+    try sendKeys(self, "/upgrade\r");
+    try std.testing.expect(self.upgrade_requested);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    try self.reader.start(std.testing.io, &gate, Gate.run);
+    try sendKeys(self, "/upgrade\r");
+    try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
+    try std.testing.expect(std.mem.indexOf(u8, self.notice.?, "still settling") != null);
+    try sendKeys(self, "\x03");
+    try std.testing.expect(!self.upgrade_requested and self.upgrade_reobserve_draining);
+    try sendKeys(self, "\r");
+    try std.testing.expect(!self.upgrade_requested and self.reader.thread != null);
+    try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
+    gate.release.set(std.testing.io);
+    try self.reader.join();
+    // A fresh observation, not the old borrower's completion, reopens input.
+    self.reading.phase = .activity;
+    self.job.result = .{ .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try self.applyReader(.complete);
+    try std.testing.expect(self.upgrade_reobserving);
+    self.upgrade_reobserve_draining = false;
+    try self.applyReader(.complete);
+    try std.testing.expect(!self.upgrade_reobserving);
+    try sendKeys(self, "\r");
+    try std.testing.expect(self.upgrade_requested);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
 }
 
 test "a pre-cancellation activity result cannot release upgrade reobservation" {
