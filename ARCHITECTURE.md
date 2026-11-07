@@ -2707,7 +2707,6 @@ Preparation captures the old source anchor before backend resize; waiting prefix
 Encoding finishes before output can pump, then the screen issues its ticket and returns Delivered only after every byte and final flush succeed, including a zero-byte unchanged frame.
 Every nonempty encoded frame, including prefix-only output, closes OSC8 and resets SGR; a truly unchanged empty frame emits nothing.
 A begin, paint, encode or output failure poisons the backend for the invocation; releasing its storage never authorizes a retry of an uncertain diff.
-The overview still owns its legacy Span projection/diff separately; a healthy overview/detail handoff invalidates both projections without replacing the backend or decoder.
 libvaxis's own TTY owner is not used: restoration must attempt every step without waiting on a drain, wait at most one bounded second for output credit, and restore descriptor flags exactly.
 Resize keeps the first browsed line in view and preserves draft bytes and logical cursor; an Action restarts from its top.
 Text uses existing width behavior unless a terminal reports Unicode mode 2027 already enabled.
