@@ -841,7 +841,11 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     self.height = layout.height;
     const conversation = self.view == .live or self.view == .transcript;
     document.scroll.vertical_scrollbar = if (conversation) .{ .character = .{ .grapheme = "▐", .width = 1 }, .track_character = .{ .grapheme = "│", .width = 1 }, .fg = self.style(.normal), .bg = self.style(.quiet) } else null;
-    const body = window.child(.{ .y_off = layout.navigation_height, .height = layout.height, .width = self.textLayout().width });
+    // Conversation owns the full physical window: ScrollView itself
+    // reserves its right rail. Only a partial Action reserves a source-edge
+    // marker cell in advance.
+    const body_width = if (self.actionVisible() and !self.preview_complete) self.textLayout().width else size.col;
+    const body = window.child(.{ .y_off = layout.navigation_height, .height = layout.height, .width = body_width });
     document.scroll.draw(body, .{ .cols = self.textLayout().width, .rows = projection.total +| document.blank_tail });
     try layout.observe(projection, document.scroll.scroll.y, frame_input);
     if (!selector) self.draft_anchor = layout.draft_lines[0].start;
@@ -849,7 +853,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     self.commands = footer.commands;
     if (self.commands) |*commands| commands.drew(layout.list_height != 0);
     _ = try layout.heading.draw(window.child(.{ .height = layout.navigation_height }), .{}, true, self.colour, self.style(.quiet), .{});
-    try projection.paint(&document.scroll, window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = layout.height - layout.document_offset, .width = self.textLayout().width }), self.colour, self.backend.scratch());
+    try projection.paint(&document.scroll, window.child(.{ .y_off = layout.navigation_height + layout.document_offset, .height = layout.height - layout.document_offset, .width = body_width }), self.colour, self.backend.scratch());
     if (layout.document_offset != 0) {
         // The conversation's latest rows fill the rows above a whole Action;
         // they are context, never read rows of the Action.
@@ -1719,6 +1723,39 @@ test "prepared Action preserves selected inspection until explicit return" {
     }
 }
 
+test "conversation source edge and rail retain full physical width" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    for ([_]bool{ false, true }) |colour| {
+        screen.colour = colour;
+        _ = screen.backend.setPolicy(.{ .depth = if (colour) .indexed else .none, .width = screen.backend.widthMethod() });
+        for ([_]u16{ 8, 100 }) |columns| for ([_][]const u8{ "Z", "│", "▐" }) |edge| {
+            screen.live.text.clear();
+            const bytes: [98]u8 = @splat('a');
+            try screen.append(bytes[0 .. columns - 2]);
+            try screen.append(edge);
+            const size: std.posix.winsize = .{ .row = 12, .col = columns, .xpixel = 0, .ypixel = 0 };
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+            const cells = Test.window(screen);
+            try std.testing.expectEqualStrings(edge, cells.readCell(columns - 2, 0).?.char.grapheme);
+            const rail = cells.readCell(columns - 1, 0).?.char.grapheme;
+            try std.testing.expect(std.mem.eql(u8, rail, "│") or std.mem.eql(u8, rail, "▐"));
+            try screen.beginTranscript(0);
+            _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+            try std.testing.expectEqualStrings(edge, cells.readCell(columns - 2, 0).?.char.grapheme);
+            const transcript_rail = cells.readCell(columns - 1, 0).?.char.grapheme;
+            try std.testing.expect(std.mem.eql(u8, transcript_rail, "│") or std.mem.eql(u8, transcript_rail, "▐"));
+            try screen.latest();
+        };
+    }
+}
+
 test "tiny Action preserves source custody and requires an actual source row" {
     const io = std.testing.io;
     var environ = try std.testing.environ.createMap(std.testing.allocator);
@@ -1791,6 +1828,14 @@ test "tiny Action preserves source custody and requires an actual source row" {
         try std.testing.expect(!screen.promptCompleted(.empty, false, false));
         try std.testing.expect(screen.offered() == null);
 
+        const both = try Test.render(screen, &out.writer, tiny, "", 0, .{ .status = "!retain", .status_essential = true, .notice = "!hold" }, &.{});
+        try std.testing.expectEqualStrings("!retain", rowText(screen, 0, &row));
+        try std.testing.expectEqualStrings("› A   D", rowText(screen, 1, &row));
+        try std.testing.expect(!both.notice);
+        try std.testing.expect(screen.presented(both));
+        try std.testing.expect(!screen.promptCompleted(.empty, false, false));
+        try std.testing.expect(screen.offered() == null);
+
         const choice_notice = try Test.render(screen, &out.writer, tiny, "", 0, .{ .notice = "!hold" }, &.{});
         try std.testing.expectEqualStrings("› A   D", rowText(screen, 0, &row));
         try std.testing.expectEqualStrings("!hold", rowText(screen, 1, &row));
@@ -1822,6 +1867,57 @@ test "tiny Action preserves source custody and requires an actual source row" {
         try std.testing.expect(screen.offered() == null);
         try std.testing.expectEqual(source.len, try action.readPositionalAll(io, &raw, 0));
         try std.testing.expectEqualStrings(source, &raw);
+    }
+}
+
+test "partial Action source glyphs survive edge and resize" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "edge-action-unicode", .{ .read = true });
+    defer file.close(io);
+    const cases = [_]struct { source: []const u8, first: []const u8 }{
+        .{ .source = "ABCDEF│X\n", .first = "ABCDEF│…" },
+        .{ .source = "ABCDEF▐X\n", .first = "ABCDEF▐…" },
+        .{ .source = "ABCDE中X\n", .first = "ABCDE中…" },
+    };
+    for (cases) |case| {
+        screen.releaseAction();
+        screen.consent = null;
+        try file.setLength(io, 0);
+        try file.writePositionalAll(io, case.source, 0);
+        const block: [4096]u8 = @splat('x');
+        var offset: u64 = case.source.len;
+        while (offset <= Viewport.capacity) {
+            const count = @min(block.len, Viewport.capacity + 1 - offset);
+            try file.writePositionalAll(io, block[0..count], offset);
+            offset += count;
+        }
+        try screen.adopt(io, file, 7, true);
+        var row: [64]u8 = undefined;
+        const tiny: std.posix.winsize = .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 };
+        _ = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
+        try std.testing.expectEqualStrings(case.first, rowText(screen, 0, &row));
+        _ = screen.browse(true, false);
+        _ = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
+        try std.testing.expectEqualStrings("X      …", rowText(screen, 0, &row));
+        // Resizing restarts an Action at its actual source, under the shared
+        // new measurement; the literal and following X remain recoverable.
+        _ = try Test.render(screen, &out.writer, .{ .row = 2, .col = 10, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{});
+        const cells = Test.window(screen);
+        try std.testing.expectEqualStrings("X", cells.readCell(7, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("…", cells.readCell(9, 0).?.char.grapheme);
+        var raw: [32]u8 = undefined;
+        try std.testing.expectEqual(case.source.len, try file.readPositionalAll(io, raw[0..case.source.len], 0));
+        try std.testing.expectEqualStrings(case.source, raw[0..case.source.len]);
     }
 }
 
