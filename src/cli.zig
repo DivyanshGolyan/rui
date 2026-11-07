@@ -31,7 +31,6 @@ const launch_frame = @import("launch_frame.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const platform = @import("platform.zig");
 const preferences = @import("preferences.zig");
-const status_page = @import("status_page.zig");
 const model_capability = @import("model_capability.zig");
 const slash_commands = @import("slash_commands.zig").conversation;
 const session_view = @import("session_view.zig");
@@ -409,9 +408,8 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     });
     // Preferences are local hints, not Session settings or Host facts.
     try std.Io.File.stdout().writeStreamingAll(init.io, if (!changed) "Defaults (read only):\n" else if (reader == .conversation) "Saved defaults for future Sessions. Active Session unchanged.\n" else "Saved defaults for future Sessions.\n");
-    // A conversation's /status page shows the defaults: after a change
-    // there, the report follows only when the next Session cannot start as
-    // saved.
+    // In a conversation, show the full report only when the next Session
+    // cannot start as saved; `rui defaults inspect` shows saved defaults.
     if (reader == .conversation and changed and available_store != null and nextSessionReady(&values, &readiness)) return;
     try std.Io.File.stdout().writeStreamingAll(init.io, "Store: ");
     try writeSafeText(init.io, prospective_store orelse "unavailable");
@@ -1503,7 +1501,7 @@ fn openOverview(init: std.process.Init, options: Overview.Options) !void {
     defer init.gpa.destroy(directory_buffer);
     var with_directory = options;
     with_directory.directory = requestDirectory(init, directory_buffer) catch |err| return Overview.printFailure(err, options.store, options.open, null);
-    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate });
+    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .captured = captureGate });
 }
 
 fn captureGate(io: std.Io) !void {
@@ -2212,7 +2210,7 @@ fn captureTarget(init: std.process.Init, parsed: *const cli_args.Parsed, directo
     return .{ .generated = try requestDirectory(init, directory_buffer) };
 }
 
-/// Entry only confirms configuration; /status renders inside the Session.
+/// Entry confirms the selected Session is configured.
 fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8) !void {
     var buffer: [256]u8 = undefined;
     var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
@@ -2221,143 +2219,6 @@ fn confirmSessionConfigured(init: std.process.Init, requester: client.Requests, 
     const report = try inspectWorkTo(init, requester, store, session_ref, &writer.interface);
     report.file.close(init.io);
     try writer.flush();
-}
-
-/// What /status reports of the Session, from one Current capture whose
-/// attention rows are in `rows`, taken into `taken`. True when it differs
-/// from `shown` (always without one): `actions` then lists its Actions
-/// awaiting approval, in Current's order.
-pub fn sessionStatus(io: std.Io, current: *const protocol_reply.Current, rows: std.Io.File, taken: *status_page.Session, shown: ?*const status_page.Session, actions: std.Io.File) anyerror!bool {
-    try takeStatus(taken, current);
-    const Digest = struct {
-        hash: std.hash.Wyhash = .init(0),
-        count: u64 = 0,
-        pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
-            if (row != .actionable) return;
-            self.hash.update(std.mem.asBytes(&row.actionable.action.value));
-            self.count += 1;
-        }
-    };
-    var digest: Digest = .{};
-    try current.traverse(io, rows, &digest);
-    if (digest.count != current.actionable_count) return error.InvalidObservation;
-    taken.work.actions = digest.hash.final();
-    if (shown) |page| if (taken.eql(page)) return false;
-    try actions.setLength(io, 0);
-    var buffer: [1024]u8 = undefined;
-    var output = actions.writer(io, &buffer);
-    const List = struct {
-        out: *std.Io.Writer,
-        pub fn visit(self: *@This(), row: protocol_reply.Current.Attention) !void {
-            if (row == .actionable) try status_page.writeAction(row.actionable.action.value, self.out);
-        }
-    };
-    var list: List = .{ .out = &output.interface };
-    try current.traverse(io, rows, &list);
-    try output.interface.flush();
-    return true;
-}
-
-comptime {
-    std.debug.assert(status_page.max_session_bytes == protocol.max_session_bytes);
-    std.debug.assert(status_page.max_label_bytes == protocol.max_label_bytes);
-    std.debug.assert(status_page.max_path_bytes >= protocol.max_workspace_bytes and status_page.max_path_bytes >= std.Io.Dir.max_path_bytes);
-    std.debug.assert(status_page.max_model_bytes == protocol.max_model_bytes);
-    std.debug.assert(status_page.max_key_bytes == protocol.max_key_bytes);
-    std.debug.assert(status_page.max_outcome_bytes == protocol.max_code_bytes);
-    std.debug.assert(status_page.max_recent == @typeInfo(@FieldType(protocol_reply.Current, "recent")).array.len);
-}
-
-test "/status takes the Session's facts from Current, lists every Action awaiting approval, and says when they change" {
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const file = try tmp.dir.createFile(io, "current", .{ .read = true });
-    defer file.close(io);
-    const listed = try tmp.dir.createFile(io, "actions", .{ .read = true });
-    defer listed.close(io);
-    const report = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"archive_state\":\"active\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/home/d/w\",\"provider\":\"openai\",\"model\":\"gpt-6.1-sol\",\"revision\":\"3\",\"tools\":[\"bash\"],\"loaded_tools\":[\"bash\"],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"},\"output_schema\":null,\"reasoning_effort\":\"high\",\"reasoning_effort_override\":\"high\",\"compaction_trigger\":\"1000\",\"context_estimate\":\"310\",\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":\"lane four\",\"created_at\":\"1\"},\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"finished\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":\"m1\",\"recent_messages\":[{\"turn\":\"1\",\"message\":\"m1\",\"outcome\":\"completed\"}],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
-    try file.writePositionalAll(io, report, 0);
-    var reply = try protocol_reply.CurrentReply.decode(io, file, "k7m2qx", .{ .report = .{ .bytes = report.len } });
-    const taken = try std.testing.allocator.create([2]status_page.Session);
-    defer std.testing.allocator.destroy(taken);
-    taken[0].archive_state = .active;
-    taken[1].archive_state = .active;
-    try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[0], null, listed));
-    var defaults: status_page.Defaults = error.AccessDenied;
-    var bytes: [4096]u8 = undefined;
-    var out = std.Io.Writer.fixed(&bytes);
-    try status_page.render(.{ .home = "/home/d", .store = "/home/d/s", .session = &taken[0], .defaults = &defaults }, .effort, &out);
-    try status_page.writeWorkEnd(&taken[0].work, &out);
-    const page = out.buffered();
-    for ([_][]const u8{
-        " Status · lane four · k7m2qx\n",
-        "Folder          ~/w\n",
-        "Tools           bash\n",
-        "Permissions     ask · Bash and MCP ask first\n",
-        "Effort          high  \x1b[90mSession override",
-        "Compact at      1,000 tokens · now 310",
-        "Model           gpt-6.1-sol · API key  \x1b[90mfixed",
-        "Store           ~/s  \x1b[90mfixed",
-        "Instructions    none\n",
-        " Work\n   Finished\n   Current message: m1\n   Recent messages (use /result KEY for an answer):\n     m1: completed\n",
-    }) |expected| {
-        errdefer std.debug.print("missing {s} in\n{s}\n", .{ expected, page });
-        try std.testing.expect(std.mem.indexOf(u8, page, expected) != null);
-    }
-    try std.testing.expectEqual(@as(u64, 0), try listed.length(io));
-    // The same capture again is no change, and leaves the list as it was.
-    try listed.writePositionalAll(io, "kept", 0);
-    try std.testing.expect(!try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
-    try std.testing.expectEqual(@as(u64, 4), try listed.length(io));
-    taken[0].work.recent_count = 0;
-    try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
-    try std.testing.expectEqual(@as(u64, 0), try listed.length(io));
-    taken[0].work.recent_count = 1;
-    reply.current.archive_state = .archived;
-    try std.testing.expect(try sessionStatus(io, &reply.current, file, &taken[1], &taken[0], listed));
-    try std.testing.expectEqual(protocol.SessionArchiveState.archived, taken[1].archive_state);
-}
-
-/// The Session's settings and work as the page shows them, its Actions'
-/// digest aside.
-fn takeStatus(taken: *status_page.Session, current: *const protocol_reply.Current) !void {
-    const settings = &current.settings;
-    taken.archive_state = current.archive_state;
-    try taken.session.set(settings.reference.slice());
-    taken.label.len = 0;
-    if (settings.label) |label| try taken.label.set(label.slice());
-    try taken.workspace.set(settings.workspace.slice());
-    taken.provider = settings.provider.value;
-    try taken.model.set(settings.model.slice());
-    taken.effort = if (settings.reasoning_effort) |effort| effort.value else null;
-    taken.effort_override = settings.reasoning_effort_override != null;
-    taken.permission = switch (settings.permission_mode.value) {
-        .ask => .ask,
-        .bypass => .bypass,
-    };
-    taken.tools = settings.tools.set;
-    taken.instructions = settings.instructions.bytes.value != 0;
-    taken.compaction_trigger = if (settings.compaction_trigger) |tokens| tokens.value else null;
-    taken.compaction_override = settings.compaction_trigger_override != null;
-    taken.context_estimate = if (settings.context_estimate.value orelse null) |estimate| estimate.value else null;
-    taken.output_reservation = settings.output_reservation.value;
-    taken.reservation_override = settings.output_reservation_override != null;
-    const work = &taken.work;
-    work.state = std.meta.activeTag(current.work.state.value);
-    work.approvals = current.actionable_count;
-    work.current_message = null;
-    if (current.selected_message) |selected| {
-        work.current_message = .{ .len = 0 };
-        try work.current_message.?.set(selected.slice());
-    }
-    work.indeterminate = current.first_indeterminate;
-    work.indeterminate_count = current.indeterminate_count;
-    work.recent_count = current.recent_count;
-    for (current.recent[0..current.recent_count], work.recent[0..current.recent_count]) |*from, *to| {
-        try to.message.set(from.message.slice());
-        try to.outcome.set(from.outcome.slice());
-    }
 }
 
 fn writeSafeFieldTo(out: *std.Io.Writer, label: []const u8, value: []const u8) !void {
@@ -4000,7 +3861,7 @@ fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escap
     try writer.flush();
 }
 
-const compaction_help = cli_args.compaction_policy ++ " Inspect settings with /status or rui session inspect.";
+const compaction_help = cli_args.compaction_policy ++ " Inspect settings with rui session inspect.";
 
 const interactive_configure_usage = "Rui: Usage: /configure [--model MODEL] [--tools bash,find_tools,message_agent,read_transcript,start_agent,web_search|none] [--loaded-tools a,b|none] [--permission-mode " ++ cli_args.live_configure.argumentOf("permission-mode").?.? ++ "] [--reasoning-effort " ++ cli_args.live_configure.argumentOf("reasoning-effort").?.? ++ "] [--compaction-trigger TOKENS|default] [--output-reservation TOKENS|default] [--label TEXT] (settings for this Session only)\n" ++ cli_args.label_help ++ cli_args.reasoning_help ++ compaction_help ++ "\n";
 
@@ -4009,7 +3870,7 @@ const usage_text =
     \\  rui [--store PATH] [--provider codex] [--model MODEL]
     \\    Create a fresh live terminal conversation in the current directory. Bash runs
     \\    without asking by default. Enter Message text in the terminal editor.
-    \\    Type /help in the conversation.
+    \\    Type / to see interactive commands.
     \\  rui RESOURCE --help
     \\    Resources: session, request, action, host, defaults, auth, store.
     \\  rui RESOURCE COMMAND --help

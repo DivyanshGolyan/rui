@@ -9,7 +9,6 @@ const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const Consent = @import("session_consent.zig");
 const Viewport = @import("ConversationViewport.zig");
-const status_page = @import("status_page.zig");
 
 pub const Suite = enum { focus, pages, acknowledgement, retention, publication };
 
@@ -65,7 +64,6 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
         tmp: std.testing.TmpDir,
         page: std.Io.File,
         action: std.Io.File,
-        actions: std.Io.File,
         output: std.Io.File,
         input: [2]c_int,
         saved_stdin: c_int,
@@ -75,7 +73,6 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             self.tmp = std.testing.tmpDir(.{});
             self.page = try self.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
             self.action = try self.tmp.dir.createFile(std.testing.io, "action", .{ .read = true });
-            self.actions = try self.tmp.dir.createFile(std.testing.io, "actions", .{ .read = true });
             self.output = try std.Io.Dir.openFileAbsolute(std.testing.io, "/dev/null", .{ .mode = .write_only });
             self.saved_stdin = std.c.dup(0);
             try std.testing.expect(self.saved_stdin >= 0);
@@ -94,7 +91,7 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
                 .store = "td1-no-host",
                 .session = "k7m2qx",
                 .directory = path,
-                .files = .{ .scratch = self.page, .inspection = self.page, .status = self.page, .action = self.action, .actions = .{ self.actions, self.actions } },
+                .files = .{ .scratch = self.page, .inspection = self.page, .action = self.action },
                 .command = undefined,
                 .colour = false,
                 .reading = .{ .opening = false },
@@ -120,7 +117,6 @@ fn Fixture(comptime Frontend: type, comptime ops: anytype) type {
             for ([_]c_int{ self.saved_stdin, self.input[0], self.input[1] }) |fd| std.debug.assert(std.c.close(fd) == 0);
             self.output.close(std.testing.io);
             self.action.close(std.testing.io);
-            self.actions.close(std.testing.io);
             self.page.close(std.testing.io);
             self.tmp.cleanup();
         }
@@ -379,7 +375,7 @@ fn focus(comptime Frontend: type, comptime ops: anytype) !void {
 }
 
 fn pages(comptime Frontend: type, comptime ops: anytype) !void {
-    const Event = enum { details, history, status, complete, send, latest, transcript, edit };
+    const Event = enum { details, history, requests, complete, send, latest, transcript, edit };
     const events = std.enums.values(Event);
     const first_cursor: protocol_reply.ConversationCursor = .{ .end = 99, .before_position = 79, .before_ordinal = 3 };
     const next_cursor: protocol_reply.ConversationCursor = .{ .end = 99, .before_position = 23, .before_ordinal = 1 };
@@ -393,7 +389,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
         var sent: u64 = 0;
         var requested_at: u64 = 0;
         var request_generation: u64 = 0;
-        var request: ?enum { details, history, status } = null;
+        var request: ?enum { details, history, requests } = null;
         var draft: Text = .{};
         var older: ?protocol_reply.ConversationCursor = null;
         // Seed a real retained boundary. History is launched only from the
@@ -417,29 +413,24 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                 printPrefix(Event, sequence, prefix + 1);
             }
             switch (event) {
-                .details, .history, .status => if (request == null and (event != .history or (selected == .transcript and older != null))) {
+                .details, .history, .requests => if (request == null and (event != .history or (selected == .transcript and older != null))) {
                     if (event == .history) try std.testing.expect(ops.olderWanted(front));
                     request = switch (event) {
                         .details => .details,
                         .history => .history,
-                        else => .status,
+                        else => .requests,
                     };
                     requested_at = sent;
                     request_generation = generation;
                     front.reading.phase = switch (event) {
                         .details => .details,
                         .history => .history,
-                        else => .activity,
+                        else => .inspection,
                     };
                     front.admission.details_sent = front.admission.sent;
                     _ = ops.freeze(front, front.reading.phase);
                     front.job.result.history_cursor = next_cursor;
-                    if (event == .status) {
-                        front.inspection.status_requested = true;
-                        front.job.open_status = true;
-                        front.job.result = .{ .status = true };
-                        status_page.sample(front.job.status_taken);
-                    }
+                    if (event == .requests) front.inspection.kind = .requests;
                 },
                 .complete => if (request) |pending| {
                     try fixture.complete();
@@ -447,7 +438,7 @@ fn pages(comptime Frontend: type, comptime ops: anytype) !void {
                         .details => if (sent == requested_at) {
                             selected = .inspection;
                         },
-                        .status => if (sent == requested_at) {
+                        .requests => if (sent == requested_at) {
                             selected = .inspection;
                         },
                         .history => {

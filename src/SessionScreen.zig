@@ -1182,7 +1182,7 @@ test "the input keeps the bottom rows under a rule while content starts at the t
     try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
     // A notice takes the line until the next key, in the failure colour
     // when it reports one; the input does not move.
-    for ([_][]const u8{ "Work continues while you compose.", "! Unknown command /x · /help" }, [_]vaxis.Color{ .default, .{ .index = 9 } }) |notice, colour| {
+    for ([_][]const u8{ "Work continues while you compose.", "! Unknown command /x · type / for commands" }, [_]vaxis.Color{ .default, .{ .index = 9 } }) |notice, colour| {
         _ = try Test.render(screen, &out.writer, size, "next", 4, .{ .status = "Sending…", .notice = notice, .session = session }, &.{});
         try std.testing.expectEqualStrings(notice, rowText(screen, 23, &storage));
         try std.testing.expectEqual(colour, window.readCell(0, 23).?.style.fg);

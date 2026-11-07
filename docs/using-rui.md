@@ -9,10 +9,8 @@ Enter these at the `›` prompt.
 
 | Command | What it does |
 | --- | --- |
-| `/help` | Lists available commands. |
 | `/history` | Shows older conversation. |
 | `/details` | Shows recent conversation with each tool result's last 8,192 raw bytes and a full raw export command. |
-| `/status` | Shows settings, including the Bash permission mode, and current work. |
 | `/requests` | Lists saved requests for recovery. |
 | `/configure` | Changes settings for the current Session only. |
 | `/setup` | Changes defaults for future Sessions, not the current one. |
@@ -137,7 +135,7 @@ Existing Sessions keep their saved settings, including approval mode and model.
 ### Archive Sessions
 
 Select a Session in the overview and press **Alt+A** or enter `/archive`.
-If it has work, confirm **Stop and archive**.
+Alt+A asks for confirmation if the Session has work; `/archive` acts when submitted.
 The Session stays visible until the stop completes.
 You can also press **Alt+A** or enter `/archive` inside its conversation.
 Alt+A keeps your draft intact.
@@ -145,7 +143,7 @@ For **Stop and archive**, press Enter to confirm or Esc to cancel; neither sends
 
 Use `/sessions archived` to show archived Sessions, `/sessions all` to show both views, or `/sessions unarchived` to return.
 Enter `/unarchive` to restore the selected Session without starting work.
-After an archive hides a row, `/undo` restores that last archived Session.
+To restore a hidden Session, show archived Sessions, select it, and enter `/unarchive`.
 
 Archive keeps history, saved results, settings, and files.
 Opening an archived Session does not restore it.
@@ -199,7 +197,6 @@ To change the threshold for the current Session, enter:
 
 ```text
 /configure --compaction-trigger 200000 --output-reservation 8000
-/status
 ```
 
 The trigger is an estimate, not a limit on message size.

@@ -441,7 +441,7 @@ Omission never clears a field.
 Settings are plain data captured at each configure invocation, before later caller mutation.
 Each Session evolves independently; sharing a settings object creates no shared configuration entity.
 
-The CLI spells a Label `--label TEXT` (the Session's name or title, shown in lists and `/status`) on `session start`, `session configure` and interactive `/configure`, and clears it with `--label ""`: the empty string is the one spelling that can never be a Label.
+The CLI spells a Label `--label TEXT` (the Session's name or title, shown in lists) on `session start`, `session configure` and interactive `/configure`, and clears it with `--label ""`: the empty string is the one spelling that can never be a Label.
 A Session can label itself from Bash with `--store "$RUI_STORE" --session "$RUI_ADDRESS"`, and its collaboration context names that command so a model asked to rename its Session finds it.
 Every Label change is a revision like any other configuration change.
 A Label-only revision adds no Conversation entry and changes no model input.
@@ -712,11 +712,11 @@ Session configuration stores only nullable overrides for `compaction_trigger` an
 An omitted update preserves the override.
 Explicit `null` resets it to provider/model policy, spelled `default` in the CLI.
 Triggers are positive token counts; output reservation is nonnegative extra heuristic headroom, not a provider output limit.
-Current inspection and `/status` show effective values and whether each value is a Session override.
+Current inspection shows effective values and whether each value is a Session override.
 Current inspection also reports `context_estimate`: the estimated tokens the next model call starts from (accepted usage since the compaction base, uncovered bytes / 4 and output reservation), read by the same facts purpose selection reads, when that selection would compare it with the trigger.
 It is null without a trigger and when the next call's purpose does not depend on it: a Session's first call, the call after a compaction, a recovery compaction and context unchanged since the last compaction.
 So whenever it is shown, it reaches the trigger exactly when a model call admitted at that moment compacts, and the Session line's `0% left` means that.
-`/status` shows it beside the trigger, and the conversation's Session line shows the share of the trigger it leaves.
+The conversation's Session line shows the share of the trigger it leaves.
 Resolve policy once before purpose selection and freeze the effective values on the admitted Operation.
 Later settings or capability changes cannot change its purpose or retry policy.
 
@@ -2172,7 +2172,7 @@ Current/attention and Full remain separate report families.
 
 #### Store selection and defaults
 
-Human `rui session resume` enters an already configured Session and retains its address within the interactive process; `/status` displays its effective Workspace, permission mode and Label.
+Human `rui session resume` enters an already configured Session and retains its address within the interactive process; `rui session inspect` reports its effective Workspace, permission mode and Label.
 Every destination-bearing command selects its Store by explicit `--store`, then the private saved default, then `$HOME/.local/share/rui/store`.
 Explicit selection does not read preferences.
 Scripts can pin destinations with `--store`.
@@ -2184,7 +2184,7 @@ Captured requests retain their recorded Store across preference edits.
 `rui defaults inspect` reads defaults without writing; `rui defaults configure` saves explicit Store/provider/model edits.
 A saved Store is the global default for commands without `--store` (captured requests keep their recorded Store), so `defaults configure --store` names it on stderr; stdout and exit status are unchanged.
 Interactive `/setup` keeps the same future-default capability.
-After a successful change in a conversation it prints one line, `Saved defaults for future Sessions. Active Session unchanged.`, and follows it with the Store, provider and sign-in report only when the next Session cannot start as saved; that conversation's `/status` shows the saved defaults themselves.
+After a successful change in a conversation it prints one line, `Saved defaults for future Sessions. Active Session unchanged.`, and follows it with the Store, provider and sign-in report only when the next Session cannot start as saved; `rui defaults inspect` shows the saved defaults.
 The overview's `/setup`, which has no such page, keeps the full report.
 `--notifications on|off` on either saves whether an open overview or conversation sends [desktop notifications](#desktop-notifications); it is on by default and changes no Session.
 `--reasoning-effort LEVEL` on either saves the effort new Sessions start at, and `default` clears it.
@@ -2227,13 +2227,12 @@ A ready existing Host retains its actual capacity/capabilities; no model capabil
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 `/sessions unarchived`, `/sessions archived`, and `/sessions all` choose the server-side archive filter.
 The header names the view; changing it clears the previous traversal.
-`/archive` or Alt-A puts away the selected Session, with a Stop and archive confirmation while it has work.
+`/archive` or Alt-A puts away the selected Session; Alt-A asks for confirmation while it has work, but the typed command acts on submission.
 `/unarchive` restores the selected Session.
-`/undo` restores the last Session explicitly archived from this overview.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
 Conversations also expose `/archive` and `/unarchive`; these validated commands and Alt-A forward semantic intents for the exact open Session even when it is absent from the listing.
-The overview core owns their shared confirmation, archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
+The overview core owns their shortcut confirmation, archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
 Alt-A leaves the draft, caret and retained original unchanged.
 The shared Stop and archive prompt captures its Session reference; unpasted, unmodified Enter confirms it before any draft, picker or permission choice, and Esc cancels it without clearing or sending the draft.
 Archive confirmation spends any permission offer without deciding the Action.
@@ -2283,7 +2282,7 @@ A partial output failure poisons the invocation before any normal-leave conversi
 Typing in the overview's composer and pressing Enter starts a new Session with that text as its first Message, through one captured `session start` command: atomic configuration plus Message admission with the full Workspace, exact provider/model, Bash and `bypass` unless the composer's `/configure` start settings select otherwise.
 The Store returns the allocated ID, and the overview opens that Session.
 The same enumerable handle recovers that ID after a lost reply; a second Enter is a new intent, so a start whose reply is lost clears the composer, says in the overview that the start is unconfirmed, and names its recovery command after the terminal is restored.
-Successful Host startup and request receipts stay out of normal output; `/status` and `/requests` in a conversation expose binding and recovery records.
+Successful Host startup and request receipts stay out of normal output; `/requests` in a conversation exposes recovery records.
 A capture failure creates no transmissible intent and keeps the composer's text.
 Non-TTY entry rejects before Store, Host or request mutation.
 Existing explicit Session entry and scripted commands retain their saved permission modes.
@@ -2382,7 +2381,7 @@ The durable decision retains that exact target for Host revalidation.
 One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal; `/inspect-action` also prints executable `rui action allow`/`deny` commands.
 `/configure` changes settings for this Session (including its immutable Workspace check).
 Instructions require a separate one-shot `session configure --instructions -`; schema input uses a file path rather than terminal stdin.
-`/status` shows the Session's settings, its Store and the defaults new Sessions start from, the work with its current message and the recent messages whose answers `/result KEY` shows; `/requests` lists this machine's local recovery handles; `/setup` edits only future defaults.
+`/requests` lists this machine's local recovery handles; `/setup` edits only future defaults.
 `/wait` and `/login` are unsupported within the conversation; explicit operator authentication remains separate.
 Re-entry uses Host facts, not local saved-request guesses.
 An unknown Session requires explicit configuration before entry.
@@ -2433,7 +2432,7 @@ Every binding needs its exact modifiers: a Kitty key that reports Shift is never
 ESC ESC is Esc, and the second ESC starts whatever follows: an Esc just before a marked paste or an arrow keeps that input whole, so an ESC ESC arrow (urxvt Meta-arrow) is Esc then that arrow.
 ESC before P, X, ], ^ or _ begins a terminal string, never typed text.
 A pending ESC before Ctrl-C or Ctrl-D is discarded, so those still interrupt or end input.
-A terminal path can change a key before Rui reads it: tmux delivers Shift-Enter as Enter and Hyper or Meta chords as their bare keys, so while a draft is composed inside tmux the status says `In tmux, Shift-Enter sends · Alt-J adds a line`, and `/help` says so too.
+A terminal path can change a key before Rui reads it: tmux delivers Shift-Enter as Enter and Hyper or Meta chords as their bare keys, so while a draft is composed inside tmux the status says `In tmux, Shift-Enter sends · Alt-J adds a line`.
 At an Action's choice any chord is refused, spends freshness and authorizes nothing.
 Shift alone stays text.
 An xterm modifyOtherKeys key (`CSI 27 ; modifier ; code ~`, which Ghostty's legacy table sends for modified Enter without being asked) decodes as the Kitty key with the same modifiers and no associated text, so its bindings mean the same: Shift-Enter adds a line, Ctrl-A moves to the line start, Ctrl-J sends, an unbound Alt or Super chord is dropped and an unbound Ctrl key rejects the draft as its Kitty form does.
@@ -2684,7 +2683,7 @@ A User Message is a block: `›` at the margin, dim body text, and its Host-writ
 Assistant prose starts at column 0 without speaker labels.
 A Message over 1,024 bytes, 4 non-blank lines or 12 lines from its first to its last non-blank line shows its first two non-blank lines and a dim `┄ N more lines` row; `/details` shows it whole.
 Tool activity follows the conversation's last line.
-It shows at most the three oldest calls awaiting permanent presentation, fewer on short terminals, with an exact overflow count and `/status` guidance.
+It shows at most the three oldest calls awaiting permanent presentation, fewer on short terminals, with an exact overflow count.
 A displayed call retains its complete wrapped description and outcome explanation; calls that do not fit the physical-row budget count in overflow rather than showing a misleading clipped prefix.
 This display bound does not cap execution.
 While work is under way, the conversation says what it is doing now, and says nothing once the work ends.
@@ -2719,7 +2718,7 @@ Routine tool labels, including successful calls, are quiet and indented beneath 
 Failure rows stay in the compact tool group: only their `!` glyph is red while the description and complete outcome are quiet; pending permissions retain their attention style, and labels and links keep their existing escaping.
 Routine capture, reserved keys, proposal fields, resize notices and repeated attention prose stay out of the transcript.
 Unconfirmed or rejected submissions retain actionable notices.
-Explicit `/status` keeps the current reserved recovery key under the page, even before publication, and `/requests` lists recovery handles; reservation does not prove capture or acceptance.
+`/requests` lists recovery handles and reports the current original reservation, even before publication; reservation does not prove capture or acceptance.
 
 The interface preserves the shell's previous screen; conversation output does not enter native scrollback or remain after exit, so terminal search covers only the shell.
 This trade-off is accepted for one library-owned renderer.
@@ -2804,23 +2803,7 @@ Standalone zero-width output clusters, clusters wider than eight cells and clust
 Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
 Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.
 
-`/status`, `/requests`, `/help`, `/history` and `/details` render selected inspections without changing the draft.
-`/status` is rendered by the next settled live read from that read's own Current capture, and shows in the same step as that read's history and composer status, so the page never disagrees with them.
-While the page is on screen, each settled live read renders it again only if its contents would change, and replaces it in place: the reader's position, highlighted option, notice and consent are kept.
-A live read's failure is the same failure with or without `/status`.
-A requested `/status` is a read, not a command: until it shows, a visible Action choice still takes its fresh decision, and a later `/history`, `/details` or inspection request replaces it.
-`/status` is also where settings change.
-Divyansh approved the page on 2026-11-02 (mock at 12:44Z, changes through #814's list at 13:23Z).
-Its title names the Session and its ID; a row for each of this Session's settings follows (effort, permissions, tools, name, Folder, compaction trigger, headroom, and the fixed model, Store and instructions, `none` or `set from a shell`), then a row for each default new Sessions start from (model, effort, notifications, Store), then the work: its state and Actions awaiting approval, its current message, every Action awaiting approval by ID, any indeterminate Action, and the recent messages with their outcomes, whose answers `/result KEY` shows.
-Each row is one line, its value followed by a quiet note on where the value comes from.
-A default that cannot be read says why on its row (`unreadable · ` and the error's name), never a blank; with no saved provider, the defaults' model row shows the provider and model a new Session gets from Rui's defaults, with the note `Rui default`.
-With no automatic threshold the compaction row reads `off`, and its own change sets one; the page names no separate command for it.
-The read takes the Session's facts from its Current capture into one of two slots that alternate between the shown page and the next read, so no read copies them, and lists the Actions awaiting approval in that slot's file; it replaces the page only when those facts differ from the shown ones.
-The saved defaults are read when the page opens and again after a command run over it finishes, not on every read.
-The page is text rendered from those facts and the selected row, so moving `›` renders it again with no read.
-Up and Down move `›` over the rows that can change from the page (the Session's model, Store and instructions cannot), while the draft is empty and no list shows; Page Up and Page Down still scroll, and each `/status` starts at the first row.
-Enter on an empty draft puts the row's own command in the draft: `/configure` or `/setup` with the option, whose list then offers a fixed choice (the compaction trigger and headroom offer `default` and take a typed number, so Enter resolves the chosen client default into an explicit token count), or with the current value to edit.
-The page has no second way to change a setting; the command runs as typed over the page, which stays shown: a saved change replies in one line as a notice, and the page's next read shows the new value with `›` on the same row, while a longer reply, such as a failure with its usage, opens as any command's does.
+`/requests`, `/history` and `/details` provide inspection without changing the draft. `rui session inspect` reports saved Session settings and work.
 Action presentation is staged in an independent unlinked file before its choice is shown.
 A tall Action pages from its top, but scrolling or displaying every row is not a prerequisite to an explicit decision.
 A preview beyond the 256 KiB viewport is labeled truncated and remains confirmable; `/inspect-action` binds the displayed Action's identity, and `/copy` on that inspection page explicitly sends its exact shell-quoted inspect command using the existing clipboard owner.
@@ -2832,12 +2815,12 @@ Marked paste never grants permission.
 CLI owners write complete stdout and stderr to the inspection scratch file; an Action-bound inspection instead names its captured ID and checks availability.
 Output of up to two lines becomes a notice under the input without the CLI's `Rui: ` prefix, with `rui: ` diagnostics marked `!`; longer output opens as an inspection page under the `Browsing · Esc returns` heading.
 The Session screen stays in place and no command reads terminal input.
-`/discard`, `/recover KEY`, `/wait` and `/login` answer with a notice; an unknown command shows `! Unknown command /NAME · /help`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
+`/discard`, `/recover KEY`, `/wait` and `/login` answer with a notice; an unknown command shows `! Unknown command /NAME · type / for commands`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
 
 A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename are short forms of /configure. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 
-`slash_commands.zig` holds one table per screen of each command's name, argument shape and one-line description; the draft's parser, the command runner, the list and `/help`'s command lines read it, and `/wait` and `/login` stay out of the list and `/help`.
-`/requests`, `/recover`, `/result`, `/inspect-action` and `/discard` are for recovery: they work and `/help` names them, but the list leaves them out (Divyansh, 2026-11-02).
+`slash_commands.zig` holds one table per screen of each command's name, argument shape and one-line description; the draft's parser, the command runner, and the list read it, and `/wait` and `/login` stay out of the list.
+`/requests`, `/recover`, `/result`, `/inspect-action` and `/discard` are for recovery: they work, but the list leaves them out (Divyansh, 2026-11-02).
 `/requests` still writes its page of every recovery handle, and while that page shows over an empty draft the list's rows offer what can be done with them, each row the command line it runs, so a pick does what typing it does and no key is typed (Divyansh, 2026-11-02).
 The first row is `/recover KEY` for this conversation's own original only while a retry would go now and could only send a Message: a plain Message whose Admission is unconfirmed, nothing in flight and no Action waiting; never a decision or a Message that carries one.
 Then come each saved Message's `/result KEY`, newest saved first with its local `HH:MM` (23 of them, the list's rows less that one), the original included when it has no `/recover` row.
@@ -2858,10 +2841,8 @@ Enter in a shown list takes the highlighted row: a command with nothing more to 
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
 Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/configure`, `/exit`, `/help`, `/model`, `/rename` and `/setup`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
-Both screens share `/help`, `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME · /help` (Divyansh, 2026-11-02: "Same commands both screens").
-The overview's `/help` replaces the Sessions' rows with a panel headed `Help`, `Esc returns` at its right: the overview's keys, then its commands as its table lists them.
-A screen too small for the whole panel says `! Screen too small for /help` instead, as `/model` does; one that shrinks under it shows the lines that fit and counts the rest.
+The overview lists its own commands, `/configure`, `/exit`, `/model`, `/rename` and `/setup`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
+Both screens share `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME · type / for commands` (Divyansh, 2026-11-02: "Same commands both screens").
 Esc or Ctrl-G, past a shown command list, closes the panel and keeps the draft, and the line under the input says `esc close` while it shows; a key that acts on a Session (one that selects, Ctrl-X, Enter on an empty draft) and `/rename` close it first and act where the Sessions show.
 The overview's `/rename NAME` names the selected Session and `/setup [OPTIONS]` saves defaults with no Session, each through the same CLI owner a conversation's runs, on the overview's worker with stdout and stderr in an unlinked scratch file; without a selected Session `/rename` says `! Select a Session first.`, as Ctrl-X does.
 With no Session, the overview's `/setup` says `Saved defaults for future Sessions.` and its failures name no Session, where a conversation's add that the active Session is unchanged.
@@ -2885,14 +2866,14 @@ After a failure or an interruption partway, the next write, or restoration on le
 At most 75,000 bytes go to the clipboard: their base64 is 100,000 bytes, the most hterm's `osc52.sh` sends.
 Over that nothing is written and the notice says `Too large for the clipboard · /copy file`.
 Rui cannot see whether the terminal took the bytes.
-Inside tmux the sequence goes out unwrapped, like Rui's other terminal sequences, and reaches the outer terminal only with `set-clipboard on`, so there the notice reads `Sent to clipboard · tmux needs set-clipboard on`, and `/help` says so too.
+Inside tmux the sequence goes out unwrapped, like Rui's other terminal sequences, and reaches the outer terminal only with `set-clipboard on`, so there the notice reads `Sent to clipboard · tmux needs set-clipboard on`.
 `/copy file` writes the last answer as it arrives to an exclusively created mode 0600 temporary file beside `rui-ID-answer.md` in the directory Rui runs in, then renames it over that name, so an earlier file or a link there is replaced and a link's target is never followed or changed.
 If the read fails the temporary file is removed and the name keeps what it had.
 It says `Saved to ./rui-ID-answer.md`.
 Before the first answer each says `No answer to copy yet.`; `/copy code` on an answer with no complete fenced block says `No code block in the last answer.` A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
 Non-TTY conversation invocation is refused; one-shot and pipe commands keep their existing contracts.
 
-On short layouts, the renderer can remove the spacer and shorten overflow to `+N · /status`.
+On short layouts, the renderer can remove the spacer and shorten overflow to `+N`.
 It budgets the actual undisplayed population after selecting complete call previews.
 Optional spacing and overflow wording yield before ordinary status.
 Only after trying those alternatives may genuine row pressure shorten the bounded status view.
@@ -2939,7 +2920,7 @@ A live read renders its page into scratch; after a successful join, the UI appen
 The opening is such a read, so a failed opening draws none of its content.
 Each page carries the Session's work from the same Store read as its items, so a page and its work always agree and no read repeats to pair them: its [Session work](#work-state-and-wait-conditions) state, with `since` and that state's facts (a running Bash call's saved description, a waiting retry's due time, cause and ordinal, or a quota failure's saved reset time), the latest Turn and Operation, the first actionable Action, revision and workspace.
 Session listing rows carry the same work value from the same derivation.
-Current is read for `/status` and for the Session line: on opening, and again whenever a page's revision or end position differs from the one the line was read with, in the same read as that page, so the line changes with the page that caused it.
+Current is read for the Session line: on opening, and again whenever a page's revision or end position differs from the one the line was read with, in the same read as that page, so the line changes with the page that caused it.
 Every input of the estimate (accepted output and usage, Tool Results, queued and admitted Messages, stops, compactions) takes a Session position and every settings change a revision, so the line follows each of them without reading Current on reads where nothing changed.
 A page delivered after a later change, such as another client's decision, still applies whole, and the next page supersedes it; a decision sent from its prompt for an already decided Action is refused by the Store.
 Accepted: decisions bind to the exact Action shown, so a stale prompt can only produce a rejected decision (`action_not_pending`), never one retargeted to another Action.
@@ -3508,7 +3489,7 @@ Attention does not create a Session phase or imply that progressing siblings are
 
 On permission return, an adapter caller can read every actionable ID through a separate bounded-memory Current snapshot.
 Later hints/results may reflect newer commits; only a decision revalidated against the Host's exact target authorizes an Action.
-`/status` likewise lists every actionable ID, one line each, and flags indeterminate resolved Actions in the active Turn.
+`rui session inspect --profile current` lists actionable and indeterminate Actions.
 Such commands may have run and were not replayed.
 Older Turns require historical inspection.
 
@@ -3591,14 +3572,13 @@ Exact nonzero numbers are not another state protocol.
 
 Conversation entry is quiet, without configuration banners or routine IDs.
 Bash and `bypass`, the default, stay quiet: no notice or banner announces them, and the Session line says `asks before Bash/MCP` only in `ask` mode.
-`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash and MCP run without asking` or `ask · Bash and MCP ask first`, `session list` JSON shows it, and `/help` describes the Session line.
+`session list` JSON shows the permission mode; the Session line indicates when Bash or MCP asks first.
 Existing Sessions preserve their saved mode.
 User submissions are `›` blocks with their admission time and assistant prose has no role labels; concise tool outcomes stay quiet and the live line ends the conversation only while work is under way.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 Successful conversation omits protocol receipts and follow reminders; original captured request handles remain available through `/requests`.
 If opening a Session started from the overview fails after its `session start` was confirmed, best-effort stderr guidance retains that request handle and an executable exact Store/Session resume command while preserving the original failure.
 This reports admission only, not completion, and does not promise delivery under stderr contention or failed output credit.
-`/help` describes the implemented Session commands and one-shot login route.
 These are presentation choices over existing Host facts, not new conversation or recovery authority; one-shot and JSON output remain unchanged.
 
 ### Connection capacity and control headroom

@@ -72,7 +72,6 @@ pub const Hooks = struct {
     scratch: *const fn (std.process.Init) anyerror!std.Io.File,
     command: SessionFrontend.Command,
     requests: SessionFrontend.Requests,
-    status: SessionFrontend.Status,
     /// Runs between a start's capture and its send, as the CLI's other
     /// captures do.
     captured: *const fn (std.Io) anyerror!void,
@@ -1238,20 +1237,20 @@ fn converse(self: *Self, session: view.Reference) ?Left {
     const screen = self.terminal.screen;
     // Fresh domain state borrows the SAME invocation grids and decoder.
     screen.init(screen.backend);
-    var opened: [6]std.Io.File = undefined;
+    var opened: [3]std.Io.File = undefined;
     for (&opened, 0..) |*file, count| file.* = self.hooks.scratch(self.init) catch |err| {
         for (opened[0..count]) |done| done.close(io);
         left.ended = err;
         return left;
     };
-    const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .status = opened[3], .actions = opened[4..6].* };
+    const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2] };
     const frontend = self.init.gpa.create(SessionFrontend) catch |err| {
         for (opened) |file| file.close(io);
         left.ended = err;
         return left;
     };
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeHandoff };
-    var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, self.terminal, self.interrupted, lender);
+    var ended = frontend.run(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.terminal, self.interrupted, lender);
     // The conversation may have read the terminal's width report.
     self.caps.width = screen.backend.widthMethod();
     const returned = if (ended) |outcome| outcome == .returned else |_| false;
@@ -1457,8 +1456,7 @@ noinline fn writeDeparture(self: *const Self) void {
 fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
     const io = self.init.io;
     defer if (left.files) |files| {
-        inline for (.{ "scratch", "action", "inspection", "status" }) |name| @field(files, name).close(io);
-        for (files.actions) |file| file.close(io);
+        inline for (.{ "scratch", "action", "inspection" }) |name| @field(files, name).close(io);
     };
     defer if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
     const session = &left.session;
@@ -3613,8 +3611,8 @@ fn shownRow(rig: *const Rig, at: usize) view.Reference {
 test "Tab completes from the draft's own list, however many keys arrive before a frame" {
     const rig = try openComposer();
     defer rig.close();
-    try std.testing.expect(try rig.press("/he\t") == null);
-    try std.testing.expectEqualStrings("/help", rig.overview.composerDraft().bytes);
+    try std.testing.expect(try rig.press("/sess\t") == null);
+    try std.testing.expectEqualStrings("/sessions ", rig.overview.composerDraft().bytes);
     // Two Tabs in one batch: the second completes from the list the first
     // one's word calls for.
     rig.overview.composer = rig.overview.emptyComposer(rig.overview.composer.edits +% 1);

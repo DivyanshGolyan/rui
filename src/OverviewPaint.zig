@@ -775,7 +775,6 @@ fn panelLines(painter: *RowPaint, panel: *const Panel, lines: view.Layout.Rows) 
     painter.at(lines.start);
     painter.begin(false);
     const name = switch (panel.*) {
-        .help => "Help",
         .output => |output| try std.fmt.allocPrint(painter.arena, "/{s}", .{@tagName(output.name)}),
     };
     _ = try painter.put(1, name, painter.width -| 2, .{ .colour = .ink, .bold = true });
@@ -1577,7 +1576,7 @@ test "the composer starts text with one slash from //, as a conversation does" {
     defer state.deinit();
     draft = try typeText(&state, "/home/me/project needs investigating");
     try expectEffects(&.{}, try submit(&state, draft));
-    try expectNoticeWithData(&state, "! Unknown command /home/me/project · /help");
+    try expectNoticeWithData(&state, "! Unknown command /home/me/project · type / for commands");
     draft = try typeText(&state, "//home/me/project needs investigating");
     const empty: StartSettings = .{};
     try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "/home/me/project needs investigating" } }}, try submit(&state, draft));
@@ -1602,10 +1601,10 @@ test "typing / lists the overview's commands between the rule and the draft, as 
         " /archive              archive the selected Session; stop active work first",
         " /configure [OPTIONS]  hold settings for the next Session",
         " /exit                 leave; Host work continues",
-        " /help                 keys and commands",
         " /model                choose the model new Sessions use",
         " /rename NAME          name the selected Session",
-        " +5 more · type to narrow",
+        " /sessions [VIEW]      view Unarchived, Archived or All Sessions",
+        " +3 more · type to narrow",
         " › /",
         " esc close",
     });
@@ -1722,7 +1721,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
         .{ "/configure --label \"open", configure_usage },
         // The Host would admit it; its Turns would fail at the provider.
         .{ "/configure --model \"gpt 5\"", "! Not a model ID; session configure -h" },
-        .{ "/status", "! Unknown command /status · /help" },
+        .{ "/status", "! Unknown command /status · type / for commands" },
     }) |case| {
         draft = try typeText(&state, case[0]);
         try expectEffects(&.{}, try submit(&state, draft));
@@ -3457,82 +3456,6 @@ fn listRows(state: *State, draft: Draft) ![]u8 {
     };
     std.testing.allocator.free(text);
     return kept.toOwnedSlice();
-}
-
-test "/help shows the overview's keys and commands in the Sessions' rows until Esc" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    const label = "Fix the flaky resize test";
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
-    _ = try submit(&state, try typeText(&state, "/configure --permission-mode ask"));
-    try expectEffects(&.{.clear_draft}, try submit(&state, try typeText(&state, "/help")));
-    const shown = try listRows(&state, .{});
-    defer std.testing.allocator.free(shown);
-    var lines = std.mem.splitScalar(u8, shown, '\n');
-    const top = lines.next().?;
-    try std.testing.expect(std.mem.startsWith(u8, top, " Help "));
-    try std.testing.expect(std.mem.endsWith(u8, top, "Esc returns"));
-    try std.testing.expectEqual(@as(usize, 79), top.len);
-    for ([_][]const u8{
-        " Up/Down select · Shift-Up/Down always · Home/End first/last on empty draft",
-        " Enter opens · Alt-A archives · Ctrl-X twice stops · Type a task to start",
-        " / lists commands · Up/Down choose · Tab or Enter takes it",
-        " Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves",
-        "",
-        " /archive              archive the selected Session; stop active work first",
-        " /configure [OPTIONS]  hold settings for the next Session",
-        " /exit                 leave; Host work continues",
-        " /help                 keys and commands",
-        " /model                choose the model new Sessions use",
-        " /rename NAME          name the selected Session",
-        " /sessions [VIEW]      view Unarchived, Archived or All Sessions",
-        " /setup [OPTIONS]      future defaults",
-        " /unarchive            restore the selected Session without restarting work",
-        " /undo                 restore the last Session archived here",
-        " /upgrade              install stable Rui; may restart this Store's Host",
-    }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
-    try std.testing.expect(std.mem.indexOf(u8, shown, label) == null);
-    // The line under the input says Esc closes it, over held settings or a
-    // typed draft.
-    try expectScreenLine(&state, 23, " start settings: --permission-mode ask · esc close");
-    const draft = try typeText(&state, "fix the build");
-    const held = state.settings;
-    state.settings = .{};
-    const hinted = try draftLines(&state, draft, 80, 24);
-    defer std.testing.allocator.free(hinted);
-    state.settings = held;
-    try std.testing.expect(std.mem.indexOf(u8, hinted, " enter start · esc close") != null);
-    // A draft typed under it stays when Esc closes it, and so do the held
-    // start settings: Esc returns to the Sessions first. (Over a shown
-    // command list, Esc closes the list first.)
-    try expectEffects(&.{}, try press(&state, draft, .clear));
-    try std.testing.expect(state.panel == null);
-    try std.testing.expect(!state.settings.empty());
-    const back = try listRows(&state, .{});
-    defer std.testing.allocator.free(back);
-    try std.testing.expect(std.mem.indexOf(u8, back, label) != null);
-    // Ctrl-G closes it as Esc does.
-    _ = try submit(&state, try typeText(&state, "/help"));
-    try expectEffects(&.{}, try press(&state, .{}, .clear));
-    try std.testing.expect(state.panel == null);
-    try std.testing.expect(!state.settings.empty());
-}
-
-test "/help says when the screen is too small for it, and a screen that shrinks under it counts the lines it hides" {
-    var state = try opened(&mixed);
-    defer state.deinit();
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 12 } }));
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/help")));
-    try std.testing.expect(state.panel == null);
-    try expectNotice(&state, "! Screen too small for /help");
-    try std.testing.expectEqual(Colour.attention, state.notice.?.colour);
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
-    _ = try submit(&state, try typeText(&state, "/help"));
-    const text = try draftLines(&state, .{}, 80, 12);
-    defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, " Help ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, " more lines") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "/setup [OPTIONS]") == null);
 }
 
 test "/rename names the selected Session through the shell, as a conversation does, one command at a time" {

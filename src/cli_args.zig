@@ -94,7 +94,7 @@ pub const compaction_policy =
 
 /// Shared by `session configure`, `session start` and the interactive /configure.
 pub const label_help =
-    \\--label TEXT names, renames or titles the Session, shown in lists and /status: one line of at most 100 bytes. --label "" clears it.
+    \\--label TEXT names, renames or titles the Session, shown in lists and Session inspection: one line of at most 100 bytes. --label "" clears it.
     \\A Label is display text only; it never addresses or selects a Session.
     \\
 ;

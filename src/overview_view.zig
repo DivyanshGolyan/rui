@@ -424,15 +424,13 @@ pub const Command = struct {
 };
 
 /// What takes the Sessions' rows until Esc or a key that acts on a
-/// Session: /help, or a command's output of more than one line.
+/// Session: a command's output of more than one line.
 pub const Panel = union(enum) {
-    help,
     /// The text is owned.
     output: struct { name: commands.Name, text: []u8 },
 
     pub fn text(self: *const Panel) []const u8 {
         return switch (self.*) {
-            .help => help_text,
             .output => |output| output.text,
         };
     }
@@ -442,14 +440,6 @@ pub const Panel = union(enum) {
         return 2 + std.mem.count(u8, self.text(), "\n");
     }
 };
-
-/// What /help shows under its heading: the overview's keys, then its
-/// commands, which its table lists.
-const help_text = "Up/Down select · Shift-Up/Down always · Home/End first/last on empty draft\n" ++
-    "Enter opens · Alt-A archives · Ctrl-X twice stops · Type a task to start\n" ++
-    "/ lists commands · Up/Down choose · Tab or Enter takes it\n" ++
-    "Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves\n" ++
-    "\n" ++ std.mem.trimEnd(u8, commands.help, "\n");
 
 /// How a model-list read ended.
 pub const ModelsRead = union(enum) {
@@ -517,7 +507,7 @@ pub const Observed = struct { reference: Reference, work: session_work.Work, nam
 /// An input in the open conversation of `reference`, whose work it shows as
 /// `work`: Ctrl-X there asks for and confirms a stop as Ctrl-X on the
 /// Session's row does, and any other input cancels the prompt.
-pub const ConversationInput = union(enum) { other, stop, archive: ArchiveState, unarchive, confirm_archive };
+pub const ConversationInput = union(enum) { other, stop, archive: ArchiveState, archive_command: ArchiveState, unarchive, confirm_archive };
 pub const Conversed = struct { reference: Reference, work: Kind, input: ConversationInput };
 
 pub const Read = struct { reference: Reference, position: u64, admission: u64 };
@@ -864,7 +854,6 @@ pub const State = struct {
     /// The in-flight traversal's filter, or null once a view change
     /// invalidates it. Returning to that filter cannot revive its pages.
     listing_archive: ?ArchiveFilter = .active,
-    last_archived: ?Reference = null,
     rows: Vec(Row) = .{},
     /// Row indices by reference.
     by_reference: Vec(Keyed) = .{},
@@ -1461,6 +1450,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 },
                 .stop => stopKey(state, .{ .reference = input.reference, .work = input.work }, &effects),
                 .archive => |archive| archiveIntent(state, .{ .ask = .{ .reference = input.reference, .work = input.work, .archive = archive } }, &effects),
+                .archive_command => |archive| archiveIntent(state, .{ .submit = .{ .reference = input.reference, .work = input.work, .archive = archive } }, &effects),
                 .unarchive => archiveIntent(state, .{ .restore = input.reference }, &effects),
                 .confirm_archive => archiveIntent(state, .{ .confirm = input.reference }, &effects),
             }
@@ -1473,8 +1463,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .requested => |completion| {
                     state.answer(at, .done, "");
                     if (result.request.archived) {
-                        state.last_archived = ref;
-                        if (completion == .pending) state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref}) else state.say(.quiet, "Archived {s}. /undo restores it.", .{&ref});
+                        if (completion == .pending) state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref}) else state.say(.quiet, "Archived {s}.", .{&ref});
                     } else state.say(.quiet, "Restored {s}; work was not restarted.", .{&ref});
                 },
                 .failed => |code| {
@@ -1797,13 +1786,6 @@ fn labelOf(text: []const u8) Bounded(max_label_bytes) {
 /// replaces the set, `not_modified` keeps every row.
 fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     const selected_at = if (state.selected) |ref| position(state, ref) orelse 0 else 0;
-    var completed_archive: ?Reference = null;
-    if (state.last_archived) |ref| for (state.pending.items) |incoming| {
-        if (!std.mem.eql(u8, &incoming.reference, &ref) or incoming.archive_state != .archived) continue;
-        if (state.find(ref)) |old| if (old.archive_state != .archived) {
-            completed_archive = ref;
-        };
-    };
     switch (answer.delta) {
         .not_modified => {},
         .changed => {
@@ -1849,7 +1831,6 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     state.listed_at_ms = state.now_ms;
     state.unreachable_since_ms = null;
     try arrange(state);
-    if (completed_archive) |ref| state.say(.quiet, "Archived {s}. /undo restores it.", .{&ref});
     if (state.selectedRow() == null) {
         state.selected = if (state.order.items.len == 0) null else state.rows.items[state.order.items[@min(selected_at, state.order.items.len - 1)]].reference;
         if (state.selectedRow()) |row| state.unfolded.insert(row.group());
@@ -2192,7 +2173,6 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         .command => |command| switch (command.name) {
             .archive => return archiveIntent(state, .{ .selected_archive = .submitted }, effects),
             .unarchive => return archiveIntent(state, .selected_restore, effects),
-            .undo => return archiveIntent(state, .undo, effects),
             else => {},
         },
         else => {},
@@ -2239,7 +2219,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         .command => |command| command,
     };
     switch (command.name) {
-        .archive, .unarchive, .undo => unreachable, // Routed through archiveIntent.
+        .archive, .unarchive => unreachable, // Routed through archiveIntent.
         .sessions => {
             const filter: ArchiveFilter = if (std.mem.eql(u8, command.argument, "archived")) .archived else if (std.mem.eql(u8, command.argument, "all")) .all else if (std.mem.eql(u8, command.argument, "unarchived")) .active else {
                 state.say(.quiet, "Sessions: {s}. /sessions unarchived|archived|all", .{archiveViewName(state.archive)});
@@ -2267,13 +2247,6 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
             askModels(state, effects);
         },
         .configure => if (configure(state, command.argument)) effects.add(.clear_draft),
-        .help => {
-            const help: Panel = .help;
-            // As for /model, a panel the screen cannot show whole never opens.
-            if (layout(state, 1, 0).list.len() < help.rows()) return state.say(.attention, "! Screen too small for /help", .{});
-            state.showPanel(help);
-            effects.add(.clear_draft);
-        },
         .rename => {
             // As a key that acts on a Session, it acts where the Sessions
             // show, so the list shows the row it names.
@@ -2285,12 +2258,12 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
     }
 }
 
-const ArchiveDraft = enum { keep, submitted };
+const ArchiveDraft = enum { keep, submitted, command };
 const ArchiveIntent = union(enum) {
     selected_archive: ArchiveDraft,
     selected_restore,
-    undo,
     ask: struct { reference: Reference, work: Kind, archive: ArchiveState },
+    submit: struct { reference: Reference, work: Kind, archive: ArchiveState },
     restore: Reference,
     /// Null confirms the overview's captured target; a conversation must match it.
     confirm: ?Reference,
@@ -2315,12 +2288,8 @@ fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
             archiveSession(state, .{ .reference = row.reference, .archived = false }, effects);
             effects.add(.clear_draft);
         },
-        .undo => {
-            const ref = state.last_archived orelse return state.say(.quiet, "No archive to undo here. /sessions archived shows the archive.", .{});
-            archiveSession(state, .{ .reference = ref, .archived = false }, effects);
-            effects.add(.clear_draft);
-        },
         .ask => |target| askArchive(state, target.reference, target.work, target.archive, .keep, effects),
+        .submit => |target| askArchive(state, target.reference, target.work, target.archive, .command, effects),
         .restore => |ref| archiveSession(state, .{ .reference = ref, .archived = false }, effects),
         .confirm => |ref| if (prompt) |open| {
             if (open.action == .archive and (ref == null or std.mem.eql(u8, &open.stop, &ref.?))) archiveSession(state, .{ .reference = open.stop }, effects);
@@ -2339,7 +2308,7 @@ fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, 
         return;
     }
     if (draft == .submitted) effects.add(.clear_draft);
-    if (groups.get(rules.get(work).group).under_way or work == .approval) {
+    if (draft == .keep and (groups.get(rules.get(work).group).under_way or work == .approval)) {
         state.prompt = .{ .stop = ref, .action = .archive };
     } else archiveSession(state, .{ .reference = ref }, effects);
 }
@@ -4060,7 +4029,7 @@ test "a key that acts on a Session brings the Sessions back first, so it acts wh
     try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
     for ([_]Action{ .next, .select_next, .last, .stop }) |action| {
         errdefer std.debug.print("action={t}\n", .{action});
-        _ = try submit(&state, try typeText(&state, "/help"));
+        state.showPanel(.{ .output = .{ .name = .setup, .text = try state.gpa.dupe(u8, "output\nmore") } });
         try std.testing.expect(state.panel != null);
         state.selected = first;
         _ = try press(&state, .{}, action);
@@ -4069,7 +4038,7 @@ test "a key that acts on a Session brings the Sessions back first, so it acts wh
         state.prompt = null;
     }
     // Enter on an empty draft opens the selected Session from under it.
-    _ = try submit(&state, try typeText(&state, "/help"));
+    state.showPanel(.{ .output = .{ .name = .setup, .text = try state.gpa.dupe(u8, "output\nmore") } });
     try expectEffects(&.{.{ .open = state.selected.? }}, try submit(&state, .{}));
     try std.testing.expect(state.panel == null);
 }
@@ -4083,7 +4052,7 @@ test "/rename under a panel brings the Sessions back, so the list shows the row 
     var state = try opened(&mixed);
     defer state.deinit();
     try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
-    _ = try submit(&state, try typeText(&state, "/help"));
+    state.showPanel(.{ .output = .{ .name = .setup, .text = try state.gpa.dupe(u8, "output\nmore") } });
     try std.testing.expect(state.panel != null);
     var line = "/rename lane four".*;
     try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .rename, .session = state.selected.?, .text = &line } } }, try submit(&state, try typeText(&state, &line)));
@@ -4203,19 +4172,14 @@ test "archive filter switch clears hidden data and discards every stale traversa
     try std.testing.expectEqual(@as(usize, 2), state.rows.items.len);
 }
 
-test "busy archive confirms Stop and archive and never hides before settled server state" {
+test "typed busy archive runs immediately and never hides before settled server state" {
     var row = session("aaaaaa", .{ .working = ago(1) }, .{ .label = "busy" });
     var state = try opened(&.{row});
     defer state.deinit();
     var effects: Effects = .{};
     try enter(&state, "/archive", &effects);
-    try expectEffects(&.{.clear_draft}, effects);
-    try std.testing.expectEqual(.archive, state.prompt.?.action);
-    _ = try press(&state, .{}, .clear);
+    try expectEffects(&.{ .clear_draft, .{ .archive = .{ .reference = row.reference } } }, effects);
     try std.testing.expect(state.prompt == null);
-    effects = .{};
-    try enter(&state, "/archive", &effects);
-    try expectEffects(&.{.{ .archive = .{ .reference = row.reference } }}, try submit(&state, .{}));
     try std.testing.expectEqual(ArchiveState.active, state.find(row.reference).?.archive_state);
     _ = try step(&state, .{ .archive = .{ .request = .{ .reference = row.reference }, .outcome = .{ .requested = .pending } } });
     try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
@@ -4227,10 +4191,7 @@ test "busy archive confirms Stop and archive and never hides before settled serv
     row.state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } };
     _ = try refresh(&state, .changed, testToken(3), &.{row});
     try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
-    try std.testing.expectEqualStrings("Archived aaaaaa. /undo restores it.", state.notice.?.text());
-    effects = .{};
-    try enter(&state, "/undo", &effects);
-    try expectEffects(&.{ .{ .archive = .{ .reference = row.reference, .archived = false } }, .clear_draft }, effects);
+    try expectEffects(&.{.{ .archive = .{ .reference = row.reference, .archived = false } }}, try step(&state, .{ .conversed = .{ .reference = row.reference, .work = .idle, .input = .unarchive } }));
     _ = try step(&state, .{ .archive = .{ .request = .{ .reference = row.reference, .archived = false }, .outcome = .{ .requested = .completed } } });
     try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
     row.archive_state = .active;
@@ -4419,7 +4380,7 @@ test "upgrade holds admit no archive surface before prompt draft or ledger mutat
                     .{ .event = .{ .composed = .{ .draft = .{}, .input = .{ .choice = .enter } } }, .confirms = true },
                     .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/archive", .cursor = 3, .edits = 18 }, .input = .{ .composer = .submit } } } },
                     .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/unarchive", .cursor = 3, .edits = 19 }, .input = .{ .composer = .submit } } } },
-                    .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/undo", .cursor = 3, .edits = 20 }, .input = .{ .composer = .submit } } } },
+                    .{ .event = .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = .{ .archive_command = archive } } } },
                     .{ .event = .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = .{ .archive = archive } } } },
                     .{ .event = .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = .unarchive } } },
                     .{ .event = .{ .conversed = .{ .reference = ref, .work = work, .input = .confirm_archive } }, .confirms = true },
@@ -4435,8 +4396,7 @@ test "upgrade holds admit no archive surface before prompt draft or ledger mutat
                     try std.testing.expectEqual(@as(?Reference, ref), state.selected);
                     state.upgrade_blocked = blocked;
                     state.upgrade_pending = !blocked;
-                    state.last_archived = "bbbbbb".*;
-                    state.panel = .help;
+                    state.showPanel(.{ .output = .{ .name = .setup, .text = try state.gpa.dupe(u8, "output\nmore") } });
                     state.prompt = .{ .stop = ref, .action = if (case.confirms) .archive else .stop };
                     const prompt = state.prompt;
                     // Preserve both an unknown handle and accepted in-flight work.
@@ -4454,10 +4414,9 @@ test "upgrade holds admit no archive surface before prompt draft or ledger mutat
                     try std.testing.expectEqual(@as(usize, 2), state.request_count);
                     try std.testing.expectEqual(unknown, state.requests[0]);
                     try std.testing.expectEqual(pending, state.requests[1]);
-                    try std.testing.expectEqualStrings("bbbbbb", &state.last_archived.?);
                     try std.testing.expectEqualStrings(&ref, &state.selected.?);
                     try std.testing.expectEqual(archive, state.find(ref).?.archive_state);
-                    try std.testing.expect(state.panel != null and state.panel.? == .help);
+                    try std.testing.expect(state.panel != null and state.panel.? == .output);
                     try std.testing.expect(state.command == null);
                     try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
                 }
@@ -4483,11 +4442,11 @@ test "upgrade holds share stop admission for both screens and preserve captured 
                 state.upgrade_pending = !blocked;
                 state.prompt = if (confirming) .{ .stop = ref } else null;
                 const prompt = state.prompt;
-                state.panel = .help;
+                state.showPanel(.{ .output = .{ .name = .setup, .text = try state.gpa.dupe(u8, "output\nmore") } });
                 try expectEffects(&.{}, try step(&state, event));
                 try std.testing.expectEqual(prompt, state.prompt);
                 try std.testing.expectEqual(@as(usize, 0), state.request_count);
-                try std.testing.expect(state.panel != null and state.panel.? == .help);
+                try std.testing.expect(state.panel != null and state.panel.? == .output);
                 try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
                 // Clearing the hold resumes the same stop owner and target.
                 state.upgrade_blocked = false;
@@ -4559,7 +4518,6 @@ test "upgrade holds settle accepted archive restore and stop completions without
                     try std.testing.expectEqual(expected, state.requests[0].status);
                     if (outcome == .unconfirmed) try std.testing.expectEqualStrings("saved-handle", state.requests[0].text.slice());
                 }
-                if (outcome == .requested and archived) try std.testing.expectEqual(@as(?Reference, ref), state.last_archived);
             }
         }
         for ([_]StopOutcome{ .stopped, .{ .failed = "stop_failed" }, .{ .unconfirmed = "saved-handle" } }) |outcome| {

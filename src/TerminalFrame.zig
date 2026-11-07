@@ -128,7 +128,7 @@ fn rows(text: anytype, layout: Viewport.Layout) !u16 {
 fn overflow(self: *Self, layout: Viewport.Layout, omitted: u64, compact: bool) !u16 {
     self.heading.clear();
     var storage: [128]u8 = undefined;
-    try self.heading.append(try std.fmt.bufPrint(&storage, "+{d}{s} · /status", .{ omitted, if (compact) "" else " more calls" }));
+    try self.heading.append(try std.fmt.bufPrint(&storage, "+{d}{s}", .{ omitted, if (compact) "" else " more calls" }));
     return rows(&self.heading, layout);
 }
 
@@ -339,7 +339,7 @@ test "the draft keeps the bottom rows under a rule and over the Session line, an
     try std.testing.expectEqual(Position{ .offset = 12 }, frame.first);
     try std.testing.expectEqual(@as(u16, 21), frame.height);
     try std.testing.expectEqual(@as(u16, 22), frame.draft_top);
-    input.notice = "! Unknown command /x · /help";
+    input.notice = "! Unknown command /x · type / for commands";
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 1), frame.line_height);
     try std.testing.expectEqual(@as(u16, 22), frame.draft_top);
@@ -433,7 +433,7 @@ test "the live line takes a row after every required row and before call rows" {
     // counts the call.
     try frame.plan(&document, .{ .width = 24, .height = 5, .status = "", .cursor = 0, .calls = &.{ "• First", "• Second" }, .total_calls = 2, .live = true, .selected = false, .action_visible = false, .preview_complete = true });
     try std.testing.expectEqual(@as(usize, 0), frame.used);
-    try std.testing.expectEqualStrings("+2 more calls · /status", frame.heading.text());
+    try std.testing.expectEqualStrings("+2 more calls", frame.heading.text());
     try std.testing.expectEqual(@as(u16, 1), frame.live_height);
     // A running call whose row is not shown leaves its clock to the live
     // line.
@@ -638,7 +638,7 @@ test "a multiline draft grows to its cap and then scrolls inside the input" {
     for ([_]u16{ 8, 24 }, [_]u16{ 1, 8 }) |height, draft_rows| {
         try frame.plan(&document, .{ .width = 100, .height = height, .draft = &tall, .draft_source = &tall, .cursor = tall.len, .status = "Sending…", .calls = &.{ "• Inspect\n  continued", "• Compare" }, .total_calls = 3, .selected = false, .action_visible = false, .preview_complete = true });
         try std.testing.expectEqual(@as(usize, 2), frame.used);
-        try std.testing.expectEqualStrings("+1 more calls · /status", frame.heading.text());
+        try std.testing.expectEqualStrings("+1 more calls", frame.heading.text());
         try std.testing.expectEqual(draft_rows, frame.draft.rows);
         try std.testing.expectEqual(@as(usize, 41) - draft_rows, frame.draft.first);
         try std.testing.expectEqual(height - 2, frame.caret_row);
@@ -657,7 +657,7 @@ test "complete approval and overflow survive short layouts or fail before render
     var frame: Self = undefined;
     var input: Input = .{ .width = 24, .height = 3, .cursor = 0, .status = "Idle", .calls = &.{}, .total_calls = 100, .selected = false, .action_visible = false, .preview_complete = true };
     try frame.plan(&document, input);
-    try std.testing.expectEqualStrings("+100 · /status", frame.heading.text());
+    try std.testing.expectEqualStrings("+100", frame.heading.text());
     try std.testing.expectEqual(@as(u16, 2), frame.draft_top);
     input.height = 2;
     try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));

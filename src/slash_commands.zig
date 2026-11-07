@@ -1,6 +1,6 @@
 //! Each screen's slash commands: one table per screen of each command's
 //! name, argument shape and one-line description. The screen's parser, the
-//! list typing "/" shows, Tab and /help all read it.
+//! list typing "/" shows and Tab read it.
 const std = @import("std");
 const cli_args = @import("cli_args.zig");
 const model_capability = @import("model_capability.zig");
@@ -76,11 +76,10 @@ pub const Command = struct {
     /// offers each admitted word.
     choice_name: ?[]const u8 = null,
     argument: Argument = .none,
-    /// Null keeps the command out of the list and /help: it exists only to
+    /// Null keeps the command out of the list: it exists only to
     /// say where the thing it names lives.
     description: ?[]const u8,
-    /// False keeps a command /help names out of the list typing "/" shows:
-    /// it is for recovery, which /help explains.
+    /// False keeps recovery commands out of the list typing "/" shows.
     listed: bool = true,
 };
 
@@ -101,7 +100,7 @@ const live_options: Options = .of(cli_args.live_configure, &.{ "permission-mode"
 /// Future defaults, as /setup saves them; /setup alone shows them.
 const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider", "reasoning-effort", "notifications", "clear-model", "store" }, true, false);
 
-/// The conversation's commands, declared in the order its list and /help
+/// The conversation's commands, declared in the order its list
 /// show them.
 const ConversationName = enum {
     archive,
@@ -111,7 +110,6 @@ const ConversationName = enum {
     discard,
     effort,
     exit,
-    help,
     history,
     @"inspect-action",
     login,
@@ -123,7 +121,6 @@ const ConversationName = enum {
     result,
     setup,
     skill,
-    status,
     unarchive,
     upgrade,
     wait,
@@ -138,7 +135,6 @@ pub const conversation = Commands(ConversationName, .{
     .discard = .{ .description = "release rejected input, retaining the draft", .listed = false },
     .effort = .{ .argument = .effort, .description = "this Session's effort, also the default for new ones" },
     .exit = .{ .description = "detach; Host work continues, unsent draft is lost" },
-    .help = .{ .description = "keys and commands" },
     .history = .{ .description = "older conversation" },
     .@"inspect-action" = .{ .description = "exact one-shot diagnostics", .listed = false },
     .login = .{ .description = null },
@@ -150,7 +146,6 @@ pub const conversation = Commands(ConversationName, .{
     .result = .{ .argument = .{ .required = "KEY" }, .description = "a saved answer", .listed = false },
     .setup = .{ .argument = .{ .options = setup_options }, .description = "future defaults" },
     .skill = .{ .argument = .{ .required = "NAME" }, .description = "invoke an advertised skill as ordinary input" },
-    .status = .{ .description = "settings and work" },
     .unarchive = .{ .description = "restore this Session without restarting work" },
     .upgrade = .{ .description = "install stable Rui; may restart this Store's Host" },
     .wait = .{ .description = null },
@@ -168,17 +163,15 @@ const session_views = &[_]Choice{
     .{ .word = "all", .description = "unarchived and archived Sessions" },
 };
 
-pub const overview = Commands(enum { archive, configure, exit, help, model, rename, sessions, setup, unarchive, undo, upgrade }, .{
+pub const overview = Commands(enum { archive, configure, exit, model, rename, sessions, setup, unarchive, upgrade }, .{
     .archive = .{ .description = "archive the selected Session; stop active work first" },
     .configure = .{ .argument = .{ .options = start_options }, .description = "hold settings for the next Session" },
     .exit = .{ .description = "leave; Host work continues" },
-    .help = conversation.table.get(.help),
     .model = .{ .description = "choose the model new Sessions use" },
     .rename = .{ .argument = conversation.table.get(.rename).argument, .description = "name the selected Session" },
     .sessions = .{ .choice_name = "VIEW", .argument = .{ .choice = session_views }, .description = "view Unarchived, Archived or All Sessions" },
     .setup = conversation.table.get(.setup),
     .unarchive = .{ .description = "restore the selected Session without restarting work" },
-    .undo = .{ .description = "restore the last Session archived here" },
     .upgrade = conversation.table.get(.upgrade),
 });
 
@@ -188,11 +181,11 @@ pub fn unknown(buffer: *[unknown_bytes]u8, text: []const u8) []const u8 {
     const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
     var shown = name.len <= max_unknown_name;
     for (name) |byte| shown = shown and byte > ' ' and byte < 0x7f;
-    return std.fmt.bufPrint(buffer, "! Unknown command{s}{s} · /help", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
+    return std.fmt.bufPrint(buffer, "! Unknown command{s}{s} · type / for commands", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
 }
 
 const max_unknown_name = 32;
-pub const unknown_bytes = "! Unknown command  · /help".len + max_unknown_name;
+pub const unknown_bytes = "! Unknown command  · type / for commands".len + max_unknown_name;
 
 /// The most a command's output may hold and still show as a notice, on
 /// either screen; more opens a page.
@@ -279,15 +272,6 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
 
         /// Spaces that pad a usage to `description_column`.
         pub const padding: [description_column]u8 = @splat(' ');
-
-        /// The listed commands, one per line, as /help shows them.
-        pub const help = blk: {
-            var text: []const u8 = "";
-            for (std.enums.values(Name)) |name| if (table.get(name).description) |description| {
-                text = text ++ usage.get(name) ++ padding[usage.get(name).len..] ++ description ++ "\n";
-            };
-            break :blk text;
-        };
 
         pub const Parsed = union(enum) {
             /// Not a command's name.
@@ -725,9 +709,9 @@ test "a /requests list takes only keys the parser reads back as one word the lis
 
 test "a command admits exactly the arguments its shape names" {
     const cases = .{
-        .{ "/status", conversation.Parsed{ .command = .{ .name = .status, .argument = "" } } },
-        .{ "/status ", conversation.Parsed{ .command = .{ .name = .status, .argument = "" } } },
-        .{ "/status now", conversation.Parsed{ .misused = .status } },
+        .{ "/status", @as(conversation.Parsed, .unknown) },
+        .{ "/help", @as(conversation.Parsed, .unknown) },
+        .{ "/status now", @as(conversation.Parsed, .unknown) },
         .{ "/copy", conversation.Parsed{ .command = .{ .name = .copy, .argument = "" } } },
         .{ "/copy code", conversation.Parsed{ .command = .{ .name = .copy, .argument = "code" } } },
         .{ "/copy file", conversation.Parsed{ .command = .{ .name = .copy, .argument = "file" } } },
@@ -764,15 +748,15 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "reload-skills", "rename ", "setup ", "skill ", "status", "unarchive", "upgrade" } },
+        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "history", "model", "reload-skills", "rename ", "setup ", "skill ", "unarchive", "upgrade" } },
         .{ .draft = "/c", .shown = &.{ "configure ", "copy " }, .first = "onfigure " },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
-        .{ .draft = "/st", .shown = &.{"status"}, .first = "atus" },
+        .{ .draft = "/st", .shown = &.{} },
         .{ .draft = "/re", .shown = &.{ "reload-skills", "rename " } },
         .{ .draft = "/rel", .shown = &.{"reload-skills"}, .first = "oad-skills" },
-        .{ .draft = "/s", .shown = &.{ "setup ", "skill ", "status" }, .first = "etup " },
+        .{ .draft = "/s", .shown = &.{ "setup ", "skill " }, .first = "etup " },
         .{ .draft = "/sk", .shown = &.{"skill "}, .first = "ill " },
-        // Recovery commands work, and /help names them, but the list leaves them out.
+        // Recovery commands work, but the list leaves them out.
         .{ .draft = "/req", .shown = &.{} },
         .{ .draft = "/w", .shown = &.{} },
         .{ .draft = "/login", .shown = &.{} },
@@ -944,7 +928,7 @@ test "/copy takes each Copy's name but the answer's, which it copies alone" {
 }
 
 test "both screens' shared commands take the same arguments and say the same things" {
-    inline for (.{ "help", "rename", "setup", "upgrade" }) |name| try std.testing.expectEqualStrings(conversation.usage.get(@field(conversation.Name, name)), overview.usage.get(@field(overview.Name, name)));
+    inline for (.{ "rename", "setup", "upgrade" }) |name| try std.testing.expectEqualStrings(conversation.usage.get(@field(conversation.Name, name)), overview.usage.get(@field(overview.Name, name)));
     for ([_][]const u8{ "/rename", "/rename lane four", "/setup", "/setup --model gpt-5.5", "/help", "/help me", "/upgrade", "/upgrade now" }) |text| {
         errdefer std.debug.print("line={s}\n", .{text});
         try std.testing.expectEqualStrings(@tagName(conversation.parse(text)), @tagName(overview.parse(text)));
@@ -957,11 +941,11 @@ test "both screens' shared commands take the same arguments and say the same thi
 
 test "an unknown command names itself when it is short printable ASCII" {
     var buffer: [unknown_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("! Unknown command /foo · /help", unknown(&buffer, "/foo bar"));
-    try std.testing.expectEqualStrings("! Unknown command · /help", unknown(&buffer, "/\x1b[2J"));
+    try std.testing.expectEqualStrings("! Unknown command /foo · type / for commands", unknown(&buffer, "/foo bar"));
+    try std.testing.expectEqualStrings("! Unknown command · type / for commands", unknown(&buffer, "/\x1b[2J"));
     const long = "/" ++ @as([max_unknown_name]u8, @splat('x'));
-    try std.testing.expectEqualStrings("! Unknown command · /help", unknown(&buffer, long));
-    try std.testing.expectEqualStrings("! Unknown command " ++ long[0..max_unknown_name] ++ " · /help", unknown(&buffer, long[0..max_unknown_name]));
+    try std.testing.expectEqualStrings("! Unknown command · type / for commands", unknown(&buffer, long));
+    try std.testing.expectEqualStrings("! Unknown command " ++ long[0..max_unknown_name] ++ " · type / for commands", unknown(&buffer, long[0..max_unknown_name]));
 }
 
 test "a command's short output is the same notice on both screens, and longer output takes a page" {
@@ -1010,7 +994,7 @@ test "archive commands and server archive view choices parse on their owning scr
     }
     try std.testing.expect(overview.parse("/sessions") == .command);
     try std.testing.expect(overview.parse("/sessions active") == .misused);
-    try std.testing.expect(overview.parse("/undo") == .command);
+    try std.testing.expect(overview.parse("/undo") == .unknown);
     try std.testing.expect(conversation.parse("/sessions archived") == .unknown);
 }
 
@@ -1028,7 +1012,5 @@ test "archive and upgrade retain separate local command identities after merge" 
             try std.testing.expect(list.enter(0).runs);
         }
     }
-    const restored = overview.parse("/undo").command;
-    try std.testing.expectEqual(.undo, restored.name);
     try std.testing.expect(conversation.parse("/undo") == .unknown);
 }
