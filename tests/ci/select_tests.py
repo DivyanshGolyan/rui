@@ -36,7 +36,7 @@ UPGRADE_PATHS = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEd
 # Keep this standalone even beside check, which does not run the installer driver.
 INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
                    "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py",
-                   "tests/ci/release.py", "tests/ci/release_numbers.py", "tests/ci/qualification.py",
+                   "tests/ci/release.py", "tests/ci/release_publication.py", "tests/ci/test_release_publication.py", "tests/ci/release_numbers.py", "tests/ci/qualification.py",
                    "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
                    "src/cli.zig", "src/cli_args.zig", "src/store/schema.zig",
                    "src/fetch_dependencies.sh", "release/*", "install.sh", "build.zig", "build.zig.zon")
@@ -415,11 +415,6 @@ def select(paths, phase, available):
     for reason, served_by in live_reasons:
         if not targets & served_by:
             raise ValueError(f"{reason!r} selected none of the targets that start its server: {sorted(served_by)}")
-    if "check-full" in native_targets:
-        # The daily macOS workflow owns Mac check-full; the covered owners above
-        # are not selected separately.
-        native_targets.discard("check-full")
-        reasons.add("Mac check-full: daily macOS qualification")
     cache_execution_checks = phase == "review" and any(path in CACHE_POLICY for path in paths)
     missing = (targets | native_targets) - available
     if missing:

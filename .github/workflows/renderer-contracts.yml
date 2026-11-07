@@ -1,6 +1,6 @@
 name: Renderer contracts
-# Nonblocking: Selected checks and merging never require these. The
-# nightly run adds the mutation campaign and files an issue on failure.
+# Nonblocking: Selected checks and merging never require these.
+# Manual runs also execute the mutation campaign.
 on:
   pull_request:
     paths:
@@ -13,8 +13,6 @@ on:
       - 'tests/integration/terminal_restoration_integration.py'
       - 'tests/qualification/direct-pty/**'
       - '.github/workflows/renderer-contracts.yml'
-  schedule:
-    - cron: '41 3 * * *'
   workflow_dispatch:
 
 permissions:
@@ -70,7 +68,7 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
   mutations:
-    if: ${{ !github.event.repository.private && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ !github.event.repository.private && github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -97,20 +95,3 @@ jobs:
           path: ${{ runner.temp }}/mutations
           retention-days: 3
           if-no-files-found: ignore
-  report:
-    needs: [contracts, mutations]
-    if: ${{ always() && github.event_name == 'schedule' && (needs.contracts.result != 'success' || needs.mutations.result != 'success') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      issues: write
-      actions: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: File each failure under its cause
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 -B tests/ci/report_issue.py --workflow "Nightly renderer contracts" --run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA"

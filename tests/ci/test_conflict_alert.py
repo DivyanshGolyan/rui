@@ -1,6 +1,9 @@
 """A move of main comments once per head on each open PR it left conflicting."""
 import subprocess
 import unittest
+from unittest.mock import patch
+
+import conflict_alert
 
 from conflict_alert import MARKER, alert
 
@@ -88,6 +91,19 @@ class ConflictAlertTest(unittest.TestCase):
     def test_a_failing_warm_up_read_does_not_stop_the_rest(self):
         github = FakeGitHub({1: ("h1", False, MAIN), 2: ("h2", False, MAIN)}, failing=[1], failing_after=0)
         self.assertEqual(run(github), ([2], [], [1]))
+
+
+class GitHubCommandTest(unittest.TestCase):
+    def test_command_captures_output_and_propagates_failures(self):
+        with patch.object(conflict_alert.subprocess, "run", return_value=
+                          subprocess.CompletedProcess([], 0, "response\n", "")) as run:
+            self.assertEqual(conflict_alert.gh("api", "repos/o/r"), "response\n")
+        run.assert_called_once_with(["gh", "api", "repos/o/r"], check=True,
+                                    capture_output=True, text=True)
+        with patch.object(conflict_alert.subprocess, "run", side_effect=
+                          subprocess.CalledProcessError(1, "gh", stderr="HTTP 502")):
+            with self.assertRaises(subprocess.CalledProcessError):
+                conflict_alert.gh("api", "repos/o/r")
 
 
 if __name__ == "__main__":
