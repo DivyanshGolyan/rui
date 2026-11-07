@@ -22,6 +22,12 @@ pub fn release() void {
     _ = state.cmpxchgStrong(.borrowed, .available, .release, .monotonic);
 }
 
+/// A borrower whose fd2 flag restoration failed must permanently exclude
+/// optional output. Required readiness may still use tryExclude.
+pub fn disableHeld() void {
+    state.store(.disabled, .release);
+}
+
 /// The caller owns custody, including any trace formatting/sequence assignment.
 /// One write, no credit wait or retry. Existing process initialization owns
 /// SIGPIPE. NONBLOCK does not bound filesystem/device latency or scheduling.
@@ -35,7 +41,7 @@ pub fn writeHeld(bytes: []const u8) bool {
     const enabled = !change_flags or std.c.fcntl(2, std.c.F.SETFL, flags | nonblock) == 0;
     const written = if (enabled) std.c.write(2, bytes.ptr, bytes.len) else -1;
     if (change_flags and std.c.fcntl(2, std.c.F.SETFL, flags) != 0) {
-        state.store(.disabled, .release);
+        disableHeld();
         return false;
     }
     return written >= 0 and @as(usize, @intCast(written)) == bytes.len;
@@ -65,4 +71,16 @@ pub fn diagnosticBytes(bytes: []const u8) void {
 pub fn diagnostic(comptime format: []const u8, args: anytype) void {
     // The preceding transcript may end mid-line, including a partial command.
     print("\n" ++ format, args);
+}
+
+test "disabled stderr excludes optional output and permits required readiness" {
+    const before = state.swap(.available, .acq_rel);
+    defer state.store(before, .release);
+    try std.testing.expect(tryAcquire());
+    disableHeld();
+    release();
+    try std.testing.expect(!tryAcquire());
+    try std.testing.expect(tryExclude());
+    release();
+    try std.testing.expect(!tryAcquire());
 }

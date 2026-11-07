@@ -371,8 +371,11 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
     const unfinished_upgrade = self.upgrade_job.started and !self.upgrade_job.finished;
     self.upgrade_job.settle();
     const fatal = (if (ended) |outcome| outcome == .interrupted else |_| true) or std.meta.isError(restored) or unfinished_upgrade;
+    var receipt_failure: ?anyerror = null;
     if (self.upgrade_report) |*report| {
-        stderr.diagnosticBytes(report.written());
+        self.terminal.receipt(report.written()) catch |err| {
+            receipt_failure = err;
+        };
         report.deinit();
         self.upgrade_report = null;
     }
@@ -382,10 +385,15 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
         const detailed = fatal or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible;
         const rendered = if (detailed) self.upgrade_job.writeReport(&out.writer) else self.upgrade_job.writeReceipt(&out.writer);
         if (rendered) |_| {
-            stderr.diagnosticBytes(out.written());
-        } else |err| stderr.diagnostic("rui: Upgrade receipt failed ({s}).\n", .{@errorName(err)});
+            self.terminal.receipt(out.written()) catch |err| {
+                receipt_failure = receipt_failure orelse err;
+            };
+        } else |err| {
+            receipt_failure = receipt_failure orelse err;
+        }
     }
     self.upgrade_job.deinit();
+    if (receipt_failure) |err| stderr.diagnostic("rui: Upgrade receipt output incomplete ({s}); retained cleanup paths may be missing.\n", .{@errorName(err)});
     const settled = self.settle(restored);
     self.submission.close();
     if (self.reading.pending_diagnostic != null) {
@@ -406,12 +414,27 @@ pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Depa
     };
     const action_view = self.terminal.screen.action_view != null;
     return .{
-        .end = if (plan.failure) |err| err else ended,
+        .end = receiptEnd(ended, plan.failure, receipt_failure),
         .action = if (action_view) self.live.work.first_action else null,
         // Never a main-screen notice before confirmed restoration.
         .failure_notice = action_view and !std.meta.isError(restored),
         .recovery_shown = plan.recovery_before_notice,
     };
+}
+
+// Existing departure/restore failures take precedence over output failure.
+fn receiptEnd(ended: anyerror!Outcome, prior: ?anyerror, receipt_failure: ?anyerror) anyerror!Outcome {
+    if (prior) |err| return err;
+    _ = ended catch |err| return err;
+    if (receipt_failure) |err| return err;
+    return ended;
+}
+
+test "departure preserves earlier failure and propagates receipt output failure" {
+    try std.testing.expectError(error.TerminalRestoreFailed, receiptEnd(.detached, error.TerminalRestoreFailed, error.UpgradeReceiptOutputFailed));
+    try std.testing.expectError(error.Cancelled, receiptEnd(error.Cancelled, null, error.UpgradeReceiptOutputFailed));
+    try std.testing.expectError(error.UpgradeReceiptOutputFailed, receiptEnd(.detached, null, error.UpgradeReceiptOutputFailed));
+    try std.testing.expectEqual(Outcome.detached, try receiptEnd(.detached, null, null));
 }
 
 fn stop(self: *Self) void {

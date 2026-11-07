@@ -1370,16 +1370,27 @@ fn keepUpgrade(self: *Self) !void {
     self.upgrade_job.deinit();
 }
 
-fn writeUpgradeReports(self: *Self, fatal: bool) void {
-    if (self.upgrade_report) |*report| stderr.diagnosticBytes(report.written());
+fn writeUpgradeReports(self: *Self, fatal: bool) !void {
+    var failure: ?anyerror = null;
+    if (self.upgrade_report) |*report| self.terminal.receipt(report.written()) catch |err| {
+        failure = err;
+    };
     if (self.upgrade_job.started and (fatal or self.upgrade_job.result != null or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible)) {
         var out: std.Io.Writer.Allocating = .init(self.init.gpa);
         defer out.deinit();
         const detailed = fatal or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible;
         const rendered = if (detailed) self.upgrade_job.writeReport(&out.writer) else self.upgrade_job.writeReceipt(&out.writer);
         if (rendered) |_| {
-            stderr.diagnosticBytes(out.written());
-        } else |err| stderr.diagnostic("rui: Upgrade receipt failed ({s}).\n", .{@errorName(err)});
+            self.terminal.receipt(out.written()) catch |err| {
+                failure = failure orelse err;
+            };
+        } else |err| {
+            failure = failure orelse err;
+        }
+    }
+    if (failure) |err| {
+        stderr.diagnostic("rui: Upgrade receipt output incomplete ({s}); retained cleanup paths may be missing.\n", .{@errorName(err)});
+        return err;
     }
 }
 
@@ -1393,7 +1404,7 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
     const unfinished_upgrade = self.upgrade_job.started and !self.upgrade_job.finished;
     self.upgrade_job.settle();
     const fatal = (if (ended) |_| self.interrupted.stopped.load(.acquire) else |_| true) or std.meta.isError(restored);
-    self.writeUpgradeReports(fatal or unfinished_upgrade);
+    const receipt = self.writeUpgradeReports(fatal or unfinished_upgrade);
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
     const saved = self.flushSaves();
@@ -1404,12 +1415,16 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
             try restored;
             _ = try answered;
             try saved;
+            try receipt;
             try self.terminal.detached(self.options.store, null, null);
         },
         .conversation => |*left| {
             if (answered) |_| {} else |err| left.ended = err;
             saved catch |err| {
                 left.ended = err;
+            };
+            receipt catch |err| {
+                if (!std.meta.isError(left.ended)) left.ended = err;
             };
             return self.leave(left.*, restored);
         },
