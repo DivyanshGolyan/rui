@@ -118,13 +118,21 @@ fn scanRoot(allocator: Allocator, catalog_allocator: Allocator, io: std.Io, root
     const directory_buffer = try allocator.alignedAlloc(u8, .of(usize), std.Io.Dir.Reader.min_buffer_len);
     defer allocator.free(directory_buffer);
     var iterator = std.Io.Dir.Reader.init(dir, directory_buffer);
-    var children: usize = 0;
+    var children: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (children.items) |name| allocator.free(name);
+        children.deinit(allocator);
+    }
     while (try iterator.next(io)) |child| {
-        children += 1;
-        if (children > max_root_children) return error.SkillDirectoryLimit;
-        if (!validName(child.name)) continue;
+        if (children.items.len == max_root_children) return error.SkillDirectoryLimit;
+        const name = try allocator.dupe(u8, child.name);
+        errdefer allocator.free(name);
+        try children.append(allocator, name);
+    }
+    std.sort.heap([]const u8, children.items, {}, directoryLessThan);
+    for (children.items) |directory_name| {
         // Follow symlink directories, but never recurse into grandchildren.
-        const stat = dir.statFile(io, child.name, .{}) catch |err| switch (err) {
+        const stat = dir.statFile(io, directory_name, .{}) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
@@ -135,7 +143,7 @@ fn scanRoot(allocator: Allocator, catalog_allocator: Allocator, io: std.Io, root
         var candidate_memory: std.heap.ArenaAllocator = .init(allocator);
         defer candidate_memory.deinit();
         const temporary = candidate_memory.allocator();
-        const relative = try std.fs.path.join(temporary, &.{ child.name, "SKILL.md" });
+        const relative = try std.fs.path.join(temporary, &.{ directory_name, "SKILL.md" });
         defer temporary.free(relative);
         const file_stat = dir.statFile(io, relative, .{}) catch |err| switch (err) {
             error.FileNotFound => continue,
@@ -149,12 +157,12 @@ fn scanRoot(allocator: Allocator, catalog_allocator: Allocator, io: std.Io, root
             else => return err,
         };
         defer temporary.free(path);
-        const raw = readSkill(temporary, io, .{ .name = child.name, .description = "", .path = path }) catch |err| switch (err) {
+        const raw = readSkill(temporary, io, .{ .name = directory_name, .description = "", .path = path }) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => return err,
         };
         defer temporary.free(raw);
-        const metadata = try parseMetadata(temporary, raw, child.name) orelse continue;
+        const metadata = try parseMetadata(temporary, raw) orelse continue;
         defer temporary.free(metadata.name);
         defer temporary.free(metadata.description);
         if (findEntry(winners.items, metadata.name) != null) continue;
@@ -165,6 +173,10 @@ fn scanRoot(allocator: Allocator, catalog_allocator: Allocator, io: std.Io, root
             .path = path,
         }));
     }
+}
+
+fn directoryLessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
 }
 
 const Metadata = struct { name: []const u8, description: []const u8 };
@@ -196,7 +208,7 @@ fn trimCr(line: []const u8) []const u8 {
     return if (std.mem.endsWith(u8, line, "\r")) line[0 .. line.len - 1] else line;
 }
 
-fn parseMetadata(allocator: Allocator, raw: []const u8, directory_name: []const u8) !?Metadata {
+fn parseMetadata(allocator: Allocator, raw: []const u8) !?Metadata {
     const source = try frontmatter(raw) orelse return null;
     // yaml_parser_t is larger than 1 KiB. Never copy it or put it on a Host stack.
     const parser = try allocator.create(yaml.yaml_parser_t);
@@ -235,7 +247,7 @@ fn parseMetadata(allocator: Allocator, raw: []const u8, directory_name: []const 
     }
     const parsed_name = name orelse return null;
     const parsed_description = description orelse return null;
-    if (!validName(parsed_name) or !std.mem.eql(u8, parsed_name, directory_name)) return null;
+    if (!validName(parsed_name)) return null;
     if (parsed_description.len == 0) return null;
     const description_view = std.unicode.Utf8View.init(parsed_description) catch return null;
     // A commented document separator is YAML syntax, not a Markdown closing
@@ -494,7 +506,7 @@ pub fn deltaInstruction(allocator: Allocator, delta: Delta) ![]const u8 {
 }
 
 fn expectMetadata(raw: []const u8, expected: []const u8) !void {
-    const metadata = (try parseMetadata(std.testing.allocator, raw, "demo")) orelse return error.ExpectedMetadata;
+    const metadata = (try parseMetadata(std.testing.allocator, raw)) orelse return error.ExpectedMetadata;
     defer std.testing.allocator.free(metadata.name);
     defer std.testing.allocator.free(metadata.description);
     try std.testing.expectEqualStrings("demo", metadata.name);
@@ -520,7 +532,6 @@ test "skills libyaml ignores valid unknown nested metadata without granting auth
         "---\nname: demo\ndescription: missing-end\n",
         "---\nname: demo\n---\n",
         "---\ndescription: absent-name\n---\n",
-        "---\nname: other\ndescription: mismatch\n---\n",
         "---\nname: demo\ndescription: ''\n---\n",
         "---\nname: demo\ndescription: [not, scalar]\n---\n",
         "---\nname: [demo]\ndescription: wrong-type\n---\n",
@@ -534,7 +545,7 @@ test "skills libyaml ignores valid unknown nested metadata without granting auth
         "---\nname: demo\ndescription: valid\n--- # extra document\nvendor: [malformed\n---\n",
         "---\nname: demo\ndescription: valid\n--- # extra document\nvendor: valid\n---\n",
     };
-    for (invalid) |raw| try std.testing.expectEqual(@as(?Metadata, null), try parseMetadata(std.testing.allocator, raw, "demo"));
+    for (invalid) |raw| try std.testing.expectEqual(@as(?Metadata, null), try parseMetadata(std.testing.allocator, raw));
 }
 
 test "skills validates name byte grammar and Unicode character description bounds" {
@@ -631,7 +642,7 @@ test "skills truncates only after validating complete YAML metadata" {
     for (invalid_suffixes) |suffix| {
         const invalid = try std.fmt.allocPrint(allocator, "---\nname: demo\ndescription: {s}{s}---\n", .{ &description, suffix });
         defer allocator.free(invalid);
-        try std.testing.expectEqual(@as(?Metadata, null), try parseMetadata(allocator, invalid, "demo"));
+        try std.testing.expectEqual(@as(?Metadata, null), try parseMetadata(allocator, invalid));
     }
 }
 
@@ -767,6 +778,88 @@ test "skills discovery uses declared names through directory aliases in both roo
     }
 }
 
+test "skills discovery resolves same-root declared-name collisions in directory order" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const candidates = [_]struct { directory: []const u8, description: []const u8 }{
+        .{ .directory = "z-last", .description = "last candidate" },
+        .{ .directory = "a-first", .description = "first candidate" },
+        .{ .directory = "shared", .description = "matching directory" },
+    };
+    for ([_]bool{ false, true }) |reverse| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const root = try fixturePath(allocator, tmp.dir);
+        defer allocator.free(root);
+        try tmp.dir.createDirPath(io, ".git");
+        const home = try std.fs.path.join(allocator, &.{ root, "home" });
+        defer allocator.free(home);
+        const roots = [_][]const u8{ ".agents/skills", "home/.agents/skills" };
+        const names = [_][]const u8{ "shared", "home-only" };
+        for (roots, names) |directory, name| {
+            const invalid = try std.fs.path.join(allocator, &.{ directory, "0-invalid" });
+            defer allocator.free(invalid);
+            try fixtureSkill(tmp.dir, invalid, name, "");
+            for (0..candidates.len) |position| {
+                const candidate = candidates[if (reverse) candidates.len - 1 - position else position];
+                const path = try std.fs.path.join(allocator, &.{ directory, candidate.directory });
+                defer allocator.free(path);
+                try fixtureSkill(tmp.dir, path, name, candidate.description);
+            }
+        }
+        try fixtureSkill(tmp.dir, "home/.agents/skills/0-home", "shared", "home must lose");
+        const catalog = try discover(allocator, io, root, home);
+        defer catalog.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 2), catalog.entries.len);
+        for (roots, names) |directory, name| {
+            const entry = findEntry(catalog.entries, name) orelse return error.ExpectedDeclaredSkill;
+            try std.testing.expectEqualStrings("first candidate", entry.description);
+            const path = try std.fs.path.join(allocator, &.{ root, directory, "a-first/SKILL.md" });
+            defer allocator.free(path);
+            try std.testing.expectEqualStrings(path, entry.path);
+        }
+    }
+}
+
+test "skills discovery deduplicates canonical symlink aliases and ignores alias-only renames" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try fixturePath(allocator, tmp.dir);
+    defer allocator.free(root);
+    try tmp.dir.createDirPath(io, ".git");
+    try fixtureSkill(tmp.dir, "external/source", "demo", "linked metadata");
+    try tmp.dir.createDirPath(io, ".agents/skills");
+    try tmp.dir.createDirPath(io, "home/.agents/skills");
+    try tmp.dir.symLink(io, "../../external/source", ".agents/skills/a-link", .{ .is_directory = true });
+    try tmp.dir.symLink(io, "../../external/source", ".agents/skills/z-link", .{ .is_directory = true });
+    try tmp.dir.symLink(io, "../../../external/source", "home/.agents/skills/Home_Link", .{ .is_directory = true });
+    const home = try std.fs.path.join(allocator, &.{ root, "home" });
+    defer allocator.free(home);
+    const before = try discover(allocator, io, root, home);
+    defer before.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), before.entries.len);
+    try std.testing.expectEqualStrings("demo", before.entries[0].name);
+    const expected_path = try std.fs.path.join(allocator, &.{ root, "external/source/SKILL.md" });
+    defer allocator.free(expected_path);
+    try std.testing.expectEqualStrings(expected_path, before.entries[0].path);
+    try tmp.dir.deleteFile(io, ".agents/skills/a-link");
+    try tmp.dir.rename(".agents/skills/z-link", tmp.dir, ".agents/skills/Vendor_Renamed", io);
+    const after = try discover(allocator, io, root, home);
+    defer after.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), after.entries.len);
+    try std.testing.expectEqualStrings(expected_path, after.entries[0].path);
+    const delta = try diff(allocator, before, after);
+    defer delta.deinit(allocator);
+    try std.testing.expect(delta.isEmpty());
+    try tmp.dir.deleteFile(io, ".agents/skills/Vendor_Renamed");
+    const home_only = try discover(allocator, io, root, home);
+    defer home_only.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), home_only.entries.len);
+    try std.testing.expectEqualStrings(expected_path, home_only.entries[0].path);
+}
+
 test "skills discovery chooses nearest repository and valid project winners over home" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -780,11 +873,11 @@ test "skills discovery chooses nearest repository and valid project winners over
     // gitdir: discovery only needs the nearest repository boundary.
     try tmp.dir.writeFile(io, .{ .sub_path = "repo/nested/.git", .data = "gitdir: /not-mounted/worktree\n" });
     try fixtureSkill(tmp.dir, "repo/.agents/skills/outer", "outer", "must not discover ancestor");
-    try fixtureSkill(tmp.dir, "repo/nested/.agents/skills/shared", "shared", "project wins");
-    try fixtureSkill(tmp.dir, "repo/nested/.agents/skills/bad", "wrong-name", "invalid project");
+    try fixtureSkill(tmp.dir, "repo/nested/.agents/skills/Vendor_Shared", "shared", "project wins");
+    try fixtureSkill(tmp.dir, "repo/nested/.agents/skills/Vendor_Bad", "Bad_Name", "invalid project");
     try fixtureSkill(tmp.dir, "repo/nested/work/.agents/skills/local", "local", "must not discover workspace root inside repository");
     try fixtureSkill(tmp.dir, "home/.agents/skills/shared", "shared", "home shadowed");
-    try fixtureSkill(tmp.dir, "home/.agents/skills/bad", "bad", "valid home fallback");
+    try fixtureSkill(tmp.dir, "home/.agents/skills/Vendor_Fallback", "bad", "valid home fallback");
     try fixtureSkill(tmp.dir, "home/.agents/skills/z-last", "z-last", "home only");
     const workspace = try std.fs.path.join(allocator, &.{ root, "repo/nested/work" });
     defer allocator.free(workspace);
@@ -798,7 +891,7 @@ test "skills discovery chooses nearest repository and valid project winners over
     try std.testing.expectEqualStrings("shared", catalog.entries[1].name);
     try std.testing.expectEqualStrings("project wins", catalog.entries[1].description);
     try std.testing.expectEqualStrings("z-last", catalog.entries[2].name);
-    const expected_path = try std.fs.path.join(allocator, &.{ root, "repo/nested/.agents/skills/shared/SKILL.md" });
+    const expected_path = try std.fs.path.join(allocator, &.{ root, "repo/nested/.agents/skills/Vendor_Shared/SKILL.md" });
     defer allocator.free(expected_path);
     try std.testing.expectEqualStrings(expected_path, catalog.entries[1].path);
 }

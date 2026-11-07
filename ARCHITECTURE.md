@@ -491,11 +491,12 @@ The shared Host capture owner discovers only `<repository>/.agents/skills` and t
 The repository is the nearest ancestor with a `.git` directory or worktree `.git` file; outside a repository, the Session Workspace is the repository root for discovery.
 Only direct child directories containing a valid `SKILL.md` are candidates, including symlinks; broken paths and missing roots are absent, while other root/file I/O failures fail the whole capture.
 A valid repository skill wins a same-name home skill.
+Within each root, the lexically smallest valid candidate directory name in bytewise order wins a repeated declared name.
 No `.claude` roots, marketplace discovery, installation or package machinery participates.
 
 Pinned LibYAML validates the complete frontmatter document, including quoted, literal and folded scalars.
 Required `name` and nonempty Unicode `description` follow the Agent Skills format, except that overlong descriptions remain discoverable.
-The name must match its candidate directory.
+The declared name, not the directory or symlink spelling, is the catalog and invocation identity.
 Catalog descriptions longer than 1,024 Unicode code points are shortened to the first 1,023 followed by `…`, keeping discovery useful without unbounded model metadata.
 This changes only catalog metadata; the source file and full invocation content remain unchanged.
 Unknown optional/vendor fields are ignored, including `disable-model-invocation` even when true and tool/permission metadata.
