@@ -270,6 +270,15 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(["test-logic"], result["native_targets"])
         self.assertEqual([], result["server_targets"])
 
+    def test_inline_skill_core_selects_its_exact_boundary(self):
+        result = select(["src/skill_completion.zig"], "review", AVAILABLE)
+        self.assertEqual(["stack-frames", "test-logic"], result["targets"])
+        self.assertEqual(["test-logic"], result["native_targets"])
+        self.assertEqual([], result["server_targets"])
+        development = select(["src/skill_completion.zig"], "development", AVAILABLE)
+        self.assertEqual(["test-logic"], development["targets"])
+        self.assertEqual([], development["native_targets"])
+
     def test_every_functional_core_selects_the_boundary_check(self):
         source = (Path(__file__).resolve().parents[2] / "src" / "logic_tests.zig").read_text()
         listed = source.split("const cores = .{", 1)[1].split("\n};", 1)[0]
