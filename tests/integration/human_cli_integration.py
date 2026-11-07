@@ -8392,5 +8392,7 @@ def main(selected="all", *, held_owner=None):
 
 if __name__ == "__main__":
     held_owner = os.environ.get("RUI_TEST_HELD_OWNER")
+    if held_owner:
+        held_owner = str(pathlib.Path(held_owner).resolve())
     host_process.enter()
     main(sys.argv[2] if len(sys.argv) == 3 else "all", held_owner=held_owner)
