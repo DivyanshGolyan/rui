@@ -1467,7 +1467,32 @@ fn scroll(self: *Self, down: bool, page: bool) !void {
     const screen = self.terminal.screen;
     if (screen.view == .live) {
         if (down) return; // Live output already shows the latest rows.
+        // All-fitting output with no canonical predecessor is unchanged by
+        // Up: selecting a source is not itself backward movement.
+        if (screen.live.scroll.scroll.y == 0) {
+            const front = try screen.liveStart();
+            const plan = reads.plan(&self.live.marks, &self.live.echoes, front, self.live.lowest);
+            if (self.reading.opening or (plan.next() == null and plan.older == null and !plan.gap)) return;
+        }
         try self.beginTranscript();
+    }
+    if (down and screen.view == .transcript) {
+        const appended = try screen.catchUp();
+        // Only the admitted prefix may have fit. Count the live blocks after
+        // that exact normalized endpoint, not simply the newest N identities.
+        const endpoint = switch (screen.tail) {
+            .retained, .limited => |end| end,
+            .gap => 0,
+        };
+        const after = if (endpoint >= screen.live.text.origin and endpoint <= screen.live.text.origin + screen.live.text.length)
+            screen.live.text.collapsed(@intCast(endpoint - screen.live.text.origin), screen.live.text.length).count
+        else
+            0;
+        var index = appended;
+        while (index != 0) {
+            index -= 1;
+            self.transcript.blocks.append(self.live.blocks.fromEnd(after + index));
+        }
     }
     self.transcript.older_failed = false; // A new scroll may retry a failed load.
     if (screen.browse(down, page)) try screen.latest();
@@ -2526,8 +2551,8 @@ test "a transcript begun before grown live output is drawn shows the gap, not a 
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Screen);
     defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
+    try Screen.Test.init(screen, std.testing.io, &environ, false);
+    defer Screen.Test.deinit(screen);
     var terminal: Terminal = .{ .original = undefined, .flags = undefined, .screen = screen };
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false } };
     try screen.append("GROWS-FIRST\n");
@@ -2536,7 +2561,7 @@ test "a transcript begun before grown live output is drawn shows the gap, not a 
     for (0..45000) |_| try screen.append("\u{200b}");
     try screen.append("\nGROWS-END\n");
     try self.beginTranscript();
-    try std.testing.expect(std.mem.indexOf(u8, screen.browsing.text(), "Earlier rows left this view.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, screen.browsing.text.text(), "Earlier rows left this view.") != null);
     try std.testing.expectEqual(@as(?u64, 3), if (self.transcript.older) |cursor| cursor.end else null);
 }
 
@@ -4057,6 +4082,50 @@ test "a change run from the /status page replies under the page, which shows the
             try std.testing.expect(rowWith(held.screen, " Name ", &storage) == null);
         }
     }
+}
+
+test "all-fitting no-older Up and PgUp are identical cells, while real history and motion detach" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    for ([_]usize{ 0, 4, 9 }) |lines| {
+        held.screen.live.text.clear();
+        for (0..lines) |_| try held.screen.append("line\n");
+        self.live.marks = .{};
+        self.live.marks.record(.{ .offset = 0, .cursor = null, .admitted = 0 });
+        _ = held.screen.presented(try Screen.Test.render(held.screen, &out.writer, size, "", 0, .{}, &.{}));
+        const rendered = out.written().len;
+        for ([_]bool{ false, true }) |page| {
+            try self.scroll(false, page);
+            try std.testing.expectEqual(Screen.ViewKind.live, held.screen.view);
+            _ = held.screen.presented(try Screen.Test.render(held.screen, &out.writer, size, "", 0, .{}, &.{}));
+            try std.testing.expectEqual(rendered, out.written().len);
+        }
+    }
+    self.reading.opening = true;
+    try self.scroll(false, true);
+    try std.testing.expectEqual(Screen.ViewKind.live, held.screen.view);
+    self.reading.opening = false;
+    self.live.marks.items[0].cursor = .{ .end = 5 };
+    try self.scroll(false, true);
+    try std.testing.expectEqual(Screen.ViewKind.transcript, held.screen.view);
+    try std.testing.expectEqual(@as(?u64, 5), self.transcript.older.?.end);
+    try std.testing.expect(self.olderWanted());
+    try held.screen.latest();
+    for (0..40) |_| try held.screen.append("more\n");
+    _ = held.screen.presented(try Screen.Test.render(held.screen, &out.writer, size, "", 0, .{}, &.{}));
+    const before = held.screen.live.scroll.scroll.y;
+    try self.scroll(false, false);
+    try std.testing.expectEqual(before - 1, held.screen.browsing.scroll.scroll.y);
+    try self.scroll(false, true);
+    try std.testing.expectEqual(before - 1 - held.screen.height, held.screen.browsing.scroll.scroll.y);
+    try sendKeys(self, "\x1b[200~draft\nsecond\x1b[201~");
+    try sendKeys(self, "\x1b[1;5F");
+    try std.testing.expectEqual(Screen.ViewKind.live, held.screen.view);
+    try std.testing.expectEqualStrings("draft\nsecond", self.input.composition().bytes);
 }
 
 test "upgrade command stays local and preserves the actual draft cursor and original submission" {

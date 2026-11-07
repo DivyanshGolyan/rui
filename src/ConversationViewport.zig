@@ -2,6 +2,9 @@
 //! vaxis lays out and draws rows (`Window.print`); this module keeps retained
 //! bytes, trusted styles and which row of which logical line a view starts at.
 const std = @import("std");
+const OutputBlocks = @import("output_blocks.zig");
+const AnswerRenderer = @import("AnswerRenderer.zig");
+const TableRow = @import("table_row.zig");
 const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
@@ -11,6 +14,9 @@ pub const Document = Sized(capacity, true);
 pub const Method = gwidth.Method;
 
 pub const capacity = 256 * 1024;
+/// Deterministic per-unit normalized inline payload limit, before any paint.
+/// Source beyond this finite expansion keeps its safe literal projection.
+pub const cell_output_limit = 8192;
 /// Clusters wider than the narrowest supported terminal are shown escaped.
 pub const widest_cluster = 8;
 /// Longer clusters (for example thousands of combining marks) are shown
@@ -537,69 +543,33 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return .{ .offset = position.offset, .row = @min(position.row, self.lineRows(layout, position.offset) - 1) };
         }
 
-        fn lastRow(self: *const Self, layout: Layout) Position {
-            const bytes = self.text();
-            if (bytes.len == 0) return .{};
-            const last = self.previousLine(if (bytes[bytes.len - 1] == '\n') bytes.len else bytes.len + 1) orelse 0;
-            return .{ .offset = last, .row = self.lineRows(layout, last) - 1 };
+        pub fn rowCount(self: *const Self, layout: Layout) usize {
+            var total: usize = 0;
+            var units = Units.forward(self, 0);
+            while (units.next()) |unit| total += self.unitRows(layout, unit);
+            return total;
         }
 
-        pub fn down(self: *const Self, layout: Layout, from: Position, moves: usize) Position {
-            var position = self.clamp(layout, from);
-            var remaining = moves;
-            while (remaining != 0) {
-                const used = self.lineRows(layout, position.offset);
-                if (remaining < used - position.row) {
-                    position.row += @intCast(remaining);
-                    break;
-                }
-                remaining -= used - position.row;
-                position = .{ .offset = self.nextLine(position.offset) orelse return .{ .offset = position.offset, .row = used - 1 } };
+        pub fn positionAtRow(self: *const Self, layout: Layout, row: usize) Position {
+            var remaining = row;
+            var units = Units.forward(self, 0);
+            while (units.next()) |unit| {
+                const used = self.unitRows(layout, unit);
+                if (remaining < used) return .{ .offset = unit.start, .row = @intCast(remaining) };
+                remaining -= used;
             }
-            return position;
+            return .end;
         }
 
-        pub fn up(self: *const Self, layout: Layout, from: Position, moves: usize) Position {
-            var position = self.clamp(layout, from);
-            var remaining = moves;
-            while (remaining > position.row) {
-                remaining -= position.row + 1;
-                const previous = self.previousLine(position.offset) orelse return .{ .offset = position.offset };
-                position = .{ .offset = previous, .row = self.lineRows(layout, previous) - 1 };
+        pub fn rowOf(self: *const Self, layout: Layout, position: Position) usize {
+            var row: usize = 0;
+            var units = Units.forward(self, 0);
+            while (units.next()) |unit| {
+                const used = self.unitRows(layout, unit);
+                if (position.offset < unit.end) return row + @min(position.row, used - 1);
+                row += used;
             }
-            position.row -= @intCast(remaining);
-            return position;
-        }
-
-        /// The first row that shows the last `height` rows.
-        pub fn bottom(self: *const Self, layout: Layout, height: usize) Position {
-            return self.up(layout, self.lastRow(layout), height -| 1);
-        }
-
-        pub fn first(self: *const Self, layout: Layout, height: usize) Position {
-            const last = self.bottom(layout, height);
-            return if (self.top) |top| self.clamp(layout, top).min(last) else last;
-        }
-
-        /// Moves by `rows` (a page is the view height). Key repeat may deliver
-        /// many events before a frame: never skip unread Action rows; only
-        /// delivered frames advance that cap.
-        pub fn browse(self: *Self, layout: Layout, down_: bool, rows_: usize, height: usize, first_unseen: ?Position) void {
-            const current = self.first(layout, height);
-            if (!down_) {
-                self.top = self.up(layout, current, rows_);
-                return;
-            }
-            const moved = self.down(layout, current, rows_).min(self.bottom(layout, height));
-            self.top = if (first_unseen) |unseen| moved.min(unseen) else moved;
-        }
-
-        pub fn atTop(self: *const Self, layout: Layout, height: usize) bool {
-            return self.first(layout, height).order(.{}) == .eq;
-        }
-
-        pub fn atBottom(self: *const Self, layout: Layout, height: usize) bool {
-            return self.first(layout, height).order(self.bottom(layout, height)) != .lt;
+            return row;
         }
 
         /// Where each collapsed block's summary starts within text bytes
@@ -637,22 +607,138 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// Places complete older text before this text, keeping the same rows
         /// in view. Newer bytes beyond capacity leave from the end at a line
         /// boundary; returns whether any did.
-        pub fn prepend(self: *Self, older: anytype, layout: Layout, height: usize) !bool {
+        pub fn appendRetained(self: *Self, source: *const Self, start: usize) usize {
+            std.debug.assert(styled and start <= source.length);
+            const suffix = source.length - start;
+            var count = @min(suffix, std.math.sub(usize, self.available(), self.length) catch return 0);
+            var planned: OutputBlocks.Retained = .{};
+            while (true) {
+                if (count < suffix) count = if (std.mem.lastIndexOfScalar(u8, source.bytes[start..][0..count], '\n')) |line| line + 1 else 0;
+                if (!semantic) break;
+                planned = self.blocks;
+                var continuation: ?struct { old: OutputBlocks.Span(u32), source: OutputBlocks.Span(u32) } = null;
+                if ((count != 0 or suffix == 0) and planned.count != 0) {
+                    const last = planned.items[planned.count - 1];
+                    for (source.blocks.slice()) |block| {
+                        if (block.start < start and (start < block.end or (suffix == 0 and start == block.end)) and last.end == self.length and
+                            last.end - last.start == start - block.start and
+                            std.mem.eql(u8, self.bytes[last.start..last.end], source.bytes[block.start..start]) and
+                            std.mem.eql(u8, self.styles[last.start..last.end], source.styles[block.start..start]))
+                        {
+                            if (block.data == .quote) {
+                                planned.items[planned.count - 1].end = @intCast(self.length + @min(start + count, block.end) - start);
+                            } else {
+                                continuation = .{ .old = last, .source = block };
+                                planned.count -= 1;
+                            }
+                            break;
+                        }
+                    }
+                }
+                planned.copy(&source.blocks, source.bytes[0..source.length], start, start + count, self.length) catch {
+                    // Slot pressure ends before the first unadmitted block,
+                    // never after silently dropping its raw provenance.
+                    if (count == 0) return 0;
+                    const admitted = OutputBlocks.limit - self.blocks.count;
+                    var seen: usize = 0;
+                    var permitted: usize = 0;
+                    for (source.blocks.slice()) |block| {
+                        if (block.end <= start or block.start >= start + count) continue;
+                        if (seen == admitted) {
+                            permitted = block.start -| start;
+                            break;
+                        }
+                        seen += 1;
+                    }
+                    count = @min(count - 1, permitted);
+                    continue;
+                };
+                if (continuation) |joined| {
+                    // The complete prior byte/style prefix proves this SAME
+                    // block across prepend rebasing. Its CURRENT source proof
+                    // also owns pending promotion and metadata-only downgrade.
+                    const stop = @min(start + count, joined.source.end);
+                    var value = joined.old;
+                    value.end = @intCast(self.length + stop - start);
+                    value.data = .literal_raw;
+                    value.header_end = 0;
+                    value.delimiter_end = 0;
+                    value.complete_end = 0;
+                    if (joined.source.data == .table and joined.source.delimiter_end <= stop) {
+                        const base = joined.old.start;
+                        const from = joined.source.start;
+                        value.data = joined.source.data;
+                        value.header_end = @intCast(base + joined.source.header_end - from);
+                        value.delimiter_end = @intCast(base + joined.source.delimiter_end - from);
+                        const complete = if (joined.source.complete_end <= stop) joined.source.complete_end else from + std.mem.lastIndexOfScalar(u8, source.bytes[from..stop], '\n').? + 1;
+                        value.complete_end = @intCast(base + complete - from);
+                    }
+                    if (count == 0) {
+                        std.debug.assert(planned.reserve(value));
+                    } else planned.items[self.blocks.count - 1] = value;
+                }
+                const room = self.plannedRoom(self.length, &planned) orelse {
+                    // The copied descriptor itself may not fit. Retry empty;
+                    // pinned bytes never leave to make room for a suffix.
+                    if (count == 0) return 0;
+                    count = 0;
+                    continue;
+                };
+                if (count > room) {
+                    count = room;
+                    continue;
+                }
+                break;
+            }
+            if (semantic and count == 0 and planned.count == self.blocks.count) {
+                var unchanged = true;
+                for (planned.slice(), self.blocks.slice()) |after, before| unchanged = unchanged and OutputBlocks.same(u32, before, after);
+                if (unchanged) return 0;
+            }
+            if (semantic) self.blocks.clear();
+            self.copyInterval(.{ .bytes = source.bytes[0..source.length], .styles = &source.styles }, start, start + count, self.length) catch unreachable;
+            if (semantic) self.blocks = planned;
+            self.length += count;
+            self.dirty = true;
+            self.generation +%= 1;
+            return count;
+        }
+
+        /// Places complete older text before retained text. Newer bytes
+        /// beyond capacity leave from the end at a line
+        /// boundary; returns whether any did.
+        pub fn prepend(self: *Self, older: anytype) !bool {
             std.debug.assert(older.control_length == 0 and older.length <= limit);
             try self.prepare();
-            const anchor = self.first(layout, height);
-            var keep = self.text().len;
-            if (older.length + keep > limit) {
-                keep = limit - older.length;
-                keep = if (std.mem.lastIndexOfScalar(u8, self.bytes[0..keep], '\n')) |line| line + 1 else 0;
+            var keep = @min(self.text().len, limit - older.length);
+            const blocks = if (semantic) self.blocks else OutputBlocks.Retained{};
+            var planned: OutputBlocks.Retained = .{};
+            while (true) {
+                if (keep < self.text().len) keep = if (std.mem.lastIndexOfScalar(u8, self.bytes[0..keep], '\n')) |line| line + 1 else 0;
+                if (!semantic) break;
+                planned = if (older.retainedBlocks()) |marks| marks.* else .{};
+                planned.copy(&blocks, self.bytes[0..self.length], 0, keep, older.length) catch {
+                    const admitted = OutputBlocks.limit - if (older.retainedBlocks()) |marks| marks.count else @as(usize, 0);
+                    if (keep == 0) return error.BlockCapacity;
+                    keep = @min(keep - 1, blocks.items[admitted].start);
+                    continue;
+                };
+                const room = self.plannedRoom(older.length, &planned) orelse {
+                    if (keep == 0) return error.BlockCapacity;
+                    keep = 0;
+                    continue;
+                };
+                if (keep > room) {
+                    keep = room;
+                    continue;
+                }
+                break;
             }
             const trimmed = keep != self.text().len or self.control_length != 0;
-            std.mem.copyBackwards(u8, self.bytes[older.length..][0..keep], self.bytes[0..keep]);
-            @memcpy(self.bytes[0..older.length], older.bytes[0..older.length]);
-            if (styled) {
-                std.mem.copyBackwards(u8, self.styles[older.length..][0..keep], self.styles[0..keep]);
-                @memcpy(self.styles[0..older.length], older.styles[0..older.length]);
-            }
+            if (semantic) self.blocks.clear();
+            try self.copyInterval(.{ .bytes = self.bytes[0..self.length], .styles = if (styled) self.styles[0..self.length] else &.{} }, 0, keep, older.length);
+            try self.copyInterval(.{ .bytes = older.bytes[0..older.length], .styles = if (styled) older.styles[0..older.length] else &.{} }, 0, older.length, 0);
+            if (semantic) self.blocks = planned;
             self.length = older.length + keep;
             if (trimmed) {
                 self.control_length = 0;
@@ -660,13 +746,106 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
             self.origin = older.origin;
             self.dirty = true;
+            self.generation +%= 1;
             try self.prepare();
-            // Older text ends at a line boundary, so its lines precede ours.
-            self.top = .{ .offset = anchor.offset + older.length, .row = anchor.row };
             return trimmed;
         }
     };
 }
+
+/// Immutable layout projection. Byte positions remain source/consent
+/// coordinates; ScrollView is the only stored navigation coordinate.
+pub const TextRows = struct {
+    text: *const Document,
+    layout: Layout,
+    total: usize,
+
+    pub fn init(text: *const Document, layout: Layout) TextRows {
+        return .{ .text = text, .layout = layout, .total = text.rowCount(layout) };
+    }
+    pub fn row(self: TextRows, at: Position) usize {
+        if (at.offset <= self.text.length / 2) return self.text.rowOf(self.layout, at);
+        var units = Document.Units.reverse(self.text, self.text.length);
+        var remaining = self.total;
+        while (units.previous()) |unit| {
+            const used = self.text.unitRows(self.layout, unit);
+            remaining -= used;
+            if (unit.start <= at.offset) return if (at.offset >= self.text.length) self.total else remaining + @min(at.row, used - 1);
+        }
+        return 0;
+    }
+    pub fn position(self: TextRows, at: usize) Position {
+        if (at >= self.total) return .end;
+        if (at <= self.total / 2) return self.text.positionAtRow(self.layout, at);
+        var units = Document.Units.reverse(self.text, self.text.length);
+        var remaining = self.total;
+        while (units.previous()) |unit| {
+            remaining -= self.text.unitRows(self.layout, unit);
+            if (remaining <= at) return .{ .offset = unit.start, .row = @intCast(at - remaining) };
+        }
+        unreachable;
+    }
+
+    pub fn paint(self: TextRows, scroll: *vaxis.widgets.ScrollView, parent: vaxis.Window, colour: bool, scratch: std.mem.Allocator) !void {
+        try self.text.checkPaintWindow(parent, true);
+        if (self.total == 0) return;
+        const bounds = scroll.bounds(parent);
+        const first = self.position(bounds.y1);
+        if (first.order(.end) == .eq) return;
+        var row_: usize = bounds.y1 - first.row;
+        var units = Document.Units.forward(self.text, first.offset);
+        while (units.next()) |unit| {
+            if (row_ >= bounds.y2) break;
+            const used = self.text.unitRows(self.layout, unit);
+            if (row_ + used > bounds.y1) {
+                const delta: i17 = if (row_ >= bounds.y1) @intCast(row_ - bounds.y1) else -@as(i17, @intCast(bounds.y1 - row_));
+                const window = parent.child(.{ .y_off = delta, .width = @intCast(bounds.x2 - bounds.x1) });
+                _ = try self.text.printUnit(window, 0, unit, true, colour, .{}, .{ .scratch = scratch, .home = self.layout.home });
+            }
+            row_ += used;
+        }
+    }
+};
+
+pub const Pane = struct {
+    text: Document = .{},
+    scroll: vaxis.widgets.ScrollView = .{},
+    // Only transcripts have trailing canvas: preserve a logical first row
+    // when text prepends or geometry grows, never create overscroll on Down.
+    blank_tail: usize = 0,
+    // Measured full-buffer census was 7–18 ms per clock frame at 240 KiB.
+    // Cache one scalar total, never rows, cells, or a second scroll position.
+    census: ?struct { generation: u64, layout: Layout, sidenotes: bool, quotes: bool, total: usize } = null,
+
+    pub fn projection(self: *Pane, layout: Layout) TextRows {
+        if (self.census) |known| {
+            if (known.generation == self.text.generation and std.meta.eql(known.layout, layout) and known.sidenotes == self.text.sidenotes and known.quotes == self.text.quotes)
+                return .{ .text = &self.text, .layout = layout, .total = known.total };
+        }
+        const rows = TextRows.init(&self.text, layout);
+        self.census = .{ .generation = self.text.generation, .layout = layout, .sidenotes = self.text.sidenotes, .quotes = self.text.quotes, .total = rows.total };
+        return rows;
+    }
+    pub fn anchor(self: *Pane, layout: Layout) Position {
+        return self.projection(layout).position(self.scroll.scroll.y);
+    }
+    pub fn restore(self: *Pane, layout: Layout, at: Position, height: usize, pin: bool) void {
+        const rows = self.projection(layout);
+        self.scroll.scroll.y = @min(rows.row(at), rows.total -| 1);
+        self.blank_tail = if (pin) (self.scroll.scroll.y +| height) -| rows.total else 0;
+    }
+    pub fn move(self: *Pane, layout: Layout, down: bool, count: usize, height: usize, unseen: ?Position) void {
+        const rows = self.projection(layout);
+        if (down) {
+            self.scroll.scroll.y +|= count;
+            if (unseen) |at| self.scroll.scroll.y = @min(self.scroll.scroll.y, rows.row(at));
+        } else {
+            self.scroll.scroll.y -|= count;
+            self.blank_tail = @min(self.blank_tail, (self.scroll.scroll.y +| height) -| rows.total);
+        }
+        self.scroll.scroll.restrictTo(0, (rows.total +| self.blank_tail) -| height);
+    }
+};
 
 const TestScreen = struct {
     screen: vaxis.Screen,
@@ -788,6 +967,22 @@ test "positions move by laid-out rows and never skip the first unseen row" {
     var empty: Sized(16, false) = .{};
     try std.testing.expectEqual(@as(usize, 0), empty.measure(layout, .{}, 9).rows);
     try std.testing.expect(empty.atTop(layout, 2) and empty.atBottom(layout, 2));
+}
+
+test "row projection preserves source positions and wraps without navigation state" {
+    var view: Sized(256, false) = .{};
+    try view.append("one two three four five six\nseven\neight\n");
+    const layout: Layout = .{ .width = 10, .method = .unicode };
+    try std.testing.expectEqual(@as(usize, 5), view.rowCount(layout));
+    for ([_]Position{ .{}, .{ .row = 1 }, .{ .row = 2 }, .{ .offset = 28 }, .{ .offset = 34 } }, 0..) |at, row| {
+        try std.testing.expectEqual(at, view.positionAtRow(layout, row));
+        try std.testing.expectEqual(row, view.rowOf(layout, at));
+    }
+    try std.testing.expectEqual(Position.end, view.positionAtRow(layout, 5));
+    try std.testing.expectEqual(@as(usize, 0), view.rowOf(.{ .width = 40, .method = .unicode }, .{ .row = 2 }));
+    var empty: Sized(16, false) = .{};
+    try std.testing.expectEqual(@as(usize, 0), empty.rowCount(layout));
+    try std.testing.expectEqual(Position.end, empty.positionAtRow(layout, 0));
 }
 
 test "viewport retention is finite and split Unicode is not rendered early" {
@@ -1145,6 +1340,117 @@ test "rendered local path cells carry the file URI but the sentence semicolon do
         }
     }
 }
+test "row projection cost at retained capacity" {
+    const pane = try std.testing.allocator.create(Pane);
+    defer std.testing.allocator.destroy(pane);
+    const layout: Layout = .{ .width = 79, .method = .unicode };
+    for ([_][]const u8{ "short line\n", "abcdefghijklmnopqrstuvwxyz", "\x1b[90m中 é 🐄\x1b[39m\n", (comptime linkBytes("https://example.test", "linked text")) ++ "\n" }, 0..) |line, index| {
+        pane.* = .{};
+        while (pane.text.length < 240 * 1024) try pane.text.append(line);
+        try pane.text.prepare();
+        const start = std.Io.Clock.awake.now(std.testing.io);
+        for (0..10) |_| {
+            var offset = pane.text.length;
+            for (0..21) |_| {
+                const previous = pane.text.previousLine(offset) orelse break;
+                offset = previous;
+                std.mem.doNotOptimizeAway(pane.text.lineRows(layout, offset));
+                if (offset == 0) break;
+            }
+        }
+        const cold = std.Io.Clock.awake.now(std.testing.io);
+        _ = pane.projection(layout);
+        const middle = std.Io.Clock.awake.now(std.testing.io);
+        for (0..10) |_| {
+            const rows = pane.projection(layout);
+            std.mem.doNotOptimizeAway(rows.position(rows.total -| 21));
+        }
+        const end = std.Io.Clock.awake.now(std.testing.io);
+        std.debug.print("row cost case{d}: tail={d}ns cold={d}ns projection={d}ns /10\n", .{ index, cold.nanoseconds - start.nanoseconds, middle.nanoseconds - cold.nanoseconds, end.nanoseconds - middle.nanoseconds });
+    }
+}
+
+test "the library row owner preserves a pinned short canvas without downward overscroll" {
+    const pane = try std.testing.allocator.create(Pane);
+    defer std.testing.allocator.destroy(pane);
+    pane.* = .{};
+    const layout: Layout = .{ .width = 19, .method = .unicode };
+    for (0..10) |_| try pane.text.append("line\n");
+    try pane.text.prepare();
+    pane.restore(layout, .{ .offset = 15 }, 10, true);
+    try std.testing.expectEqual(@as(usize, 3), pane.scroll.scroll.y);
+    try std.testing.expectEqual(@as(usize, 3), pane.blank_tail);
+    pane.move(layout, true, 100, 10, null);
+    try std.testing.expectEqual(@as(usize, 3), pane.scroll.scroll.y);
+    pane.move(layout, false, 1, 10, null);
+    try std.testing.expectEqual(@as(usize, 2), pane.scroll.scroll.y);
+    try std.testing.expectEqual(@as(usize, 2), pane.blank_tail);
+    pane.move(layout, true, 100, 10, null);
+    try std.testing.expectEqual(@as(usize, 2), pane.scroll.scroll.y);
+    const anchor = pane.anchor(layout);
+    try pane.text.append("new\nnew\nnew\n");
+    try pane.text.prepare();
+    pane.restore(layout, anchor, 10, true);
+    try std.testing.expectEqual(@as(usize, 2), pane.scroll.scroll.y);
+    try std.testing.expectEqual(@as(usize, 0), pane.blank_tail);
+    pane.move(layout, true, 1, 10, null);
+    try std.testing.expectEqual(@as(usize, 3), pane.scroll.scroll.y);
+}
+
+test "row projection cache follows every text edit and complete layout key" {
+    const pane = try std.testing.allocator.create(Pane);
+    defer std.testing.allocator.destroy(pane);
+    pane.* = .{};
+    try pane.text.append("alpha beta gamma\nline\n");
+    try pane.text.prepare();
+    for ([_]u16{ 8, 79, 8 }) |width| {
+        const layout: Layout = .{ .width = width, .method = .unicode };
+        for ([_]bool{ true, false }) |sidenotes| {
+            pane.text.sidenotes = sidenotes;
+            pane.text.quotes = !sidenotes;
+            const rows = pane.projection(layout);
+            try std.testing.expectEqual(pane.text.rowCount(layout), rows.total);
+            for (0..rows.total) |row| {
+                try std.testing.expectEqual(pane.text.positionAtRow(layout, row), rows.position(row));
+                try std.testing.expectEqual(row, rows.row(rows.position(row)));
+            }
+        }
+    }
+    const layout: Layout = .{ .width = 79, .method = .wcwidth };
+    try pane.text.append("new\n");
+    try pane.text.prepare();
+    try std.testing.expectEqual(@as(usize, 3), pane.projection(layout).total);
+    var older: Sized(64, true) = .{};
+    try older.append("older\n");
+    _ = try pane.text.prepend(&older);
+    try std.testing.expectEqual(@as(usize, 4), pane.projection(layout).total);
+    pane.text.discardFront(pane.text.origin + 6);
+    try std.testing.expectEqual(@as(usize, 3), pane.projection(layout).total);
+    pane.text.clear();
+    try std.testing.expectEqual(@as(usize, 0), pane.projection(layout).total);
+}
+
+test "ScrollView translated printing keeps wrapped link cells and hanging indentation" {
+    const pane = try std.testing.allocator.create(Pane);
+    defer std.testing.allocator.destroy(pane);
+    pane.* = .{};
+    try pane.text.append("• " ++ comptime linkBytes("https://example.test", "alpha beta gamma delta epsilon zeta") ++ "\n");
+    try pane.text.prepare();
+    const layout: Layout = .{ .width = 12, .method = .unicode };
+    var screen: TestScreen = undefined;
+    const window = screen.window(13, 3);
+    pane.scroll.scroll.y = 1;
+    const rows = pane.projection(layout);
+    pane.scroll.draw(window, .{ .cols = layout.width, .rows = rows.total });
+    try rows.paint(&pane.scroll, window, false, std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), pane.scroll.scroll.y);
+    try std.testing.expectEqualStrings(" ", screen.screen.readCell(0, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("g", screen.screen.readCell(2, 0).?.char.grapheme);
+    try std.testing.expectEqualStrings("https://example.test", screen.screen.readCell(2, 0).?.link.uri);
+    try std.testing.expectEqualStrings("d", screen.screen.readCell(2, 1).?.char.grapheme);
+    try std.testing.expectEqualStrings("▐", screen.screen.readCell(12, 0).?.char.grapheme);
+}
+
 test "one logical word keeps its golden wrapping across more than 64 retained style runs" {
     const word: [80]u8 = @splat('W');
     for ([_][]const u8{ "", "p " }) |prefix| {

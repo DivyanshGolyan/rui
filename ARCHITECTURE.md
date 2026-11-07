@@ -2716,8 +2716,15 @@ It retains a bounded latest view (256 KiB each for live text and a selected insp
 PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines and the mouse wheel scroll it; Esc, Ctrl-G, End on an empty draft or scrolling past the end returns to the latest view, or to a pending Action.
 At the latest view, Esc, Ctrl-G or End on an empty draft returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view, running command or unresolved submission; a draft keeps the conversation open, and the status line says to clear it first.
 Sending a Message returns to the latest view, where it and its reply appear, and a page asked for before it no longer opens over it.
-With nothing said yet, scrolling up reaches `Start of conversation`.
-Scrolling up from live text freezes a transcript copy that starts at the first retained read boundary.
+When all retained text fits and no older conversation exists, Up and PgUp do nothing, including before the opening read knows the predecessor.
+`/history` can deliberately reveal `Start of conversation`; ordinary detachment does not insert that label into the shown short text.
+Actual backward movement or a real request for older conversation freezes a transcript copy that starts at the first retained read boundary, pinning the exact first logical content from the delivered frame before applying the movement.
+Live and transcript share body width, calls, queued row, draft and status geometry; only genuine inspection, Message and Action pages have navigation headings.
+The existing footer quietly says `Looking back`, or `New output below` when the normalized live endpoint has advanced, with `Ctrl-End` as the unconditional return hint.
+Notices take priority over approval hints, then looking-back state, then Session metadata; the rule keeps its independent hidden-draft-line labels.
+No unread count or history persists beyond this snapshot.
+New output leaves the anchored snapshot unchanged; downward input appends its still-retained contiguous normalized suffix, with styles, links and exact collapsed Message proofs, before moving toward the actual current end.
+A frozen snapshot endpoint is never mistaken for the current end: an endpoint lost to retention or trimmed by older paging says `Retention gap below`, while insufficient snapshot capacity says `More output below`, not that saved output was lost; both retain `Ctrl-End` as an explicit transition to latest.
 A boundary pairs a live offset with the Conversation cursor before it (an Admission or call row is no Conversation cursor) and is valid only if no Conversation item at or after its cursor showed before its offset.
 `session_reads.Marks` owns that rule: the opening's start is one, and a later page records each item it shows that follows the conversation row of every Message shown so far as its Admission.
 A stop answers every Message up to its cutoff, since each has its row by then or never will, and a read whose stop shows queued Messages before its line keeps no boundary before that stop.
@@ -2747,7 +2754,22 @@ A Message page never shows or decides an Action.
 Display eviction does not delete saved work.
 Wheel motion arrives as arrow keys through alternate scroll mode 1007, which Rui enables only when the terminal reports it present and reset, and restores on exit; opening never waits for that report. libvaxis `Window.print` lays out and wraps all text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
 Rui's pinned vaxis patch keeps wide clusters, window-wide words and words crossing a style change off the row edge.
-`ConversationViewport` keeps retained bytes, styles and the first row in view as a logical line and row within it; `TerminalFrame` budgets regions and counts the Action rows a frame delivers; `SessionScreen` owns libvaxis cells and bounded allocations; and `SessionTerminal` alone owns terminal modes and output. libvaxis's own TTY owner is not used: restoration must attempt every step without waiting on a drain, wait at most one bounded second for output credit, and restore descriptor flags exactly.
+One library `printIterator` call consumes replayable borrowed style runs for each logical range, so word lookahead crosses every style boundary without a fixed segment batch or caller continuation offset.
+The iterator keeps complete visible graphemes together with their first presentation style; hidden link addresses and sidenotes are separate display channels, so orphan combining marks escape without changing link metadata.
+`ConversationViewport` keeps retained bytes, styles and parser state separately from each Pane's libvaxis `ScrollView`, the sole stored row offset and extent-clamp owner.
+An immutable laid-out row projection converts byte Positions for source joins and consent, and paints intersecting logical lines through `ScrollView.bounds` and translated `Window.print` windows, without cell copies or input-sized surfaces.
+One scalar row census per Pane is cached by text generation and the complete layout key; no row table, second navigation anchor or cell cache is kept.
+The conversation reserves a stable one-column library scrollbar rail from its first frame, showing position within the loaded retained canvas, never a percentage of all saved history.
+A transcript alone may keep bounded trailing blank canvas to pin short text through prepend or geometry changes; Down never grows it, Up shrinks it, and added text absorbs it.
+`TerminalFrame` budgets regions without moving the scroll owner and observes only real text rows after final layout; blank canvas cannot credit an Action.
+One invocation-owned `RenderBackend` owns libvaxis grids, page-charged allocations, URI retention and frozen encoded bytes; detail Sessions and upgrade panels borrow it rather than reinitialize it.
+A nested panel keeps the original screen's active and hidden transcript source coordinates on the stack and reflows them on return; live output still follows, Action reading restarts, and a poisoned backend cannot be revived.
+`SessionScreen` owns only its conversation projection, reflow coordinates and exact per-frame consent tickets/Delivered receipts; `SessionTerminal` alone owns terminal modes, output deadlines, waiting-report acknowledgment and the persistent byte decoder.
+Preparation captures the old source anchor before backend resize; waiting prefixes are staged before paint borrows cells, and generated helper labels live in charged frame scratch through encode.
+Encoding finishes before output can pump, then the screen issues its ticket and returns Delivered only after every byte and final flush succeed, including a zero-byte unchanged frame.
+Every nonempty encoded frame, including prefix-only output, closes OSC8 and resets SGR; a truly unchanged empty frame emits nothing.
+A begin, paint, encode or output failure poisons the backend for the invocation; releasing its storage never authorizes a retry of an uncertain diff.
+libvaxis's own TTY owner is not used: restoration must attempt every step without waiting on a drain, wait at most one bounded second for output credit, and restore descriptor flags exactly.
 Resize keeps the first browsed line in view and preserves draft bytes and logical cursor; an Action restarts from its top.
 Text uses existing width behavior unless a terminal reports Unicode mode 2027 already enabled.
 The renderer neither enables that mode nor requires Kitty graphics, mouse reporting or a particular emulator.

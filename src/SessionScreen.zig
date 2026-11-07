@@ -148,10 +148,16 @@ pub fn liveStart(self: *Self) !u64 {
     return self.live.origin;
 }
 
-fn textLayout(self: *const Self) Viewport.Layout {
-    return .{ .width = @max(1, self.vx.screen.width), .method = self.vx.caps.unicode };
+fn paneLayout(kind: ViewKind, columns: u16, method: vaxis.gwidth.Method, home: []const u8) Viewport.Layout {
+    return .{ .width = @max(1, columns -| @as(u16, @intFromBool(kind == .live or kind == .transcript))), .method = method, .home = home };
 }
 
+pub fn textLayout(self: *const Self) Viewport.Layout {
+    return paneLayout(self.view, self.backend.geometry().cols, self.backend.widthMethod(), self.home);
+}
+
+// An overlay does not lend its full-width layout to the retained transcript.
+// Capture and restore under that pane's own old/new rail-adjusted widths.
 pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
     if (self.vx.caps.unicode == method) return;
     self.invalidateLayout();
@@ -375,18 +381,40 @@ pub fn liveApproval(self: *const Self, command_blocked: bool) ConsentPolicy.Appr
 /// position from which older canonical pages continue without a gap.
 pub fn beginTranscript(self: *Self, front: u64) !void {
     std.debug.assert(self.view == .live);
+    try self.live.text.prepare();
+    const current = self.live.anchor(self.textLayout());
+    const first = self.live_first orelse LiveAnchor{ .offset = self.live.text.origin + if (current.order(.end) == .eq) @as(usize, 0) else current.offset, .row = current.row };
     self.browsing = self.live;
-    self.browsing.discardFront(front);
-    try self.browsing.prepare();
-    // Moves apply to the transcript's own height, which its heading and the
-    // absent calls make differ from the live view's: start at its end so the
-    // same rows down as up return to live output.
-    self.height = self.browsing_height;
-    self.browsing.top = null;
-    self.newer_trimmed = false;
+    self.browsing.text.discardFront(front);
+    try self.browsing.text.prepare();
+    self.browsing.restore(self.textLayout(), .{ .offset = @intCast(first.offset -| self.browsing.text.origin), .row = first.row }, self.height, true);
+    self.tail = .{ .retained = self.live.text.origin + self.live.text.length };
     self.overscroll = 0;
     self.view = .transcript;
     self.invalidateScope();
+}
+
+/// Join only the still-retained contiguous suffix, on downward input. New
+/// output never mutates a snapshot by itself. The caller associates these
+/// newly admitted collapsed blocks with the newest live Message proofs.
+pub fn catchUp(self: *Self) !usize {
+    std.debug.assert(self.view == .transcript);
+    try self.live.text.prepare();
+    const end = switch (self.tail) {
+        .retained, .limited => |position| position,
+        .gap => return 0,
+    };
+    if (end < self.live.text.origin or end > self.live.text.origin + self.live.text.length) {
+        self.tail = .gap;
+        return 0;
+    }
+    const before = self.transcriptCollapsed();
+    const anchor = self.browsing.anchor(self.textLayout());
+    const copied = self.browsing.text.appendRetained(&self.live.text, @intCast(end - self.live.text.origin));
+    self.browsing.restore(self.textLayout(), anchor, self.height, true);
+    const next = end + copied;
+    self.tail = if (next == self.live.text.origin + self.live.text.length) .{ .retained = next } else .{ .limited = next };
+    return self.transcriptCollapsed() - before;
 }
 
 /// Pages or lines through the shown document. Returns true when a downward
@@ -395,29 +423,25 @@ pub fn beginTranscript(self: *Self, front: u64) !void {
 pub fn browse(self: *Self, down: bool, page: bool) bool {
     std.debug.assert(self.view != .live);
     const document = self.viewed();
-    const end = document.atBottom(self.textLayout(), self.height);
     const moves: usize = if (page) self.height else 1;
-    if (self.view == .transcript) self.overscroll = if (down) 0 else if (document.atTop(self.textLayout(), self.height)) @min(self.overscroll + moves, 4 * @as(usize, self.height)) else 0;
+    if (self.view == .transcript) self.overscroll = if (down) 0 else if (document.scroll.scroll.y == 0) @min(self.overscroll + moves, 4 * @as(usize, self.height)) else 0;
     const unseen = if (self.actionVisible() and self.preview_complete and !self.actionRead()) self.action_seen else null;
-    document.browse(self.textLayout(), down, moves, self.height, unseen);
+    document.move(self.textLayout(), down, moves, self.height, unseen);
     if (self.view != .transcript or !down) return false;
-    // Untrimmed transcript ends where live output continues.
-    return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.textLayout(), self.height));
+    // A frozen endpoint is not the current end. Only a contiguous joined
+    // suffix can resume following; limits and gaps require explicit End.
+    return self.tail == .retained and self.tail.retained == self.live.text.origin + self.live.text.length and document.scroll.scroll.y + self.height >= document.projection(self.textLayout()).total;
 }
 
 /// Scrolls the inspection page so line `line` begins in view, as little as
 /// it takes.
 pub fn revealLine(self: *Self, line: usize) void {
     std.debug.assert(self.view == .inspection);
-    const document = &self.browsing;
+    const document = &self.browsing.text;
     const start = lineStart(document, line) orelse return;
-    const layout = self.textLayout();
-    const first = document.first(layout, self.height);
-    if (start < first.offset or (start == first.offset and first.row != 0)) {
-        document.top = .{ .offset = start };
-    } else if (document.measure(layout, first, self.height).next.order(.{ .offset = start }) != .gt) {
-        document.top = document.up(layout, .{ .offset = start }, self.height -| 1);
-    }
+    const row = document.rowOf(self.textLayout(), .{ .offset = start });
+    const y = &self.browsing.scroll.scroll.y;
+    if (row < y.*) y.* = row else if (row >= y.* + self.height) y.* = row -| (self.height -| 1);
 }
 
 fn lineStart(document: *const Document, line: usize) ?usize {
@@ -428,43 +452,20 @@ fn lineStart(document: *const Document, line: usize) ?usize {
 
 /// The transcript shows its first retained row, so older text is wanted.
 pub fn transcriptAtTop(self: *const Self) bool {
-    return self.view == .transcript and self.browsing.atTop(self.textLayout(), self.height);
+    return self.view == .transcript and self.browsing.scroll.scroll.y == 0;
 }
 
 /// Prepends one older canonical page, rendered to `file`, above the
 /// transcript without moving the rows in view.
 pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !Prepended {
-    std.debug.assert(self.view == .transcript);
-    try self.load(&self.staging, io, file, false);
-    if (self.staging.origin != 0) {
-        // A page larger than the view cannot join its older neighbour without
-        // a gap. Keep its newest whole lines and say so at the gap.
-        const text = "Rui: Earlier rows of this saved page exceed the view.\n";
-        const retained = self.staging.bytes[0..self.staging.length];
-        const cut = std.mem.indexOfScalarPos(u8, retained, text.len, '\n') orelse retained.len - 1;
-        self.staging.discardFront(self.staging.origin + cut + 1);
-        var marker: Viewport.Sized(128, true) = .{ .width_method = self.staging.width_method };
-        try marker.append(View.Style.quiet.code(self.colour));
-        try marker.append(text);
-        try marker.append(View.Style.normal.code(self.colour));
-        _ = try self.staging.prepend(&marker, self.textLayout(), 1);
-    }
-    const before = self.browsing.collapsed(0, self.browsing.text().len).count;
-    const older = self.staging.collapsed(0, self.staging.text().len).count;
-    if (try self.browsing.prepend(&self.staging, self.textLayout(), self.height)) self.newer_trimmed = true;
-    const first = self.browsing.first(self.textLayout(), self.height);
-    self.browsing.top = self.browsing.up(self.textLayout(), first, self.overscroll);
-    self.overscroll = 0;
-    return .{ .older = older, .trimmed = before + older - self.browsing.collapsed(0, self.browsing.text().len).count };
+    return self.prependPreparedFile(io, file, null);
 }
 
-/// Collapsed blocks an older page kept, its newest, and those newer rows
-/// lost from the transcript's end.
 pub const Prepended = struct { older: usize, trimmed: usize };
 
 /// Collapsed blocks in the transcript.
 pub fn transcriptCollapsed(self: *const Self) usize {
-    return self.browsing.collapsed(0, self.browsing.text().len).count;
+    return self.browsing.text.collapsed(0, self.browsing.text.text().len).count;
 }
 
 /// Shows that the transcript reached the start of the saved conversation.
@@ -481,12 +482,15 @@ pub fn markGap(self: *Self) !usize {
 
 fn boundary(self: *Self, text: []const u8) !usize {
     std.debug.assert(self.view == .transcript);
-    var marker: Viewport.Sized(128, true) = .{ .width_method = self.browsing.width_method };
+    var marker: Viewport.Sized(128, true) = .{ .width_method = self.browsing.text.width_method };
     try marker.append(View.Style.quiet.code(self.colour));
     try marker.append(text);
     try marker.append(View.Style.normal.code(self.colour));
     const before = self.transcriptCollapsed();
-    if (try self.browsing.prepend(&marker, self.textLayout(), self.height)) self.newer_trimmed = true;
+    var anchor = self.browsing.anchor(self.textLayout());
+    if (try self.browsing.text.prepend(&marker)) self.tail = .gap;
+    anchor.offset +|= marker.length;
+    self.browsing.restore(self.textLayout(), anchor, self.height, true);
     return before - self.transcriptCollapsed();
 }
 
@@ -495,7 +499,7 @@ fn boundary(self: *Self, text: []const u8) !usize {
 /// Call right after drawing: later text moves what the frame drew.
 pub fn collapsedInView(self: *Self) ?usize {
     if (self.view != .live and self.view != .transcript) return null;
-    const document = self.viewed();
+    const document = &self.viewed().text;
     const text = document.text().len;
     const next = document.measure(self.textLayout(), self.drawn.first, self.drawn.rows).next;
     // A line cut at the bottom shows its first rows, which hold the mark.
@@ -524,7 +528,7 @@ pub fn leaveMessage(self: *Self) !void {
     self.invalidateScope();
 }
 
-fn viewed(self: *Self) *Document {
+fn viewed(self: *Self) *Viewport.Pane {
     return switch (self.view) {
         .live => &self.live,
         .message => &self.staging,
@@ -966,6 +970,21 @@ fn drawLive(self: *const Self, window: vaxis.Window, width: u16, line: work_line
         const end = window.child(.{ .x_off = column }).printSegment(.{ .text = piece[0], .style = self.style(piece[1]) }, .{ .wrap = .none });
         column += end.col;
     }
+}
+
+/// The rule above the input. It names the draft lines hidden above or
+/// below the input when there are any.
+fn lookbackLabel(self: *const Self, width: u16) []const u8 {
+    const forms: []const []const u8 = switch (self.tail) {
+        .gap => &.{ "Looking back · Retention gap below · Ctrl-End: latest", "Retention gap below · Ctrl-End", "Retention gap below", "Gap below", "Gap" },
+        .limited => &.{ "Looking back · More output below · Ctrl-End: latest", "More output below · Ctrl-End", "More output below", "More below", "More" },
+        .retained => if (self.tail.retained < self.live.text.origin + self.live.text.length)
+            &.{ "Looking back · New output below · Ctrl-End: latest", "New output below · Ctrl-End", "New output below", "New below", "New" }
+        else
+            &.{ "Looking back · Ctrl-End: latest", "Looking back", "Back" },
+    };
+    for (forms) |form| if (session_line.cells(form, self.backend.widthMethod()) <= width) return form;
+    return "";
 }
 
 /// The rule above the input. It names the draft lines hidden above or
@@ -1445,6 +1464,55 @@ test "a queued Message sits dimmed right above the status, in the latest view on
     _ = try screen.render(&out.writer, size, "", 0, footer, &calls);
     try std.testing.expect(!screenHas(screen, "queued", &buffer));
     try std.testing.expect(screenHas(screen, "Sent", &buffer));
+}
+
+test "a queued Message keeps its row and status while looking back" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    for (0..40) |index| {
+        var bytes: [16]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&bytes, "row{d:0>2}\n", .{index}));
+    }
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const calls: View.Live = .{};
+    // The row confirms the send, so the status no longer says Sent.
+    const footer: Footer = .{ .status = "Sent", .queued = .{ .waiting = .{ .line = "also check the history scratch cache", .count = 2 }, .status = "" } };
+    _ = try Test.render(screen, &out.writer, size, "", 0, footer, &calls);
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("row39", rowText(screen, 7, &buffer));
+    try std.testing.expectEqualStrings("› also check the history scrat… 2 queued", rowText(screen, 8, &buffer));
+    try std.testing.expect(!screenHas(screen, "Sent", &buffer));
+    for ([_]u16{ 0, 32 }) |column| try std.testing.expectEqual(screen.style(.quiet).fg, Test.window(screen).readCell(column, 8).?.style.fg);
+    // A short terminal with a call, the live line and a multiline draft has
+    // no row for it: the status says Sent instead.
+    var running: View.Live = .{ .count = 1, .total = 1 };
+    running.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
+    try running.entries[0].presentation.description.?.set("Run zig build");
+    const state: protocol.WorkState = .{ .working = .{ .since = 100 } };
+    var working = footer;
+    working.live = work_line.of(&test_words, &state, null, 142_000);
+    const short: std.posix.winsize = .{ .row = 6, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const draft = "one\ntwo\nthree";
+    _ = try Test.render(screen, &out.writer, short, draft, draft.len, working, &running);
+    try std.testing.expect(!screenHas(screen, "queued", &buffer));
+    try std.testing.expect(screenHas(screen, "Sent", &buffer));
+    try std.testing.expect(screenHas(screen, "Run zig build", &buffer));
+    // With a one-line draft it has the row, and Sent goes.
+    _ = try Test.render(screen, &out.writer, short, "one", 3, working, &running);
+    try std.testing.expect(screenHas(screen, "queued", &buffer));
+    try std.testing.expect(!screenHas(screen, "Sent", &buffer));
+    // A transcript keeps the same queued row and confirming status.
+    try screen.beginTranscript(0);
+    _ = screen.browse(false, true);
+    _ = try Test.render(screen, &out.writer, size, "", 0, footer, &calls);
+    try std.testing.expect(screenHas(screen, "queued", &buffer));
+    try std.testing.expect(!screenHas(screen, "Sent", &buffer));
 }
 
 test "a command list of one row shows a command, not only how many match" {
@@ -2277,3 +2345,143 @@ test "links stay within the cell memory budget at every frame and over many fram
     // Unchanged, the frame would write nothing; redrawn, it writes every row.
     try std.testing.expect(out.written().len > 20 * 79);
 }
+test "live and transcript chrome have identical cells with calls queue work drafts and NO_COLOR" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 16, .col = 60, .xpixel = 0, .ypixel = 0 };
+    var saved: [16 * 60]vaxis.Cell = undefined;
+    var calls: View.Live = .{ .count = 3, .total = 4 };
+    for (0..3) |index| calls.entries[index] = .{ .operation = 1, .ordinal = index, .presentation = .{ .code = if (index == 2) .failed else .unresolved, .description = null, .publication_position = null } };
+    const state: protocol.WorkState = .{ .working = .{ .since = 100 } };
+    for ([_]bool{ false, true }) |colour| for (0..4) |count| for ([_]bool{ false, true }) |queued| for ([_]bool{ false, true }) |working| for ([_][]const u8{ "", "draft\nsecond" }) |draft| {
+        screen.colour = colour;
+        _ = screen.backend.setPolicy(.{ .depth = if (colour) .indexed else .none, .width = screen.backend.widthMethod() });
+        try screen.latest();
+        screen.live.text.clear();
+        try screen.append("Assistant answer\n");
+        calls.count = count;
+        calls.total = if (count == 3) 4 else count;
+        const footer: Footer = .{ .status = "Sent", .queued = if (queued) .{ .waiting = .{ .line = "queued message", .count = 1 }, .status = "" } else null, .live = if (working) work_line.of(&test_words, &state, null, 142_000) else null };
+        _ = screen.presented(try Test.render(screen, &out.writer, size, draft, draft.len, footer, &calls));
+        for (&saved, 0..) |*cell, index| cell.* = screen.backend.storage.?.vx.screen_last.readCell(@intCast(index % 60), @intCast(index / 60)).?;
+        const height = screen.height;
+        try screen.beginTranscript(0);
+        _ = try Test.render(screen, &out.writer, size, draft, draft.len, footer, &calls);
+        try std.testing.expectEqual(height, screen.height);
+        for (saved[0 .. 15 * 60], 0..) |before, index| {
+            const after = screen.backend.storage.?.vx.screen_last.readCell(@intCast(index % 60), @intCast(index / 60)).?;
+            try std.testing.expectEqualStrings(before.char.grapheme, after.char.grapheme);
+            try std.testing.expectEqualDeep(before.style, after.style);
+            try std.testing.expectEqualStrings(before.link.uri, after.link.uri);
+        }
+        var row: [256]u8 = undefined;
+        try std.testing.expect(std.mem.indexOf(u8, rowText(screen, 15, &row), "Looking back") != null);
+        _ = try Test.render(screen, &out.writer, size, draft, draft.len, .{ .notice = "Important notice" }, &calls);
+        try std.testing.expectEqualStrings("Important notice", rowText(screen, 15, &row));
+    };
+
+    // Pin the actual source/chrome boundary independently of the viewport's
+    // capacity: a short body leaves blank rows BELOW its live call, while the
+    // queued preview stays immediately above the rule.
+    for ([_]u16{ 24, 200 }) |rows| for ([_]bool{ false, true }) |colour| {
+        screen.colour = colour;
+        _ = screen.backend.setPolicy(.{ .depth = if (colour) .indexed else .none, .width = screen.backend.widthMethod() });
+        try screen.latest();
+        screen.live.text.clear();
+        try screen.append("BODY-FIRST ▐\nBODY-LAST");
+        var held: View.Live = .{ .count = 1, .total = 1 };
+        held.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
+        try held.entries[0].presentation.description.?.set("Held call");
+        const running: protocol.WorkState = .{ .bash = .{ .since = 100, .call = 0, .description = held.entries[0].presentation.description, .running = 1, .approvals = 0 } };
+        const chrome: Footer = .{ .queued = .{ .waiting = .{ .line = "QUEUED-SOURCE", .count = 3 }, .status = "" }, .live = work_line.of(&test_words, &running, 7, 142_000) };
+        for ([_]bool{ false, true }) |transcript| {
+            if (transcript) try screen.beginTranscript(0);
+            _ = screen.presented(try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, chrome, &held));
+            var row: [256]u8 = undefined;
+            try std.testing.expectEqual(rows - 5, screen.height);
+            const raw = &screen.backend.storage.?.vx.screen_last;
+            for (0..rows) |y| {
+                const glyph = raw.readCell(79, @intCast(y)).?.char.grapheme;
+                try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, glyph, "▐"));
+            }
+            try std.testing.expectEqualStrings("▐", raw.readCell(11, 0).?.char.grapheme);
+            try std.testing.expectEqual(@as(u16, 2), screen.drawn.rows);
+            try std.testing.expect(screen.height > screen.drawn.rows);
+            try std.testing.expectEqualStrings("BODY-FIRST ▐", rowText(screen, 0, &row));
+            try std.testing.expectEqualStrings("BODY-LAST", rowText(screen, 1, &row));
+            try std.testing.expectEqualStrings("  • Held call · 42s", rowText(screen, 2, &row));
+            for (3..rows - 4) |y| try std.testing.expectEqualStrings("", rowText(screen, @intCast(y), &row));
+            try std.testing.expectEqualStrings("› QUEUED-SOURCE                                                         3 queued", rowText(screen, rows - 4, &row));
+            try std.testing.expectEqual(@as(usize, 80 * "─".len), rowText(screen, rows - 3, &row).len);
+            try std.testing.expectEqualStrings("›", rowText(screen, rows - 2, &row));
+            if (transcript) try std.testing.expectEqualStrings("Looking back · Ctrl-End: latest", rowText(screen, rows - 1, &row));
+        }
+        const waiting: protocol.WorkState = .{ .working = .{ .since = 100 } };
+        _ = try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .queued = chrome.queued, .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &.{});
+        const raw = &screen.backend.storage.?.vx.screen_last;
+        try std.testing.expectEqual(rows - 5, screen.height);
+        for (0..rows) |y| try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, raw.readCell(79, @intCast(y)).?.char.grapheme, "▐"));
+        var work_row: [256]u8 = undefined;
+        try std.testing.expectEqual(@as(u16, 2), screen.drawn.rows);
+        try std.testing.expectEqualStrings("• Waiting · 42s", rowText(screen, 2, &work_row));
+        _ = try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "keep", 4, .{ .notice = "Important notice", .queued = chrome.queued, .live = chrome.live }, &held);
+        var row: [256]u8 = undefined;
+        try std.testing.expectEqualStrings("Important notice", rowText(screen, rows - 1, &row));
+
+        // A full body places the SAME call just outside the rail, unlike the
+        // short body's call above. Rail ownership cannot decide call readiness.
+        try screen.latest();
+        screen.live.text.clear();
+        for (0..rows - 5) |index| {
+            if (index != 0) try screen.append("\n");
+            try screen.append("FULL-BODY");
+        }
+        for ([_]bool{ false, true }) |transcript| {
+            if (transcript) try screen.beginTranscript(0);
+            _ = screen.presented(try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, chrome, &held));
+            const full = &screen.backend.storage.?.vx.screen_last;
+            try std.testing.expectEqual(rows - 5, screen.height);
+            try std.testing.expectEqual(rows - 5, screen.drawn.rows);
+            for (0..rows) |y| try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, full.readCell(79, @intCast(y)).?.char.grapheme, "▐"));
+            try std.testing.expectEqualStrings("FULL-BODY", rowText(screen, rows - 6, &row));
+            try std.testing.expectEqualStrings("  • Held call · 42s", rowText(screen, rows - 5, &row));
+            try std.testing.expectEqualStrings(" ", full.readCell(79, rows - 5).?.char.grapheme);
+            try std.testing.expectEqualStrings("› QUEUED-SOURCE                                                         3 queued", rowText(screen, rows - 4, &row));
+            try std.testing.expectEqualStrings("›", rowText(screen, rows - 2, &row));
+            if (transcript) try std.testing.expectEqualStrings("Looking back · Ctrl-End: latest", rowText(screen, rows - 1, &row));
+        }
+    };
+    // Conversation source reserves ONE physical column at either width.
+    // Semantic observers select cells, without reconstructing chrome layout.
+    for ([_]u16{ 80, 2048 }) |columns| for ([_]bool{ false, true }) |colour| {
+        screen.colour = colour;
+        _ = screen.backend.setPolicy(.{ .depth = if (colour) .indexed else .none, .width = screen.backend.widthMethod() });
+        try screen.latest();
+        screen.live.text.clear();
+        try screen.append("PRIOR ▐\n› " ++ View.Mark.sidenote ++ "11:42" ++ View.Mark.reset ++ View.Mark.body ++ "line1" ++ View.Mark.reset ++ "\n  line2\nedited 2\nEDGE " ++ View.Mark.sidenote ++ "    ▐" ++ View.Mark.reset ++ View.Mark.body ++ "left ▐" ++ View.Mark.reset);
+        for ([_]bool{ false, true }) |transcript| {
+            if (transcript) try screen.beginTranscript(0);
+            _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{});
+            const raw = &screen.backend.storage.?.vx.screen_last;
+            try std.testing.expectEqual(@as(u16, 21), screen.height);
+            for (0..24) |y| try std.testing.expectEqual(y < 21, std.mem.eql(u8, raw.readCell(columns - 1, @intCast(y)).?.char.grapheme, "▐"));
+            var row: [8192]u8 = undefined;
+            try std.testing.expectEqualStrings("PRIOR ▐", rowText(screen, 0, &row));
+            try std.testing.expect(std.mem.startsWith(u8, rowText(screen, 1, &row), "› line1"));
+            for (7..columns - 6) |x| try std.testing.expectEqualStrings(" ", raw.readCell(@intCast(x), 1).?.char.grapheme);
+            for ("11:42", columns - 6..) |byte, x| try std.testing.expectEqualStrings(&.{byte}, raw.readCell(@intCast(x), 1).?.char.grapheme);
+            try std.testing.expectEqualStrings("  line2", rowText(screen, 2, &row));
+            try std.testing.expectEqualStrings("edited 2", rowText(screen, 3, &row));
+            try std.testing.expectEqualStrings("▐", raw.readCell(10, 4).?.char.grapheme);
+            try std.testing.expectEqualStrings("▐", raw.readCell(columns - 2, 4).?.char.grapheme);
+            try std.testing.expectEqualStrings("›", rowText(screen, 22, &row));
+        }
+    };
+}
+

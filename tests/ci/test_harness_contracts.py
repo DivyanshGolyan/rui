@@ -327,7 +327,7 @@ SLEEP_ORDERED = {
     ("tests/integration/human_cli_integration.py", "persistent_opening_case"):
         (1, "sleeps 0.5 s before asserting history stopped at its start"),
     ("tests/integration/human_cli_integration.py", "renderer_cases"):
-        (14, "settle sleeps before screen and request assertions"),
+        (8, "partial-key and held-read ordering, bare-ESC expiry and a held-reply scan window"),
     ("tests/integration/model_fixture.py", "FailureHandler.do_POST"):
         (2, "slow-body and stall peers pace bytes against the client's real deadlines"),
     ("tests/integration/model_fixture.py", "SuccessHandler.do_POST"):
