@@ -13,18 +13,24 @@ pub fn initial(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocato
 
 pub fn captureInitial(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, workspace: []const u8, home: ?[]const u8) !*const storage.InitialSkills {
     const out = try allocator.create(storage.InitialSkills);
-    out.* = prepareInitial(allocator, scratch_allocator, io, workspace, home) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        // Refusal is carried into the normal keyed creation transaction, where
-        // replay wins even if the filesystem changed since the original request.
-        else => .unavailable,
-    };
+    var found: catalog.Catalog = .{ .entries = &.{} };
+    out.* = try prepareInitial(allocator, scratch_allocator, io, workspace, home, &found);
     return out;
 }
 
-fn prepareInitial(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, workspace: []const u8, home: ?[]const u8) !storage.InitialSkills {
-    const found = try catalog.discoverWithScratch(allocator, scratch_allocator, io, workspace, home);
-    const rendered = try catalog.initialCatalog(allocator, found);
+fn initialFailure(err: anyerror) error{OutOfMemory}!storage.InitialSkills {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    // Keyed creation validation, not capture, owns ordinary refusal precedence.
+    return .unavailable;
+}
+
+fn prepareInitial(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, workspace: []const u8, home: ?[]const u8, found: *catalog.Catalog) !storage.InitialSkills {
+    found.* = catalog.discoverWithScratch(allocator, scratch_allocator, io, workspace, home) catch |err| return initialFailure(err);
+    return initialFromCatalog(allocator, found.*);
+}
+
+fn initialFromCatalog(allocator: std.mem.Allocator, found: catalog.Catalog) !storage.InitialSkills {
+    const rendered = catalog.initialCatalog(allocator, found) catch |err| return initialFailure(err);
     return .{ .ready = .{ .encoded = rendered.encoded, .instruction = rendered.instruction } };
 }
 
@@ -86,15 +92,8 @@ pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.A
     if (command.configuration) |*configuration| {
         const initial_value = try allocator.create(storage.InitialSkills);
         prepared.initial = initial_value;
-        found = catalog.discoverWithScratch(allocator, scratch_allocator, io, if (configuration.workspace.state == .value) configuration.workspace.value.slice() else "/", home) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => {
-                initial_value.* = .unavailable;
-                return prepared;
-            },
-        };
-        const rendered = try catalog.initialCatalog(allocator, found);
-        initial_value.* = .{ .ready = .{ .encoded = rendered.encoded, .instruction = rendered.instruction } };
+        initial_value.* = try prepareInitial(allocator, scratch_allocator, io, if (configuration.workspace.state == .value) configuration.workspace.value.slice() else "/", home, &found);
+        if (initial_value.* == .unavailable) return prepared;
     } else if (invokes) {
         const state = store.readSkills(allocator, command.session.slice()) catch |err| switch (err) {
             error.SessionNotFound => {
@@ -276,4 +275,43 @@ test "inline skills aggregate raw body cap reclaims all sequential capture custo
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expect(prepared.payload.file == null and retained == null);
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "request-0-3.tmp", .{}));
+}
+
+test "inline skills initial render limits remain keyed refusals with ordinary configuration precedence" {
+    // The factored owner receives a discovered snapshot. Force its supported
+    // encoding limit without a giant filesystem tree or a whole JSON buffer.
+    const entries = try std.testing.allocator.alloc(catalog.Entry, catalog.max_entries + 1);
+    defer std.testing.allocator.free(entries);
+    const unavailable = try initialFromCatalog(std.testing.allocator, .{ .entries = entries });
+    try std.testing.expect(unavailable == .unavailable);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/catalog-limit.sqlite", .{root});
+    var store: storage.Store = undefined;
+    try store.open(std.testing.io, database, root);
+    defer store.close() catch unreachable;
+    var configuration = try storage.testingCompleteConfiguration("unused", "", root, "");
+    var command: protocol.MessageCommand = .{ .configuration = configuration.configuration, .text = .{ .state = .value, .length = 0, .digest = protocol.contentDigest("") } };
+    try command.key.set("invalid-config-render-limit");
+    const invalid = store.submitMessageWithInitialSkills(&command, null, &unavailable, .{});
+    try std.testing.expect(invalid == .rejected);
+    try std.testing.expectEqual(.invalid_model, invalid.rejected.code);
+    try configuration.configuration.model.value.set("model-a");
+    command.configuration = configuration.configuration;
+    try command.key.set("valid-config-render-limit");
+    const refused = store.submitMessageWithInitialSkills(&command, null, &unavailable, .{});
+    try std.testing.expect(refused == .rejected);
+    try std.testing.expectEqual(.skills_unavailable, refused.rejected.code);
+    try std.testing.expect(!store.isFenced());
+    var used: std.atomic.Value(u64) = .init(0);
+    var page = try store.captureSessionList(&.{}, .{ .scratch_path = root, .scratch_budget = .{ .used = &used, .limit = 1024 }, .request_number = 1 });
+    defer page.deinit();
+    var bytes: [1024]u8 = undefined;
+    const count = try page.read(0, &bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..count], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 0), parsed.value.object.get("sessions").?.array.items.len);
 }

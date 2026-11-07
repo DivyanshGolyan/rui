@@ -10,7 +10,7 @@ pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "11";
 /// Historical saved-record grammar; never a live transport version.
-const legacy_record_version = "10";
+pub const legacy_record_version = "10";
 
 /// Host-owned lifecycle state of a Message request.
 pub const MessageRequestState = enum { queued, processing, waiting_for_permission, completed, failed, cancelled, rejected };
@@ -1501,6 +1501,7 @@ pub const Ingress = struct {
         if (self.content_state == .capturing) self.capture.deinit();
         self.content_state = .metadata;
         self.skill_names.deinit(self.allocator);
+        self.skill_names = .empty;
         for (&self.contents) |*field| removeContent(field, self.options.io) catch unreachable;
         self.metadata.deinit(self.allocator);
         self.metadata = .empty;

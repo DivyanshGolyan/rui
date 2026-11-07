@@ -1490,8 +1490,8 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     var reader = std.json.Reader.init(arena.allocator(), &file_reader.interface);
     defer reader.deinit();
     const fields = std.json.parseFromTokenSourceLeaky(Fields, arena.allocator(), &reader, .{ .allocate = .alloc_if_needed, .max_value_len = protocol.max_store_bytes }) catch return file_reader.err orelse error.InvalidRequestRecord;
-    if (!fields.version.eql(protocol.wire_version) and !fields.version.eql("10")) return error.InvalidRequestRecord;
-    if (fields.version.eql("10") and fields.skills != null) return error.InvalidRequestRecord;
+    if (!fields.version.eql(protocol.wire_version) and !fields.version.eql(protocol.legacy_record_version)) return error.InvalidRequestRecord;
+    if (fields.version.eql(protocol.legacy_record_version) and fields.skills != null) return error.InvalidRequestRecord;
     const kind = std.meta.stringToEnum(protocol.CommandKind, fields.kind.slice()) orelse return error.InvalidRequestRecord;
     var saved: protocol_reply.MutationIdentity = .{ .store = fields.store.value, .key = fields.key.value, .kind = kind };
     if (kind == .model_interruption) {
@@ -1565,7 +1565,7 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !pro
     };
     const parsed = try std.json.parseFromSlice(Fields, std.heap.c_allocator, head[0 .. kind_marker + 1], .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
-    if ((!std.mem.eql(u8, parsed.value.version, protocol.wire_version) and !std.mem.eql(u8, parsed.value.version, "10")) or !std.mem.eql(u8, parsed.value.key, handle)) return error.InvalidRequestRecord;
+    if ((!std.mem.eql(u8, parsed.value.version, protocol.wire_version) and !std.mem.eql(u8, parsed.value.version, protocol.legacy_record_version)) or !std.mem.eql(u8, parsed.value.key, handle)) return error.InvalidRequestRecord;
     var store: @FieldType(protocol_reply.MutationIdentity, "store") = .{};
     try store.set(parsed.value.store);
     var key: @FieldType(protocol_reply.MutationIdentity, "key") = .{};
@@ -4962,7 +4962,7 @@ test "inline skills native recovery opens every old wire10 canonical command wit
     for (cases) |case| {
         var body: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer body.deinit();
-        try body.writer.print("{{\"version\":\"10\",\"kind\":\"{s}\",\"store\":", .{@tagName(case.kind)});
+        try body.writer.print("{{\"version\":\"{s}\",\"kind\":\"{s}\",\"store\":", .{ protocol.legacy_record_version, @tagName(case.kind) });
         try std.json.Stringify.encodeJsonString(root, .{}, &body.writer);
         try body.writer.writeAll(",\"key\":\"" ++ handle ++ "\"");
         try body.writer.writeAll(case.tail);

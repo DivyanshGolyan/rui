@@ -583,7 +583,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
             try std.testing.expectError(case.failure, parseHostInfoForProfile(bad, "/one", profile));
         }
     }
-    for ([_][]const u8{ "8", "11", "09", "unknown", "" }) |wire| {
+    for ([_][]const u8{ "8", protocol.next_wire_version, "09", "unknown", "" }) |wire| {
         const version = try std.fmt.allocPrint(std.testing.allocator, "\"version\":\"{s}\"", .{wire});
         defer std.testing.allocator.free(version);
         const bad = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, version);
