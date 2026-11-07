@@ -199,6 +199,20 @@ pub const Draft = struct {
     attachments: []const skill_completion.Range = &.{},
     skill_choices: ?slash_commands.SkillChoices = null,
 
+    pub fn attachedToken(self: Draft) bool {
+        const token = skill_completion.candidate(self.bytes, self.cursor) orelse return false;
+        return token.attached(self.attachments);
+    }
+
+    /// Selection is not a completion target until an edit detaches its mark.
+    pub fn skillChoices(self: Draft) ?slash_commands.SkillChoices {
+        const choices = self.skill_choices orelse return null;
+        if (choices.dismissed) return null;
+        const token = skill_completion.candidate(self.bytes, self.cursor) orelse return null;
+        if (token.attached(self.attachments)) return null;
+        return choices;
+    }
+
     pub fn leadingSkill(self: Draft) bool {
         for (self.attachments) |range| if (range.start == 0) return true;
         return false;
@@ -2121,7 +2135,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             .clear => if (prompt != null) {} else if (picker) |shown| switch (shown.step) {
                 .sign_in => shown.step = .models,
                 .models => state.closePicker(),
-            } else if (skillChoices(value.draft)) |_| {
+            } else if (value.draft.skillChoices()) |_| {
                 if (nextCommands(state, value.draft)) |shown| {
                     state.commands = shown;
                     state.commands.?.close();
@@ -2932,7 +2946,7 @@ pub fn topRows(state: *const State) usize {
 /// types a command, after the latest frame's; null for any other draft or
 /// when nothing matches. The next Session's model offers its efforts.
 pub fn nextCommands(state: *const State, draft: Draft) ?slash_commands.Shown {
-    if (state.inputMode() != .compose) return null;
+    if (state.inputMode() != .compose or draft.attachedToken()) return null;
     if (draft.skill_choices) |choices| if (choices.dismissed) return null;
     const held = state.heldEffort();
     const context: slash_commands.Context = .{
@@ -2940,25 +2954,16 @@ pub fn nextCommands(state: *const State, draft: Draft) ?slash_commands.Shown {
         .effort = if (held) |text| std.meta.stringToEnum(model_capability.ReasoningEffort, text) else null,
     };
     const builtin = if (!draft.leadingSkill() and draft.cursor == draft.bytes.len) commands.suggest(draft.bytes, context) else null;
-    const choices = skillChoices(draft) orelse return slash_commands.Shown.next(state.commands, draft.edits, builtin);
+    const choices = draft.skillChoices() orelse return slash_commands.Shown.next(state.commands, draft.edits, builtin);
     const token = skill_completion.candidate(draft.bytes, draft.cursor).?;
     const merged = slash_commands.withSkills(builtin, draft.bytes[token.start..draft.cursor], choices.entries);
     if (choices.entries.len == 0) return slash_commands.Shown.next(state.commands, draft.edits, builtin);
     return slash_commands.Shown.nextAt(state.commands, draft.edits, draft.cursor, token.start, token.end, choices.generation, merged);
 }
 
-/// A selected token is no longer a discovery target until an edit drops its mark.
-fn skillChoices(draft: Draft) ?slash_commands.SkillChoices {
-    const choices = draft.skill_choices orelse return null;
-    if (choices.dismissed) return null;
-    const token = skill_completion.candidate(draft.bytes, draft.cursor) orelse return null;
-    for (draft.attachments) |range| if (range.start == token.start and range.end == token.end) return null;
-    return choices;
-}
-
 /// Pending or not-yet-drawn skills consume selection keys without sending.
 fn skillCompletion(state: *State, draft: Draft, effects: *Effects) bool {
-    const choices = skillChoices(draft) orelse return false;
+    const choices = draft.skillChoices() orelse return false;
     if (choices.pending) return true;
     const current = nextCommands(state, draft) orelse return false;
     if (!current.list.containsSkills()) return false;

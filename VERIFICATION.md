@@ -803,6 +803,7 @@ It exercises Host-owned Configure and initial-Message creation, default and expl
 The fixture uses native public readers and actual provider inputs, not direct Store edits or terminal excerpts.
 Mismatched repository symlinks and HOME directory aliases retain their declared names through creation, invocation, reload and replay.
 An actual PTY `/skill` invocation uses the retained Message pipeline and exposes its normal HOME-owned request handle through `/requests`; plain `request inspect`, `list` and `recover` retain that identity and frozen admitted bytes after the source file and terminal disappear, without another provider request or Conversation input.
+Composer owner regressions exclude attached tokens from completion after cursor movement and unrelated edits, preserve Enter's authored text and selected names, keep Tab ordinary with overlap detachment or delimiter retention, and still allow a different unmarked token to be selected after a leading skill.
 
 `zig build yaml-linux-compile` compiles all pinned libyaml sources as strict C99 against Linux glibc headers for x86-64 and ARM64 without linking or executing a Host.
 It reuses `configureYaml`, whose POSIX feature exposure is scoped to the dependency's C sources; removing it must fail at libyaml's `strdup` declaration, not witness setup.

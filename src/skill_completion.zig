@@ -2,7 +2,17 @@ const std = @import("std");
 
 pub const Range = struct { start: usize, end: usize };
 
-pub const Candidate = struct { start: usize, end: usize, prefix: []const u8 };
+pub const Candidate = struct {
+    start: usize,
+    end: usize,
+    prefix: []const u8,
+
+    /// Selection persists beyond the cursor/revision that dismissed its menu.
+    pub fn attached(self: Candidate, ranges: []const Range) bool {
+        for (ranges) |range| if (range.start == self.start and range.end == self.end) return true;
+        return false;
+    }
+};
 
 /// Projects validated ranges in first textual order into caller-owned space.
 /// Returned names borrow the original text; allocation stays with its owner.
@@ -128,4 +138,19 @@ test "selected skill names preserve borrowed original coordinates and distinct o
     text[2] = 'D';
     try std.testing.expectEqualStrings("Demo", names[0]);
     try std.testing.expectEqualStrings("other", names[1]);
+}
+
+test "attached completion candidates are ineligible at every caret position" {
+    const text = "é /demo, /other";
+    const ranges = [_]Range{.{ .start = 3, .end = 8 }};
+    for (4..9) |cursor| {
+        const token = candidate(text, cursor) orelse return error.MissingCandidate;
+        try std.testing.expect(token.attached(&ranges));
+        try std.testing.expect(!token.attached(&.{}));
+    }
+    const other = candidate(text, 16) orelse return error.MissingCandidate;
+    try std.testing.expect(!other.attached(&ranges));
+    const shifted = candidate("! é /demo, /other", 7) orelse return error.MissingCandidate;
+    try std.testing.expect(shifted.attached(&.{.{ .start = 5, .end = 10 }}));
+    try std.testing.expect(!shifted.attached(&ranges));
 }

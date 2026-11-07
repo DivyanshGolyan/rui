@@ -734,7 +734,9 @@ fn skillWorkspace(self: *const Self) []const u8 {
 /// No metadata mutation while a frame still borrows its rows.
 fn refreshSkills(self: *Self) !void {
     if (try self.skill_menu.setScope(.{ .workspace = self.skillWorkspace() })) self.state.commands = null;
-    if (try self.skill_menu.refresh(self.draft[0..self.composer.length], self.composer.cursor, self.composer.edits)) {
+    const draft = self.composerDraft();
+    const attached = draft.attachedToken();
+    if (try self.skill_menu.refresh(if (attached) "" else draft.bytes, if (attached) 0 else draft.cursor, draft.edits)) {
         self.state.commands = null;
         if (self.skill_menu.failure() != null) _ = try self.event(.skill_suggestions_unavailable);
     }
@@ -1147,7 +1149,7 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
         }
     }
     const draft = self.composerDraft();
-    const skill_tab = if (draft.skill_choices) |choices| !choices.dismissed else false;
+    const skill_tab = draft.skillChoices() != null;
     const input = if (self.state.inputMode() == .compose and skill_tab and TerminalEditor.plainTab(decoded))
         view.Input.complete
     else if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.plainEnter(decoded))
@@ -1177,6 +1179,7 @@ fn emptyComposer(self: *Self, edits: u32) TerminalEditor {
 fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     const self: *const Self = @ptrCast(@alignCast(context));
     const current = self.composerDraft();
+    if (current.attachedToken() or current.leadingSkill()) return null;
     if (current.skill_choices) |choices| if (choices.dismissed) return null;
     if (view.commands.suggest(draft, .{}) == null) return null;
     const shown = view.nextCommands(&self.state, current) orelse return "";
@@ -4560,6 +4563,134 @@ test "inline overview shell attaches middle UTF8 token on Tab or Enter then send
         try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.attachments().len);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
+    }
+}
+
+test "inline overview shell a selected leading skill does not block a different completion target" {
+    const rig = try openComposer();
+    defer rig.close();
+    const self = rig.overview;
+    try std.testing.expect(try rig.press("/help /rev") == null);
+    try self.composer.attachSkill(std.testing.allocator, 0, 5, "help");
+    try std.testing.expect(try rig.press("\x1b[F") == null);
+    try self.inlineTestMenu("rev");
+    try std.testing.expect(try self.draw(0) == null);
+    drain(rig.output[0]);
+    try std.testing.expect(try rig.press("\t") == null);
+    try std.testing.expectEqualStrings("/help /review", self.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 2), self.composer.attachments().len);
+    try std.testing.expect(try rig.press("\r") == null);
+    try std.testing.expectEqual(@as(usize, 1), self.job_count);
+    const names = self.jobs[0].start.skills();
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings("help", names[0]);
+    try std.testing.expectEqualStrings("review", names[1]);
+}
+
+test "inline overview shell selected token interior Tab inserts literally and detaches its edited mark" {
+    const cases = [_]struct { text: []const u8, start: usize, end: usize, name: []const u8, prefix: []const u8, left: usize, expected: []const u8, cursor: usize }{
+        .{ .text = "/help", .start = 0, .end = 5, .name = "help", .prefix = "hel", .left = 1, .expected = "/hel\tp", .cursor = 5 },
+        .{ .text = "é /review, next", .start = 3, .end = 10, .name = "review", .prefix = "rev", .left = 3, .expected = "é /rev\tiew, next", .cursor = 8 },
+    };
+    for (cases) |case| {
+        const rig = try openComposer();
+        defer rig.close();
+        const self = rig.overview;
+        try std.testing.expect(try rig.press(case.text) == null);
+        try self.composer.attachSkill(std.testing.allocator, case.start, case.end, case.name);
+        try self.inlineTestMenuNamed(case.prefix, case.name);
+        self.skill_menu.dismiss(self.composer.edits, self.composer.cursor);
+        for (0..case.left) |_| try std.testing.expect(try rig.press("\x1b[D") == null);
+        try std.testing.expectEqual(case.end - case.left, self.composer.cursor);
+        try std.testing.expectEqualStrings(case.text, self.composerDraft().bytes);
+        try std.testing.expectEqualSlices(TerminalEditor.Attachment, &.{.{ .start = case.start, .end = case.end }}, self.composer.attachments());
+        // The pure renderer already excludes this mark. The shell must not
+        // convert Tab into a completion that no visible list can perform.
+        try std.testing.expect(try self.draw(0) == null);
+        const revision = self.composer.edits;
+        try std.testing.expect(try rig.press("\t") == null);
+        try std.testing.expectEqualStrings(case.expected, self.composerDraft().bytes);
+        try std.testing.expectEqual(case.cursor, self.composer.cursor);
+        try std.testing.expectEqual(revision +% 1, self.composer.edits);
+        try std.testing.expectEqual(@as(usize, 0), self.composer.attachments().len);
+        try std.testing.expectEqual(@as(usize, 0), self.job_count);
+        try std.testing.expectEqual(@as(usize, 0), self.state.request_count);
+        try std.testing.expect(self.worker.thread == null);
+        try std.testing.expect(self.state.panel == null); // selected /help never becomes the builtin
+    }
+}
+
+test "inline overview shell selected token Tab stays literal after an unrelated edit and Enter sends its retained name" {
+    const cases = [_]struct { text: []const u8, start: usize, end: usize, name: []const u8, right: usize, expected: []const u8 }{
+        .{ .text = "/help, next", .start = 0, .end = 5, .name = "help", .right = 5, .expected = "/help\t, next!" },
+        .{ .text = "é /review, next", .start = 3, .end = 10, .name = "review", .right = 9, .expected = "é /review\t, next!" },
+    };
+    for (cases) |case| {
+        const rig = try openComposer();
+        defer rig.close();
+        const self = rig.overview;
+        try std.testing.expect(try rig.press(case.text) == null);
+        try self.composer.attachSkill(std.testing.allocator, case.start, case.end, case.name);
+        try self.inlineTestMenuNamed(case.name, case.name);
+        self.skill_menu.dismiss(self.composer.edits, self.composer.cursor);
+        const attached_revision = self.composer.edits;
+        try std.testing.expect(try rig.press("\x1b[F!\x1b[H") == null);
+        for (0..case.right) |_| try std.testing.expect(try rig.press("\x1b[C") == null);
+        try std.testing.expectEqual(case.end, self.composer.cursor);
+        try std.testing.expect(self.composer.edits != attached_revision);
+        try std.testing.expectEqualSlices(TerminalEditor.Attachment, &.{.{ .start = case.start, .end = case.end }}, self.composer.attachments());
+        try std.testing.expect(try self.draw(0) == null);
+        try std.testing.expect(try rig.press("\t") == null);
+        try std.testing.expectEqualStrings(case.expected, self.composerDraft().bytes);
+        try std.testing.expectEqual(case.end + 1, self.composer.cursor);
+        // A literal delimiter at the end is not an overlapping name edit.
+        try std.testing.expectEqualSlices(TerminalEditor.Attachment, &.{.{ .start = case.start, .end = case.end }}, self.composer.attachments());
+        try std.testing.expectEqual(@as(usize, 0), self.job_count);
+        try std.testing.expectEqual(@as(usize, 0), self.state.request_count);
+        try std.testing.expect(self.worker.thread == null);
+        try std.testing.expect(self.state.panel == null);
+        try std.testing.expect(try rig.press("\x1b[D") == null);
+        try std.testing.expectEqual(case.end, self.composer.cursor);
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expectEqual(@as(usize, 1), self.job_count);
+        try std.testing.expect(self.jobs[0] == .start);
+        const owned = &self.jobs[0].start;
+        try std.testing.expectEqualStrings(case.expected, owned.original());
+        try std.testing.expectEqualStrings(case.expected, owned.text());
+        try std.testing.expectEqual(@as(usize, 1), owned.skills().len);
+        try std.testing.expectEqualStrings(case.name, owned.skills()[0]);
+        try std.testing.expectEqual(@as(usize, 1), self.state.request_count);
+        try std.testing.expect(self.state.panel == null);
+    }
+}
+
+test "inline overview shell selected token interior Enter sends existing intent rather than selecting again" {
+    const cases = [_]struct { text: []const u8, start: usize, end: usize, name: []const u8, prefix: []const u8 }{
+        .{ .text = "/help", .start = 0, .end = 5, .name = "help", .prefix = "hel" },
+        .{ .text = "é /review, next", .start = 3, .end = 10, .name = "review", .prefix = "revie" },
+    };
+    for (cases) |case| {
+        const rig = try openComposer();
+        defer rig.close();
+        const self = rig.overview;
+        try std.testing.expect(try rig.press(case.text) == null);
+        try self.composer.attachSkill(std.testing.allocator, case.start, case.end, case.name);
+        try self.inlineTestMenuNamed(case.prefix, case.name);
+        self.skill_menu.dismiss(self.composer.edits, self.composer.cursor);
+        try std.testing.expect(try rig.press("\x1b[D") == null);
+        try std.testing.expectEqual(case.end - 1, self.composer.cursor);
+        try std.testing.expect(try self.draw(0) == null);
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expectEqual(@as(usize, 1), self.job_count);
+        try std.testing.expect(self.jobs[0] == .start);
+        const owned = &self.jobs[0].start;
+        try std.testing.expectEqualStrings(case.text, owned.original());
+        try std.testing.expectEqualStrings(case.text, owned.text());
+        try std.testing.expectEqual(@as(usize, 1), owned.skills().len);
+        try std.testing.expectEqualStrings(case.name, owned.skills()[0]);
+        try std.testing.expectEqual(@as(usize, 1), self.state.request_count);
+        try std.testing.expect(self.worker.thread == null); // no Session or body read during selection
+        try std.testing.expect(self.state.panel == null);
     }
 }
 

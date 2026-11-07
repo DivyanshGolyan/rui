@@ -1229,7 +1229,7 @@ fn drawFrame(self: *Self) !void {
         try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
     else if (self.input.attachments().len != 0)
         try context.print("{d} skill{s} selected · Enter sends · editing a token detaches it", .{ self.input.attachments().len, if (self.input.attachments().len == 1) @as([]const u8, "") else "s" })
-    else if (self.skill_menu.choices(view.bytes, view.cursor, self.input.revision)) |choices| {
+    else if (self.skillChoices()) |choices| {
         if (!choices.dismissed) {
             if (choices.pending) try context.writeAll("Finding skills · Esc keeps text literal") else if (choices.total > slash_commands_shared.List.capacity) try context.print("{d} matching skills · type more to narrow · Enter/Tab selects", .{choices.total}) else if (choices.entries.len != 0) try context.writeAll("Enter/Tab selects a skill · Esc keeps text literal");
         }
@@ -1256,9 +1256,22 @@ fn drawFrame(self: *Self) !void {
     if (delivered.notice and rendered_upgrade and notice_revision == self.upgrade_note_revision) self.upgrade_note_shown = true;
 }
 
+fn attachedToken(self: *const Self) bool {
+    const view = self.input.composition();
+    const token = skill_completion.candidate(view.bytes, view.cursor) orelse return false;
+    return token.attached(self.input.attachments());
+}
+
+fn skillChoices(self: *const Self) ?slash_commands_shared.SkillChoices {
+    if (self.attachedToken()) return null;
+    const view = self.input.composition();
+    return self.skill_menu.choices(view.bytes, view.cursor, self.input.revision);
+}
+
 fn refreshSkills(self: *Self) !void {
     const view = self.input.composition();
-    if (try self.skill_menu.refresh(view.bytes, view.cursor, self.input.revision)) {
+    const attached = self.attachedToken();
+    if (try self.skill_menu.refresh(if (attached) "" else view.bytes, if (attached) 0 else view.cursor, self.input.revision)) {
         self.terminal.screen.commands = null;
         self.dirty = true;
         if (self.skill_menu.failure() != null) self.notice = "! Skill suggestions unavailable. Text remains literal; /skill NAME still works.";
@@ -1269,7 +1282,7 @@ fn refreshSkills(self: *Self) !void {
 fn attachSkillEvent(self: *Self, decoded: TerminalInput.Decoded) !bool {
     if (!Editor.plainTab(decoded) and !Editor.plainEnter(decoded)) return false;
     const view = self.input.composition();
-    const choices = self.skill_menu.choices(view.bytes, view.cursor, self.input.revision) orelse return false;
+    const choices = self.skillChoices() orelse return false;
     if (choices.dismissed) return false;
     if (choices.pending) {
         self.dirty = true;
@@ -1300,11 +1313,12 @@ fn attachSkillEvent(self: *Self, decoded: TerminalInput.Decoded) !bool {
 /// its command word starts, or the choices for the word typed after one.
 /// Null when nothing matches.
 fn nextCommands(self: *Self, previous: ?slash_commands_shared.Shown) ?slash_commands_shared.Shown {
+    if (self.attachedToken()) return null;
     // The Session's model offers its efforts once a read names it.
     const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
     const view = self.input.composition();
     const draft = view.bytes;
-    if (self.skill_menu.choices(draft, view.cursor, self.input.revision)) |choices| {
+    if (self.skillChoices()) |choices| {
         if (choices.dismissed) return null;
         const token = skill_completion.candidate(draft, view.cursor).?;
         const selected_leading = self.input.attachments().len != 0 and self.input.attachments()[0].start == 0;
@@ -1367,14 +1381,15 @@ fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     // The editor lends back the frontend `startInput` registered, whose
     // rows' lines this writes.
     const self: *Self = @ptrCast(@alignCast(@constCast(context)));
-    const view = self.input.composition();
-    if (self.skill_menu.choices(draft, view.cursor, self.input.revision)) |choices| {
+    if (self.attachedToken()) return null;
+    if (self.skillChoices()) |choices| {
         if (choices.dismissed) return null;
         if (choices.pending) return "";
         const shown = self.shownCommands() orelse return if (choices.entries.len != 0) "" else null;
         if (shown.list.entries[shown.highlight].kind == .skill) return "";
         return shown.completion();
     }
+    if (self.input.attachments().len != 0 and self.input.attachments()[0].start == 0) return null;
     if (draft.len == 0) {
         const rows = self.nextCommands(self.terminal.screen.commands) orelse return null;
         return rows.completion();
@@ -1589,7 +1604,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
     const screen = self.terminal.screen;
     if (screen.inputRow() == .draft) {
         const view = self.input.composition();
-        if (self.skill_menu.choices(view.bytes, view.cursor, self.input.revision)) |choices| {
+        if (self.skillChoices()) |choices| {
             if (!choices.dismissed) {
                 if (action == .close) {
                     self.skill_menu.dismiss(self.input.revision, view.cursor);
@@ -5334,6 +5349,89 @@ test "inline session drawn Tab replaces the middle UTF8 token and second Enter s
     try std.testing.expectEqualStrings("é /demo, suffix", try self.input.message(ticket));
     try sendKeys(self, "next");
     try std.testing.expectEqualStrings("demo", names[0]);
+}
+
+test "inline session attached tokens stay out of completion after caret movement and unrelated edits" {
+    for ([_]bool{ false, true }) |leading| {
+        for ([_]bool{ false, true }) |edited| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            const self = &held.self;
+            const text = if (leading) "/help" else "ask /demo, later";
+            const name = if (leading) "help" else "demo";
+            const start: usize = if (leading) 0 else 4;
+            const end = start + 5;
+            try sendKeys(self, text);
+            try self.input.attachSkill(std.testing.allocator, start, end, name);
+            try fixtureSkillMenu(self, if (leading) "he" else "de", if (leading) "hello" else "delete");
+            self.skill_menu.dismiss(self.input.revision, end);
+            if (edited) {
+                for (end..text.len) |_| try sendKeys(self, "\x1b[C");
+                try sendKeys(self, "!");
+            }
+            const cursor = start + 3;
+            const at = self.input.composition().cursor;
+            for (cursor..at) |_| try sendKeys(self, "\x1b[D");
+            try std.testing.expectEqual(cursor, self.input.composition().cursor);
+            try std.testing.expect(self.nextCommands(null) == null);
+            try std.testing.expect(tabCompletion(self, self.input.composition().bytes) == null);
+            try std.testing.expect(!try self.attachSkillEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }));
+            var vtable = std.testing.io.vtable.*;
+            vtable.randomSecure = SkillEntropyFailure.random;
+            self.submission.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+            try std.testing.expectError(error.EntropyUnavailable, sendKeys(self, "\r"));
+            const ticket = self.submission.intent.?.message;
+            const names = try self.input.skillNames(ticket, std.testing.allocator);
+            defer std.testing.allocator.free(names);
+            try std.testing.expectEqual(@as(usize, 1), names.len);
+            try std.testing.expectEqualStrings(name, names[0]);
+            var expected: [32]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{s}{s}", .{ text, if (edited) @as([]const u8, "!") else "" }), try self.input.message(ticket));
+            try std.testing.expect(self.input.queuedCommand() == null);
+        }
+    }
+}
+
+test "inline session Tab inside an attached builtin spelling is ordinary editor input" {
+    for ([_]bool{ false, true }) |at_end| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try sendKeys(self, "/help");
+        try self.input.attachSkill(std.testing.allocator, 0, 5, "help");
+        try fixtureSkillMenu(self, if (at_end) "help" else "he", if (at_end) "help" else "hello");
+        self.skill_menu.dismiss(self.input.revision, 5);
+        if (!at_end) try sendKeys(self, "\x1b[D\x1b[D");
+        try sendKeys(self, "\t");
+        try std.testing.expectEqualStrings(if (at_end) "/help\t" else "/he\tlp", self.input.composition().bytes);
+        try std.testing.expectEqual(@as(usize, if (at_end) 6 else 4), self.input.composition().cursor);
+        try std.testing.expectEqual(@as(usize, if (at_end) 1 else 0), self.input.attachments().len);
+        try std.testing.expect(self.submission.view() == null);
+        try std.testing.expect(self.input.queuedCommand() == null);
+    }
+}
+
+test "inline session a selected leading skill does not block a different completion target" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "/help /de");
+    try self.input.attachSkill(std.testing.allocator, 0, 5, "help");
+    for (0..4) |_| try sendKeys(self, "\x1b[C");
+    try fixtureSkillMenu(self, "de", "demo");
+    try held.settle();
+    try sendKeys(self, "\t");
+    try std.testing.expectEqualStrings("/help /demo", self.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 2), self.input.attachments().len);
+    var vtable = std.testing.io.vtable.*;
+    vtable.randomSecure = SkillEntropyFailure.random;
+    self.submission.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    try std.testing.expectError(error.EntropyUnavailable, sendKeys(self, "\r"));
+    const names = try self.input.skillNames(self.submission.intent.?.message, std.testing.allocator);
+    defer std.testing.allocator.free(names);
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings("help", names[0]);
+    try std.testing.expectEqualStrings("demo", names[1]);
 }
 
 test "inline session pending hidden cursor and catalog changes cannot select or send" {
