@@ -1487,7 +1487,8 @@ Complete builds remain available for running processes, but retained executables
 
 A release version has the form `0.S.N`.
 `S` is the released commit's `schema_version`, and `N` counts earlier releases with the same schema.
-The release workflow publishes each promoted `stable` SHA at most once, and versions never decrease.
+The release workflow publishes qualified `main` commits, and versions never decrease.
+The `stable` branch is a compatibility pointer to the last successfully published release, not another integration branch.
 A build reports `unreleased` unless its commit has a matching release tag.
 [Issue #523](https://github.com/DivyanshGolyan/rui/issues/523) records the approved decision and unresolved conversion and relocation work; it does not authorize a new migration or reset policy.
 

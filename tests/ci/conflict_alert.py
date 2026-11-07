@@ -3,8 +3,7 @@
 
 GitHub runs no checks on a PR that conflicts with its base, and no event says
 so: the PR just sits without CI (#780 waited about 45 minutes). After every
-move of main (a PR merge, or Auto-land's fast-forward, which dispatches this)
-it asks GitHub for each open PR's merge state and comments on each
+PR merge, it asks GitHub for each open PR's merge state and comments on each
 conflicting PR once per PR head, naming the main commit. The comment is the
 event that reaches whoever watches the PR.
 """
@@ -14,9 +13,11 @@ import subprocess
 import sys
 import time
 
-from auto_land import gh
-
 MARKER = "<!-- conflict-alert head={head} -->"
+
+
+def gh(*args):
+    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
 
 
 def github(method, path, fields=()):

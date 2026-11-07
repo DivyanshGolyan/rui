@@ -1,0 +1,232 @@
+"""Publish complete immutable releases, then repair the stable compatibility pointer."""
+import hashlib
+import json
+import os
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+
+def gh(*args):
+    return subprocess.run(["gh", *map(str, args)], check=True,
+                          capture_output=True, text=True).stdout
+
+
+def git(*args):
+    return subprocess.run(["git", *args], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _repository():
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise SystemExit("GITHUB_REPOSITORY must name the release repository")
+    return repository
+
+
+def expected_assets(version):
+    if not re.fullmatch(r"0\.[0-9]+\.[0-9]+", version):
+        raise SystemExit(f"invalid release version: {version}")
+    return {
+        *(f"rui-{version}-{platform}.tar.gz"
+          for platform in ("linux-x86_64", "linux-arm64", "darwin-arm64")),
+        *(f"rui-{version}-linux-{arch}-debug.tar.gz" for arch in ("x86_64", "arm64")),
+        f"rui-{version}.tgz",
+        *(f"rui-{platform}-{version}.tgz"
+          for platform in ("linux-x64", "linux-arm64", "darwin-arm64")),
+        "SHA256SUMS", "install.sh",
+    }
+
+
+def inventory():
+    """Read every release, including drafts; API errors must not become absence."""
+    try:
+        pages = json.loads(gh("api", "--paginate", "--slurp",
+                              f"repos/{_repository()}/releases"))
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"invalid release inventory: {error}") from error
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise SystemExit("release inventory must be paginated REST release arrays")
+    records = [record for page in pages for record in page]
+    if any(not isinstance(record, dict) or not isinstance(record.get("tag_name"), str)
+           or type(record.get("draft")) is not bool for record in records):
+        raise SystemExit("release inventory contains an invalid REST release record")
+    return records
+
+
+def _record(version):
+    matches = [record for record in inventory() if record["tag_name"] == f"v{version}"]
+    if len(matches) > 1:
+        raise SystemExit(f"multiple releases claim v{version}")
+    return matches[0] if matches else None
+
+
+def _asset_names(version, record):
+    if record.get("tag_name") != f"v{version}" or type(record.get("draft")) is not bool:
+        raise SystemExit(f"invalid release record for v{version}")
+    assets = record.get("assets")
+    if not isinstance(assets, list) or any(
+        not isinstance(asset, dict) or not isinstance(asset.get("name"), str)
+        or asset.get("state", "uploaded") != "uploaded" for asset in assets
+    ):
+        raise SystemExit(f"v{version} has invalid or unfinished assets")
+    names = [asset["name"] for asset in assets]
+    if len(names) != len(set(names)):
+        raise SystemExit(f"v{version} has duplicate asset names")
+    return set(names)
+
+
+def _check_names(version, names):
+    expected = expected_assets(version)
+    if names != expected:
+        raise SystemExit(f"v{version} incomplete asset set; "
+                         f"missing={sorted(expected - names)}, unexpected={sorted(names - expected)}")
+
+
+def _verify_directory(version, directory):
+    _check_names(version, {path.name for path in directory.iterdir()})
+    for name in expected_assets(version):
+        path = directory / name
+        if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+            raise SystemExit(f"v{version} asset is not a nonempty regular file: {name}")
+    archives = {name for name in expected_assets(version) if name.endswith((".tar.gz", ".tgz"))}
+    digests = {}
+    for line in (directory / "SHA256SUMS").read_text().splitlines():
+        match = re.fullmatch(r"([0-9a-fA-F]{64}) [ *](\S+)", line)
+        if not match or match[2] in digests:
+            raise SystemExit(f"v{version} has malformed or duplicate SHA256SUMS entries")
+        digests[match[2]] = match[1].lower()
+    if set(digests) != archives:
+        raise SystemExit(f"v{version} SHA256SUMS must cover every archive exactly")
+    for name, expected in digests.items():
+        digest = hashlib.sha256()
+        with (directory / name).open("rb") as asset:
+            for chunk in iter(lambda: asset.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != expected:
+            raise SystemExit(f"v{version} digest mismatch: {name}")
+
+
+def verify_release(version, record):
+    """Check the full remote asset set and its bytes, whether public or draft."""
+    _check_names(version, _asset_names(version, record))
+    with tempfile.TemporaryDirectory(prefix="rui-release-") as scratch:
+        gh("release", "download", f"v{version}", "--repo", _repository(), "--dir", scratch)
+        _verify_directory(version, Path(scratch))
+
+
+def _commit(sha):
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+        raise SystemExit("release target must be a full immutable commit SHA")
+    if git("rev-parse", "--verify", f"{sha}^{{commit}}") != sha:
+        raise SystemExit(f"release target is not a commit: {sha}")
+    return sha
+
+
+def _remote_tag(version):
+    tag = f"refs/tags/v{version}"
+    refs = {}
+    for line in git("ls-remote", "origin", tag, f"{tag}^{{}}").splitlines():
+        value, ref = line.split()
+        refs[ref] = value
+    return refs.get(f"{tag}^{{}}", refs.get(tag))
+
+
+def _guard_target(version, sha, record):
+    tag_sha = _remote_tag(version)
+    if tag_sha is not None and tag_sha != sha:
+        raise SystemExit(f"v{version} tag points to {tag_sha}, not {sha}")
+    if record is not None:
+        if record["draft"]:
+            # Draft releases need not create their tag until they become public.
+            if record.get("target_commitish") != sha:
+                raise SystemExit(f"v{version} draft target is not immutable SHA {sha}")
+        elif tag_sha is None:
+            raise SystemExit(f"published v{version} has no remote tag")
+    return tag_sha
+
+
+def publish(version, sha, directory, notes):
+    """Recover a draft, and expose it only after remote bytes pass verification."""
+    _verify_directory(version, directory)
+    sha = _commit(sha)
+    repository = _repository()
+    record = _record(version)
+    tag_sha = _guard_target(version, sha, record)
+    if record is None:
+        args = ["release", "create", f"v{version}", "--repo", repository,
+                "--target", sha, "--draft", "--title", f"Rui {version}",
+                "--notes-file", str(notes)]
+        if tag_sha is not None:
+            args.append("--verify-tag")
+        gh(*args)
+        record = _record(version)
+        if record is None:
+            raise SystemExit(f"v{version} draft creation did not produce a release")
+        _guard_target(version, sha, record)
+    if record["draft"]:
+        # A draft may have been published outside the serialized workflow meanwhile.
+        record = _record(version)
+        if record is None:
+            raise SystemExit(f"v{version} disappeared before asset upload")
+        _guard_target(version, sha, record)
+    if not record["draft"]:
+        verify_release(version, record)
+        return
+    unexpected = _asset_names(version, record) - expected_assets(version)
+    if unexpected:
+        raise SystemExit(f"v{version} draft has unexpected assets: {sorted(unexpected)}")
+    # Only drafts may replace bytes from an earlier, possibly different cold build.
+    gh("release", "upload", f"v{version}", "--repo", repository, "--clobber",
+       *(str(directory / name) for name in sorted(expected_assets(version))))
+    record = _record(version)
+    if record is None:
+        raise SystemExit(f"v{version} disappeared after asset upload")
+    _guard_target(version, sha, record)
+    verify_release(version, record)
+    if record["draft"]:
+        gh("release", "edit", f"v{version}", "--repo", repository,
+           "--draft=false", "--latest", "--notes-file", str(notes))
+    record = _record(version)
+    if record is None or record["draft"]:
+        raise SystemExit(f"v{version} is not public after publication")
+    _guard_target(version, sha, record)
+    verify_release(version, record)
+
+
+def _ancestor(ancestor, commit):
+    result = subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, commit],
+                            check=False, capture_output=True, text=True)
+    if result.returncode not in (0, 1):
+        result.check_returncode()
+    return result.returncode == 0
+
+
+def repair_stable(sha):
+    """Fast-forward stable after a verified publication, never rewind or force it."""
+    remote = git("ls-remote", "--heads", "origin", "refs/heads/main", "refs/heads/stable")
+    refs = dict(reversed(line.split()) for line in remote.splitlines())
+    if "refs/heads/main" not in refs:
+        raise SystemExit("origin/main is missing")
+    refspecs = ["+refs/heads/main:refs/remotes/origin/main"]
+    if "refs/heads/stable" in refs:
+        refspecs.append("+refs/heads/stable:refs/remotes/origin/stable")
+    fetch = ["fetch", "--quiet", "--no-tags"]
+    if git("rev-parse", "--is-shallow-repository") == "true":
+        fetch.append("--unshallow")
+    git(*fetch, "origin", *refspecs)
+    sha = _commit(sha)
+    main = git("rev-parse", "refs/remotes/origin/main")
+    if not _ancestor(sha, main):
+        raise SystemExit(f"{sha} is not on origin/main")
+    if "refs/heads/stable" in refs:
+        stable = git("rev-parse", "refs/remotes/origin/stable")
+        if not _ancestor(stable, main):
+            raise SystemExit("stable diverges from origin/main")
+        if _ancestor(sha, stable):
+            return
+        if not _ancestor(stable, sha):
+            raise SystemExit("stable diverges from the published commit")
+    git("push", "origin", f"{sha}:refs/heads/stable")
+    git("update-ref", "refs/remotes/origin/stable", sha)

@@ -2,8 +2,7 @@ name: Maintain shared build caches
 on:
   push:
     branches: [main]
-    # Refresh immediately when compatibility inputs change. Ordinary source edits
-    # use the daily baseline, avoiding two extra production builds per merge.
+    # Refresh when compatibility inputs change, not on ordinary source edits.
     paths:
       - 'build.zig*'
       - 'src/build_*'
@@ -11,17 +10,15 @@ on:
       - '.github/actions/setup/**'
       - '.github/workflows/cache-maintenance.yml'
       - '.github/scripts/prune-caches.cjs'
-  schedule:
-    - cron: '43 5 * * *'
   workflow_run:
-    workflows: [Selected checks, Daily changed-main macOS, On-demand macOS qualification, Scheduled cold acceptance, Renderer contracts]
+    workflows: [Selected checks, On-demand macOS qualification, Renderer contracts]
     types: [completed]
 
 permissions:
   contents: read
 
 concurrency:
-  # Completion cleanups must not replace a pending scheduled/push baseline.
+  # Completion cleanups must not replace a pending push baseline.
   group: cache-maintenance-${{ github.event_name == 'workflow_run' && 'prune' || 'baseline' }}
   # Finish cache saves; only superseded pending refreshes may be replaced.
   cancel-in-progress: false

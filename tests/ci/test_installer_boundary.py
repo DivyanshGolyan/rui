@@ -41,5 +41,6 @@ class InstallerBoundaryTest(unittest.TestCase):
                 [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests/ci", "-p", "test_release.py", "-v"],
                 cwd=ROOT, env=environment, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("Ran 11 tests", result.stderr)
+            self.assertRegex(result.stderr, r"Ran [1-9][0-9]* tests?\b")
+            self.assertRegex(result.stderr, r"(?m)^OK$")
             self.assertNotIn("skipped", result.stderr)

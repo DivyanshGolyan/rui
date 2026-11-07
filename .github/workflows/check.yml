@@ -1,19 +1,14 @@
 name: Selected checks
-# Auto-land reads dispatch titles to tell stable qualification from other dispatches.
-run-name: ${{ inputs.stable && format('Stable qualification from base {0}', inputs.base) || github.event_name == 'workflow_dispatch' && format('Selected checks from base {0}', inputs.base) || '' }}
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('Selected checks from base {0}', inputs.base) || '' }}
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  # Qualify a ref against a chosen base; Auto-land qualifies stable candidates this way.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
+  # Diagnose a ref against a chosen base without publishing it.
   workflow_dispatch:
     inputs:
       base:
         description: Base commit; selection covers base..ref
         required: true
-      stable:
-        description: Qualify current main on Mac, including candidates with no selected native targets
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -21,7 +16,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}-${{ inputs.stable && github.sha || '' }}
+  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -30,6 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
+      candidate_ref: ${{ steps.select.outputs.candidate_ref }}
       targets: ${{ steps.select.outputs.targets }}
       native_targets: ${{ steps.select.outputs.native_targets }}
       native: ${{ steps.select.outputs.native }}
@@ -44,16 +40,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - name: Select existing targets
         id: select
         env:
+          CANDIDATE_REF: ${{ github.sha }}
           BASE: ${{ github.event.pull_request.base.sha || inputs.base }}
           PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
           EVENT_NAME: ${{ github.event_name }}
-          STABLE: ${{ inputs.stable || false }}
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_REF"
           python3 tests/ci/select_tests.py --base "$BASE" --phase "$PHASE" > selection.json
           cat selection.json
           BASE=$(python3 -c 'import json; print(json.load(open("selection.json"))["base"])')
@@ -64,17 +62,17 @@ jobs:
           from qualification import shards, split_build
           from select_tests import CHECK_COVERS
           p = json.load(open('selection.json'))
-          if os.environ['STABLE'] == 'true':
-              assert os.environ['GITHUB_REF_NAME'] == 'main', 'stable qualifies main only'
-              p['targets'] = []
-              p['native_targets'] = sorted((set(p['native_targets']) - CHECK_COVERS)
-                                           | {'check', 'admission-debug-integration'})
+          ready_pr = os.environ['EVENT_NAME'] == 'pull_request' and p['phase'] == 'review'
+          if ready_pr:
+              # Qualify the tested source tree, not the later final squash SHA.
+              # check-full already contains the core native acceptance suites.
+              native = (set(p['native_targets']) - CHECK_COVERS) | {'admission-debug-integration'}
+              if 'check-full' not in native:
+                  native.add('check')
+              p['native_targets'] = sorted(native)
               p['retry'] = False
-          elif os.environ['EVENT_NAME'] == 'pull_request' and p['mac_required']:
-              # Platform code can differ on Mac; Linux green does not predict it.
-              p['native_targets'] = p['native_targets'] or ['check']
           else:
-              # Other PRs are Linux-only, even for strict paths. Mac runs after main.
+              # Reduced draft feedback cannot qualify a merge candidate.
               p['native_targets'] = []
           # PR integration codegen is fast; the LLVM stack oracle remains a
           # required, independent job rather than a dependency of every shard.
@@ -84,6 +82,7 @@ jobs:
               p['targets'] = [t for t in p['targets'] if t != 'stack-frames']
           p['native_required'] = bool(p['native_targets'])
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              print('candidate_ref=' + os.environ['CANDIDATE_REF'], file=f)
               print('targets=' + json.dumps(p['targets']), file=f)
               print('native_targets=' + json.dumps(p['native_targets']), file=f)
               print('linux_matrix=' + json.dumps(shards(p['targets'])), file=f)
@@ -105,10 +104,10 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      issues: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           # Import-cycle and caller-error allowances only shrink from trusted main history.
           fetch-depth: 0
       - name: Install the pinned packages tests/ci imports
@@ -130,13 +129,6 @@ jobs:
       - name: Check caller error coverage and shrink-only pending causes
         run: python3 -B tests/ci/caller_errors.py
       - run: python3 -B -m unittest discover -s tests/ci -v
-      - name: Warn when a change touches a held fixture without citing its stable-red issue
-        if: ${{ github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-        run: python3 -B tests/ci/stable_hold.py pr --base "$BASE"
       - name: Reject undefined fixture names before native builds
         run: |
           python3 -m pip install --disable-pip-version-check ruff==0.17.0
@@ -181,6 +173,8 @@ jobs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
         with:
           targets: ${{ needs.plan.outputs.targets }}
@@ -208,6 +202,8 @@ jobs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
         with:
           check-part: compiled-unit
@@ -232,6 +228,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
         with:
           check-part: typecheck-macos
@@ -240,11 +238,14 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.native == 'true' }}
     runs-on: macos-15
-    timeout-minutes: 15
+    # Match the cold Release producer budget without extending acceptance deadlines.
+    timeout-minutes: 60
     outputs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
         with:
           targets: ${{ needs.plan.outputs.native_targets }}
@@ -273,6 +274,8 @@ jobs:
       artifact: ${{ steps.publish.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
         with:
           check-part: compiled-unit
@@ -289,19 +292,21 @@ jobs:
           if-no-files-found: error
           retention-days: 1
   cache_execution:
-    # Not required by linux or macos: the cache-policy proof runs beside the
-    # gates instead of delaying both producers.
+    # Admission requires both platforms when cache policy changes.
+    # Run alongside compilation rather than delaying its producers.
     name: cache execution (${{ matrix.runner }})
     needs: plan
     if: ${{ needs.plan.outputs.cache_execution == 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        runner: ${{ inputs.stable && fromJSON('["macos-15"]') || fromJSON('["ubuntu-24.04"]') }}
+        runner: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
         with:
           targets: '["test-logic"]'
@@ -316,6 +321,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
         with:
           targets: '["stack-frames"]'
@@ -343,6 +350,8 @@ jobs:
       LIVE_MYSQL: ${{ contains(matrix.targets, 'test') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') || contains(matrix.targets, 'launch-frame-integration') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
         with:
           targets: ${{ toJSON(matrix.targets) }}
@@ -488,6 +497,8 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.macos_matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_ref }}
       - uses: ./.github/actions/setup
         with:
           targets: ${{ toJSON(matrix.targets) }}
@@ -538,44 +549,41 @@ jobs:
           if [ "$SPLIT" = true ]; then test "$UNIT_RESULT" = success; else test "$UNIT_RESULT" = skipped; fi
           test "$BUILD_RESULT" = success
           test "$NATIVE_RESULT" = success
-  report:
-    # Stable reds are filed by cause; a PR's own red is its author's.
-    needs: [linux, macos, cache_execution]
-    if: ${{ always() && !github.event.repository.private && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.stable && (needs.linux.result != 'success' || needs.macos.result != 'success') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      issues: write
-      actions: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: File each failure under its cause
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 -B tests/ci/report_issue.py --workflow "Stable qualification" --run-id "$GITHUB_RUN_ID" --sha "$GITHUB_SHA" --label stable-red
-  completion:
-    # Explicit dispatch is supported for GITHUB_TOKEN; workflow_run is suppressed.
-    # The wake follows the report, so a red's stable-red issue exists before promotion runs.
-    needs: [linux, macos, cache_execution, report]
-    if: ${{ always() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.stable && !github.event.repository.private }}
+  previous_release_upgrade:
+    needs: plan
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
+    uses: ./.github/workflows/previous-release-upgrade.yml
+    with:
+      candidate-ref: ${{ needs.plan.outputs.candidate_ref }}
+  admission:
+    # This is the sole PR admission status. Reduced draft feedback cannot pass it.
+    needs: [plan, policy, linux, macos, previous_release_upgrade, cache_execution]
+    if: ${{ always() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions:
-      contents: read
-      actions: write
     steps:
-      - name: Wake Auto-land after this qualification finishes
+      - name: Require candidate acceptance
         env:
-          GH_TOKEN: ${{ github.token }}
-        # A lost wake skips this promotion until the next one. A repeated wake
-        # is harmless: Auto-land's writer is serialized and rechecks evidence.
+          DRAFT: ${{ github.event.pull_request.draft }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          POLICY_RESULT: ${{ needs.policy.result }}
+          LINUX_RESULT: ${{ needs.linux.result }}
+          MACOS_RESULT: ${{ needs.macos.result }}
+          UPGRADE_RESULT: ${{ needs.previous_release_upgrade.result }}
+          NATIVE: ${{ needs.plan.outputs.native }}
+          CACHE_SELECTED: ${{ needs.plan.outputs.cache_execution }}
+          CACHE_RESULT: ${{ needs.cache_execution.result }}
         run: |
-          for delay in 10 30 ''; do
-            gh workflow run auto-land.yml --repo "$GITHUB_REPOSITORY" --ref main -f completed_run="$GITHUB_RUN_ID" && exit 0
-            test -n "$delay" || exit 1
-            echo "::warning::Auto-land wake failed; retrying in ${delay}s"
-            sleep "$delay"
-          done
+          set -euo pipefail
+          test "$DRAFT" = false
+          test "$PLAN_RESULT" = success
+          test "$POLICY_RESULT" = success
+          test "$LINUX_RESULT" = success
+          test "$NATIVE" = true
+          test "$MACOS_RESULT" = success
+          test "$UPGRADE_RESULT" = success
+          case "$CACHE_SELECTED" in
+            true) test "$CACHE_RESULT" = success ;;
+            false) test "$CACHE_RESULT" = skipped ;;
+            *) echo 'Missing or invalid cache selection' >&2; exit 1 ;;
+          esac
