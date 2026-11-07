@@ -2412,7 +2412,10 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     }
     try sqlite.exec(database, "UPDATE session_stop SET position=NULL WHERE command_key='rui.core/stop0'");
     try sqlite.exec(database, "CREATE TEMP TABLE original_stops AS SELECT * FROM session_stop");
-    try sqlite.exec(database, "CREATE TEMP TABLE original_commands AS SELECT * FROM core_command");
+    try sqlite.exec(database, "CREATE TEMP TABLE expected_commands AS SELECT * FROM core_command");
+    // Schema 60 adds best-available authored references to these legacy Messages.
+    try sqlite.exec(database, "UPDATE expected_commands SET secondary_content_id=2 WHERE command_key='fixture-answer-key'");
+    try sqlite.exec(database, "UPDATE expected_commands SET secondary_content_id=6 WHERE command_key='fixture-ask-message'");
     try sqlite.exec(database, "INSERT INTO session_ending_owed(turn_id,delivered) VALUES(1,0),(2,1)");
     try sqlite.exec(database, "CREATE TEMP TABLE original_endings AS SELECT * FROM session_ending_owed");
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE core_command SET kind=6 WHERE command_key='fixture-stop'"));
@@ -2420,8 +2423,8 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expect(try metaEquals(database, "wire_version", protocol.wire_version));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_commands EXCEPT SELECT * FROM core_command)"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM original_commands)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM expected_commands EXCEPT SELECT * FROM core_command)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM core_command EXCEPT SELECT * FROM expected_commands)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_stops EXCEPT SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop)"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at FROM session_stop EXCEPT SELECT * FROM original_stops)"));
     for (legacy_stops) |each| {
