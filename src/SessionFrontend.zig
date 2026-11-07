@@ -6005,7 +6005,7 @@ test "delayed permission queued inspection and Message input retain separate aut
         try std.testing.expect(self.submission.view() == null);
         try std.testing.expect(self.reading.phase == .permission and !self.reader.completed());
         const arguments = "{\"cmd\":\"echo gated\",\"description\":\"Gate\",\"timeout_ms\":null}";
-        try Host.reply(peer, arguments, "text/plain");
+        try Host.reply(peer, arguments, "text/plain; charset=utf-8");
     }
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), self, struct {
         fn done(frontend: *Self) bool {
