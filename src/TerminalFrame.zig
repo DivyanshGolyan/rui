@@ -95,6 +95,7 @@ pub const Input = struct {
     /// The byte that started the previous frame's first draft line.
     draft_anchor: usize = 0,
     status: []const u8,
+    status_essential: bool = false,
     notice: []const u8 = "",
     /// The command list's lines, each one row.
     command_rows: usize = 0,
@@ -185,9 +186,19 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
     self.status_height = try rows(&self.status, layout);
     try self.notice.append(input.notice);
     const notice_rows: u16 = if (input.notice.len != 0) try rows(&self.notice, layout) else 0;
+    // At a selected Action, a routine context/status yields before the
+    // source, choice or a notice when the small frame cannot fit all three.
+    if (input.selected and input.action_visible and !input.status_essential and
+        @as(u32, self.status_height) + notice_rows >= input.height - 1)
+    {
+        self.status.clear();
+        self.status_height = 0;
+    }
     // A notice that cannot show whole gives way, as the live line does.
     if (@as(u32, self.status_height) + notice_rows > input.height - 1) self.notice.clear();
     self.line_height = if (self.notice.length != 0) notice_rows else @intFromBool(input.height -| self.status_height >= 3);
+    if (input.selected and input.action_visible and self.notice.length == 0 and
+        @as(u32, self.status_height) + self.line_height >= input.height - 1) self.line_height = 0;
     // The input keeps one row: the draft's first line, or a waiting Action's
     // choice.
     if (@as(u32, self.status_height) + self.line_height > input.height - 1) return error.TerminalTooSmall;

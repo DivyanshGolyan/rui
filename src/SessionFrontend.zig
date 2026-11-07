@@ -1344,7 +1344,7 @@ fn drawFrame(self: *Self) !void {
     self.dirty = false;
     const notice_revision = self.upgrade_note_revision;
     const rendered_upgrade = said.text == null and self.notice == null and !screen.actionVisible() and self.upgrade_note_len != 0;
-    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
+    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .status_essential = self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
     _ = screen.presented(delivered);
     if (delivered.notice and rendered_upgrade and notice_revision == self.upgrade_note_revision) self.upgrade_note_shown = true;
 }
