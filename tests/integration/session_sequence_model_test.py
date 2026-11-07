@@ -61,7 +61,7 @@ raise SystemExit(code)
 
 
 class ProducerTests(unittest.TestCase):
-    def invoke(self, root, *, stage="", kind="", build_exit=0, direct_exit=0, custody="", evidence=""):
+    def invoke(self, root, *, stage="", kind="", build_exit=0, direct_exit=0, custody="", evidence="", umask=-1):
         source = root / ("source" if custody == "same_root" else "supplied")
         (source / "src").mkdir(parents=True)
         (source / "src/SessionFrontend.zig").write_text(FRONTEND)
@@ -129,7 +129,7 @@ class ProducerTests(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, str(RUNNER), "--source", str(source), "--output", str(output),
              "--cache", str(cache), "--selector", "pages"],
-            env=environment, capture_output=True, text=True, timeout=10,
+            env=environment, capture_output=True, text=True, timeout=10, umask=umask,
         )
         receipt = json.loads((output / "receipt.json").read_text()) if evidence in ("", "amp") else None
         after = {str(path.relative_to(source)): (path.read_bytes() if path.is_file() else None,
@@ -175,6 +175,13 @@ class ProducerTests(unittest.TestCase):
                     self.assertEqual(replayed, stage == "direct")
                     if stage == "build":
                         self.assertIsNone(receipt["direct_exit"])
+
+    def test_link_creation_modes_follow_process_umask(self):
+        for mask in (0o000, 0o077):
+            with self.subTest(umask=oct(mask)), tempfile.TemporaryDirectory() as directory:
+                result, receipt, replayed = self.invoke(Path(directory), umask=mask)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(replayed and receipt["source_unchanged"] and receipt["overlay_unchanged"])
 
     def test_abnormal_build_never_replays_even_with_a_discoverable_binary(self):
         for code in (-9, 42):

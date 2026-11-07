@@ -225,10 +225,16 @@ test "TD1 sequence model {name}" {{
     # Expected authority comes from supplied inputs, NEVER cache/source. The
     # only transformed input is the frontend with these exact declarations.
     expected_overlay = dict(supplied)
+    # Symlink modes are platform- and umask-dependent (notably on Darwin).
+    # Derive the creation mode independently of the executed overlay.
+    with tempfile.TemporaryDirectory(prefix="link-mode-", dir=output) as probe:
+        link = Path(probe) / "link"
+        link.symlink_to(source, target_is_directory=True)
+        link_mode = stat.S_IMODE(link.lstat().st_mode)
     for path in source.iterdir():
         if path.name in SCRATCH or path.name == "src":
             continue
-        expected_overlay[path.name] = {"kind": "link", "mode": 0o777, "target": str(path),
+        expected_overlay[path.name] = {"kind": "link", "mode": link_mode, "target": str(path),
                                        "target_mode": stat.S_IMODE(path.stat().st_mode)}
         if path.is_file():
             expected_overlay[path.name]["sha256"] = supplied[path.name]["sha256"]
@@ -269,6 +275,11 @@ test "TD1 sequence model {name}" {{
         # keys include filesystem identity, not just bytes. This bounded source
         # overlay is compilation scratch, not cached test acceptance.
         expected = set()
+        directories = [source / "src", *(path for path in (source / "src").rglob("*") if path.is_dir())]
+        for path in directories:
+            target = overlay / path.relative_to(source)
+            target.mkdir(parents=True, exist_ok=True)
+            expected.add(target)
         for path in (source / "src").rglob("*"):
             if not path.is_file():
                 continue
@@ -289,6 +300,11 @@ test "TD1 sequence model {name}" {{
         for path in sorted((overlay / "src").rglob("*"), reverse=True):
             if path.is_dir() and not path.is_symlink() and path not in expected and not any(path.iterdir()):
                 path.rmdir()
+        for path in reversed(directories):
+            target = overlay / path.relative_to(source)
+            mode = stat.S_IMODE(path.stat().st_mode)
+            if stat.S_IMODE(target.stat().st_mode) != mode:
+                target.chmod(mode)
         command = ["zig", "build", "test", "-j2", "--cache-dir", str(cache / "build"),
                    "-Dtest-filter=TD1 sequence model" + ("" if selector == "all" else " " + selector),
                    "--summary", "all", "--verbose"]

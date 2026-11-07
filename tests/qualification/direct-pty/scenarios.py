@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 
-from driver import DirectPty, defer_signals
+from driver import DirectPty, defer_signals, history_rows
 from host_process import canonical_fixture_root, dispose_all
 import model_fixture as model
 import codex_integration as codex
