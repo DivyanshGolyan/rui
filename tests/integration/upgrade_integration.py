@@ -628,8 +628,11 @@ def terminal_check_cases(root, binary, releases, artifacts):
                 # The arrow left Z after the caret; Ctrl-U alone only
                 # deletes to the line start. Move to the end before clearing.
                 screen.send("\x05\x15")
+                # The overview paints its placeholder only for an empty
+                # draft; the conversation renders an empty prompt instead.
+                empty_row = "Type a task to start a Session" if entry == "overview" else ""
                 wait_for(screen.observe, "cleared edited draft before Unicode paste",
-                         ready=lambda _: screen.capture.draft("", len(prompt), prompt=prompt))
+                         ready=lambda _: screen.capture.draft(empty_row, len(prompt), prompt=prompt))
                 screen.send("\x1b[200~A❤️B\x1b[201~")
 
                 def unicode_draft(_):
@@ -687,8 +690,11 @@ def terminal_cases(root, binary, releases, artifacts):
                 # The arrow left Z after the caret; Ctrl-U alone only
                 # deletes to the line start. Move to the end before clearing.
                 screen.send("\x05\x15")
+                # The overview paints its placeholder only for an empty
+                # draft; the conversation renders an empty prompt instead.
+                empty_row = "Type a task to start a Session" if entry == "overview" else ""
                 wait_for(screen.observe, "cleared edited draft before Unicode paste",
-                         ready=lambda _: screen.capture.draft("", len(prompt), prompt=prompt))
+                         ready=lambda _: screen.capture.draft(empty_row, len(prompt), prompt=prompt))
                 screen.send("\x1b[200~A❤️B\x1b[201~")
 
                 def unicode_draft(_):
