@@ -297,6 +297,47 @@ pub const Requests = struct {
         };
     }
 
+    /// Bounded owned metadata only; scope strings are borrowed until return.
+    pub fn skillSuggestions(self: Requests, gpa: std.mem.Allocator, store_path: []const u8, scope: @import("skill_suggestions.zig").Scope, prefix: []const u8) !@import("skill_suggestions.zig").Page {
+        try self.check();
+        if (prefix.len > 64 or !std.unicode.utf8ValidateSlice(prefix)) return error.InvalidPrefix;
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        const body = try gpa.create(protocol.RequestBuffer);
+        defer gpa.destroy(body);
+        body.len = 0;
+        switch (scope) {
+            .session => |session| {
+                try protocol_reply.validateIdentityInputs("", session);
+                try body.appendShape(protocol.skill_suggestions_session_request, .{ paths.store.slice(), session, prefix });
+            },
+            .workspace => |workspace| {
+                if (workspace.len == 0 or workspace.len > protocol.max_workspace_bytes or !std.unicode.utf8ValidateSlice(workspace)) return error.InvalidWorkspace;
+                try body.appendShape(protocol.skill_suggestions_workspace_request, .{ paths.store.slice(), workspace, prefix });
+            },
+        }
+        const fd = try openRead(self, &paths, "/v1/skill-suggestions", body.slice());
+        defer closeSocket(self.io, fd);
+        const Sink = struct {
+            bytes: std.ArrayList(u8) = .empty,
+            gpa: std.mem.Allocator,
+            pub fn feed(s: *@This(), bytes: []const u8) !void {
+                if (bytes.len > protocol.skill_suggestions_reply.max_bytes - s.bytes.items.len) return error.ResponseTooLarge;
+                try s.bytes.appendSlice(s.gpa, bytes);
+            }
+        };
+        var sink: Sink = .{ .gpa = gpa };
+        defer sink.bytes.deinit(gpa);
+        var buffer: ReplyBuffer = .{};
+        switch (try readReportResponse(self, fd, &sink, &buffer)) {
+            .report => {},
+            .command => |reply| return self.failRead(try self.captureReadFailure(reply)),
+        }
+        var page = try protocol_reply.decodeSkillSuggestions(gpa, sink.bytes.items);
+        errdefer page.deinit(gpa);
+        for (page.entries) |entry| if (!std.mem.startsWith(u8, entry.name, prefix)) return error.InvalidResponse;
+        return page;
+    }
+
     /// Complete scoped bytes once.
     pub fn readActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
         try self.check();
@@ -305,6 +346,18 @@ pub const Requests = struct {
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         try body.appendShape(protocol.activity_content_request, .{ paths.store.slice(), session, position, ordinal });
+        const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
+        defer closeSocket(self.io, fd);
+        return readPublicContentResponse(self, fd, expected, sink);
+    }
+
+    pub fn readAuthoredActivityContent(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: ?protocol_reply.CommandObservation.ContentReference, sink: anytype) !?protocol_reply.ReadFailure {
+        try self.check();
+        try protocol_reply.validateIdentityInputs("", session);
+        if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
+        const paths = try platform.resolveClientPaths(self.io, store_path);
+        var body: protocol.RequestBuffer = .{};
+        try body.appendShape(protocol.activity_authored_content_request, .{ paths.store.slice(), session, position, ordinal });
         const fd = try openRead(self, &paths, "/v1/activity-content", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
@@ -462,6 +515,7 @@ pub const MessageInput = struct {
     text_path: []const u8,
     text: ?[]const u8 = null,
     skill: ?[]const u8 = null,
+    skills: []const []const u8 = &.{},
     configuration: ?ConfigureInput = null,
     // The full sending address from the tool process, retained for recovery.
     sender: ?Address = null,
@@ -1389,6 +1443,23 @@ const CapturedConfiguration = struct {
     }
 };
 
+const CapturedSkills = struct {
+    names: []const protocol_reply.JsonString(64),
+    pub fn jsonParse(a: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !CapturedSkills {
+        if (try source.next() != .array_begin) return error.UnexpectedToken;
+        var names: std.ArrayList(protocol_reply.JsonString(64)) = .empty;
+        while (try source.peekNextTokenType() != .array_end) {
+            if (names.items.len == 4096) return error.ValueTooLong;
+            const name = try std.json.innerParse(protocol_reply.JsonString(64), a, source, options);
+            if (name.slice().len == 0) return error.InvalidCharacter;
+            for (names.items) |other| if (other.eql(name.slice())) return error.InvalidCharacter;
+            try names.append(a, name);
+        }
+        _ = try source.next();
+        return .{ .names = names.items };
+    }
+};
+
 fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol_reply.MutationIdentity, target: protocol_reply.MutationTarget } {
     const Fields = struct {
         version: protocol_reply.JsonString(8),
@@ -1401,6 +1472,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         archived: bool = true,
         reload_skills: ?bool = null,
         skill: ?protocol_reply.JsonString(64) = null,
+        skills: ?CapturedSkills = null,
         sender: ?protocol_reply.JsonAddress = null,
         sender_handle: ?protocol_reply.JsonString(32) = null,
         text: ?struct { state: protocol_reply.JsonString(8), value: CapturedText } = null,
@@ -1412,12 +1484,13 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     var file_reader = file.reader(io, &input);
     // Producer grammar nests at most four levels. Bounded metadata/name scratch
     // also covers escaped names; exhaustion rejects the record, never truncates.
-    var storage: [2048]u8 = undefined;
-    var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    var reader = std.json.Reader.init(fixed.allocator(), &file_reader.interface);
+    var arena: std.heap.ArenaAllocator = .init(std.heap.c_allocator);
+    defer arena.deinit();
+    var reader = std.json.Reader.init(arena.allocator(), &file_reader.interface);
     defer reader.deinit();
-    const fields = std.json.parseFromTokenSourceLeaky(Fields, fixed.allocator(), &reader, .{ .allocate = .alloc_if_needed, .max_value_len = protocol.max_store_bytes }) catch return file_reader.err orelse error.InvalidRequestRecord;
-    if (!fields.version.eql(protocol.wire_version)) return error.InvalidRequestRecord;
+    const fields = std.json.parseFromTokenSourceLeaky(Fields, arena.allocator(), &reader, .{ .allocate = .alloc_if_needed, .max_value_len = protocol.max_store_bytes }) catch return file_reader.err orelse error.InvalidRequestRecord;
+    if (!fields.version.eql(protocol.wire_version) and !fields.version.eql("10")) return error.InvalidRequestRecord;
+    if (fields.version.eql("10") and fields.skills != null) return error.InvalidRequestRecord;
     const kind = std.meta.stringToEnum(protocol.CommandKind, fields.kind.slice()) orelse return error.InvalidRequestRecord;
     var saved: protocol_reply.MutationIdentity = .{ .store = fields.store.value, .key = fields.key.value, .kind = kind };
     if (kind == .model_interruption) {
@@ -1432,6 +1505,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
         },
         .message => blk: {
             if (fields.sender) |sender| _ = sender.address() catch return error.InvalidRequestRecord;
+            if (fields.skill != null and fields.skills != null) return error.InvalidRequestRecord;
             if (fields.skill) |name| {
                 if (name.slice().len == 0 or fields.text != null or fields.configuration != null) return error.InvalidRequestRecord;
                 break :blk .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } };
@@ -1439,7 +1513,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
             const text = fields.text orelse return error.InvalidRequestRecord;
             if (!text.state.eql("value")) return error.InvalidRequestRecord;
             if (fields.configuration != null and saved.session.len != 0) return error.InvalidRequestRecord;
-            break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest, .creates_session = fields.configuration != null } };
+            break :blk .{ .message = .{ .bytes = text.value.bytes, .digest = text.value.digest, .creates_session = fields.configuration != null, .invokes_skill = if (fields.skills) |names| names.names.len != 0 else false } };
         },
         .session_stop => .session_stop,
         .session_archive => .{ .session_archive = .{ .archived = fields.archived } },
@@ -1457,7 +1531,7 @@ fn readCapturedBinding(io: std.Io, file: *std.Io.File) !struct { saved: protocol
     if ((kind != .configure and kind != .message and fields.configuration != null) or
         (fields.require_model != null and !(kind == .configure or kind == .message and fields.configuration != null)) or
         (kind != .configure and fields.reload_skills != null) or
-        (kind != .message and (fields.skill != null or fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
+        (kind != .message and (fields.skill != null or fields.skills != null or fields.text != null or fields.sender != null or fields.sender_handle != null)) or (kind != .model_interruption and fields.target != null) or
         (kind != .permission_decision and (fields.action != null or fields.decision != null))) return error.InvalidRequestRecord;
     return .{ .saved = saved, .target = target };
 }
@@ -1470,6 +1544,7 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !pro
     const count = try file.readPositionalAll(io, &buffer, 0);
     const prefix = buffer[0..count];
     const kind_marker = std.mem.indexOf(u8, prefix, ",\"configuration\"") orelse
+        std.mem.indexOf(u8, prefix, ",\"skills\"") orelse
         std.mem.indexOf(u8, prefix, ",\"text\"") orelse
         std.mem.indexOf(u8, prefix, ",\"decision\"") orelse
         // Stop/interruption records contain only bounded identities. There is
@@ -1489,7 +1564,7 @@ fn readCapturedIdentity(io: std.Io, file: *std.Io.File, handle: []const u8) !pro
     };
     const parsed = try std.json.parseFromSlice(Fields, std.heap.c_allocator, head[0 .. kind_marker + 1], .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.version, protocol.wire_version) or !std.mem.eql(u8, parsed.value.key, handle)) return error.InvalidRequestRecord;
+    if ((!std.mem.eql(u8, parsed.value.version, protocol.wire_version) and !std.mem.eql(u8, parsed.value.version, "10")) or !std.mem.eql(u8, parsed.value.key, handle)) return error.InvalidRequestRecord;
     var store: @FieldType(protocol_reply.MutationIdentity, "store") = .{};
     try store.set(parsed.value.store);
     var key: @FieldType(protocol_reply.MutationIdentity, "key") = .{};
@@ -1590,9 +1665,21 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
         try capture.writeRequest(protocol.message_request.configuration, .{});
         try capture.writeConfiguration(configuration);
     }
+    if (input.skill != null and input.skills.len != 0) return error.InvalidRequestRecord;
     if (input.skill) |name| {
         try capture.writeRequest(protocol.message_request.skill, .{name});
         return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .message);
+    }
+    if (input.skills.len != 0) {
+        if (input.skills.len > 4096) return error.InvalidRequestRecord;
+        try capture.writeRequest(.{",\"skills\":["}, .{});
+        for (input.skills, 0..) |name, i| {
+            if (name.len == 0 or name.len > 64 or !std.unicode.utf8ValidateSlice(name)) return error.InvalidRequestRecord;
+            for (input.skills[0..i]) |previous| if (std.mem.eql(u8, previous, name)) return error.InvalidRequestRecord;
+            if (i != 0) try capture.writeRequest(.{","}, .{});
+            try capture.writeJsonString(name);
+        }
+        try capture.writeRequest(.{"]"}, .{});
     }
     try capture.writeRequest(protocol.message_request.text, .{});
     if (input.text) |value| {

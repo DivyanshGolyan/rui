@@ -39,6 +39,7 @@ test {
     _ = @import("mcp/offered.zig");
     _ = @import("mcp/Request.zig");
     _ = @import("protocol.zig");
+    _ = @import("session_skills.zig");
     _ = @import("protocol_reply.zig");
     _ = @import("caller_rejection.zig");
     _ = @import("platform.zig");

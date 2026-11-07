@@ -16,7 +16,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 59;
+pub const schema_version: u32 = 60;
 
 pub const IdentityMismatch = struct {
     saved_selector: protocol.Bounded(protocol.max_store_bytes) = .{},
@@ -42,6 +42,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 57, .digest = 0x75359f28a14f23a9 },
     .{ .schema_version = 58, .digest = 0x4cd0a6b38d4904ed },
     .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
+    .{ .schema_version = 60, .digest = 0x26cc4d3d120b308f },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -289,6 +290,13 @@ pub const migrations = [_]Migration{
             "CREATE TABLE session_skill_catalog(\n session_ref VARCHAR(6) NOT NULL,\n position BIGINT NOT NULL,\n catalog_content_id BIGINT NOT NULL,\n PRIMARY KEY(session_ref,position),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(catalog_content_id) REFERENCES content(content_id),\n CHECK(position>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "ALTER TABLE conversation_entry MODIFY turn_id BIGINT NULL, ADD COLUMN source_catalog_position BIGINT AFTER source_revision, ADD UNIQUE(session_ref,source_catalog_position), ADD FOREIGN KEY(session_ref,source_catalog_position) REFERENCES session_skill_catalog(session_ref,position), DROP CHECK conversation_entry_chk_7, ADD CHECK((turn_id IS NULL)=(source_catalog_position IS NOT NULL)), ADD CHECK(source_catalog_position IS NULL OR source_catalog_position=session_position), ADD CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR (entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR (entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL))",
         },
+    },
+    // Semantic format: accepted Messages require authored provenance. Historical
+    // inputs cannot be reconstructed, so their admitted bytes are the baseline.
+    .{
+        .from = 59,
+        .sqlite = &.{ "UPDATE core_command SET secondary_content_id=primary_content_id WHERE kind=2 AND accepted=1 AND secondary_content_id IS NULL", "UPDATE store_meta SET meta_value='11' WHERE meta_key='wire_version' AND meta_value='10'" },
+        .mysql = &.{ "UPDATE core_command SET secondary_content_id=primary_content_id WHERE kind=2 AND accepted=1 AND secondary_content_id IS NULL", "UPDATE store_meta SET meta_value='11' WHERE meta_key='wire_version' AND meta_value='10'" },
     },
 };
 

@@ -469,7 +469,7 @@ const Intake = struct {
             const reply = try self.ensureReply();
             // Admission spends the environment; nothing of it outlives this.
             defer self.releaseEnvironment();
-            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, if (self.environment) |*offer| offer else null);
+            try prepareReply(self.host, reply, self.fd, self.header, self.number.?, self.accepted_at_ns, self.request.?, &self.retained_scratch, if (self.environment) |*offer| offer else null);
         }
 
         fn work(self: *Exchange) !State {
@@ -1454,6 +1454,7 @@ const Route = enum {
     activity_page,
     activity_search,
     activity_content,
+    skill_suggestions,
     model_list,
     unsupported_control,
 
@@ -1492,19 +1493,15 @@ const Header = struct {
 /// the Turn's Bash before the environment is in place. The register keeps
 /// `offer`'s allocation or leaves it, with what it released, to be freed
 /// right after admission.
-noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer) store_module.MessageReply {
+noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer, capture_options: protocol.ParseOptions) store_module.MessageReply {
     std.debug.assert(offer.value() != null);
     defer offer.deinit(host.allocator);
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
-    const initial_skills = if (command.configuration) |*configuration|
-        @import("session_skills.zig").initial(memory.allocator(), host.allocator, host.io, host.store, command.key.slice(), configuration, host.bash_facts.home) catch return .infrastructure_failure
-    else
-        null;
-    const captured_skill: ?store_module.CapturedSkill = if (command.skill != null and !(host.store.commandExists(command.key.slice()) catch return .infrastructure_failure))
-        @import("session_skills.zig").capture(memory.allocator(), host.allocator, host.io, host.store, command.session.slice(), &.{ .operation = .invoke, .name = command.skill }, host.bash_facts.home) catch return .infrastructure_failure
-    else
-        null;
+    const prepared = @import("session_skills.zig").prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home, capture_options) catch return .infrastructure_failure;
+    defer prepared.deinit(host.io);
+    const initial_skills = prepared.initial;
+    const captured_skill = prepared.captured;
     const faults = host.hooks.storeFaults(.command);
     const environments = host.environments orelse return host.store.submitMessageCapturedSkills(command, null, initial_skills, if (captured_skill) |*value| value else null, faults);
     const Install = struct {
@@ -1577,7 +1574,7 @@ noinline fn configureCapturedSkills(host: *Host, command: *const protocol.Config
 }
 
 /// `client_environment` holds a Message's checked environment.
-fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, client_environment: ?*SessionEnvironments.Offer) !void {
+fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *protocol.Request, retained_scratch: *?named_scratch.Owner, client_environment: ?*SessionEnvironments.Offer) !void {
     // The first MySQL readiness probe learns the opaque id over the private
     // socket. All subsequent work must name that exact id, never the URL.
     const discovering = request.* == .host_info and request.store().len == 0 and host.store.engine == .mysql;
@@ -1627,7 +1624,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(status, protocol.max_response_bytes, renderConfigureReply, .{ command, result });
         },
         .message => |*command| {
-            const result = submitMessage(host, command, client_environment.?);
+            const result = submitMessage(host, command, client_environment.?, .{ .io = host.io, .content_length = 0, .scratch_path = host.lease.paths.scratch.slice(), .request_number = request_number, .retained_scratch = retained_scratch, .scratch_budget = host.retention.sharedBudget() });
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
@@ -1857,6 +1854,19 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try deliverPublicContent(host, fd, location, 0, true);
         },
+        .skill_suggestions => |*command| {
+            const scope: @import("skill_suggestions.zig").Scope = if (command.session) |*session| .{ .session = session.slice() } else .{ .workspace = command.workspace.?.slice() };
+            var page = @import("session_skills.zig").suggestions(host.allocator, host.allocator, host.io, host.store, scope, command.prefix.slice(), host.bash_facts.home) catch |err| switch (err) {
+                error.SessionNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+                error.CorruptStore, error.StoreFenced => {
+                    fenceDispatch(host, "skill suggestions", err);
+                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+                },
+                else => return respondStatic(fd, 409, .activity_unavailable, "skills_unavailable"),
+            };
+            defer page.deinit(host.allocator);
+            try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, renderSkillSuggestions, .{&page});
+        },
         // Host memory only: never SQLite or the network.
         // Sized as written: the bound is tens of KiB, a reply mostly far less.
         .model_list => {
@@ -1864,6 +1874,15 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.jsonGrowing(200, protocol.model_list_reply.max_bytes, renderModelList, .{host});
         },
     }
+}
+
+fn renderSkillSuggestions(out: protocol.JsonOut, page: *const @import("skill_suggestions.zig").Page) !void {
+    try out.appendShape(protocol.skill_suggestions_reply.head, .{ page.revision, page.total });
+    for (page.entries, 0..) |entry, index| {
+        if (index != 0) try out.append(",");
+        try out.appendShape(protocol.skill_suggestions_reply.entry, .{ entry.name, entry.description });
+    }
+    try out.append(protocol.skill_suggestions_reply.tail);
 }
 
 fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!void {
@@ -1991,6 +2010,8 @@ const HeaderReader = struct {
             .activity_page
         else if (std.mem.eql(u8, path, "/v1/activity-content"))
             .activity_content
+        else if (std.mem.eql(u8, path, "/v1/skill-suggestions"))
+            .skill_suggestions
         else if (std.mem.eql(u8, path, "/v1/model-list"))
             .model_list
         else if (std.mem.startsWith(u8, path, "/v1/control/"))

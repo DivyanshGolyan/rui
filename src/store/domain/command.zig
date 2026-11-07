@@ -218,6 +218,8 @@ pub const MessageReads = struct {
     /// The text's identity, and the row its lookup found.
     text: content_domain.Import,
     captured_text: ?[]const u8 = null,
+    payload: ?*const protocol.ContentField = null,
+    authored: ?content_domain.Import = null,
 };
 
 /// The handle a peer Message's sender claims, when its address names this
@@ -323,12 +325,13 @@ fn admitMessage(
     committed: ?MessageCommitted,
     faults: Faults,
 ) !MessageReply {
-    const text_id = if (reads.captured_text) |bytes| try content_domain.importBytes(a, &reads.text, bytes) else try content_domain.importSealed(a, io, &command.text, &reads.text, faults);
+    const text_id = if (reads.captured_text) |bytes| try content_domain.importBytes(a, &reads.text, bytes) else try content_domain.importSealed(a, io, reads.payload orelse &command.text, &reads.text, faults);
+    const authored_id = if (reads.authored) |*authored| (if (command.skill != null) try content_domain.importBytes(a, authored, "") else try content_domain.importSealed(a, io, &command.text, authored, faults)) else text_id;
     const answer: StoredAnswer = .{ .accepted = true };
     if (configured) |applied| {
-        try configuration_domain.queueConfiguredCommand(a, applied, command.key.slice(), .message, &reads.digest, text_id, null, &answer);
+        try configuration_domain.queueConfiguredCommand(a, applied, command.key.slice(), .message, &reads.digest, text_id, authored_id, &answer);
     } else {
-        try queueCommand(a, command.key.slice(), .message, session.slice(), &reads.digest, text_id, null, &answer);
+        try queueCommand(a, command.key.slice(), .message, session.slice(), &reads.digest, text_id, authored_id, &answer);
     }
     const admission_id = try a.identity(.admission_id);
     const position = try (try a.positions(head)).take(1);
@@ -378,9 +381,27 @@ pub fn submitMessage(
     captured_skill: ?*const skills_domain.Capture,
     faults: Faults,
 ) !MessageReply {
-    if (command.configuration != null) return submitCreating(a, io, served, selector, command, committed, initial_skills, faults);
+    if (command.configuration != null) return submitCreating(a, io, served, selector, command, committed, initial_skills, captured_skill, faults);
     var reads: MessageReads = .{ .digest = command.semanticDigest(), .text = content_domain.sealedIdentity(&command.text) };
     return submitTo(a, io, served, selector, command, committed, captured_skill, faults, &reads);
+}
+
+fn prepareMessageReads(a: anytype, command: *const protocol.MessageCommand, reads: *MessageReads, captured: *const skills_domain.Capture) !void {
+    reads.authored = if (command.skill != null) .ofBytes("", false) else content_domain.sealedIdentity(&command.text);
+    switch (captured.*) {
+        .payload => |payload| {
+            reads.payload = payload;
+            reads.text = content_domain.sealedIdentity(payload);
+        },
+        .invocation => |bytes| {
+            reads.captured_text = bytes;
+            reads.text = .ofBytes(bytes, false);
+        },
+        else => return error.CorruptStore,
+    }
+    content_domain.lookup(a, &reads.authored.?);
+    content_domain.lookup(a, &reads.text);
+    try a.run();
 }
 
 /// Round 1 reads the saved answer, the sender's Action, the Session and
@@ -419,14 +440,10 @@ noinline fn submitTo(
     else
         null;
     if (rejection) |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, code, faults);
-    if (command.skill != null) {
+    if (command.skill != null or command.skills.len != 0) {
         const captured = captured_skill orelse return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
         if (captured.* == .failed) return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, captured.failed.rejection(protocol.MessageRejection), captured.failed, faults);
-        if (captured.* != .invocation) return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
-        reads.captured_text = captured.invocation;
-        reads.text = .ofBytes(captured.invocation, false);
-        content_domain.lookup(a, &reads.text);
-        try a.run();
+        try prepareMessageReads(a, command, reads, captured);
     }
     if (target.?.archive_state == .archived) a.write(clear_archive, .{ .session = target.?.session });
     return admitMessage(a, io, command, reads, target.?.session, command.session, null, committed, faults);
@@ -448,6 +465,7 @@ noinline fn submitCreating(
     command: *const protocol.MessageCommand,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
+    captured_skill: ?*const skills_domain.Capture,
     faults: Faults,
 ) !MessageReply {
     const configuration = &command.configuration.?;
@@ -470,6 +488,14 @@ noinline fn submitCreating(
         .model_capability_unavailable
     else
         null;
+    // A failed batch must refuse before configuration queues any creation writes.
+    // An unavailable initial catalog goes through configuration validation so an
+    // invalid Workspace keeps its established typed refusal and replay.
+    if (rejection == null and (command.skill != null or command.skills.len != 0) and !(initial_skills != null and initial_skills.?.* == .unavailable)) {
+        const captured = captured_skill orelse return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
+        if (captured.* == .failed) return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, captured.failed.rejection(protocol.MessageRejection), captured.failed, faults);
+        try prepareMessageReads(a, command, reads, captured);
+    }
     if (rejection == null) switch (try configuration_domain.applyConfiguration(a, io, "", configuration, initial_skills, faults, creation)) {
         .rejected => |code| rejection = std.meta.stringToEnum(protocol.MessageRejection, @tagName(code)).?,
         .accepted => |applied| {
@@ -548,7 +574,7 @@ pub fn deliverAgentMessage(
         var digest = std.crypto.hash.sha2.Sha256.init(.{});
         digest.update("rui/core/message_agent/v1");
         digest.update(&protocol.contentDigest(text));
-        try queueCommand(a, key, .message, target, &digest.finalResult(), text_id, null, &.{ .accepted = true });
+        try queueCommand(a, key, .message, target, &digest.finalResult(), text_id, text_id, &.{ .accepted = true });
         a.write(admit_sent_message, .{
             .admission_id = try a.identity(.admission_id),
             .session = head,
@@ -650,7 +676,7 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, faults: Faults) !bool {
     var digest = std.crypto.hash.sha2.Sha256.init(.{});
     digest.update("rui/core/child_ending/v1");
     digest.update(&content_digest);
-    try queueCommand(a, key, .message, found.parent.slice(), &digest.finalResult(), content_id, null, &.{ .accepted = true });
+    try queueCommand(a, key, .message, found.parent.slice(), &digest.finalResult(), content_id, content_id, &.{ .accepted = true });
     a.write(admit_sent_message, .{
         .admission_id = try a.identity(.admission_id),
         .session = head,
@@ -772,7 +798,7 @@ pub fn startAgent(
         digest.update("rui/core/start_agent/v1");
         digest.update(&protocol.contentDigest(task));
         const answer: StoredAnswer = .{ .accepted = true, .revision = value.revision, .created = true };
-        try configuration_domain.queueConfiguredCommand(a, value, key, .message, &digest.finalResult(), text_id, null, &answer);
+        try configuration_domain.queueConfiguredCommand(a, value, key, .message, &digest.finalResult(), text_id, text_id, &answer);
         admission_id = try a.identity(.admission_id);
         a.write(admit_sent_message, .{
             .admission_id = admission_id,
