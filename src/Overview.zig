@@ -478,7 +478,7 @@ const Next = union(enum) { leave, open: view.Reference };
 /// Runs until the person leaves the overview or a conversation, or a signal
 /// stops it. The terminal is still begun when it returns.
 fn loop(self: *Self) !Ending {
-    if (try self.resize()) |value| if (self.proceed(value)) |ending| return ending;
+    if (try self.resize(self.terminal.geometry())) |value| if (self.proceed(value)) |ending| return ending;
     if (self.options.open) |reference| if (try self.event(.{ .open = reference })) |value| if (self.proceed(value)) |ending| return ending;
     // After the open: keys typed during the wait act on the overview.
     var next = try self.askBackground();
@@ -1051,7 +1051,12 @@ fn route(mode: view.InputMode, composer: *TerminalEditor, decoded: TerminalInput
 /// Paints semantic rows at animation `frame`; libvaxis alone diffs its grid.
 /// Encoded bytes remain frozen until the existing pumped write completes.
 fn draw(self: *Self, frame: u64) !?Next {
-    if (try self.resize()) |next| return next;
+    // Domain and grid must share one snapshot, even during a terminal resize.
+    return self.drawFrame(frame, self.terminal.geometry());
+}
+
+fn drawFrame(self: *Self, frame: u64, size: std.posix.winsize) !?Next {
+    if (try self.resize(size)) |next| return next;
     self.terminal.applyReports();
     const backend = self.terminal.screen.backend;
     _ = backend.setPolicy(.{ .width = self.caps.width, .depth = switch (self.caps.depth) {
@@ -1059,7 +1064,6 @@ fn draw(self: *Self, frame: u64) !?Next {
         .indexed => .indexed,
         .direct => .direct,
     } });
-    const size = self.terminal.geometry();
     try backend.begin(.{ .cols = size.col, .rows = size.row, .x_pixel = size.xpixel, .y_pixel = size.ypixel });
     defer {
         backend.end();
@@ -1091,8 +1095,7 @@ fn draw(self: *Self, frame: u64) !?Next {
 
 /// Steps the terminal's size when it changed, so the frame drawn next and
 /// the keys read until the one after act on one layout.
-fn resize(self: *Self) !?Next {
-    const size = self.terminal.geometry();
+fn resize(self: *Self, size: std.posix.winsize) !?Next {
     if (size.col == self.state.size.width and size.row == self.state.size.height) return null;
     return self.event(.{ .resized = .{ .width = size.col, .height = size.row } });
 }
@@ -1560,7 +1563,7 @@ const Rig = struct {
         rig.overview = try create(rig.init, options, undefined, ops, interrupted);
         rig.overview.terminal = &rig.terminal;
         // As the loop does before it reads a key.
-        _ = try rig.overview.resize();
+        _ = try rig.overview.resize(rig.terminal.geometry());
         return rig;
     }
 
@@ -3735,6 +3738,41 @@ test "a command that fails while it runs is the failure reported, even when taki
     defer rig.overview.state.gpa = gpa;
     try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
     try std.testing.expect(failing.has_induced_failure);
+}
+
+test "one captured overview frame geometry sizes the domain and backend through shrink and grow" {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    const selected = overview.state.selected.?;
+    const backend = rig.screen.backend;
+    const decoder = &rig.terminal.stream;
+    const fallback = rig.terminal.geometry();
+    const captured = [_]std.posix.winsize{
+        .{ .col = 60, .row = 20, .xpixel = 600, .ypixel = 400 },
+        .{ .col = 120, .row = 40, .xpixel = 1200, .ypixel = 800 },
+        .{ .col = 100, .row = 30, .xpixel = 1000, .ypixel = 600 },
+        .{ .col = 132, .row = 44, .xpixel = 1320, .ypixel = 880 },
+    };
+    var buffer: [64 * 1024]u8 = undefined;
+    for (captured) |size| {
+        // The real frame consumes its snapshot, not another terminal read.
+        try std.testing.expect(size.col != fallback.col and size.row != fallback.row);
+        try std.testing.expect(try overview.drawFrame(0, size) == null);
+        try std.testing.expectEqual(size.col, overview.state.size.width);
+        try std.testing.expectEqual(size.row, overview.state.size.height);
+        const actual = backend.geometry();
+        try std.testing.expectEqual(size.col, actual.cols);
+        try std.testing.expectEqual(size.row, actual.rows);
+        try std.testing.expectEqual(size.xpixel, actual.x_pixel);
+        try std.testing.expectEqual(size.ypixel, actual.y_pixel);
+        try std.testing.expectEqualStrings(&selected, &overview.state.selected.?);
+        try std.testing.expect(rig.screen.backend == backend and &rig.terminal.stream == decoder);
+        try std.testing.expect(backend.idle());
+        try std.testing.expect(rig.drawn(&buffer).len != 0);
+        try std.testing.expect(try overview.drawFrame(0, size) == null);
+        try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+    }
 }
 
 test "overview detail overview paints one healthy backend and retains the invocation decoder" {
