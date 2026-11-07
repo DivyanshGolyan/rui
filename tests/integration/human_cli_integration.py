@@ -1349,6 +1349,18 @@ def live_conversation(frame):
     return not frame.startswith("Browsing") and not looking_back(frame)
 
 
+def assert_scroll_latest(cells, cursor, latest, context):
+    rows = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, len(cells[0]))]
+    frame = "\n".join(rows)
+    x, y = cursor
+    assert live_conversation(frame), (context, "still looking back", frame)
+    assert composer_ready(frame, x, y), (context, frame)
+    assert y == len(rows) - 2 and rows[y] == "› keep" and set(rows[y - 1]) == {"─"}, (context, "composer geometry", frame)
+    source = cell_rows(cells, 0, y - 1, 0, len(cells[0]) - 1)
+    written = [row.rstrip(" ") for row in source if row.rstrip(" ")]
+    assert latest in written[-3:], (context, "latest row not last", frame)
+
+
 def assert_submitted_feedback(cells, times):
     rows = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)]
     composer = max(index for index, row in enumerate(rows) if row.startswith("›"))
@@ -1699,6 +1711,39 @@ def cell_value_cases():
         assert not listed_call_ready(cells_for([""]))  # Never reuse the old clock.
     assert listed_call_ready(cells_for(["  • Held call · 42s"]))
     assert not listed_call_ready(cells_for(["  • Held call · 42s".ljust(78) + "▐ "]))
+    # The direct-scroll fixture has no call or queue: source ends at the
+    # rule. Empty SOURCE cells stay empty even when their gutter is painted.
+    for height in (30, 16):
+        body = [""] * (height - 3)
+        body[0] = "literal ▐"
+        body[-5:] = ["scroll answer 23", "", "second row 23", "", "third row 23"]
+        rows = [row.ljust(79) + "▐" for row in body] + ["─" * 80, "› keep", "Session · model"]
+        assert_scroll_latest(cells_for(rows), (6, height - 2), "third row 23", height)
+        for fault in ("wrong", "missing", "draft", "rule", "position", "lookback"):
+            bad = rows.copy()
+            cursor = (6, height - 2)
+            if fault == "wrong": bad[-4] = "WRONG SOURCE".ljust(79) + "▐"
+            elif fault == "missing": bad[-4] = " " * 79 + "▐"
+            elif fault == "draft": bad[-2] = "› changed"
+            elif fault == "rule": bad[-3] = "─" * 79 + "X"
+            elif fault == "position": cursor = (6, height - 3)
+            else: bad[-1] = "Looking back · Ctrl-End: latest"
+            rejects(lambda: assert_scroll_latest(cells_for(bad), cursor, "third row 23", fault))
+        # Keep the original LAST THREE written-source bound, not merely any
+        # earlier occurrence. Rail-only blank rows must not consume that bound.
+        body[-7:] = ["TARGET", "", "after one", "", "after two", "", ""]
+        rows = [row.ljust(79) + "▐" for row in body] + rows[-3:]
+        assert_scroll_latest(cells_for(rows), (6, height - 2), "TARGET", height)
+        too_old = rows.copy();too_old[-4] = "after three".ljust(79) + "▐"
+        rejects(lambda: assert_scroll_latest(cells_for(too_old), (6, height - 2), "TARGET", height))
+        nbsp = rows.copy();nbsp[-4] = "\u00a0".ljust(79) + "▐"
+        rejects(lambda: assert_scroll_latest(cells_for(nbsp), (6, height - 2), "TARGET", height))
+        # The literal rightmost SOURCE glyph survives; only physical col79
+        # belongs to the gutter. No character-strip normalization is allowed.
+        literal = "third row 23".ljust(78) + "▐"
+        rows[-4] = literal + "▐"
+        assert_scroll_latest(cells_for(rows), (6, height - 2), literal, height)
+        rejects(lambda: assert_scroll_latest(cells_for(rows), (6, height - 2), "third row 23", height))
     # Comparison remains a pure key: no copied globals, fake clock or IO mocks.
     for left, right in (("9s", "10s"), ("59s", "1m 0s"), ("59m 59s", "1h 0m")):
         a, b = submitted("x"), submitted("x")
@@ -2499,16 +2544,10 @@ def scroll_return_case():
             return {path: path.read_bytes() for path in records.glob("*.json")}, len(endpoint.requests)
 
         def live(latest, context):
-            shown = settle_screen(master, quiet=0.5)
+            settle_screen(master, quiet=0.5)
             capture = terminal_capture(master)
-            assert live_conversation(shown), (context, "still looking back", shown)
-            assert composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y), (context, shown)
-            # The draft keeps the row over the Session line, under the rule,
-            # and the latest text is the last written row above it.
-            rows = shown.split("\n")
-            y = capture.screen.cursor.y
-            written = [row for row in rows[:y - 1] if row.strip()]
-            assert y == len(rows) - 2 and rows[y] == "› keep" and set(rows[y - 1]) == {"─"} and latest in written[-3:], (context, "latest row not last", shown)
+            cursor = (capture.screen.cursor.x, capture.screen.cursor.y)
+            assert_scroll_latest(capture.completed_cells, cursor, latest, context)
 
         def leave(saved):
             records_before, requests = saved
