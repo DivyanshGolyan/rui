@@ -376,6 +376,8 @@ pub const StartResult = union(enum) {
 pub const Event = union(enum) {
     /// An explicit skill replacement exceeded the editor capacity; no edit occurred.
     skill_refused,
+    /// Metadata could not be read; selection and the current draft remain local.
+    skill_suggestions_unavailable,
     composed: Composed,
     /// The size of the screen the shell draws next; keys read until the
     /// next one act on that screen.
@@ -1475,6 +1477,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
         .skill_refused => state.say(.attention, "! Skill does not fit; draft retained.", .{}),
+        .skill_suggestions_unavailable => state.say(.attention, "! Skill suggestions unavailable; draft retained.", .{}),
         .composed => |value| try compose(state, value, &effects),
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| switch (reply) {
@@ -2928,6 +2931,7 @@ pub fn topRows(state: *const State) usize {
 /// when nothing matches. The next Session's model offers its efforts.
 pub fn nextCommands(state: *const State, draft: Draft) ?slash_commands.Shown {
     if (state.inputMode() != .compose) return null;
+    if (draft.skill_choices) |choices| if (choices.dismissed) return null;
     const held = state.heldEffort();
     const context: slash_commands.Context = .{
         .model = state.nextBinding().model,
@@ -4866,5 +4870,24 @@ test "inline overview kinded collision preserves builtin Tab and skill Enter as 
             try std.testing.expect(state.panel != null and state.panel.? == .help);
         }
         try std.testing.expectEqual(@as(usize, 0), state.request_count);
+    }
+}
+
+test "inline overview dismissed skill identity also suppresses colliding builtin rows" {
+    const skills = [_]slash_commands.Entry{.{ .kind = .skill, .word = "help", .shown = "/help", .description = "Help skill", .runs = false }};
+    for ([_]bool{ false, true }) |pending| {
+        var state = try testState();
+        defer state.deinit();
+        var draft: Draft = .{ .bytes = "/he", .cursor = 3, .edits = 11, .skill_choices = .{ .entries = &skills, .generation = 2, .total = 1, .pending = pending } };
+        drawWithRoom(&state, draft);
+        draft.skill_choices.?.dismissed = true;
+        try std.testing.expect(nextCommands(&state, draft) == null);
+        try expectEffects(&.{}, try inlineComplete(&state, draft));
+        // The owner lifts dismissal when the cursor or revision changes.
+        draft.cursor = 2;
+        draft.skill_choices.?.dismissed = false;
+        const reopened = nextCommands(&state, draft).?;
+        try std.testing.expect(reopened.list.containsSkills());
+        try std.testing.expectEqual(.hidden, reopened.seen);
     }
 }
