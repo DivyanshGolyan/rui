@@ -21,9 +21,17 @@ INTEGRATION = pathlib.Path(__file__).resolve().parents[2] / "integration"
 sys.path.insert(0, str(INTEGRATION))
 from host_process import dispose_all, stop_process
 from terminal_process import open_pty
-from terminal_screen import ScreenCapture
+from terminal_screen import ScreenCapture, cell_rows
 
 LIMIT = 1024 * 1024
+
+
+def history_rows(capture):
+    """History lines in the committed source rectangle."""
+    cells = capture.completed_cells
+    assert cells, "history requires a committed screen"
+    rows = cell_rows(cells, 0, len(cells), 0, len(cells[0]) - 1)
+    return [line.strip() for line in rows if line.strip().startswith("History line ")]
 
 
 def assert_file_flags(actual, expected):
