@@ -198,10 +198,10 @@ Implementation claims require inspected source.
 Keep accepted decisions, source inspection, prototypes, compilation and native process-crash evidence distinct.
 OS-crash and power-loss recovery are outside the supported contract.
 
-For changes touching the [strict landing paths](tests/ci/strict_paths.py), pause the affected outcome after a failed or unknown check, not independent work.
-A Mac check, or a signature that [CI triage](.claude/skills/rui-ci-triage/SKILL.md) shows already fails on main, pauses nothing on main; it holds only `stable`.
-Otherwise, assertions, unexplained timeouts and unknown results require diagnosis, not replay.
-Elsewhere, Selected CI retries a failed shard once automatically, and other reds follow the landing rule: file an issue and fix forward.
+Required admission failures and unknown results block merging the current candidate, including native checks.
+A signature that already fails on main is not permission to bypass admission.
+Assertions, unexplained timeouts and unknown results require diagnosis, not replay.
+Pause the affected outcome, not independent work; a publication failure does not create another main admission gate.
 Diagnostic reruns need no routine grant; state the hypothesis or correction and preserve every failure.
 An unexplained fail-then-pass is not reliable green.
 
