@@ -504,7 +504,7 @@ pub fn facts(code: Code) Facts {
         .model_is_immutable => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "the model already saved for this Session" }, .says = "An existing Session cannot change its model.", .next = "Omit --model, or create a new Session with the other model." },
         .unknown_skill => .{ .act = .fix, .input = .tools, .accepted = .{ .grammar = "a name in this Session's advertised skills catalog" }, .says = "No advertised skill has that name.", .next = "Reload skills to refresh the catalog, then use its exact name." },
         .skill_file_unavailable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "a readable SKILL.md at its advertised absolute path" }, .says = "The selected skill file could not be read.", .next = "Restore the file and access to it, or reload skills before choosing another name." },
-        .skill_file_too_large => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "a complete SKILL.md of at most 1 MiB" }, .says = "The selected skill file exceeds the read limit.", .next = "Reduce SKILL.md to at most 1 MiB, then invoke it again." },
+        .skill_file_too_large => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "complete SKILL.md files of at most 1 MiB each and in total" }, .says = "The selected skill files exceed the per-file or combined read limit.", .next = "Select fewer skills or reduce their files to fit both limits." },
         .skill_text_invalid => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "UTF-8 SKILL.md text" }, .says = "The selected skill file is not valid UTF-8 text.", .next = "Save the complete file as UTF-8, then invoke it again." },
         .skills_unavailable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "readable repository and home .agents/skills roots" }, .says = "The skills catalog could not be read completely.", .next = "Restore access to the skill roots, then retry the original request." },
         .revision_exhausted => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "a Session whose configuration revision can still advance" }, .says = "This Session has exhausted its configuration revisions.", .next = "Create a new Session with the desired configuration." },
@@ -779,4 +779,14 @@ test "fresh CLI argument errors are distinct from saved tool refusals" {
 // Prefixes are native read arguments, not saved tool rejections.
 test "inline skills invalid suggestion prefix has a mapped caller repair" {
     try std.testing.expectEqual(Code.invocation_invalid, of(error.InvalidPrefix));
+}
+
+test "inline skills size refusal explains per-file and combined limits" {
+    var storage: [2048]u8 = undefined;
+    var out = std.Io.Writer.fixed(&storage);
+    try writeSavedLine(&out, .skill_file_too_large, .{ .resource = "session", .operation = "send" });
+    const line = out.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, line, "each and in total") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "Select fewer skills or reduce their files") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "a resend needs a new key") != null);
 }
