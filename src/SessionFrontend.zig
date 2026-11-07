@@ -1164,6 +1164,10 @@ fn attachSkillEvent(self: *Self, decoded: TerminalInput.Decoded) !bool {
     const view = self.input.composition();
     const choices = self.skill_menu.choices(view.bytes, view.cursor, self.input.revision) orelse return false;
     if (choices.dismissed) return false;
+    if (choices.pending) {
+        self.dirty = true;
+        return true;
+    }
     if (self.shownCommands()) |shown| {
         const entry = shown.list.entries[shown.highlight];
         if (entry.kind != .skill) return false;
@@ -1259,7 +1263,8 @@ fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     const view = self.input.composition();
     if (self.skill_menu.choices(draft, view.cursor, self.input.revision)) |choices| {
         if (choices.dismissed) return null;
-        const shown = self.shownCommands() orelse return if (choices.pending or choices.entries.len != 0) "" else null;
+        if (choices.pending) return "";
+        const shown = self.shownCommands() orelse return if (choices.entries.len != 0) "" else null;
         if (shown.list.entries[shown.highlight].kind == .skill) return "";
         return shown.completion();
     }
@@ -5236,4 +5241,24 @@ test "inline session legacy skill command obeys permission preparation blocker" 
     try std.testing.expectEqualStrings("/skill demo", self.input.composition().bytes);
     try std.testing.expect(self.submission.view() == null);
     try std.testing.expect(self.input.queuedCommand() == null);
+}
+
+test "inline session pending metadata blocks drawn builtin Enter and Tab" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "/he");
+    try fixtureSkillMenu(self, "he", "help");
+    self.skill_menu.page.?.deinit(std.testing.allocator);
+    self.skill_menu.page = null;
+    self.skill_menu.count = 0;
+    try held.settle();
+    try std.testing.expectEqual(.command, self.shownCommands().?.list.entries[0].kind);
+    try sendKeys(self, "\t");
+    try std.testing.expectEqualStrings("/he", self.input.composition().bytes);
+    try sendKeys(self, "\r");
+    try std.testing.expectEqualStrings("/he", self.input.composition().bytes);
+    try std.testing.expect(self.input.queuedCommand() == null);
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expect(self.leaving == null);
 }
