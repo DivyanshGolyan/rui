@@ -147,7 +147,9 @@ class Case:
         self.store = self.root / "store"
         self.binary = binary
         self.releases = releases
-        self.env = {**os.environ, "HOME": str(self.home),
+        # This Upgrade oracle compares text/caret, not colour. pyte does not
+        # implement the renderer's colon-delimited indexed-colour SGR.
+        self.env = {**os.environ, "HOME": str(self.home), "NO_COLOR": "1",
                     "PATH": f"{self.home}/.local/bin:{os.environ['PATH']}",
                     "RUI_TEST_UPGRADE_API_URL": releases.origin + "/latest",
                     "RUI_UPGRADE_FIXTURE_PRIVATE": "isolated-private-launch-value"}
@@ -581,6 +583,11 @@ class TerminalScreen:
     def send(self, text):
         os.write(self.master, text.encode())
 
+    def command(self, text):
+        # Explicitly dismiss advisory skill completion before executing a control
+        # command. Its metadata read may itself be waiting on the selected build.
+        self.send(text + "\x07\r")
+
     def save(self, destination, name):
         if destination is not None:
             (destination / f"{name}.txt").write_text(self.capture.completed + "\n")
@@ -616,7 +623,7 @@ def terminal_cases(root, binary, releases, artifacts):
             with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
                 screen = TerminalScreen(master, process)
                 screen.contains("›")
-                screen.send("/upgrade\r")
+                screen.command("/upgrade")
                 screen.contains("enter Install")
                 screen.save(artifacts, f"{entry}-offer")
                 assert c.link.resolve() == c.original and c.status()["instance"] == previous["instance"]
@@ -636,7 +643,8 @@ def terminal_cases(root, binary, releases, artifacts):
                 screen.contains("›")
                 wait_for(screen.observe, "retained /upgrade draft after cancellation",
                          ready=lambda _: screen.capture.draft("/upgrade", len(prompt) + 8, prompt=prompt))
-                screen.send("\x15/upgrade\r")
+                screen.send("\x15")
+                screen.command("/upgrade")
                 screen.contains("enter Install")
                 screen.send("\r")
                 screen.contains("Activation: ready;")
@@ -667,7 +675,7 @@ def cancel_after_publication(root, binary, releases, artifacts):
         with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
-            screen.send("/upgrade\r")
+            screen.command("/upgrade")
             screen.contains("enter Install")
             screen.send("\r")
             screen.until(lambda: c.link.resolve() != c.original, "publication before terminal cancellation")
@@ -692,7 +700,7 @@ def signal_during_check(root, binary, releases, artifacts):
         with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
-            screen.send("/upgrade\r")
+            screen.command("/upgrade")
             screen.until(gate.entered.is_set, "metadata check held before terminal signal")
             screen.contains("Read-only check")
             screen.save(artifacts, "signal-during-check")
@@ -724,7 +732,7 @@ def signal_after_publication(root, binary, releases, artifacts):
         with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
-            screen.send("/upgrade\r")
+            screen.command("/upgrade")
             screen.contains("enter Install")
             screen.send("\r")
             screen.until(lambda: c.link.resolve() != c.original, "publication before SIGINT")
@@ -785,12 +793,18 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                 try:
                     screen = TerminalScreen(master, process)
                     screen.contains("›")
-                    screen.send("/upgrade\r")
+                    screen.command("/upgrade")
+                    screen.contains("Checking the published stable release")
 
                     def child_started():
                         if not receipt.exists():
                             return False
-                        return receipt.read_text().strip().isdigit()
+                        pid = receipt.read_text().strip()
+                        if not pid.isdigit():
+                            return False
+                        running = subprocess.run(["ps", "-p", pid, "-o", "stat="],
+                                                 env=c.env, capture_output=True, text=True, timeout=5)
+                        return running.returncode == 0 and not running.stdout.strip().startswith("Z")
 
                     screen.until(child_started, "selected --version child receipt before discovery")
                     child_pid = int(receipt.read_text().strip())
@@ -849,7 +863,7 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
             with terminal_process(args, env=c.env, cwd=c.root) as (process, master):
                 screen = TerminalScreen(master, process)
                 screen.contains("›")
-                screen.send("/upgrade\r")
+                screen.command("/upgrade")
                 screen.contains("enter Install")
                 screen.send("\r")
                 screen.until(gate.entered.is_set, "real archive request after stage creation")
@@ -962,7 +976,7 @@ def tmux_cases(root, binary, releases, artifacts):
                 assert server_pid > 0
                 reached("›")
                 command("send-keys", "-t", "upgrade:0.0", "-l", "/upgrade")
-                command("send-keys", "-t", "upgrade:0.0", "Enter")
+                command("send-keys", "-t", "upgrade:0.0", "C-g", "Enter")
                 offer = reached("enter Install")
                 save("offer", offer)
                 assert c.link.resolve() == c.original

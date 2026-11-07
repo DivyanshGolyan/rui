@@ -571,7 +571,8 @@ def main():
         # Exercise the real slash adapter, not a caller-side expansion or a
         # constructed native Message. Its durable handle must use the same
         # HOME-owned capture directory as ordinary inspect/list/recover. The
-        # retained input pipeline need not print command-worker receipts.
+        # retained input owner exposes the handle through /requests rather
+        # than launching a second command-worker admission.
         import human_cli_integration as human
         before_handles = set(invoke("request", "list"))
         count = len(endpoint.decoded())
@@ -603,7 +604,9 @@ def main():
             complete(handle)
             assert len(endpoint.decoded()) == count + 1, endpoint.decoded()
             assert user_text(endpoint.decoded()[-1]) == expected_invocation
-        # Lose the terminal's receipt and the source file. Normal handle-only
+            os.write(master, b"/requests\x07\r")
+            human.read_terminal(master, handle)
+        # Close the terminal and lose the source file. Normal handle-only
         # recovery must replay the captured operation, not admit current bytes.
         pathlib.Path(demo["path"]).unlink()
         before_recovery = conversation(parent)
