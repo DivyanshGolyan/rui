@@ -625,7 +625,12 @@ def terminal_check_cases(root, binary, releases, artifacts):
                 screen.contains("Upgrade cancelled")
                 wait_for(screen.observe, "retained draft after check cancellation",
                          ready=lambda _: screen.capture.draft("/upgradeXYQZ", len(prompt) + 11, prompt=prompt))
-                screen.send("\x15\x1b[200~A❤️B\x1b[201~")
+                # The arrow left Z after the caret; Ctrl-U alone only
+                # deletes to the line start. Move to the end before clearing.
+                screen.send("\x05\x15")
+                wait_for(screen.observe, "cleared edited draft before Unicode paste",
+                         ready=lambda _: screen.capture.draft("", len(prompt), prompt=prompt))
+                screen.send("\x1b[200~A❤️B\x1b[201~")
 
                 def unicode_draft(_):
                     capture = screen.capture
@@ -679,7 +684,12 @@ def terminal_cases(root, binary, releases, artifacts):
                 screen.contains("›")
                 wait_for(screen.observe, "retained edited draft after cancellation",
                          ready=lambda _: screen.capture.draft("/upgradeXYQZ", len(prompt) + 11, prompt=prompt))
-                screen.send("\x15\x1b[200~A❤️B\x1b[201~")
+                # The arrow left Z after the caret; Ctrl-U alone only
+                # deletes to the line start. Move to the end before clearing.
+                screen.send("\x05\x15")
+                wait_for(screen.observe, "cleared edited draft before Unicode paste",
+                         ready=lambda _: screen.capture.draft("", len(prompt), prompt=prompt))
+                screen.send("\x1b[200~A❤️B\x1b[201~")
 
                 def unicode_draft(_):
                     capture = screen.capture
@@ -689,7 +699,10 @@ def terminal_cases(root, binary, releases, artifacts):
                     return not capture.synchronized and "A❤" in row and cursor.x == len(prompt) + 4
 
                 wait_for(screen.observe, "Unicode width after upgrade cancellation", ready=unicode_draft)
-                screen.send("\x15/upgrade\r")
+                screen.send("\x05\x15/upgrade")
+                wait_for(screen.observe, "exact retry command before submission",
+                         ready=lambda _: screen.capture.draft("/upgrade", len(prompt) + 8, prompt=prompt))
+                screen.send("\r")
                 screen.contains("Upgrade installed; Host ready")
                 screen.save(artifacts, f"{entry}-installed")
                 proof_ready(c, previous, old_host)
