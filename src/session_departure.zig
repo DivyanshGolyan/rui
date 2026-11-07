@@ -34,14 +34,17 @@ pub const Settled = struct {
     restored: anyerror!void,
     reader: ReadEnd,
     admission_error: ?anyerror,
+    metadata_error: ?anyerror = null,
 
     pub fn failure(self: Settled, mode: Mode, cause: ?anyerror) ?anyerror {
         self.restored catch |err| return err;
         const reader_error = self.reader.failure(mode);
         if (reader_error) |err| if (err == error.CanonicalStoreFailure) return err;
         if (self.admission_error) |err| if (err == error.CanonicalStoreFailure) return err;
+        if (self.metadata_error) |err| if (err == error.CanonicalStoreFailure) return err;
         if (cause) |err| if (err != error.InteractiveInterrupted) return err;
         if (reader_error) |err| return err;
+        if (self.metadata_error) |err| if (err != error.Cancelled) return err;
         if (mode == .final_exit) if (self.admission_error) |err| if (err != error.Cancelled) return err;
         return null;
     }
@@ -123,4 +126,18 @@ test "departure joined fact matrix preserves precedence and recovery" {
             }
         }
     }
+}
+
+test "departure metadata joins preserve restoration canonical and substantive failure precedence" {
+    const clean: Settled = .{ .restored = {}, .reader = .complete, .admission_error = null, .metadata_error = error.ConnectionResetByPeer };
+    try std.testing.expectEqual(error.ConnectionResetByPeer, clean.failure(.final_exit, null).?);
+    try std.testing.expectEqual(error.WriteFailed, clean.failure(.final_exit, error.WriteFailed).?);
+    var canonical = clean;
+    canonical.metadata_error = error.CanonicalStoreFailure;
+    try std.testing.expectEqual(error.CanonicalStoreFailure, canonical.failure(.final_exit, error.WriteFailed).?);
+    canonical.restored = error.TerminalRestoreFailed;
+    try std.testing.expectEqual(error.TerminalRestoreFailed, canonical.failure(.final_exit, null).?);
+    var cancelled = clean;
+    cancelled.metadata_error = error.Cancelled;
+    try std.testing.expect(cancelled.failure(.final_exit, null) == null);
 }

@@ -134,14 +134,16 @@ pub fn refresh(self: *Self, text: []const u8, cursor: usize, revision: u64) !boo
                 };
                 changed = true;
             }
-        } else |err| if (current and err != error.Cancelled) {
+        } else |err| {
             if (err == error.CanonicalStoreFailure) {
                 if (self.response) |*response| response.deinit(self.allocator.?);
                 self.response = null;
                 return err;
             }
-            self.last_error = err;
-            changed = true;
+            if (current and err != error.Cancelled) {
+                self.last_error = err;
+                changed = true;
+            }
         }
         if (self.response) |*response| response.deinit(self.allocator.?);
         self.response = null;
@@ -291,4 +293,28 @@ test "skill menu is inert when disabled and clears metadata without starting on 
     try std.testing.expect(!menu.busy());
     try std.testing.expectEqual(@as(usize, 0), menu.count);
     try std.testing.expect(menu.page == null);
+}
+
+test "skill menu stale borrower cannot hide canonical failure" {
+    const Worker = struct {
+        fn fail(_: *anyopaque, _: *ClientTask) !void {
+            return error.CanonicalStoreFailure;
+        }
+        fn complete(menu: *Self) bool {
+            return menu.task.completed();
+        }
+    };
+    const menu = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(menu);
+    try menu.init(std.testing.allocator, std.testing.io, "unused", .{ .session = "k7m2qx" });
+    defer menu.close() catch unreachable;
+    menu.wanted_valid = true;
+    try menu.wanted.set("de");
+    menu.version = 1;
+    menu.active.version = 1;
+    try menu.task.start(std.testing.io, menu, Worker.fail);
+    const poll = @import("test_poll");
+    try poll.waitUntil(std.testing.io, poll.after(std.testing.io, .fromSeconds(5)), menu, Worker.complete);
+    try std.testing.expectError(error.CanonicalStoreFailure, menu.refresh("", 0, 2));
+    try std.testing.expect(!menu.busy());
 }
