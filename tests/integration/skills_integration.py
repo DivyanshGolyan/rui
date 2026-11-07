@@ -110,8 +110,8 @@ class SkillsHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def skill(root, name, description, body="BODY_NOT_METADATA\n"):
-    path = root / name / "SKILL.md"
+def skill(root, name, description, body="BODY_NOT_METADATA\n", *, directory=None):
+    path = root / (directory or name) / "SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = f"---\nname: {name}\ndescription: {description}\n---\n{body}".encode()
     path.write_bytes(raw)
@@ -139,10 +139,12 @@ def main():
         workspace.mkdir(parents=True)
         project = repo / ".agents" / "skills"
         personal = home / ".agents" / "skills"
-        demo = skill(project, "demo", "Demo metadata")
+        demo = skill(state / "external", "demo", "Demo metadata")
+        project.mkdir(parents=True)
+        (project / "Vendor_Demo").symlink_to(pathlib.Path(demo["path"]).parent, target_is_directory=True)
         shared = skill(project, "shared", "Project wins")
         removed = skill(project, "removed", "Remove this metadata")
-        home_only = skill(personal, "home-only", "Host HOME metadata")
+        home_only = skill(personal, "home-only", "Host HOME metadata", directory="Vendor_Home")
         switching = skill(personal, "switching", "Same description, different winning path")
         skill(personal, "shared", "HOME must lose")
         # Neither legacy roots, a workspace below the repository, an ancestor,
@@ -414,7 +416,7 @@ def main():
         # An addition, a removal, a description change and a path-only winner
         # change produce one append-only system fact, never a full new listing.
         pathlib.Path(removed["path"]).unlink()
-        added = skill(project, "added", "Added metadata")
+        added = skill(project, "added", "Added metadata", directory="Vendor_Added")
         changed_shared = skill(project, "shared", "Changed project description")
         changed_switching = skill(project, "switching", switching["description"])
         updated_catalog = catalog(demo, changed_shared, home_only, changed_switching, added)
@@ -447,7 +449,7 @@ def main():
         # Add a disk skill only now: the child's catalog and instruction cannot
         # deduplicate against its parent's. Instructions/schema/task are also
         # unique, exercising the entire six-content start_agent import path.
-        skill(project, "added", "Added metadata")
+        skill(project, "added", "Added metadata", directory="Vendor_Added")
         child_only = skill(project, "child-only", "Unique child discovery after parent creation")
         configured = invoke("session", "configure", "--store", store, "--session", parent,
                             "--tools", "bash,skill,start_agent", "--key", "parent-tools",
