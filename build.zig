@@ -140,6 +140,10 @@ pub fn build(b: *std.Build) void {
         .filters = test_filters,
     });
     configureTerminalEditor(b, logic_tests);
+    // Session rendering imports session_view -> client; its test declarations
+    // share the same bounded polling module as the full native tests.
+    logic_tests.root_module.addImport("test_poll", addTestPoll(b));
+    configureHostIdentity(b, logic_tests);
     const run_logic_tests = ci.run(logic_tests);
     run_logic_tests.has_side_effects = true;
     const logic_test_step = b.step(
@@ -1444,6 +1448,10 @@ fn configureHostLaunch(b: *std.Build, compile: *std.Build.Step.Compile) void {
         .file = b.path("src/host_launch.c"),
         .flags = &.{"-std=c11"},
     });
+    configureHostIdentity(b, compile);
+}
+
+fn configureHostIdentity(b: *std.Build, compile: *std.Build.Step.Compile) void {
     compile.root_module.addCSourceFile(.{
         .file = b.path("src/host_identity.c"),
         .flags = &.{"-std=c11"},
