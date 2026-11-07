@@ -1706,15 +1706,56 @@ test "prepared Action preserves selected inspection until explicit return" {
         }
         if (oversized) {
             const tiny: std.posix.winsize = .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 };
-            _ = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
-            const cells = Test.window(screen);
-            // The cue occupies its reserved edge, not a source cell or
-            // either choice or its highlight.
+            const source = "Run Bash: exact command\n";
+            var raw_prefix: [source.len]u8 = undefined;
+            try std.testing.expectEqual(source.len, try action.readPositionalAll(io, &raw_prefix, 0));
+            try std.testing.expectEqualStrings(source, &raw_prefix);
+            var raw_block: [4096]u8 = undefined;
+            var raw_offset: u64 = source.len;
+            while (raw_offset <= Viewport.capacity) {
+                const count = @min(raw_block.len, Viewport.capacity + 1 - raw_offset);
+                try std.testing.expectEqual(count, try action.readPositionalAll(io, raw_block[0..count], raw_offset));
+                for (raw_block[0..count]) |byte| try std.testing.expectEqual(@as(u8, 'x'), byte);
+                raw_offset += count;
+            }
+            try std.testing.expectEqual(@as(usize, 0), try action.readPositionalAll(io, raw_block[0..1], raw_offset));
+
+            // Width seven uses the same word-wrapped source projection for
+            // measurement and painting; the eighth cell is the preview cue.
+            const rows = [_][]const u8{ "Run    …", "Bash:  …", "exact  …", "command…" };
+            for (rows, 0..) |expected, index| {
+                const delivered = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
+                try std.testing.expectEqual(@as(u16, 7), screen.textLayout().width);
+                const projection = screen.browsing.projection(screen.textLayout());
+                const source_position = projection.position(screen.browsing.scroll.scroll.y);
+                try std.testing.expectEqual(@as(usize, 0), source_position.offset);
+                try std.testing.expectEqual(@as(u16, @intCast(index)), source_position.row);
+                var row: [32]u8 = undefined;
+                try std.testing.expectEqualStrings(expected, rowText(screen, 0, &row));
+                try std.testing.expectEqualStrings("› A   D", rowText(screen, 1, &row));
+                const cells = Test.window(screen);
+                try std.testing.expect(cells.readCell(0, 1).?.style.reverse);
+                try std.testing.expect(!cells.readCell(6, 1).?.style.reverse);
+                try std.testing.expect(screen.offered() == null);
+                try std.testing.expect(screen.presented(delivered));
+                try std.testing.expect(!screen.presented(delivered));
+                try std.testing.expect(screen.offered() == null);
+                _ = screen.browse(true, false);
+            }
+            const next_position = screen.browsing.projection(screen.textLayout()).position(screen.browsing.scroll.scroll.y);
+            try std.testing.expectEqual(source.len, next_position.offset);
+            try std.testing.expectEqual(@as(u16, 0), next_position.row);
+            const wider: std.posix.winsize = .{ .row = 2, .col = 10, .xpixel = 0, .ypixel = 0 };
+            const resized = try Test.render(screen, &out.writer, wider, "", 0, .{}, &.{});
+            try std.testing.expectEqual(@as(u16, 9), screen.textLayout().width);
+            const resized_position = screen.browsing.projection(screen.textLayout()).position(screen.browsing.scroll.scroll.y);
+            try std.testing.expectEqual(@as(usize, 0), resized_position.offset);
+            try std.testing.expectEqual(@as(u16, 0), resized_position.row);
             var row: [32]u8 = undefined;
-            try std.testing.expectEqualStrings("Run Bas…", rowText(screen, 0, &row));
+            try std.testing.expectEqualStrings("Run Bash:…", rowText(screen, 0, &row));
             try std.testing.expectEqualStrings("› A   D", rowText(screen, 1, &row));
-            try std.testing.expect(cells.readCell(0, 1).?.style.reverse);
-            try std.testing.expect(!cells.readCell(6, 1).?.style.reverse);
+            try std.testing.expect(screen.presented(resized));
+            try std.testing.expect(screen.offered() == null);
         }
         screen.releaseAction();
         screen.consent = null;
