@@ -12,6 +12,7 @@ const Allocator = std.mem.Allocator;
 // survives. Limits fail explicitly rather than publishing a partial catalog.
 pub const max_skill_bytes = 1024 * 1024;
 pub const max_frontmatter_bytes = 64 * 1024;
+const max_description_characters = 1024;
 pub const max_entries = 4096;
 pub const max_root_children = 4096;
 pub const max_catalog_bytes = 64 * 1024 * 1024;
@@ -235,7 +236,8 @@ fn parseMetadata(allocator: Allocator, raw: []const u8, directory_name: []const 
     const parsed_name = name orelse return null;
     const parsed_description = description orelse return null;
     if (!validName(parsed_name) or !std.mem.eql(u8, parsed_name, directory_name)) return null;
-    if (!validDescription(parsed_description)) return null;
+    if (parsed_description.len == 0) return null;
+    const description_view = std.unicode.Utf8View.init(parsed_description) catch return null;
     // A commented document separator is YAML syntax, not a Markdown closing
     // fence. Reject extra documents and malformed trailing YAML rather than
     // accepting only the first valid prefix.
@@ -249,7 +251,14 @@ fn parseMetadata(allocator: Allocator, raw: []const u8, directory_name: []const 
     if (yaml.yaml_document_get_root_node(trailing) != null) return null;
     const owned_name = try allocator.dupe(u8, parsed_name);
     errdefer allocator.free(owned_name);
-    return .{ .name = owned_name, .description = try allocator.dupe(u8, parsed_description) };
+    // Bound only advertised metadata, never the source read by invocation.
+    var characters = description_view.iterator();
+    const prefix = characters.peek(max_description_characters);
+    const owned_description = if (prefix.len == parsed_description.len)
+        try allocator.dupe(u8, parsed_description)
+    else
+        try std.mem.concat(allocator, u8, &.{ characters.peek(max_description_characters - 1), "…" });
+    return .{ .name = owned_name, .description = owned_description };
 }
 
 fn scalar(node: [*c]yaml.yaml_node_t) []const u8 {
@@ -273,7 +282,7 @@ fn validName(name: []const u8) bool {
 
 fn validDescription(description: []const u8) bool {
     const count = std.unicode.utf8CountCodepoints(description) catch return false;
-    return count > 0 and count <= 1024;
+    return count > 0 and count <= max_description_characters;
 }
 
 /// Reads the full *current* raw file, including frontmatter; never a retained
@@ -545,12 +554,19 @@ test "skills validates name byte grammar and Unicode character description bound
     try std.testing.expect(validDescription(unicode_1024));
     try std.testing.expect(!validDescription(unicode_1025));
     try std.testing.expect(!validDescription("\xff"));
+    const overlong: Catalog = .{ .entries = &.{.{ .name = "demo", .description = unicode_1025, .path = "/demo/SKILL.md" }} };
+    try std.testing.expectError(error.InvalidSkillCatalog, encodeCatalog(std.testing.allocator, overlong));
+    const overlong_json = try std.fmt.allocPrint(std.testing.allocator, "{{\"entries\":[{{\"name\":\"demo\",\"description\":\"{s}\",\"path\":\"/demo/SKILL.md\"}}]}}", .{unicode_1025});
+    defer std.testing.allocator.free(overlong_json);
+    try std.testing.expectError(error.InvalidSkillCatalog, decodeCatalog(std.testing.allocator, overlong_json));
     const raw = try std.fmt.allocPrint(std.testing.allocator, "---\nname: demo\ndescription: \"{s}\"\n---\n", .{unicode_1024});
     defer std.testing.allocator.free(raw);
     try expectMetadata(raw, unicode_1024);
     const too_long = try std.fmt.allocPrint(std.testing.allocator, "---\nname: demo\ndescription: \"{s}\"\n---\n", .{unicode_1025});
     defer std.testing.allocator.free(too_long);
-    try std.testing.expectEqual(@as(?Metadata, null), try parseMetadata(std.testing.allocator, too_long, "demo"));
+    const shortened = try std.mem.concat(std.testing.allocator, u8, &.{ unicode_1025[0 .. 1023 * 4], "…" });
+    defer std.testing.allocator.free(shortened);
+    try expectMetadata(too_long, shortened);
     const oversized = try std.testing.allocator.alloc(u8, max_frontmatter_bytes + 100);
     defer std.testing.allocator.free(oversized);
     @memset(oversized, 'a');
@@ -575,6 +591,47 @@ test "skills truncates long descriptions at Unicode boundaries" {
             defer allocator.free(expected);
             try expectMetadata(raw, expected);
         }
+    }
+}
+
+test "skills truncates decoded mixed-width YAML escapes by code point" {
+    const allocator = std.testing.allocator;
+    const prefix: [1019]u8 = @splat('a');
+    const cases = [_]struct { suffix: []const u8, expected: []const u8 }{
+        .{ .suffix = "\\u00e9\\u96ea\\U0001f600e", .expected = "é雪😀e" },
+        .{ .suffix = "\\u00e9\\u96ea\\U0001f600e\\u0301", .expected = "é雪😀e\u{0301}" },
+        .{ .suffix = "\\u00e9\\u96ea\\U0001f600e\\u0301x", .expected = "é雪😀e…" },
+    };
+    for (cases) |case| {
+        const raw = try std.fmt.allocPrint(allocator, "---\nname: demo\ndescription: \"{s}{s}\"\n---\n", .{ &prefix, case.suffix });
+        defer allocator.free(raw);
+        const expected = try std.mem.concat(allocator, u8, &.{ &prefix, case.expected });
+        defer allocator.free(expected);
+        try expectMetadata(raw, expected);
+    }
+}
+
+test "skills truncates only after validating complete YAML metadata" {
+    const allocator = std.testing.allocator;
+    const description: [1400]u8 = @splat('x');
+    const unknown: [4096]u8 = @splat('v');
+    const raw = try std.fmt.allocPrint(allocator, "---\nname: demo\ndescription: {s}\nvendor: {{long: {s}}}\n---\n", .{ &description, &unknown });
+    defer allocator.free(raw);
+    const expected = try std.mem.concat(allocator, u8, &.{ description[0..1023], "…" });
+    defer allocator.free(expected);
+    try expectMetadata(raw, expected);
+    const invalid_suffixes = [_][]const u8{
+        "\nvendor: [malformed\n",
+        "\n--- # extra document\nvendor: [malformed\n",
+        "\n--- # extra document\nvendor: valid\n",
+        "\nname: demo\n",
+        "\ndescription: duplicate\n",
+        "\xff\n",
+    };
+    for (invalid_suffixes) |suffix| {
+        const invalid = try std.fmt.allocPrint(allocator, "---\nname: demo\ndescription: {s}{s}---\n", .{ &description, suffix });
+        defer allocator.free(invalid);
+        try std.testing.expectEqual(@as(?Metadata, null), try parseMetadata(allocator, invalid, "demo"));
     }
 }
 
@@ -609,6 +666,45 @@ test "skills discovery truncates descriptions but invocation preserves full sour
     const unchanged = try readSkill(allocator, io, catalog.entries[0]);
     defer allocator.free(unchanged);
     try std.testing.expectEqualStrings(full_source, unchanged);
+}
+
+test "skills discovery reload compares advertised prefixes and invokes current tails" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try fixturePath(allocator, tmp.dir);
+    defer allocator.free(root);
+    try tmp.dir.createDirPath(io, ".git");
+    const description = try allocator.alloc(u8, 1223);
+    defer allocator.free(description);
+    @memset(description, 'x');
+    try fixtureSkill(tmp.dir, ".agents/skills/demo", "demo", description);
+    const before = try discover(allocator, io, root, null);
+    defer before.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), before.entries.len);
+
+    description[1100] = 'y';
+    try fixtureSkill(tmp.dir, ".agents/skills/demo", "demo", description);
+    const tail_changed = try discover(allocator, io, root, null);
+    defer tail_changed.deinit(allocator);
+    const tail_delta = try diff(allocator, before, tail_changed);
+    defer tail_delta.deinit(allocator);
+    try std.testing.expect(tail_delta.isEmpty());
+    const invoked = try invocation(allocator, io, before.entries[0]);
+    defer allocator.free(invoked);
+    try std.testing.expect(std.mem.indexOf(u8, invoked, description) != null);
+
+    description[1022] = 'z';
+    try fixtureSkill(tmp.dir, ".agents/skills/demo", "demo", description);
+    const prefix_changed = try discover(allocator, io, root, null);
+    defer prefix_changed.deinit(allocator);
+    const prefix_delta = try diff(allocator, tail_changed, prefix_changed);
+    defer prefix_delta.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), prefix_delta.added.len);
+    try std.testing.expectEqual(@as(usize, 0), prefix_delta.removed.len);
+    try std.testing.expectEqual(@as(usize, 1), prefix_delta.changed.len);
+    try std.testing.expect(std.mem.endsWith(u8, prefix_delta.changed[0].description, "z…"));
 }
 
 fn fixturePath(allocator: Allocator, dir: std.Io.Dir) ![]const u8 {
