@@ -125,3 +125,5 @@ See [Developing Rui](docs/development.md) to build and install from source, run 
 - [Architecture](ARCHITECTURE.md): behavior, ownership and recovery, including the planned V1 contract.
 - [Verification](VERIFICATION.md): required checks and what they prove.
 - [Research](research/README.md), [contributing rules](AGENTS.md) and [third-party notices](THIRD_PARTY_NOTICES.md).
+
+<!-- CI routing probe. Two sentences share this source line. -->
