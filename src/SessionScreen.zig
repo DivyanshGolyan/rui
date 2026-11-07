@@ -1727,6 +1727,40 @@ test "prepared Action preserves selected inspection until explicit return" {
 }
 
 test "conversation source edge and rail retain full physical width" {
+    const Check = struct {
+        fn rows(screen: *Self, columns: u16, edge: []const u8, bytes: []const u8) !void {
+            const cells = Test.window(screen);
+            // At 100 physical columns the 99-cell source window reserves
+            // seven cells for sidenotes, so this 99-cell word wraps 92+7.
+            // At 8 columns there is no sidenote margin and it fits once.
+            const first_count: usize = if (columns == 100) 92 else 6;
+            const edge_row: u16 = if (columns == 100) 1 else 0;
+            try std.testing.expectEqualStrings(edge, cells.readCell(6, edge_row).?.char.grapheme);
+            var row0: [256]u8 = undefined;
+            var row1: [256]u8 = undefined;
+            const first = contentColumnsText(screen, 0, &row0);
+            const second = contentColumnsText(screen, 1, &row1);
+            if (columns == 100) {
+                try std.testing.expectEqualStrings(bytes[0..first_count], first);
+                for (92..99) |column| try std.testing.expectEqualStrings(" ", cells.readCell(@intCast(column), 0).?.char.grapheme);
+            } else {
+                try std.testing.expectEqualStrings("", second);
+            }
+            var actual_storage: [256]u8 = undefined;
+            var actual = std.Io.Writer.fixed(&actual_storage);
+            try actual.writeAll(first);
+            try actual.writeAll(second);
+            var expected_storage: [256]u8 = undefined;
+            var expected = std.Io.Writer.fixed(&expected_storage);
+            try expected.writeAll(bytes);
+            try expected.writeAll(edge);
+            try std.testing.expectEqualStrings(expected.buffered(), actual.buffered());
+            try std.testing.expectEqual(@as(usize, 0), screen.viewed().scroll.scroll.x);
+            // This fixture has no overflow: each physical rightmost cell is
+            // the track, not a source glyph or a shifted scrollbar.
+            for (0..2) |row| try std.testing.expectEqualStrings("│", cells.readCell(columns - 1, @intCast(row)).?.char.grapheme);
+        }
+    };
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
@@ -1745,15 +1779,10 @@ test "conversation source edge and rail retain full physical width" {
             try screen.append(edge);
             const size: std.posix.winsize = .{ .row = 12, .col = columns, .xpixel = 0, .ypixel = 0 };
             _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
-            const cells = Test.window(screen);
-            try std.testing.expectEqualStrings(edge, cells.readCell(columns - 2, 0).?.char.grapheme);
-            const rail = cells.readCell(columns - 1, 0).?.char.grapheme;
-            try std.testing.expect(std.mem.eql(u8, rail, "│") or std.mem.eql(u8, rail, "▐"));
+            try Check.rows(screen, columns, edge, bytes[0 .. columns - 2]);
             try screen.beginTranscript(0);
             _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
-            try std.testing.expectEqualStrings(edge, cells.readCell(columns - 2, 0).?.char.grapheme);
-            const transcript_rail = cells.readCell(columns - 1, 0).?.char.grapheme;
-            try std.testing.expect(std.mem.eql(u8, transcript_rail, "│") or std.mem.eql(u8, transcript_rail, "▐"));
+            try Check.rows(screen, columns, edge, bytes[0 .. columns - 2]);
             try screen.latest();
         };
     }
@@ -1887,10 +1916,10 @@ test "partial Action source glyphs survive edge and resize" {
     defer tmp.cleanup();
     const file = try tmp.dir.createFile(io, "edge-action-unicode", .{ .read = true });
     defer file.close(io);
-    const cases = [_]struct { source: []const u8, first: []const u8 }{
-        .{ .source = "ABCDEF│X\n", .first = "ABCDEF│…" },
-        .{ .source = "ABCDEF▐X\n", .first = "ABCDEF▐…" },
-        .{ .source = "ABCDE中X\n", .first = "ABCDE中…" },
+    const cases = [_]struct { source: []const u8, edge: []const u8, wide: bool = false }{
+        .{ .source = "ABCDEF│X\n", .edge = "│" },
+        .{ .source = "ABCDEF▐X\n", .edge = "▐" },
+        .{ .source = "ABCDE中X\n", .edge = "中", .wide = true },
     };
     for (cases) |case| {
         screen.releaseAction();
@@ -1908,7 +1937,21 @@ test "partial Action source glyphs survive edge and resize" {
         var row: [64]u8 = undefined;
         const tiny: std.posix.winsize = .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 };
         _ = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
-        try std.testing.expectEqualStrings(case.first, rowText(screen, 0, &row));
+        const first = Test.window(screen);
+        for ("ABCDE", 0..) |byte, column| try std.testing.expectEqualStrings(&.{byte}, first.readCell(@intCast(column), 0).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (case.wide) case.edge else "F", first.readCell(5, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (case.wide) " " else case.edge, first.readCell(6, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("…", first.readCell(7, 0).?.char.grapheme);
+        if (case.wide) {
+            // InternalScreen.readCell reconstructs a default width; it does
+            // not retain the painted cell's width. Check the negotiated
+            // width and the actual committed continuation flag instead.
+            try std.testing.expectEqual(@as(usize, 2), @as(usize, vaxis.gwidth.gwidth(case.edge, screen.backend.widthMethod())));
+            const committed = screen.backend.storage.?.vx.screen_last.buf;
+            try std.testing.expect(!committed[5].skipped);
+            try std.testing.expect(committed[6].skipped);
+            try std.testing.expect(!committed[7].skipped);
+        }
         _ = screen.browse(true, false);
         _ = try Test.render(screen, &out.writer, tiny, "", 0, .{}, &.{});
         try std.testing.expectEqualStrings("X      …", rowText(screen, 0, &row));
