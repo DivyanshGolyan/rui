@@ -9,6 +9,7 @@ const store_core = @import("../Store.zig");
 
 /// Captured outside the Store writer. Borrowed until the synchronous mutation
 /// finishes. A failed scan is explicit rather than an empty catalog.
+/// ready.encoded may alias ready.instruction's suffix; neither is freed here.
 pub const Initial = union(enum) {
     ready: struct { encoded: []const u8, instruction: ?[]const u8 },
     unavailable,
@@ -135,7 +136,9 @@ pub fn read(a: anytype, allocator: std.mem.Allocator, session: []const u8) !cata
     const length = row.byte_length orelse return error.CorruptStore;
     const digest = row.digest orelse return error.CorruptStore;
     if (length > catalog.max_catalog_bytes) return error.CorruptStore;
-    const bytes = try allocator.alloc(u8, @intCast(length));
+    // Encoded JSON is parse scratch, not another request-arena catalog.
+    const bytes = try std.heap.c_allocator.alloc(u8, @intCast(length));
+    defer std.heap.c_allocator.free(bytes);
     var offset: usize = 0;
     while (offset < bytes.len) {
         const end = @min(offset + content.verified_window_bytes, bytes.len);

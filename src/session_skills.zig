@@ -24,10 +24,8 @@ pub fn captureInitial(allocator: std.mem.Allocator, scratch_allocator: std.mem.A
 
 fn prepareInitial(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, workspace: []const u8, home: ?[]const u8) !storage.InitialSkills {
     const found = try catalog.discoverWithScratch(allocator, scratch_allocator, io, workspace, home);
-    return .{ .ready = .{
-        .encoded = try catalog.encodeCatalog(allocator, found),
-        .instruction = if (found.entries.len == 0) null else try catalog.initialInstruction(allocator, found),
-    } };
+    const rendered = try catalog.initialCatalog(allocator, found);
+    return .{ .ready = .{ .encoded = rendered.encoded, .instruction = rendered.instruction } };
 }
 
 pub const Capture = storage.CapturedSkill;
@@ -44,7 +42,7 @@ pub fn capture(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocato
             const selected = for (state.catalog.entries) |entry| {
                 if (std.mem.eql(u8, entry.name, name)) break entry;
             } else return .{ .failed = .{ .code = .unknown_skill, .bytes = "No advertised skill has that name. Reload skills to refresh the catalog." } };
-            const raw = catalog.readSkill(allocator, io, selected) catch |err| switch (err) {
+            const bytes = catalog.invocation(allocator, io, selected) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return .{ .failed = .{ .code = switch (err) {
                     error.SkillFileTooLarge => .skill_file_too_large,
@@ -52,10 +50,7 @@ pub fn capture(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocato
                     else => .skill_file_unavailable,
                 }, .bytes = try std.fmt.allocPrint(allocator, "Rui could not read skill {s}: {s}. The catalog was not changed.", .{ name, @errorName(err) }) } },
             };
-            // The raw file is the complete suffix, unchanged, including YAML,
-            // CRLF, Unicode and trailing newlines. The path is JSON-escaped.
-            const path = try std.json.Stringify.valueAlloc(allocator, selected.path, .{});
-            return .{ .invocation = try std.fmt.allocPrint(allocator, "Skill file: {s}\n\n{s}", .{ path, raw }) };
+            return .{ .invocation = bytes };
         },
         .reload => return .{ .reload = catalog.discoverWithScratch(allocator, scratch_allocator, io, state.workspace.slice(), home) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,

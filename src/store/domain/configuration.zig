@@ -408,6 +408,7 @@ pub fn configure(a: anytype, io: std.Io, served: anytype, request: *const protoc
 // Native reload has its own atomic result/catalog settlement and scratch.
 // Keep this rare branch off ordinary Configure's deeper content-import chain.
 noinline fn reloadSkills(a: anytype, command: *const protocol.ConfigureCommand, creating: bool, reads: *const ConfigurationReads, reload_capture: ?*const skills_domain.Capture, digest: *const [32]u8, faults: Faults) !ConfigureReply {
+    if (targetRejection(command.session.slice())) |code| return saveConfigurationRejection(a, command, digest, code, faults);
     if (creating or !reads.found.get()) return saveConfigurationRejection(a, command, digest, .unknown_session, faults);
     var invalid = command.preset != null or command.require_model;
     inline for (@typeInfo(protocol.Configuration).@"struct".field_names) |field| {
@@ -835,6 +836,13 @@ noinline fn saveUnusedWorkspace(configuration: *const protocol.Configuration, ne
     reads.workspace_digest = store_core.workspaceDigest(next.workspace.slice());
 }
 
+// Both mutation branches validate after keyed replay and Configure's existing
+// preset/capability precedence. Empty targets retain creation semantics;
+// creating Messages share this check through applyConfiguration.
+fn targetRejection(session: []const u8) ?protocol.ConfigurationRejection {
+    return if (session.len != 0 and !protocol.validSessionId(session)) .invalid_session_reference else null;
+}
+
 /// After `prepareConfiguration`'s round: decides the configuration, and
 /// queues its content and the Session's insert or update. Creation and its
 /// first Message can share this owner without an intermediate commit. The
@@ -850,9 +858,7 @@ pub fn applyConfiguration(
     reads: *ConfigurationReads,
 ) !Application {
     const creating = session.len == 0;
-    if (!creating and !protocol.validSessionId(session)) {
-        return .{ .rejected = .invalid_session_reference };
-    }
+    if (targetRejection(session)) |code| return .{ .rejected = code };
     if (configuration.permission_mode.state == .value and
         std.meta.stringToEnum(protocol.PermissionMode, configuration.permission_mode.value.slice()) == null)
     {

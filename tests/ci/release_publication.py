@@ -6,11 +6,32 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 
-def gh(*args):
-    return subprocess.run(["gh", *map(str, args)], check=True,
-                          capture_output=True, text=True).stdout
+def gh(*args, input=None, output=None):
+    command = ["gh", *map(str, args)]
+    if output is not None:
+        with Path(output).open("wb") as destination:
+            subprocess.run(command, check=True, stdout=destination)
+        return ""
+    return subprocess.run(command, check=True, stdout=subprocess.PIPE, text=True, input=input).stdout
+
+
+def _json(*args, payload=None):
+    options = {} if payload is None else {"input": json.dumps(payload)}
+    if payload is not None:
+        args = (*args, "--input", "-")
+    try:
+        return json.loads(gh("api", *args, **options))
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"invalid GitHub resource response: {error}") from error
+
+
+def _release_path(release_id):
+    if type(release_id) is not int or release_id <= 0:
+        raise SystemExit("release resource must have a positive integer ID")
+    return f"repos/{_repository()}/releases/{release_id}"
 
 
 def git(*args):
@@ -62,18 +83,20 @@ def _record(version):
     return matches[0] if matches else None
 
 
-def _asset_names(version, record):
+def _asset_names(version, record, *, unfinished=False):
+    _release_path(record.get("id"))
     if record.get("tag_name") != f"v{version}" or type(record.get("draft")) is not bool:
         raise SystemExit(f"invalid release record for v{version}")
     assets = record.get("assets")
     if not isinstance(assets, list) or any(
         not isinstance(asset, dict) or not isinstance(asset.get("name"), str)
-        or asset.get("state", "uploaded") != "uploaded" for asset in assets
+        or type(asset.get("id")) is not int or asset["id"] <= 0
+        or (not unfinished and asset.get("state") != "uploaded") for asset in assets
     ):
         raise SystemExit(f"v{version} has invalid or unfinished assets")
     names = [asset["name"] for asset in assets]
-    if len(names) != len(set(names)):
-        raise SystemExit(f"v{version} has duplicate asset names")
+    if len(names) != len(set(names)) or len({asset["id"] for asset in assets}) != len(assets):
+        raise SystemExit(f"v{version} has duplicate asset names or IDs")
     return set(names)
 
 
@@ -112,7 +135,9 @@ def verify_release(version, record):
     """Check the full remote asset set and its bytes, whether public or draft."""
     _check_names(version, _asset_names(version, record))
     with tempfile.TemporaryDirectory(prefix="rui-release-") as scratch:
-        gh("release", "download", f"v{version}", "--repo", _repository(), "--dir", scratch)
+        for asset in record["assets"]:
+            gh("api", f"repos/{_repository()}/releases/assets/{asset['id']}",
+               "--header", "Accept: application/octet-stream", output=Path(scratch) / asset["name"])
         _verify_directory(version, Path(scratch))
 
 
@@ -147,51 +172,72 @@ def _guard_target(version, sha, record):
     return tag_sha
 
 
+def _identity(version, sha, record, release_id=None):
+    if not isinstance(record, dict):
+        raise SystemExit(f"invalid release resource for v{version}")
+    _release_path(record.get("id"))
+    if release_id is not None and record["id"] != release_id:
+        raise SystemExit(f"v{version} release resource ID changed")
+    if record.get("tag_name") != f"v{version}" or type(record.get("draft")) is not bool:
+        raise SystemExit(f"invalid release identity for v{version}")
+    _guard_target(version, sha, record)
+    return record
+
+
+def _refresh(version, sha, release_id):
+    return _identity(version, sha, _json(_release_path(release_id)), release_id)
+
+
+def _upload_url(record, name):
+    base = f"https://uploads.github.com/{_release_path(record['id'])}/assets"
+    if record.get("upload_url") != base + "{?name,label}":
+        raise SystemExit("release resource has an unexpected upload URL")
+    return base + "?name=" + quote(name, safe="")
+
+
 def publish(version, sha, directory, notes):
-    """Recover a draft, and expose it only after remote bytes pass verification."""
+    """Use the acknowledged release ID, never a collection index, during publication."""
     _verify_directory(version, directory)
     sha = _commit(sha)
-    repository = _repository()
     record = _record(version)
-    tag_sha = _guard_target(version, sha, record)
+    _guard_target(version, sha, record)
     if record is None:
-        args = ["release", "create", f"v{version}", "--repo", repository,
-                "--target", sha, "--draft", "--title", f"Rui {version}",
-                "--notes-file", str(notes)]
-        if tag_sha is not None:
-            args.append("--verify-tag")
-        gh(*args)
-        record = _record(version)
-        if record is None:
-            raise SystemExit(f"v{version} draft creation did not produce a release")
-        _guard_target(version, sha, record)
-    if record["draft"]:
-        # A draft may have been published outside the serialized workflow meanwhile.
-        record = _record(version)
-        if record is None:
-            raise SystemExit(f"v{version} disappeared before asset upload")
-        _guard_target(version, sha, record)
+        record = _json("--method", "POST", f"repos/{_repository()}/releases", payload={
+            "tag_name": f"v{version}", "target_commitish": sha, "draft": True,
+            "name": f"Rui {version}", "body": notes.read_text(),
+        })
+    record = _identity(version, sha, record)
+    release_id = record["id"]
+    record = _refresh(version, sha, release_id)
     if not record["draft"]:
         verify_release(version, record)
         return
-    unexpected = _asset_names(version, record) - expected_assets(version)
+    unexpected = _asset_names(version, record, unfinished=True) - expected_assets(version)
     if unexpected:
         raise SystemExit(f"v{version} draft has unexpected assets: {sorted(unexpected)}")
-    # Only drafts may replace bytes from an earlier, possibly different cold build.
-    gh("release", "upload", f"v{version}", "--repo", repository, "--clobber",
-       *(str(directory / name) for name in sorted(expected_assets(version))))
-    record = _record(version)
-    if record is None:
-        raise SystemExit(f"v{version} disappeared after asset upload")
-    _guard_target(version, sha, record)
+    for name in sorted(expected_assets(version)):
+        record = _refresh(version, sha, release_id)
+        if not record["draft"]:
+            verify_release(version, record)
+            return
+        _asset_names(version, record, unfinished=True)
+        upload_url = _upload_url(record, name)
+        for asset in record["assets"]:
+            if asset["name"] == name:
+                gh("api", "--method", "DELETE", f"repos/{_repository()}/releases/assets/{asset['id']}")
+        asset = _json("--method", "POST", upload_url,
+                      "--header", "Content-Type: application/octet-stream", "--input", directory / name)
+        if (not isinstance(asset, dict) or type(asset.get("id")) is not int or asset["id"] <= 0
+                or asset.get("name") != name or asset.get("state") != "uploaded"):
+            raise SystemExit(f"v{version} upload did not acknowledge completed asset {name}")
+    record = _refresh(version, sha, release_id)
     verify_release(version, record)
     if record["draft"]:
-        gh("release", "edit", f"v{version}", "--repo", repository,
-           "--draft=false", "--latest", "--notes-file", str(notes))
-    record = _record(version)
-    if record is None or record["draft"]:
+        record = _json("--method", "PATCH", _release_path(release_id),
+                       payload={"draft": False, "make_latest": "true", "body": notes.read_text()})
+        record = _identity(version, sha, record, release_id)
+    if record["draft"]:
         raise SystemExit(f"v{version} is not public after publication")
-    _guard_target(version, sha, record)
     verify_release(version, record)
 
 
