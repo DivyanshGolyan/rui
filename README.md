@@ -106,7 +106,9 @@ Archive keeps the conversation history and files.
 ## Skills
 
 Rui discovers `SKILL.md` skills in your repository's `.agents/skills` and the Host user's `~/.agents/skills`; repository names win collisions.
-Use `/skill NAME` to read one into the conversation and `/reload-skills` to refresh the advertised catalog without starting a model turn.
+Type `/` anywhere in a prompt, then select a Skill row with Enter or Tab.
+Selected tokens are underlined; Enter again sends your text with the selected skills.
+Use `/skill NAME` for a skill-only message and `/reload-skills` to refresh the advertised catalog without starting a model turn.
 Skills are ordinary conversation content, grant no permissions and execute nothing on load.
 See [terminal commands](docs/using-rui.md#skills) or [scripted invocation](docs/scripting.md#invoke-and-reload-skills).
 

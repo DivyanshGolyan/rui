@@ -30,9 +30,9 @@ INSERT INTO session(session_ref,workspace,provider,codec,codec_options,prefix_se
 ('rhvzwc','/home/user/rui-pr6d','codex','openai-responses/1',NULL,NULL,'model-a',1,4,1,NULL,1,NULL,NULL,NULL,NULL,1793781720,2,3,X'4f734373106b18b4300a06683393f27fe72fcb98f82b72cb0a3b98950e714433',1);
 INSERT INTO core_command(command_key,kind,target,input_digest,primary_content_id,secondary_content_id,accepted,code,revision,created,command_seq) VALUES
 ('fixture-answer-config',1,'d8mv7p',X'da30d53055d72b570beed083a96a9fbff59605a11f6606d8c06009c43a705489',NULL,NULL,1,'',1,1,1),
-('fixture-answer-key',2,'d8mv7p',X'f1c556d56340cf43f947a5c7efa143b121b78165d59292dc801d9331b8e7206a',2,NULL,1,'',0,0,2),
+('fixture-answer-key',2,'d8mv7p',X'f1c556d56340cf43f947a5c7efa143b121b78165d59292dc801d9331b8e7206a',2,2,1,'',0,0,2),
 ('fixture-ask-config',1,'brhkcj',X'cec44ce76850ac8d1faa17c7e708d732723b13fde5c482502faa9fd93f8581ac',NULL,NULL,1,'',1,1,3),
-('fixture-ask-message',2,'brhkcj',X'95937f206811b07f694d1973bece7e5a13bddb2f45fc92bfa330b713a8043aa3',6,NULL,1,'',0,0,4),
+('fixture-ask-message',2,'brhkcj',X'95937f206811b07f694d1973bece7e5a13bddb2f45fc92bfa330b713a8043aa3',6,6,1,'',0,0,4),
 ('fixture-allow',5,'brhkcj',X'7cf72581b6f2592ba788fe2b2306da74e37d8ac8f2b115d67e5143d20eae18e9',NULL,NULL,1,'',0,0,5),
 ('fixture-stop-config',1,'rhvzwc',X'da30d53055d72b570beed083a96a9fbff59605a11f6606d8c06009c43a705489',NULL,NULL,1,'',1,1,6),
 ('fixture-stop',3,'rhvzwc',X'd3a4ebf602e078b77bf4e4ccc2b6ab98d0c70d556138a870ca01f9a655dca65f',NULL,NULL,1,'',0,0,7),

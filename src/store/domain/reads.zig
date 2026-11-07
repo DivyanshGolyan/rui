@@ -1424,7 +1424,7 @@ const peer_label = rsql.Read(.{
 /// An admitted Message of the Session, with whether it was applied or
 /// excluded at end ?2 and whether its command and Turn agree with it.
 const activity_message = rsql.Read(.{
-    .sql = "SELECT m.command_key,m.turn_id,m.content_id," ++
+    .sql = "SELECT m.command_key,m.turn_id,m.content_id,c.secondary_content_id AS authored_id," ++
         "EXISTS(SELECT 1 FROM conversation_entry e WHERE e.session_ref=m.session_ref AND e.source_admission_id=m.admission_id AND e.session_position<=?2) AS applied," ++
         "EXISTS(SELECT 1 FROM session_stop s WHERE s.session_ref=m.session_ref AND s.admission_cutoff>=m.admission_id AND s.position<=?2) AS excluded," ++
         "c.kind=2 AND c.accepted=1 AND c.target=m.session_ref AND c.primary_content_id=m.content_id " ++
@@ -1438,6 +1438,7 @@ const activity_message = rsql.Read(.{
         command_key: protocol.Bounded(protocol.max_key_bytes),
         turn_id: ?rsql.Positive,
         content_id: rsql.Positive,
+        authored_id: ?rsql.Positive,
         applied: bool,
         excluded: bool,
         consistent: bool,
@@ -1584,6 +1585,7 @@ const LabelRead = struct {
 const MessageRead = struct {
     message: *protocol.ActivityItem.Message,
     content_id: u64 = 0,
+    authored_id: u64 = 0,
     count: RowCount = .{},
 
     fn queue(read: *MessageRead, a: *ReadAccess, session: []const u8, end: u64) void {
@@ -1604,6 +1606,7 @@ const MessageRead = struct {
         message.sender = if (row.sender_session_ref) |sender| .{ .session = sender } else null;
         if (row.applied) message.turn = (row.turn_id orelse return error.CorruptStore).get();
         read.content_id = row.content_id.get();
+        read.authored_id = (row.authored_id orelse return error.CorruptStore).get();
     }
 };
 
@@ -1735,7 +1738,7 @@ const ItemRead = struct {
     kind: u8 = 0,
     state: union {
         first: struct { missing: missing_assistant_entry.Result, row: activity_item.Result },
-        message: struct { read: MessageRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined, entry: PublicContentRead },
+        message: struct { read: MessageRead, metadata: content_metadata.Row = undefined, authored_metadata: content_metadata.Row = undefined, label: LabelRead = undefined, entry: PublicContentRead },
         content: struct { read: PublicContentRead, presentation: PresentationRead = undefined, answer: answer_entry.Result = null },
         call: struct { proposal: ProposalRead, resolved: call_resolved.Row = undefined },
         hosted: HostedRead,
@@ -1765,6 +1768,7 @@ const ItemRead = struct {
                     if (kind == 2) message.entry.queue(a, session);
                 } else {
                     a.read(content_metadata, .{ .content_id = message.read.content_id }, &message.metadata);
+                    a.read(content_metadata, .{ .content_id = message.read.authored_id }, &message.authored_metadata);
                     if (message.read.message.sender) |*sender| {
                         message.label = .{ .peer = sender };
                         message.label.queue(a);
@@ -1837,6 +1841,8 @@ const ItemRead = struct {
                 }
                 const content = try content_domain.publicMetadata(&message.metadata);
                 message.read.message.content = .{ .length = content.length, .digest = content.digest };
+                const authored = try content_domain.publicMetadata(&message.authored_metadata);
+                message.read.message.authored = .{ .length = authored.length, .digest = authored.digest };
                 if (message.read.message.sender != null) try message.label.found();
                 item.at = message.read.message.admitted_at;
                 if (kind == 2) {
@@ -2051,11 +2057,19 @@ noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, 
 /// Round 1 reads the sequence guard; the item's own reads follow
 /// (`publicConversationContent`, `readItems`), which read the content's
 /// metadata, so no read repeats it.
+const authored_message = rsql.Read(.{
+    .sql = "SELECT secondary_content_id AS authored_id FROM core_command WHERE command_key=?1 AND kind=2 AND accepted=1",
+    .Args = struct { key: []const u8 },
+    .Row = struct { authored_id: rsql.Positive },
+    .cardinality = .optional,
+});
+
 pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivityContent) !ContentLocation {
     var guard: activity_sequence_guard.Result = undefined;
     a.read(activity_sequence_guard, .{ .session = request.session.slice() }, &guard);
     a.run() catch |err| return store_core.fence(a.store, if (err == error.StatementFailed) error.CorruptStore else err);
     if (guard != null) return store_core.fence(a.store, error.CorruptStore);
+    if (request.selector == .authored and request.ordinal != 0) return error.ContentNotFound;
     // Only Tool Results have nonzero ordinals and content (an approval
     // request's ordinal 1 has none). Byte readers need their
     // canonical identity, not a second scan of the original arguments.
@@ -2072,6 +2086,20 @@ pub fn openActivityContent(a: *ReadAccess, request: *const protocol.ReadActivity
             error.ContentNotFound => return err,
             else => return store_core.fence(a.store, err),
         };
+        if (request.selector == .authored) {
+            // The item already owns this validated Message. Borrow it through
+            // the authored-ID read rather than copying it onto a Queue holder's
+            // stack, which may drain a queued settlement before returning.
+            const message = switch (item.value) {
+                .admission, .user, .received => |*value| value,
+                else => return error.ContentNotFound,
+            };
+            var row: authored_message.Result = undefined;
+            a.read(authored_message, .{ .key = message.key.slice() }, &row);
+            try a.run();
+            const id = row orelse return error.CorruptStore;
+            return .{ .store = a.store, .content_id = @intCast(id.authored_id.get()), .reference = .{ .length = message.authored.length, .digest = message.authored.digest } };
+        }
         break :located located orelse return error.ContentNotFound;
     };
     return .{ .store = a.store, .content_id = content.id, .reference = .{ .length = content.metadata.length, .digest = content.metadata.digest } };

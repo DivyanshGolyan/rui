@@ -718,3 +718,59 @@ test "quote draft width and source oracle spans every ASCII caret anchor and wra
         }
     };
 }
+
+/// Borrowed source spans for one visual line. Selection ranges are editor-owned,
+/// sorted, nonoverlapping and on grapheme boundaries; clipping adds no state.
+pub const Spans = struct {
+    text: []const u8,
+    attachments: []const @import("skill_completion.zig").Range,
+    position: usize,
+    end: usize,
+    index: usize = 0,
+
+    pub const Span = struct { text: []const u8, attached: bool };
+
+    pub fn next(self: *Spans) ?Span {
+        if (self.position == self.end) return null;
+        while (self.index < self.attachments.len and self.attachments[self.index].end <= self.position) self.index += 1;
+        const start = self.position;
+        var attached = false;
+        if (self.index < self.attachments.len) {
+            const range = self.attachments[self.index];
+            attached = range.start <= start;
+            self.position = @min(self.end, if (attached) range.end else range.start);
+        } else self.position = self.end;
+        return .{ .text = self.text[start..self.position], .attached = attached };
+    }
+};
+
+test "inline skill draft spans preserve every clipped byte and selection boundary" {
+    const text = "é /one and /two!";
+    const ranges = [_]@import("skill_completion.zig").Range{ .{ .start = 3, .end = 7 }, .{ .start = 12, .end = 16 } };
+    for (0..text.len + 1) |start| {
+        if (start < text.len and text[start] & 0xc0 == 0x80) continue;
+        for (start..text.len + 1) |end| {
+            if (end < text.len and text[end] & 0xc0 == 0x80) continue;
+            var spans: Spans = .{ .text = text, .attachments = &ranges, .position = start, .end = end };
+            var seen = start;
+            var count: usize = 0;
+            while (spans.next()) |span| {
+                try std.testing.expect(span.text.len != 0);
+                try std.testing.expectEqualStrings(text[seen..][0..span.text.len], span.text);
+                for (seen..seen + span.text.len) |byte| {
+                    const wanted = (byte >= 3 and byte < 7) or (byte >= 12 and byte < 16);
+                    try std.testing.expectEqual(wanted, span.attached);
+                }
+                seen += span.text.len;
+                count += 1;
+                try std.testing.expect(count <= 5);
+            }
+            try std.testing.expectEqual(end, seen);
+        }
+    }
+    var plain: Spans = .{ .text = text, .attachments = &.{}, .position = 0, .end = text.len };
+    const span = plain.next().?;
+    try std.testing.expectEqualStrings(text, span.text);
+    try std.testing.expect(!span.attached);
+    try std.testing.expect(plain.next() == null);
+}

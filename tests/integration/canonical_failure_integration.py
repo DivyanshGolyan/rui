@@ -6,7 +6,7 @@ import os
 import pathlib
 import pty
 from terminal_process import COLUMNS, ROWS, open_pty
-from terminal_screen import ScreenCapture, cell_rows, shown
+from terminal_screen import ScreenCapture, assert_details_unavailable, shown
 import re
 import select
 import shutil
@@ -485,7 +485,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     human.read_terminal(master, "accepted work remains accepted",
                         timeout=deadline - time.monotonic(), composer=True)
                     while True:
-                        os.write(master, b"/status\n")
+                        os.write(master, human.fixture_command("/status").encode())
                         status = human.read_terminal(master, f" Status · {session}",
                             timeout=deadline - time.monotonic(), composer=True)
                         # /status exposes unresolved frontend custody, independently
@@ -531,7 +531,7 @@ def interactive_cases(state, binding=False, null_code=False):
                                     timeout=deadline - time.monotonic(), composer=True)
                             elif "› " not in output.split("denied tool saved", 1)[1]:
                                 output += human.read_terminal(master, "› ", timeout=deadline - time.monotonic())
-                        os.write(master, b"/status\n")
+                        os.write(master, human.fixture_command("/status").encode())
                         diagnostic = human.read_terminal(master, f"Last submission error: {reason}", composer=True)
                         assert key in diagnostic and "Ctrl-R retries this exact original" in diagnostic, diagnostic
                         # No ordinary no-op may retry an unresolved submission.
@@ -549,7 +549,7 @@ def interactive_cases(state, binding=False, null_code=False):
                         if route == "/v1/message":
                             output += human.await_screen(master, human.CHOICE)
                             output += human.action_ready(ready_read, master)
-                    os.write(master, b"/exit\n")
+                    os.write(master, human.fixture_command("/exit").encode())
                 # Supply output credit during the original exit budget for
                 # fatal cleanup and recoverable explicit detachment alike.
                 try:
@@ -636,23 +636,6 @@ def interactive_cases(state, binding=False, null_code=False):
         endpoint_thread.join(timeout=5)
         assert not endpoint_thread.is_alive(), "provider fixture did not join"
     print(f"{'null' if null_code else 'binding' if binding else 'canonical'} PTY: Configure/Message/Permission/overview start fail before outcome interpretation, restore terminal and retain original capture", flush=True)
-
-
-def assert_details_unavailable(capture):
-    """Check this fixture's transcript and footer in one committed cell grid."""
-    cells = capture.completed_cells
-    raw = capture.completed
-    assert capture.generation and not capture.synchronized, raw
-    assert len(cells) == ROWS and all(len(row) == COLUMNS for row in cells), raw
-    transcript_end = ROWS - 3
-    assert all(row[-1].data == "▐" for row in cells[:transcript_end]), raw
-    footer = cell_rows(cells, transcript_end, ROWS, 0, COLUMNS)
-    assert [row.rstrip(" ") for row in footer] == [
-        "─" * COLUMNS, "›", "! Details unavailable; draft retained."
-    ], raw
-    transcript = "\n".join(row.rstrip(" ") for row in
-        cell_rows(cells, 0, transcript_end, 0, COLUMNS - 1))
-    assert shown("! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy", transcript), raw
 
 
 def permission_read_cases(state):
@@ -751,12 +734,12 @@ def permission_read_cases(state):
             caller = subprocess.Popen([str(fixture.RUI), "session", "resume", "--store", str(store), details_session],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             human.read_terminal(master, "› ")
-            os.write(master, b"/details\n")
+            os.write(master, human.fixture_command("/details").encode())
             human.read_terminal(master, "host_busy", timeout=10)
             output = human.current_screen(master)
             # The transcript keeps the whole diagnostic, wrapped at the width;
             # the notice under the input names only what failed.
-            assert_details_unavailable(human.terminal_capture(master))
+            assert_details_unavailable(human.terminal_capture(master), columns=COLUMNS, rows=ROWS)
             assert caller.poll() is None, output
             os.write(master, b"\x03")
             _, errors = human.terminal_exit(caller, master, timeout=10)

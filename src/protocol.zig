@@ -8,7 +8,9 @@ const named_scratch = @import("named_scratch.zig");
 const store_id = @import("store_id.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
-pub const wire_version = "10";
+pub const wire_version = "11";
+/// Historical saved-record grammar; never a live transport version.
+pub const legacy_record_version = "10";
 
 /// Host-owned lifecycle state of a Message request.
 pub const MessageRequestState = enum { queued, processing, waiting_for_permission, completed, failed, cancelled, rejected };
@@ -279,6 +281,7 @@ pub const Kind = enum {
     activity_page,
     activity_search,
     activity_content,
+    skill_suggestions,
     model_list,
 };
 
@@ -361,6 +364,8 @@ pub const MessageCommand = struct {
     text: ContentField = .{},
     /// Explicit skill invocation, alternative to caller text.
     skill: ?Bounded(64) = null,
+    /// Explicit ordered, distinct references; borrowed from the Ingress owner.
+    skills: []const Bounded(64) = &.{},
     // Non-null means create a fresh Session and admit this first Message in
     // one transaction. The requested Session must then be empty. Initial
     // configuration cannot supply instruction or schema content values.
@@ -386,7 +391,16 @@ pub const MessageCommand = struct {
         if (self.skill) |name| {
             hashField(&hash, "skill-invocation/v1");
             hashField(&hash, name.slice());
-        } else hashContent(&hash, &self.text);
+        } else {
+            hashContent(&hash, &self.text);
+            if (self.skills.len != 0) {
+                hashField(&hash, "inline-skills/v1");
+                var count: [8]u8 = undefined;
+                std.mem.writeInt(u64, &count, self.skills.len, .big);
+                hash.update(&count);
+                for (self.skills) |name| hashField(&hash, name.slice());
+            }
+        }
         if (self.configuration) |*configuration| {
             // The creation's own digest covers its capability condition.
             hashField(&hash, "initial-configuration");
@@ -900,7 +914,7 @@ pub const ActivityItem = struct {
     };
     // `admitted_at` is the Host wall-clock second the Message was admitted.
     // A null `sender` means a human or script sent the Message.
-    pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, admitted_at: u64, sender: ?NamedPeer = null };
+    pub const Message = struct { admission: u64, key: Bounded(max_key_bytes), turn: ?u64, state: enum { queued, applied, excluded }, content: Content, authored: Content = .{ .length = 0, .digest = @splat(0) }, admitted_at: u64, sender: ?NamedPeer = null };
     pub const Call = ProposalMetadata;
     /// `final` marks the Turn's answer: the assistant row a `done` Turn
     /// ended with, once its `turn_ended` row is within the page's end.
@@ -937,7 +951,7 @@ pub const ActivityItem = struct {
     /// Each value kind's JSON, named by its tag.
     pub const value_shapes = struct {
         /// Holes: admission, key, turn, state, admitted at, sender, content.
-        const message = .{ "{\"admission\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"state\":\"", Hole{ .tag = @FieldType(Message, "state") }, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeer }, ",\"content\":", Hole{ .json = Content }, "}" };
+        const message = .{ "{\"admission\":\"", Hole.decimal, "\",\"key\":", Hole{ .string = max_key_bytes }, ",\"turn\":", Hole.optional_id, ",\"state\":\"", Hole{ .tag = @FieldType(Message, "state") }, "\",\"admitted_at\":\"", Hole.decimal, "\",\"sender\":", Hole{ .optional_json = NamedPeer }, ",\"content\":", Hole{ .json = Content }, ",\"authored\":", Hole{ .json = Content }, "}" };
         pub const admission = message;
         pub const user = message;
         pub const received = message;
@@ -978,7 +992,7 @@ pub const ActivityItem = struct {
         switch (self.value) {
             inline .admission, .user, .received => |message, tag| try writeShape(out, @field(value_shapes, @tagName(tag)), .{
                 message.admission,   message.key.slice(), message.turn,    message.state,
-                message.admitted_at, message.sender,      message.content,
+                message.admitted_at, message.sender,      message.content, message.authored,
             }),
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, sent.target, sent.content }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), failed.target, failed.code.slice() }),
@@ -1000,7 +1014,14 @@ pub const ActivityItem = struct {
         try writeShape(out, tail, .{});
     }
 };
-pub const ReadActivityContent = struct { store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
+pub const ActivityContentSelector = enum { admitted, authored };
+pub const ReadSkillSuggestions = struct {
+    store: Bounded(max_store_bytes) = .{},
+    session: ?Bounded(max_session_bytes) = null,
+    workspace: ?Bounded(max_workspace_bytes) = null,
+    prefix: Bounded(64) = .{},
+};
+pub const ReadActivityContent = struct { selector: ActivityContentSelector = .admitted, store: Bounded(max_store_bytes) = .{}, session: Bounded(max_session_bytes) = .{}, position: u64 = 0, ordinal: u64 = 0 };
 
 pub const CallActivity = struct {
     pub const Entry = struct { operation: u64, ordinal: u64, presentation: ToolPresentation };
@@ -1347,13 +1368,14 @@ pub const Request = union(Kind) {
     activity_page: ActivityPage,
     activity_search: ActivitySearch,
     activity_content: ReadActivityContent,
+    skill_suggestions: ReadSkillSuggestions,
     model_list: struct { store: Bounded(max_store_bytes) = .{} },
 
     pub fn removeTemporaryContent(self: *Request, io: std.Io) !void {
         switch (self.*) {
             .configure => |*command| try command.removeTemporaryContent(io),
             .message => |*command| try command.removeTemporaryContent(io),
-            .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .model_list => {},
+            .host_info, .host_stop, .host_pause, .session_stop, .session_archive, .model_interruption, .permission_decision, .observe_command, .read_result, .read_action_call_id, .read_action_arguments, .inspect_session, .list_sessions, .conversation_page, .conversation_content, .activity_page, .activity_search, .activity_content, .skill_suggestions, .model_list => {},
         }
     }
 
@@ -1365,7 +1387,7 @@ pub const Request = union(Kind) {
     }
 };
 
-fn removeContent(content: *ContentField, io: std.Io) !void {
+pub fn removeContent(content: *ContentField, io: std.Io) !void {
     if (content.file) |file| file.close(io);
     if (content.scratch_budget) |budget| budget.release(content.charged);
     content.charged = 0;
@@ -1442,8 +1464,13 @@ pub const Ingress = struct {
     allocator: std.mem.Allocator,
     options: ParseOptions,
     metadata: std.ArrayList(u8) = .empty,
+    skill_names: std.ArrayList(Bounded(64)) = .empty,
     received: u64 = 0,
     lexical: enum { plain, string, escape } = .plain,
+    /// Valid content strings never occur within metadata arrays. Defer
+    /// speculative prefix parses until their close, so a large skills vector
+    /// is scanned linearly rather than once per member/token.
+    metadata_array_depth: usize = 0,
     /// Where the next byte goes: the metadata, the opening quote of a
     /// content string, or `capture`.
     content_state: enum { metadata, awaiting_quote, capturing } = .metadata,
@@ -1462,7 +1489,7 @@ pub const Ingress = struct {
     // short grammar tokens (keys, states and literals, each at most 32
     // bytes), plus punctuation and one preserved whitespace separator at
     // every lexical boundary.
-    const metadata_limit = 2 * (6 * (max_store_bytes + max_key_bytes + max_session_bytes +
+    const metadata_limit = 4096 * (6 * 64 + 3) + 2 * (6 * (max_store_bytes + max_key_bytes + max_session_bytes +
         max_workspace_bytes + max_provider_bytes + max_model_bytes + 16 + 2 * max_tool_list_name_bytes + 128 * 32) + (128 + 2 * max_tools) * 8);
 
     /// Builds the Ingress in its home. `request` stays unwritten.
@@ -1473,6 +1500,8 @@ pub const Ingress = struct {
     pub fn deinit(self: *Ingress) void {
         if (self.content_state == .capturing) self.capture.deinit();
         self.content_state = .metadata;
+        self.skill_names.deinit(self.allocator);
+        self.skill_names = .empty;
         for (&self.contents) |*field| removeContent(field, self.options.io) catch unreachable;
         self.metadata.deinit(self.allocator);
         self.metadata = .empty;
@@ -1519,7 +1548,12 @@ pub const Ingress = struct {
                         continue;
                     },
                     '"' => self.lexical = .string,
-                    '{', '}', '[', ']', ',', ':' => boundary = true,
+                    '[' => self.metadata_array_depth += 1,
+                    ']' => {
+                        if (self.metadata_array_depth != 0) self.metadata_array_depth -= 1;
+                        boundary = true;
+                    },
+                    '{', '}', ',', ':' => boundary = true,
                     else => {},
                 },
                 .string => switch (byte) {
@@ -1533,7 +1567,7 @@ pub const Ingress = struct {
                 .escape => self.lexical = .string,
             }
             try self.append(byte);
-            if (boundary) try self.preview();
+            if (boundary and self.metadata_array_depth == 0) try self.preview();
         }
     }
 
@@ -1544,7 +1578,10 @@ pub const Ingress = struct {
 
     fn parse(self: *Ingress) !void {
         var source: MetadataSource = .{ .input = self.metadata.items };
+        self.skill_names.clearRetainingCapacity();
         var parser = Parser{
+            .allocator = self.allocator,
+            .skill_names = &self.skill_names,
             .source = &source,
             .options = self.options,
             .captured = self.contents[0..self.content_count],
@@ -1653,8 +1690,11 @@ const MetadataSource = struct {
 };
 
 const Parser = struct {
+    allocator: std.mem.Allocator = std.heap.page_allocator,
+    skill_names: ?*std.ArrayList(Bounded(64)) = null,
     source: *MetadataSource,
     options: ParseOptions,
+    legacy_record: bool = false,
     content_ordinal: u8 = 0,
     captured: []const ContentField = &.{},
 
@@ -1755,6 +1795,25 @@ const Parser = struct {
                 out.* = .{ .activity_page = .{ .store = store } };
                 try self.parseActivityPage(&out.activity_page, &members);
             },
+            .skill_suggestions => {
+                out.* = .{ .skill_suggestions = .{ .store = store } };
+                const Field = enum { session, workspace, prefix };
+                var seen: std.EnumSet(Field) = .empty;
+                while (try self.nextCommandField(Field, &members, &seen)) |field| switch (field) {
+                    .session => {
+                        out.skill_suggestions.session = .{};
+                        try self.readSmallString(&out.skill_suggestions.session.?);
+                    },
+                    .workspace => {
+                        out.skill_suggestions.workspace = .{};
+                        try self.readSmallString(&out.skill_suggestions.workspace.?);
+                    },
+                    .prefix => try self.readSmallString(&out.skill_suggestions.prefix),
+                };
+                if (seen.contains(.session) == seen.contains(.workspace) or !seen.contains(.prefix)) return error.MissingField;
+                if (out.skill_suggestions.session) |session| if (!validSessionId(session.slice())) return error.InvalidSession;
+                if (out.skill_suggestions.workspace) |workspace| if (workspace.len == 0) return error.InvalidWorkspace;
+            },
             .activity_content => {
                 out.* = .{ .activity_content = .{ .store = store } };
                 try self.parseActivityContent(&out.activity_content, &members);
@@ -1792,7 +1851,8 @@ const Parser = struct {
                 .version => {
                     var version: Bounded(8) = .{};
                     try self.readSmallString(&version);
-                    if (!version.eql(wire_version)) return error.WrongWireVersion;
+                    if (!version.eql(wire_version) and !version.eql(legacy_record_version)) return error.WrongWireVersion;
+                    self.legacy_record = version.eql(legacy_record_version);
                 },
                 .kind => {
                     var text: Bounded(32) = .{};
@@ -1816,7 +1876,12 @@ const Parser = struct {
             }
         }
         if (!seen.contains(.version) or !seen.contains(.store)) return error.MissingField;
-        return .{ .kind = kind orelse return error.MissingField, .store = store };
+        const named = kind orelse return error.MissingField;
+        if (self.legacy_record) switch (named) {
+            .configure, .message, .session_stop, .session_archive, .model_interruption, .permission_decision => {},
+            else => return error.WrongWireVersion,
+        };
+        return .{ .kind = named, .store = store };
     }
 
     fn scanConfiguration(self: *Parser, content: bool) !void {
@@ -2017,7 +2082,7 @@ const Parser = struct {
 
     fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        const Field = enum { key, session, sender, sender_handle, configuration, text, require_model, skill };
+        const Field = enum { key, session, sender, sender_handle, configuration, text, require_model, skill, skills };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
             .key => try self.readCommandKey(&out.key),
@@ -2036,6 +2101,22 @@ const Parser = struct {
                 try self.parseConfiguration(false, &out.configuration.?);
             },
             .text => try self.readContent(&out.text, false, true),
+            .skills => {
+                if (self.legacy_record) return error.UnexpectedField;
+                const names = self.skill_names orelse return error.InvalidMessage;
+                try self.expectByte('[');
+                if (!try self.consumeIf(']')) while (true) {
+                    if (names.items.len == 4096) return error.ValueTooLong;
+                    var name: Bounded(64) = .{};
+                    try self.readSmallString(&name);
+                    if (name.len == 0) return error.InvalidMessage;
+                    for (names.items) |other| if (other.eql(name.slice())) return error.InvalidMessage;
+                    try names.append(self.allocator, name);
+                    if (try self.consumeIf(']')) break;
+                    try self.expectByte(',');
+                };
+                out.skills = names.items;
+            },
             .skill => {
                 out.skill = .{};
                 try self.readSmallString(&out.skill.?);
@@ -2043,6 +2124,7 @@ const Parser = struct {
             .require_model => out.require_model = try self.readBoolean(),
         };
         try require(Field, seen, &.{ .key, .session, .sender, .sender_handle });
+        if (seen.contains(.skill) and seen.contains(.skills)) return error.InvalidMessage;
         if (seen.contains(.text) == seen.contains(.skill)) return error.InvalidMessage;
         if (out.skill != null and (out.skill.?.len == 0 or out.configuration != null)) return error.InvalidMessage;
         // Only a creating Message, one with no Session yet, carries a
@@ -2339,9 +2421,14 @@ const Parser = struct {
     }
 
     fn parseActivityContent(self: *Parser, out: *ReadActivityContent, members: *Members) !void {
-        const Field = enum { session, position, ordinal };
+        const Field = enum { session, position, ordinal, selector };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
+            .selector => {
+                var value: Bounded(16) = .{};
+                try self.readSmallString(&value);
+                out.selector = std.meta.stringToEnum(ActivityContentSelector, value.slice()) orelse return error.InvalidCursor;
+            },
             .session => try self.readSmallString(&out.session),
             .position => out.position = try self.readCanonicalU64(),
             .ordinal => out.ordinal = try self.readCanonicalU64(),
@@ -2644,7 +2731,7 @@ const StringDecoder = struct {
     }
 };
 
-const ContentCapture = struct {
+pub const ContentCapture = struct {
     options: ParseOptions,
     path: [max_store_bytes + "/scratch/request-".len + 20 + 1 + 3 + ".tmp".len]u8 = undefined,
     path_len: usize,
@@ -2655,7 +2742,7 @@ const ContentCapture = struct {
 
     /// Opens the scratch file and builds the capture in place. On error
     /// nothing is open and the capture is not live.
-    fn init(self: *ContentCapture, options: ParseOptions, ordinal: u8) !void {
+    pub fn init(self: *ContentCapture, options: ParseOptions, ordinal: u8) !void {
         if (options.content_faults.acquire) return error.InjectedContentAcquireFailure;
         var name_buffer: [96]u8 = undefined;
         const name = try named_scratch.NumericName.request.format(&name_buffer, options.request_number, ordinal);
@@ -2673,8 +2760,29 @@ const ContentCapture = struct {
         self.transferred = false;
     }
 
-    fn seal(self: *ContentCapture) !ContentField {
+    pub fn write(self: *ContentCapture, bytes: []const u8) !void {
+        try self.sink.write(bytes);
+    }
+
+    /// Copies sealed caller bytes in bounded windows, without owning the source.
+    pub fn copy(self: *ContentCapture, source: *const ContentField) !void {
+        if (source.borrowedBytes()) |bytes| return self.write(bytes);
+        if (source.length == 0) return;
+        const file = source.file orelse return error.MissingContentCapture;
+        var buffer: [content_window_bytes]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < source.length) {
+            const size: usize = @intCast(@min(buffer.len, source.length - offset));
+            const count = try file.readPositionalAll(self.options.io, buffer[0..size], offset);
+            if (count != size) return error.ContentLengthMismatch;
+            try self.write(buffer[0..count]);
+            offset += count;
+        }
+    }
+
+    pub fn seal(self: *ContentCapture) !ContentField {
         if (self.options.content_faults.write) return error.InjectedContentWriteFailure;
+        try self.sink.endString();
         try self.sink.finish();
         if (self.options.content_faults.seal) return error.InjectedContentSealFailure;
         self.sealed = try std.Io.Dir.openFileAbsolute(self.options.io, self.path[0..self.path_len], .{});
@@ -2692,7 +2800,7 @@ const ContentCapture = struct {
         };
     }
 
-    fn deinit(self: *ContentCapture) void {
+    pub fn deinit(self: *ContentCapture) void {
         if (self.transferred) return;
         const removed = if (std.Io.Dir.deleteFileAbsolute(self.options.io, self.path[0..self.path_len])) |_| true else |err| switch (err) {
             error.FileNotFound => true,
@@ -2966,6 +3074,14 @@ pub const observe_command_request = .{ "{\"version\":\"" ++ wire_version ++ "\",
 /// Holes: Store.
 pub const host_info_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_info\",\"store\":", store_hole, "}" };
 /// Holes: Store.
+pub const skill_suggestions_session_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"skill_suggestions\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"prefix\":", Hole{ .string = 64 }, "}" };
+pub const skill_suggestions_workspace_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"skill_suggestions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .string = max_workspace_bytes }, ",\"prefix\":", Hole{ .string = 64 }, "}" };
+pub const skill_suggestions_reply = struct {
+    pub const entry = .{ "{\"name\":", Hole{ .string = 64 }, ",\"description\":", Hole{ .string = 4096 }, "}" };
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"skill_suggestions\",\"revision\":\"", Hole.decimal, "\",\"total\":\"", Hole.decimal, "\",\"entries\":[" };
+    pub const tail = "]}";
+    pub const max_bytes = shapeBytes(head) + jsonListBytes(24, shapeBytes(entry)) + tail.len;
+};
 pub const model_list_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_list\",\"store\":", store_hole, "}" };
 /// Holes: Store, paused.
 pub const host_pause_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_pause\",\"store\":", store_hole, ",\"paused\":", Hole.boolean, "}" };
@@ -3007,6 +3123,7 @@ pub const max_activity_search_response_bytes = ActivitySearchFacts.max_json_byte
 const activity_page_request_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"limit\":\"", Hole.decimal };
 pub const activity_page_request = activity_page_request_head ++ .{"\"}"};
 /// Holes: Store, Session, position, ordinal.
+pub const activity_authored_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"selector\":\"authored\"}" };
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
 /// Configure and Message carry content of unbounded size, so only their
 /// metadata has a shape. The variable parts are written between these.
@@ -3054,15 +3171,16 @@ pub const max_conversation_content_request_bytes = shapeBytes(conversation_conte
 pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
 pub const activity_page_since_request = activity_page_request_head ++ .{ "\",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
 pub const max_activity_page_request_bytes = shapeBytes(activity_page_since_request);
-pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
+pub const max_activity_content_request_bytes = maxShapeBytes(.{ activity_content_request, activity_authored_content_request });
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
-    observe_command_request,       host_info_request,           host_stop_request,
-    host_pause_request,            read_result_request,         list_sessions_changed_request,
-    read_action_arguments_request, read_action_call_id_request, conversation_content_request,
-    conversation_page_request,     activity_search_request,     activity_page_since_request,
-    activity_content_request,      model_list_request,
+    observe_command_request,             host_info_request,                 host_stop_request,
+    host_pause_request,                  read_result_request,               list_sessions_changed_request,
+    read_action_arguments_request,       read_action_call_id_request,       conversation_content_request,
+    conversation_page_request,           activity_search_request,           activity_page_since_request,
+    activity_content_request,            activity_authored_content_request, skill_suggestions_session_request,
+    skill_suggestions_workspace_request, model_list_request,
 }));
 
 /// Separated by commas, `count` JSON values of at most `item_bytes` each.
@@ -4850,4 +4968,132 @@ test "skills ingress rejects both invocation and text without retaining capture 
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
         try std.testing.expect(retained == null);
     }
+}
+
+test "inline skills digest binds ordered names and authored identity without changing ordinary v4" {
+    var command: MessageCommand = .{ .text = .{ .state = .value, .length = 6, .digest = contentDigest("hello!") } };
+    const ordinary = command.semanticDigest();
+    command.skills = &.{};
+    try std.testing.expectEqual(ordinary, command.semanticDigest());
+    var first: Bounded(64) = .{};
+    var second: Bounded(64) = .{};
+    try first.set("first");
+    try second.set("second");
+    command.skills = &.{ first, second };
+    const forward = command.semanticDigest();
+    try std.testing.expect(!std.mem.eql(u8, &ordinary, &forward));
+    command.skills = &.{ second, first };
+    try std.testing.expect(!std.mem.eql(u8, &forward, &command.semanticDigest()));
+    command.skills = &.{ first, second };
+    command.text.digest = contentDigest("changed");
+    try std.testing.expect(!std.mem.eql(u8, &forward, &command.semanticDigest()));
+}
+
+test "inline skills ingress accepts ordered text references and rejects ambiguous vectors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [max_store_bytes]u8 = undefined;
+    const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"vector\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
+    const cases = [_]struct { bytes: []const u8, valid: bool }{
+        .{ .bytes = head ++ "\"skills\":[\"demo\",\"other\"],\"text\":{\"state\":\"value\",\"value\":\"literal /demo 雪\"}}", .valid = true },
+        .{ .bytes = head ++ "\"skills\":[],\"text\":{\"state\":\"value\",\"value\":\"\"}}", .valid = true },
+        .{ .bytes = head ++ "\"skills\":[\"demo\",\"demo\"],\"text\":{\"state\":\"value\",\"value\":\"x\"}}", .valid = false },
+        .{ .bytes = head ++ "\"skills\":[\"\"],\"text\":{\"state\":\"value\",\"value\":\"x\"}}", .valid = false },
+        .{ .bytes = head ++ "\"skills\":[],\"skill\":\"demo\"}", .valid = false },
+        .{ .bytes = head ++ "\"skills\":[\"demo\"]}", .valid = false },
+    };
+    for (cases, 0..) |case, index| {
+        const ingress = try std.testing.allocator.create(Ingress);
+        defer std.testing.allocator.destroy(ingress);
+        var retained: ?named_scratch.Owner = null;
+        var used: std.atomic.Value(u64) = .init(0);
+        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = case.bytes.len, .scratch_path = path, .request_number = index, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 128 } });
+        if (case.valid) {
+            for (case.bytes) |byte| try ingress.feed(&.{byte});
+            const request = try ingress.finish();
+            try std.testing.expectEqual(@as(usize, if (index == 0) 2 else 0), request.message.skills.len);
+            if (index == 0) try std.testing.expectEqualStrings("demo", request.message.skills[0].slice());
+            try request.removeTemporaryContent(std.testing.io);
+        } else try std.testing.expectError(error.InvalidMessage, ingress.feed(case.bytes));
+        ingress.deinit();
+        try std.testing.expect(retained == null);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+}
+
+test "inline skills recover all wire10 canonical mutation shapes with pinned legacy digests" {
+    const head = "{\"version\":\"" ++ legacy_record_version ++ "\",\"store\":\"s\",\"key\":\"old\",";
+    const Case = struct { body: []const u8, digest: []const u8 };
+    // Independent SHA-256 expectations over the pre-vector v1/v4 grammars.
+    const cases = [_]Case{
+        .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{}}", .digest = "db4015965f28197d8bfae4b13f61edb8b1047904643d764a7cc8ce10f9680e30" },
+        .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{},\"reload_skills\":true}", .digest = "14764e8bb9e20125961c2b950bac15e919dfc6653fe2cc7359b027faa0ee89b5" },
+        .{ .body = head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}}", .digest = "e8cea677d75e3de98bcb68ccbbfcc6cda23fe42bd180da1c742f741f8c73975f" },
+        .{ .body = head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skill\":\"demo\"}", .digest = "ea06c3a3dd1e358d9f9b5a10ac2ad6897642f32fbedc8244aafbe43c90d4bcad" },
+        .{ .body = head ++ "\"kind\":\"session_stop\",\"session\":\"k7m2qx\"}", .digest = "f8e8c1514a14cc72fe18bad111508cffa2b5b55812f6ba2deaed959740940d48" },
+        .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":true}", .digest = "ab777e65fc2476bbadf1d8eb793e2bf4d7d3bd49334bd79b4ca15a0f0c536d6b" },
+        .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":false}", .digest = "07e24427f9ec75478b887d3d2e5bd3a072bcc57a587c6d0826eb5bf0f6aa86df" },
+        .{ .body = head ++ "\"kind\":\"model_interruption\",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"7\",\"operation\":\"9\"}}", .digest = "0fd58dfc4f6ddff0f7f9da78e88e4fa50d596a623e161646c0c5082ba4350bf4" },
+        .{ .body = head ++ "\"kind\":\"permission_decision\",\"session\":\"k7m2qx\",\"action\":\"11\",\"decision\":\"allow_once\"}", .digest = "58a41dbeb05f94c0a10bf02ec6dc5bf3b39a50dbfa4af591364f001c4008be79" },
+    };
+    for (cases) |case| {
+        var source: MetadataSource = .{ .input = case.body };
+        var retained: ?named_scratch.Owner = null;
+        const captured: ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
+        var parser: Parser = .{ .source = &source, .captured = &.{captured}, .options = .{ .io = std.testing.io, .content_length = case.body.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        const request = try parseForTest(&parser);
+        const digest = switch (request) {
+            .configure => |*command| command.semanticDigest(),
+            .message => |*command| command.semanticDigest(),
+            .session_stop => |*command| command.semanticDigest(),
+            .session_archive => |*command| command.semanticDigest(),
+            .model_interruption => |*command| command.semanticDigest(),
+            .permission_decision => |*command| command.semanticDigest(),
+            else => unreachable,
+        };
+        try std.testing.expectEqualStrings(case.digest, &std.fmt.bytesToHex(digest, .lower));
+    }
+    // The exception is canonical mutations only, never old read requests or new
+    // Message fields smuggled under the old grammar (including an empty vector).
+    for ([_][]const u8{
+        "{\"version\":\"" ++ legacy_record_version ++ "\",\"kind\":\"host_info\",\"store\":\"s\"}",
+        head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skills\":[],\"text\":{\"state\":\"value\",\"value\":\"\"}}",
+    }, 0..) |body, index| {
+        var source: MetadataSource = .{ .input = body };
+        var retained: ?named_scratch.Owner = null;
+        var parser: Parser = .{ .source = &source, .captured = &.{.{ .state = .value }}, .options = .{ .io = std.testing.io, .content_length = body.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        try std.testing.expectError(if (index == 0) error.WrongWireVersion else error.UnexpectedField, parseForTest(&parser));
+    }
+}
+
+test "inline skills ingress admits 4096 worst-escaped chunked names with arbitrary field order" {
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    try bytes.writer.writeAll("{\"skills\":[");
+    for (0..4096) |index| {
+        if (index != 0) try bytes.writer.writeByte(',');
+        try bytes.writer.writeByte('"');
+        var name_buffer: [64]u8 = @splat('x');
+        _ = try std.fmt.bufPrint(name_buffer[59..], "{d:0>5}", .{index});
+        for (name_buffer) |byte| try bytes.writer.print("\\u00{x:0>2}", .{byte});
+        try bytes.writer.writeByte('"');
+    }
+    try bytes.writer.writeAll("],\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\",\"kind\":\"message\",\"key\":\"max-vector\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"x\"}}");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [max_store_bytes]u8 = undefined;
+    const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    const ingress = try std.testing.allocator.create(Ingress);
+    defer std.testing.allocator.destroy(ingress);
+    var retained: ?named_scratch.Owner = null;
+    ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.written().len, .scratch_path = path, .request_number = 1, .retained_scratch = &retained });
+    defer ingress.deinit();
+    // Every escape and multibyte boundary can cross a transport fragment.
+    for (bytes.written()) |byte| try ingress.feed(&.{byte});
+    const request = try ingress.finish();
+    try std.testing.expectEqual(@as(usize, 4096), request.message.skills.len);
+    try std.testing.expectEqualStrings("04095", request.message.skills[4095].slice()[59..]);
+    try std.testing.expectEqual(@as(u64, 1), request.message.text.length);
+    try request.removeTemporaryContent(std.testing.io);
 }

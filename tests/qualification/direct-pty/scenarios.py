@@ -130,6 +130,13 @@ def chunks(tty, vector):
             tty.send(bytes.fromhex(chunk["hex"]))
 
 
+def exit_command(tty):
+    # This is fixture control, not the key vector under test. Dismiss even
+    # pending skill metadata before Enter so /exit cannot be a menu choice.
+    tty.send(b"/exit\x07\r")
+    tty.finish()
+
+
 def editor(fixture, row):
     fixture.answer("TD4 exact answer")
     tty = fixture.terminal()
@@ -139,8 +146,7 @@ def editor(fixture, row):
     tty.marker("TD4 exact answer")
     tty.draft("", 2)
     assert_submitted(fixture.endpoint.requests, [row["expected"]])
-    tty.send(b"/exit\r")
-    tty.finish()
+    exit_command(tty)
     assert_submitted(fixture.endpoint.requests, [row["expected"]])
 
 
@@ -166,8 +172,7 @@ def rejection(fixture, row):
     tty.send(b"valid\r")
     tty.marker("TD4 valid after rejection")
     assert_submitted(fixture.endpoint.requests, ["valid"])
-    tty.send(b"/exit\r")
-    tty.finish()
+    exit_command(tty)
 
 
 def recovery(fixture, row):
@@ -200,8 +205,7 @@ def recovery(fixture, row):
     assert next_request["text"]["value"] == "next cafXYé!", next_request
     assert next_request["key"] != json.loads(original)["key"], "next draft reused original key"
     assert_submitted(fixture.endpoint.requests, ["original éZ", "next cafXYé!"])
-    tty.send(b"/exit\r")
-    tty.finish()
+    exit_command(tty)
 
 
 def navigation(fixture, row):
@@ -225,7 +229,19 @@ def navigation(fixture, row):
         tty.draft("", 2)
     history(80, False)
     generation = tty.screen.generation
-    chunks(tty, row["chunks"])
+    if row.get("status"):
+        # /status is fixture control, not a decoder/equivalence key vector.
+        # Split its submit boundary to dismiss even pending metadata exactly
+        # once, without retrying an Enter that production intentionally holds.
+        assert len(row["chunks"]) == 1, row["chunks"]
+        command = row["chunks"][0]
+        payload = bytes.fromhex(command["hex"])
+        assert payload == b"/status\r", payload
+        tty.pause(command.get("delay_before", 0))
+        tty.send(payload[:-1])
+        tty.send(b"\x07" + payload[-1:])
+    else:
+        chunks(tty, row["chunks"])
     if row.get("status"):
         tty.wait(lambda: inspection(tty.screen.completed, fixture.session),
                  label="navigation entered inspection", after=generation)
@@ -258,8 +274,7 @@ def navigation(fixture, row):
     tty.marker("TD4 history end")
     assert_submitted(fixture.endpoint.requests, ["seed history"])
     assert set((fixture.home / ".config/rui/requests").glob("*.json")) == captures, "navigation captured intent"
-    tty.send(b"/exit\r")
-    tty.finish()
+    exit_command(tty)
 
 
 SCENARIOS = {"editor": editor, "expiry": expiry, "rejection": rejection, "recovery": recovery,

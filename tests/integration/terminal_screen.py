@@ -32,6 +32,23 @@ def shown(text, screen):
     return re.search(pattern, screen) is not None
 
 
+def assert_details_unavailable(capture, *, columns, rows):
+    """Check this fixture's transcript and footer in one committed cell grid."""
+    cells = capture.completed_cells
+    raw = capture.completed
+    assert capture.generation and not capture.synchronized, raw
+    assert len(cells) == rows and all(len(row) == columns for row in cells), raw
+    transcript_end = rows - 3
+    assert all(row[-1].data == "▐" for row in cells[:transcript_end]), raw
+    footer = cell_rows(cells, transcript_end, rows, 0, columns)
+    assert [row.rstrip(" ") for row in footer] == [
+        "─" * columns, "›", "! Details unavailable; draft retained."
+    ], raw
+    transcript = "\n".join(row.rstrip(" ") for row in
+        cell_rows(cells, 0, transcript_end, 0, columns - 1))
+    assert shown("! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy", transcript), raw
+
+
 class CombiningScreen(pyte.Screen):
     """Keep zero-width Unicode marks without dropping the following draw text."""
     # A variation selector can widen a cell beyond its first scalar's width.

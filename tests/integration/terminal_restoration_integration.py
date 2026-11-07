@@ -1239,11 +1239,11 @@ def persistent_cases(state, library, home, store, host, session):
                 key = json.loads(saved)["key"]
                 assert fixture.command("request", "inspect", "--store", store, "--key", key)["observation"]["status"] == "absent"
                 if case == "sync-handoff":
-                    os.write(master, b"/inspect-action\nSTALE")
+                    os.write(master, human.fixture_command("/inspect-action").encode() + b"STALE")
                 elif case.startswith("sync-command-"):
                     os.write(master, b"/configure --permission-mode ask\n")
                 else:
-                    os.write(master, b"/exit\nSTALE")
+                    os.write(master, human.fixture_command("/exit").encode() + b"STALE")
                 if case.startswith("sync-command-"):
                     # Commands run inside the screen; INT restores first.
                     caller.send_signal(signal.SIGINT)
@@ -1802,7 +1802,13 @@ def command_interruption_cases(state, library, only=None):
                         before_forward=before_forward if case == "configure-inflight" else None)
                 elif case == "configure-canonical":
                     proxy = canonical.ReplyProxy(host, "/v1/configure")
-                os.write(master, command.encode() + b"\n")
+                # A bare slash command is also a skill candidate. Dismiss its
+                # metadata menu explicitly so Enter tests the command, even
+                # while the asynchronous catalog read is pending. Arguments
+                # put the cursor outside that candidate; Ctrl-G there would
+                # instead act on the pending Action.
+                dismiss = b"\x07" if " " not in command else b""
+                os.write(master, command.encode() + dismiss + b"\n")
                 if route is None:
                     fixture.wait_for(lambda: log.exists() and "capture-sync-held" in log.read_text(), "Configure pre-send sync")
                 elif route:
@@ -2573,7 +2579,7 @@ def visible_stream_handoff_cases(state, library):
                 ready = "VISIBLE-END" if phase == "details" else "› "
                 human.read_terminal(master, ready, composer=True)
                 arm.touch()
-                os.write(master, (f"/{phase}\n" if phase == "details" else "produce content\n").encode())
+                os.write(master, (human.fixture_command("/details") if phase == "details" else "produce content\n").encode())
             human.read_terminal(master, marker)
             before = {path: path.read_bytes() for path in (home / ".config/rui/requests").glob("*.json")}
             if phase == "completion":
@@ -2581,7 +2587,7 @@ def visible_stream_handoff_cases(state, library):
                 # content. The typed input's own redraw is the first held
                 # write, and the command runs only once that output completes.
                 human.await_screen(master, "VISIBLE-END", composer=True)
-                os.write(master, b"/configure --permission-mode bypass\nUNREAD suffix\n")
+                os.write(master, human.fixture_command("/configure --permission-mode bypass").encode() + b"UNREAD suffix\n")
                 fixture.wait_for(lambda: log.exists() and "visible-stream-held" in log.read_text(), "post-page output gate")
                 time.sleep(0.5)
                 assert fixture.command("session", "inspect", "--store", store,
@@ -2599,8 +2605,8 @@ def visible_stream_handoff_cases(state, library):
                 tail, errors = human.terminal_exit(caller, master)
                 assert caller.returncode == 0, (tail, errors)
             else:
-                command = b"/inspect-action\n" if phase == "permission" else b"/status\n"
-                os.write(master, command)
+                command = "/inspect-action" if phase == "permission" else "/status"
+                os.write(master, human.fixture_command(command).encode())
                 # An unchanged frame writes nothing, so the typed command's
                 # own redraw may be the first held write.
                 fixture.wait_for(lambda: log.exists() and "visible-stream-held" in log.read_text(), "post-prefix output gate")
@@ -2656,7 +2662,7 @@ def visible_stream_handoff_cases(state, library):
 def held_history_owner_case(state, binary):
     """The filtered native owner test uses a private, provider-free real Host."""
     assert binary, "visible-stream requires RUI_TEST_HELD_OWNER"
-    binary = pathlib.Path(binary)
+    binary = pathlib.Path(binary).resolve()
     assert binary.is_absolute() and binary.is_file(), ("invalid held owner artifact", binary)
     root = state / "held-history-owner"
     root.mkdir(mode=0o700)
@@ -2755,7 +2761,7 @@ def visible_history_backpressure_cases(state, library):
             wait_screen(lambda: capture.draft("", 2), "history opening composer")
             assert not human.exact_railed_row(capture, marker), ("oldest answer already in opening", capture.completed)
             generation = capture.generation
-            os.write(master, b"/history\n")
+            os.write(master, human.fixture_command("/history").encode())
             wait_screen(lambda: capture.generation > generation and history_ready(), "real history command committed")
             for page in range(24):
                 if oldest_ready():
@@ -2780,7 +2786,7 @@ def visible_history_backpressure_cases(state, library):
                     human.looking_back(capture.completed) and human.exact_railed_row(capture, marker),
                     "unblocked history draft redraw")
                 assert b"output-blocked\n" not in probe(), probe()
-            command = b"\x15/configure --permission-mode bypass\n"
+            command = b"\x15" + human.fixture_command("/configure --permission-mode bypass").encode()
             phase = "queued Configure while history output held" if blocked else "unblocked Configure"
             assert os.write(master, command) == len(command)
             if blocked:

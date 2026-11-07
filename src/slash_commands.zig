@@ -390,12 +390,23 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
 /// it in the draft (with a space when another word may follow), what the
 /// row shows, and what the word does.
 pub const Entry = struct {
+    kind: enum { command, skill } = .command,
     word: []const u8,
     shown: []const u8,
     description: []const u8,
     /// Whether Enter on the entry runs the command it completes; else
     /// Enter only puts the word in, for the next one.
     runs: bool = true,
+};
+
+/// A metadata reader's borrowed skill rows for the current cursor token.
+/// The renderer and controller never open skill files.
+pub const SkillChoices = struct {
+    entries: []const Entry = &.{},
+    generation: u64 = 0,
+    total: usize = 0,
+    pending: bool = false,
+    dismissed: bool = false,
 };
 
 /// What the list shows for a draft: the words that start what is typed.
@@ -462,6 +473,11 @@ pub const List = struct {
         return .{ .rest = std.mem.trimEnd(u8, entry.word, " ")[self.typed.len..], .runs = true };
     }
 
+    pub fn containsSkills(self: *const List) bool {
+        for (self.shown()) |entry| if (entry.kind == .skill) return true;
+        return false;
+    }
+
     /// The first of `rows` rows that keep the highlighted entry in view.
     pub fn firstShown(self: *const List, highlight: usize, rows: usize) usize {
         const fit = named(self.count, rows);
@@ -477,6 +493,24 @@ pub const List = struct {
         return widest + 2;
     }
 };
+
+/// Bounded visual choices. Reserve half the rows for each kind when both
+/// match, so a broad command menu cannot hide every skill match.
+/// Entry text remains borrowed from the caller through display and selection.
+pub fn withSkills(commands: ?List, typed: []const u8, skills: []const Entry) ?List {
+    if (skills.len == 0) return commands;
+    const command_count = if (commands) |list| list.count else 0;
+    const keep_commands = @min(command_count, List.capacity - @as(usize, @min(skills.len, List.capacity / 2)));
+    const keep_skills = @min(skills.len, List.capacity - keep_commands);
+    std.debug.assert(typed.len != 0 and typed[0] == '/');
+    var combined: List = .{ .typed = typed[1..] };
+    if (commands) |list| for (list.shown()[0..keep_commands]) |entry| combined.add(entry);
+    for (skills[0..keep_skills]) |entry| {
+        std.debug.assert(entry.kind == .skill);
+        combined.add(entry);
+    }
+    return combined;
+}
 
 /// The list built for one draft revision, and what the latest frame did
 /// with a list: the one value Enter, Esc, the arrows and Tab act on. A key
@@ -495,6 +529,9 @@ pub const Shown = struct {
     seen: enum { drawn, hidden, closed } = .hidden,
     /// What the rows came from, when not the draft alone (see `nextOf`).
     source: u64 = 0,
+    at: ?Cursor = null,
+
+    const Cursor = struct { position: usize, start: usize, end: usize, generation: u64 };
 
     /// The list, `list`, for the draft at `revision`, after `previous`:
     /// while the draft is the one `previous` was built for, it keeps its
@@ -514,9 +551,24 @@ pub const Shown = struct {
         if (built.count == 0) return null;
         const fresh: Shown = .{ .list = built, .revision = revision, .source = source };
         const kept = previous orelse return fresh;
-        if (kept.source != source) return fresh;
+        if (kept.source != source or kept.at != null) return fresh;
         if (kept.revision != revision) return .{ .list = built, .revision = revision, .source = source, .seen = if (kept.seen == .drawn) .drawn else .hidden };
         return .{ .list = built, .revision = revision, .source = source, .highlight = @min(kept.highlight, built.count - 1), .seen = kept.seen };
+    }
+
+    /// Skill choices depend on the caret and metadata as well as the draft.
+    /// Changed choices must be drawn before a selection key can use them.
+    pub fn nextAt(previous: ?Shown, revision: u64, cursor: usize, start: usize, end: usize, generation: u64, list: ?List) ?Shown {
+        const built = list orelse return null;
+        if (built.count == 0) return null;
+        const at: Cursor = .{ .position = cursor, .start = start, .end = end, .generation = generation };
+        const fresh: Shown = .{ .list = built, .revision = revision, .at = at };
+        const kept = previous orelse return fresh;
+        if (kept.revision != revision or kept.at == null or !std.meta.eql(kept.at.?, at)) return fresh;
+        var current = fresh;
+        current.highlight = @min(kept.highlight, built.count - 1);
+        current.seen = kept.seen;
+        return current;
     }
 
     /// The list Enter, Esc and the arrows act on: `stored`, the latest
@@ -1031,4 +1083,83 @@ test "archive and upgrade retain separate local command identities after merge" 
     const restored = overview.parse("/undo").command;
     try std.testing.expectEqual(.undo, restored.name);
     try std.testing.expect(conversation.parse("/undo") == .unknown);
+}
+
+test "inline skills list preserves command collisions as distinct choices" {
+    var commands: List = .{ .typed = "co" };
+    commands.add(.{ .word = "copy", .shown = "/copy", .description = "copy output" });
+    const skills = [_]Entry{.{ .kind = .skill, .word = "copy", .shown = "/copy", .description = "skill guidance", .runs = false }};
+    const merged = withSkills(commands, "/co", &skills).?;
+    try std.testing.expectEqual(@as(usize, 2), merged.count);
+    try std.testing.expectEqual(.command, merged.entries[0].kind);
+    try std.testing.expectEqual(.skill, merged.entries[1].kind);
+    try std.testing.expectEqualStrings("py", merged.completion(1));
+    try std.testing.expect(!merged.enter(1).runs);
+    try std.testing.expect(merged.containsSkills());
+}
+
+test "inline skills list reserves bounded space without starving either kind" {
+    var commands: List = .{ .typed = "" };
+    var skills: [List.capacity]Entry = undefined;
+    for (&skills) |*entry| {
+        commands.add(.{ .word = "command", .shown = "/command", .description = "" });
+        entry.* = .{ .kind = .skill, .word = "skill", .shown = "/skill", .description = "", .runs = false };
+    }
+    for (0..List.capacity + 1) |command_count| for (0..List.capacity + 1) |skill_count| {
+        commands.count = command_count;
+        const merged = withSkills(commands, "/", skills[0..skill_count]).?;
+        const expected = @min(command_count + skill_count, List.capacity);
+        try std.testing.expectEqual(expected, merged.count);
+        var actual_commands: usize = 0;
+        var actual_skills: usize = 0;
+        for (merged.shown()) |entry| switch (entry.kind) {
+            .command => actual_commands += 1,
+            .skill => actual_skills += 1,
+        };
+        if (command_count != 0) try std.testing.expect(actual_commands != 0);
+        if (skill_count != 0) try std.testing.expect(actual_skills != 0);
+    };
+    const skills_only = withSkills(null, "/", &skills).?;
+    try std.testing.expectEqual(List.capacity, skills_only.count);
+    try std.testing.expect(!skills_only.enter(0).runs);
+    try std.testing.expect(withSkills(null, "/", &.{}) == null);
+}
+
+test "inline skills list gates every cursor and metadata identity change" {
+    const rows = [_]Entry{.{ .kind = .skill, .word = "example", .shown = "/example", .description = "", .runs = false }};
+    const list = withSkills(null, "/", &rows).?;
+    const initial = [_]u64{ 1, 2, 0, 8, 3 };
+    var shown = Shown.nextAt(null, initial[0], initial[1], initial[2], initial[3], initial[4], list).?;
+    shown.drew(true);
+    const unchanged = Shown.nextAt(shown, initial[0], initial[1], initial[2], initial[3], initial[4], list).?;
+    try std.testing.expectEqual(.drawn, unchanged.seen);
+    const ordinary = Shown.next(shown, initial[0], list).?;
+    try std.testing.expectEqual(.hidden, ordinary.seen);
+    const replaced = Shown.nextAt(ordinary, initial[0], initial[1], initial[2], initial[3], initial[4], list).?;
+    try std.testing.expectEqual(.hidden, replaced.seen);
+    for (0..initial.len) |index| {
+        var changed = initial;
+        changed[index] += 1;
+        var stored: ?Shown = shown;
+        const current = Shown.nextAt(stored, changed[0], changed[1], changed[2], changed[3], changed[4], list);
+        try std.testing.expect(Shown.drawnNow(&stored, current) == null);
+        try std.testing.expectEqual(.hidden, stored.?.seen);
+    }
+    shown.close();
+    const closed = Shown.nextAt(shown, initial[0], initial[1], initial[2], initial[3], initial[4], list).?;
+    try std.testing.expectEqual(.closed, closed.seen);
+}
+
+test "inline skills list merges actual builtin table prefixes" {
+    const skills = [_]Entry{.{ .kind = .skill, .word = "help", .shown = "/help", .description = "skill help", .runs = false }};
+    inline for (.{ conversation, overview }) |table| {
+        const builtins = table.suggest("/he", .{}).?;
+        try std.testing.expectEqualStrings("he", builtins.typed);
+        const merged = withSkills(builtins, "/he", &skills).?;
+        try std.testing.expectEqual(@as(usize, 2), merged.count);
+        try std.testing.expectEqual(.command, merged.entries[0].kind);
+        try std.testing.expectEqual(.skill, merged.entries[1].kind);
+        try std.testing.expectEqualStrings("lp", merged.completion(0));
+        try std.testing.expectEqualStrings("lp", merged.completion(1));
+    }
 }

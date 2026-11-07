@@ -1,9 +1,12 @@
 """Focused, offline tests for the shared committed-screen observer."""
+import pathlib
+import subprocess
+import sys
 import unittest
 
 import host_process
 
-from terminal_screen import ScreenCapture, SgrStream
+from terminal_screen import ScreenCapture, SgrStream, assert_details_unavailable
 
 
 class SgrAdapterTests(unittest.TestCase):
@@ -156,8 +159,18 @@ class CanonicalDetailsConsumerTests(unittest.TestCase):
         ]
 
     def check(self, screen):
-        from canonical_failure_integration import assert_details_unavailable
-        assert_details_unavailable(screen)
+        assert_details_unavailable(screen, columns=80, rows=50)
+
+    def test_screen_assertion_import_without_actor_argument(self):
+        # A fresh interpreter with no positional actor must load the real owner.
+        probe = subprocess.run(
+            [sys.executable, "-B", "-c",
+             "import sys; from terminal_screen import assert_details_unavailable; "
+             "assert len(sys.argv) == 1; assert callable(assert_details_unavailable); "
+             "assert 'model_fixture' not in sys.modules"],
+            cwd=pathlib.Path(__file__).resolve().parent, capture_output=True, text=True,
+        )
+        self.assertEqual(probe.returncode, 0, probe.stderr)
 
     def test_exact_diagnostic_and_footer_on_committed_physical_screen(self):
         screen = self.capture()

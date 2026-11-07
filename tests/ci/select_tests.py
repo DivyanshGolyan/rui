@@ -61,6 +61,8 @@ RULES = (
      "Pure shared table row ranges and delimiter syntax, without render activation"),
     (("src/markdown_prefix.zig",), ("test-logic",), ("test-logic",),
      "Raw quote-prefix and shared fence lexical values, without render activation"),
+    (("src/skill_completion.zig",), ("test-logic",), ("test-logic",),
+     "Inline skill token boundaries and selected-name projection, without editor or Host effects"),
     (("src/turn_policy.zig",), ("test-logic",), ("test-logic",),
      "Turn completion and compaction decisions over transaction facts"),
     (("src/retry_policy.zig",), ("test-logic", "check"), ("test-logic", "test"),

@@ -125,6 +125,10 @@ pub const routes = [_]Route{
             // A creating Message names no Session.
             variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{.{ 2, "\"\"" }}),
             variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.require_model_tail, .{.{ 2, "\"\"" }}),
+            variant(protocol.message_request.head ++ .{ ",\"skills\":", SkillNames } ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{}),
+            variant(protocol.message_request.sender_head ++ .{ ",\"skills\":", SkillNames } ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
+            variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ .{ ",\"skills\":", SkillNames } ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{.{ 2, "\"\"" }}),
+            variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ .{ ",\"skills\":", SkillNames } ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.require_model_tail, .{.{ 2, "\"\"" }}),
         },
         .reply = jsonReply(.{ protocol.message_reply.accepted, protocol.message_reply.rejected }),
         .conflict = jsonReply(.{protocol.message_reply.conflict}),
@@ -252,8 +256,15 @@ pub const routes = [_]Route{
         .path = "/v1/activity-content",
         .kind = .activity_content,
         .summary = "The content of one activity row.",
-        .variants = &.{variant(protocol.activity_content_request, .{})},
+        .variants = &.{ variant(protocol.activity_content_request, .{}), variant(protocol.activity_authored_content_request, .{}) },
         .reply = .bytes,
+    },
+    .{
+        .path = "/v1/skill-suggestions",
+        .kind = .skill_suggestions,
+        .summary = "Bounded skill metadata from a Session catalog or prospective Workspace discovery.",
+        .variants = &.{ variant(protocol.skill_suggestions_session_request, .{.{ 1, "\"k7m2qx\"" }}), variant(protocol.skill_suggestions_workspace_request, .{}) },
+        .reply = jsonReply(.{protocol.skill_suggestions_reply.head ++ .{BoundedListOf(protocol.skill_suggestions_reply.entry, 24, false)} ++ .{protocol.skill_suggestions_reply.tail}}),
     },
     .{
         .path = "/v1/model-list",
@@ -289,6 +300,25 @@ fn ListOf(comptime item: anytype) type {
         }
     };
 }
+
+fn BoundedListOf(comptime item: anytype, comptime capacity: usize, comptime unique: bool) type {
+    return struct {
+        pub const is_list = true;
+        pub fn openapi_example(out: *std.Io.Writer) !void {
+            try out.writeAll("[]");
+        }
+        pub fn openapi_inline(d: *Document) !Value {
+            const items = if (@TypeOf(item) == type) try d.typeRef(item) else try d.shapeSchema(item);
+            return d.object(.{ .type = Value{ .string = "array" }, .items = items, .maxItems = Value{ .integer = capacity }, .uniqueItems = Value{ .bool = unique } });
+        }
+    };
+}
+const SkillName = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.object(.{ .type = Value{ .string = "string" }, .minLength = Value{ .integer = 1 }, .maxLength = Value{ .integer = 64 } });
+    }
+};
+const SkillNames = BoundedListOf(SkillName, 4096, true);
 
 /// A string of any length, which the Host saves as content.
 const Content = struct {

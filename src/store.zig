@@ -93,6 +93,7 @@ pub const testingPublicProjection = store_testing.testingPublicProjection;
 pub const testingStoreWith = store_testing.testingStoreWith;
 pub const testingCanonicalCwd = store_testing.canonicalCwd;
 pub const testingCompleteConfiguration = store_testing.completeConfiguration;
+pub const testingFailReadsOf = store_testing.failReadsOf;
 pub const testingSubmitMessage = store_testing.submitTestMessage;
 pub const settleCallsForTesting = store_test_fixtures.settleCallsForTesting;
 pub const TestingCall = store_test_fixtures.TestingCall;

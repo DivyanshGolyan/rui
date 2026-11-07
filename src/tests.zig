@@ -1,4 +1,5 @@
 test {
+    _ = @import("SkillMenu.zig");
     _ = @import("Installation.zig");
     _ = @import("release_candidate.zig");
     _ = @import("upgrade_process.zig");
@@ -39,6 +40,7 @@ test {
     _ = @import("mcp/offered.zig");
     _ = @import("mcp/Request.zig");
     _ = @import("protocol.zig");
+    _ = @import("session_skills.zig");
     _ = @import("protocol_reply.zig");
     _ = @import("caller_rejection.zig");
     _ = @import("platform.zig");

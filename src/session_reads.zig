@@ -331,7 +331,7 @@ pub fn recall(raw: *anyopaque, task: *Task) !void {
         };
         if (page.facts.count == 0) return;
         const row = page.facts.items[0];
-        const content = row.value.admission.content;
+        const content = row.value.admission.authored;
         const at: Input.Recalled = .{ .position = row.position, .end = page.facts.end };
         if (content.length <= Input.capacity) if (try stageRecalled(requests, job, task.io, at, content)) |found| {
             job.result.recalled = found;
@@ -349,7 +349,7 @@ fn stageRecalled(requests: client.Requests, job: *const Job, io: std.Io, at: Inp
     try job.files.scratch.setLength(io, 0);
     var staging: RecallStaging = .{ .io = io, .file = job.files.scratch };
     const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = content.length, .digest = content.digest };
-    if (try requests.readActivityContent(job.store, job.session, at.position, 0, reference, &staging)) |failure| return requests.failRead(failure);
+    if (try requests.readAuthoredActivityContent(job.store, job.session, at.position, 0, reference, &staging)) |failure| return requests.failRead(failure);
     if (staging.offset != content.length) return error.ContentLengthMismatch;
     const slash = staging.first == '/';
     if (!staging.editable or staging.need != 0 or staging.offset + @intFromBool(slash) > Input.capacity) return null;

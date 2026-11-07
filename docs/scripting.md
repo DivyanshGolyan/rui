@@ -179,10 +179,12 @@ rui session send --store "$STORE" --to "$SESSION" --skill NAME
 rui session configure --store "$STORE" --session "$SESSION" --reload-skills
 ```
 
-Invocation uses the Session's advertised skill path and admits the complete current UTF-8 `SKILL.md` plus its absolute path as an ordinary Message, instead of reading stdin.
+Invocation uses the Session's advertised skill path and admits the complete current UTF-8 `SKILL.md` plus its absolute path as ordinary Message content.
+Repeat `--skill NAME` to include distinct skills in order alongside stdin text; terminal stdin may be omitted for a skill-only invocation.
 Reload is an idle-safe mutation: it rescans repository and Host-home `.agents/skills`, appends only catalog changes and returns `answer.skills` as `reloaded` or `unchanged` without scheduling model work.
 Do not mix reload with configuration settings or a preset.
 Both operations use normal capture keys and `request recover`; replay preserves the original captured result even after files change or disappear.
+Wire 11 recovery also resends saved wire 10 canonical configure, message, session-stop, session-archive, model-interruption and permission-decision records unchanged; live wire 10 transport is not accepted.
 `request read-result` reads the saved reload acknowledgement or typed skill refusal diagnostic, and never reopens the skill file.
 Catalog metadata tracks name, description and winning path only; body-only edits are read by the next fresh invocation without a catalog change.
 Explicit `--tools` restrictions remain authoritative; skills grant no tools or permissions and run no scripts on load.

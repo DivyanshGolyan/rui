@@ -81,6 +81,33 @@ pub fn append(self: *Self, text: []const u8) Editor.KeyOutcome {
     return outcome;
 }
 
+/// Attaches an explicitly selected skill to the active composition.
+pub fn attachSkill(self: *Self, allocator: std.mem.Allocator, start: usize, end: usize, name: []const u8) !void {
+    try self.editors[self.active].attachSkill(allocator, start, end, name);
+    self.changed();
+}
+
+/// Borrowed byte ranges in the active composition, until its next edit.
+pub fn attachments(self: *const Self) []const Editor.Attachment {
+    return self.editors[self.active].attachments();
+}
+
+/// Caller owns the outer allocation. Names borrow the sealed bank until
+/// release; duplicates collapse in first textual occurrence order.
+pub fn skillNames(self: *const Self, ticket: Ticket, allocator: std.mem.Allocator) ![]const []const u8 {
+    const submitted = try self.checked(ticket);
+    const editor = &self.editors[submitted.bank];
+    var names = try std.ArrayList([]const u8).initCapacity(allocator, editor.attachments().len);
+    errdefer names.deinit(allocator);
+    names.items.len = @import("skill_completion.zig").selectedNames(editor.buffer[0..editor.length], editor.attachments(), names.allocatedSlice()).len;
+    return names.toOwnedSlice(allocator);
+}
+
+/// Only after all borrowers of either bank have retired.
+pub fn deinitAttachments(self: *Self, allocator: std.mem.Allocator) void {
+    for (&self.editors) |*editor| editor.deinitAttachments(allocator);
+}
+
 pub fn composition(self: *const Self) View {
     const editor = &self.editors[self.active];
     return .{ .bytes = editor.buffer[0..editor.length], .cursor = editor.cursor };
@@ -115,7 +142,7 @@ pub fn applySelected(self: *Self, comptime keys: anytype, decoded: TerminalInput
     if (bytes.len == 0) return .{ .editor = outcome };
     // A slash command stays in the draft; the caller clears it once it runs.
     // While another waits, every draft command waits too, local ones included.
-    if (bytes[0] == '/' and !std.mem.startsWith(u8, bytes, "//")) return if (self.command_length != null) .busy else .command;
+    if (bytes[0] == '/' and !std.mem.startsWith(u8, bytes, "//") and !(editor.attachments().len != 0 and editor.attachments()[0].start == 0)) return if (self.command_length != null) .busy else .command;
     if (!selected or self.submitted != null) return .busy;
     return .{ .message = self.seal(false) };
 }
@@ -144,9 +171,16 @@ pub fn takeCommand(self: *Self) ?[]const u8 {
 pub fn submitText(self: *Self, text: []const u8) Ticket {
     std.debug.assert(self.submitted == null and text.len <= capacity);
     const editor = &self.editors[self.active];
+    editor.reset();
     @memcpy(editor.buffer[0..text.len], text);
     editor.length = text.len;
     editor.cursor = text.len;
+    return self.seal(true);
+}
+
+/// Retain a nonempty command unchanged while a new draft is edited.
+pub fn sealCommand(self: *Self) Ticket {
+    std.debug.assert(self.submitted == null and self.composition().bytes.len != 0);
     return self.seal(true);
 }
 
@@ -159,7 +193,7 @@ fn seal(self: *Self, literal: bool) Ticket {
 }
 
 pub fn clear(self: *Self) void {
-    self.editors[self.active] = self.empty(self.active);
+    self.editors[self.active].reset();
     self.changed();
 }
 
@@ -223,7 +257,7 @@ pub fn land(self: *Self, step: Step, found: ?Found) Landing {
 /// would, so Enter sends it rather than running a command.
 pub fn fill(self: *Self, io: std.Io, file: std.Io.File, found: Found) !void {
     const editor = &self.editors[self.active];
-    editor.* = self.empty(self.active);
+    editor.reset();
     const start = @intFromBool(found.slash);
     if (found.slash) editor.buffer[0] = '/';
     if (try file.readPositionalAll(io, editor.buffer[start..][0..found.length], 0) != found.length) return error.TruncatedDisplayScratch;
@@ -244,7 +278,7 @@ pub fn message(self: *const Self, ticket: Ticket) ![]const u8 {
 /// The loan owner decides when borrowers have retired and release is allowed.
 pub fn release(self: *Self, ticket: Ticket) !void {
     const submitted = try self.checked(ticket);
-    self.editors[submitted.bank] = self.empty(submitted.bank);
+    self.editors[submitted.bank].reset();
     self.submitted = null;
 }
 
@@ -479,4 +513,144 @@ test "Tab puts in the list's first word at the draft's end and adds a tab anywhe
         try std.testing.expectEqualStrings(case.shown, input.composition().bytes);
         try std.testing.expectEqual(case.shown.len, input.composition().cursor);
     }
+}
+
+test "selected skill SessionInput sealed names deduplicate in textual order and borrow original bank" {
+    const allocator = std.testing.allocator;
+    var stream: TerminalInput = .{};
+    var input: Self = undefined;
+    input.init(&stream);
+    defer input.deinitAttachments(allocator);
+    for ("/one /two /one!") |byte| _ = input.feed(byte);
+    // Selection order deliberately differs from textual order.
+    try input.attachSkill(allocator, 10, 14, "one");
+    try input.attachSkill(allocator, 5, 9, "two");
+    try input.attachSkill(allocator, 0, 4, "one");
+    const original_bank = input.active;
+    const original_marks = input.editors[original_bank].marks.items.ptr;
+    const ticket = input.feed('\r').message;
+    try std.testing.expectEqualStrings("/one /two /one!", try input.message(ticket));
+    const names = try input.skillNames(ticket, allocator);
+    defer allocator.free(names);
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings("one", names[0]);
+    try std.testing.expectEqualStrings("two", names[1]);
+    try std.testing.expectEqual(input.editors[original_bank].buffer.ptr + 1, names[0].ptr);
+    for ("/new") |byte| _ = input.feed(byte);
+    try input.attachSkill(allocator, 0, 4, "new");
+    try std.testing.expectEqual(.busy, std.meta.activeTag(input.feed('\r')));
+    try std.testing.expectEqualStrings("one", names[0]);
+    try std.testing.expectEqualStrings("two", names[1]);
+    const retry_names = try input.skillNames(ticket, allocator);
+    defer allocator.free(retry_names);
+    try std.testing.expectEqualStrings("one", retry_names[0]);
+    try std.testing.expectEqualStrings("two", retry_names[1]);
+    try input.release(ticket);
+    try std.testing.expectEqual(@as(usize, 0), input.editors[original_bank].attachments().len);
+    try std.testing.expectEqual(original_marks, input.editors[original_bank].marks.items.ptr);
+    try std.testing.expectEqualStrings("/new", input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 1), input.attachments().len);
+    try std.testing.expectError(error.NoSubmission, input.skillNames(ticket, allocator));
+    const next = input.feed('\r').message;
+    try std.testing.expectError(error.SubmissionChanged, input.skillNames(ticket, allocator));
+    const next_names = try input.skillNames(next, allocator);
+    defer allocator.free(next_names);
+    try std.testing.expectEqualStrings("new", next_names[0]);
+    try input.release(next);
+}
+
+test "selected skill SessionInput clear history and literal replacement retain storage not marks" {
+    const allocator = std.testing.allocator;
+    var stream: TerminalInput = .{};
+    var input: Self = undefined;
+    input.init(&stream);
+    defer input.deinitAttachments(allocator);
+    for ("/foo") |byte| _ = input.feed(byte);
+    try input.attachSkill(allocator, 0, 4, "foo");
+    const marks = input.editors[input.active].marks.items.ptr;
+    const snapshot = input.editors[input.active].paste_marks.items.ptr;
+    input.clear();
+    try std.testing.expectEqual(@as(usize, 0), input.attachments().len);
+    try std.testing.expectEqual(marks, input.editors[input.active].marks.items.ptr);
+    for ("/foo") |byte| _ = input.feed(byte);
+    try input.attachSkill(allocator, 0, 4, "foo");
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "recalled", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "history", 0);
+    try input.fill(io, file, .{ .at = .{ .position = 1, .end = 1 }, .length = 7, .slash = false });
+    try std.testing.expectEqualStrings("history", input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 0), input.attachments().len);
+    try std.testing.expectEqual(marks, input.editors[input.active].marks.items.ptr);
+    try std.testing.expectEqual(snapshot, input.editors[input.active].paste_marks.items.ptr);
+    input.clear();
+    for ("/foo") |byte| _ = input.feed(byte);
+    try input.attachSkill(allocator, 0, 4, "foo");
+    const ticket = input.submitText("/literal");
+    const names = try input.skillNames(ticket, allocator);
+    defer allocator.free(names);
+    try std.testing.expectEqual(@as(usize, 0), names.len);
+    try std.testing.expectEqualStrings("/literal", try input.message(ticket));
+    try input.release(ticket);
+}
+
+test "selected skill SessionInput leading marked slash is message unmarked builtin remains command" {
+    const allocator = std.testing.allocator;
+    var stream: TerminalInput = .{};
+    var input: Self = undefined;
+    input.init(&stream);
+    defer input.deinitAttachments(allocator);
+    for ("/status /foo") |byte| _ = input.feed(byte);
+    try input.attachSkill(allocator, 8, 12, "foo");
+    try std.testing.expectEqual(.command, std.meta.activeTag(input.feed('\r')));
+    try input.attachSkill(allocator, 0, 7, "status");
+    const event = input.feed('\r');
+    try std.testing.expectEqual(.message, std.meta.activeTag(event));
+    const ticket = event.message;
+    try std.testing.expectEqualStrings("/status /foo", try input.message(ticket));
+    try input.release(ticket);
+    // Literal pasted spelling is not selection metadata.
+    for ("\x1b[200~/foo\x1b[201~") |byte| _ = input.feed(byte);
+    try std.testing.expectEqual(@as(usize, 0), input.attachments().len);
+    try std.testing.expectEqual(.command, std.meta.activeTag(input.feed('\r')));
+}
+
+test "selected skill SessionInput allocation failure retains original and next bank intent" {
+    const allocator = std.testing.allocator;
+    var stream: TerminalInput = .{};
+    var input: Self = undefined;
+    input.init(&stream);
+    defer input.deinitAttachments(allocator);
+    for ("/old") |byte| _ = input.feed(byte);
+    try input.attachSkill(allocator, 0, 4, "old");
+    const ticket = input.feed('\r').message;
+    for ("/new") |byte| _ = input.feed(byte);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    const revision = input.revision;
+    try std.testing.expectError(error.OutOfMemory, input.attachSkill(failing.allocator(), 0, 4, "next"));
+    try std.testing.expectEqual(revision, input.revision);
+    try std.testing.expectEqualStrings("/new", input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 0), input.attachments().len);
+    try std.testing.expectError(error.OutOfMemory, input.skillNames(ticket, failing.allocator()));
+    const names = try input.skillNames(ticket, allocator);
+    defer allocator.free(names);
+    try std.testing.expectEqualStrings("old", names[0]);
+    try input.release(ticket);
+}
+
+test "seal command retains original name while editing next draft" {
+    var stream: TerminalInput = .{};
+    var input: Self = undefined;
+    input.init(&stream);
+    for ("/skill demo") |byte| _ = input.feed(byte);
+    const name = input.composition().bytes[7..];
+    const ticket = input.sealCommand();
+    for ("next draft") |byte| _ = input.feed(byte);
+    try std.testing.expectEqualStrings("/skill demo", try input.message(ticket));
+    try std.testing.expectEqualStrings("demo", name);
+    try input.release(ticket);
+    try std.testing.expectError(error.NoSubmission, input.message(ticket));
+    try std.testing.expectEqualStrings("next draft", input.composition().bytes);
 }

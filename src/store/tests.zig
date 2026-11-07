@@ -12426,3 +12426,153 @@ test "skills saved catalog read retains only decoded result metadata" {
         }
     }.run);
 }
+
+test "inline skills authored provenance stays distinct and required on every public Message read" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]u8{ 0, 1, 2 }) |corruption| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "authored-config");
+                var command = try completeMessage("authored-message", session.slice(), try tmp.dir.createFile(std.testing.io, "authored", .{ .read = true }), "literal authored /demo");
+                try command.text.file.?.writeStreamingAll(std.testing.io, "literal authored /demo");
+                defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+                var name: protocol.Bounded(64) = .{};
+                try name.set("demo");
+                command.skills = &.{name};
+                var expanded: protocol.ContentField = .{ .state = .value, .file = try tmp.dir.createFile(std.testing.io, "expanded", .{ .read = true }), .length = "literal authored /demo\n\ncomplete skill".len, .digest = protocol.contentDigest("literal authored /demo\n\ncomplete skill") };
+                try expanded.file.?.writeStreamingAll(std.testing.io, "literal authored /demo\n\ncomplete skill");
+                defer protocol.removeContent(&expanded, std.testing.io) catch unreachable;
+                const capture: skills_fixture_domain.Capture = .{ .payload = &expanded };
+                try std.testing.expect(storage.submitMessageCapturedSkills(&command, null, null, &capture, .{}) == .accepted);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key='authored-message' AND secondary_content_id<>primary_content_id", .{}));
+                const request: protocol.ActivityPage = .{ .session = session, .kinds = .initOne(.admission) };
+                const page = try store_core.activityPageForTesting(&storage, request);
+                const row = page.items[0];
+                try std.testing.expectEqualSlices(u8, &protocol.contentDigest("literal authored /demo"), &row.value.admission.authored.digest);
+                try std.testing.expectEqualSlices(u8, &expanded.digest, &row.value.admission.content.digest);
+                const read: protocol.ReadActivityContent = .{ .session = session, .position = row.position, .selector = .authored };
+                if (corruption == 0) {
+                    var reader: ContentReader = undefined;
+                    reader.open(try storage.openActivityContent(&read));
+                    defer reader.close();
+                    var bytes: [64]u8 = undefined;
+                    const count = try reader.read(0, &bytes);
+                    try std.testing.expectEqualStrings("literal authored /demo", bytes[0..count]);
+                    try std.testing.expectError(error.ContentNotFound, storage.openActivityContent(&.{ .session = session, .position = row.position, .ordinal = 1, .selector = .authored }));
+                } else {
+                    if (corruption == 1) try store_testing.exec(&storage, "UPDATE core_command SET secondary_content_id=NULL WHERE command_key='authored-message'", .{}) else try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT secondary_content_id FROM core_command WHERE command_key='authored-message')", .{});
+                    try std.testing.expectError(error.CorruptStore, storage.openActivityContent(&read));
+                    try std.testing.expect(storage.isFenced());
+                }
+            }
+        }
+    }.run);
+}
+
+test "inline skills initial failure preserves all ordinary configuration refusals before creation writes" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Case = struct { field: []const u8, value: []const u8, code: protocol.MessageRejection };
+            const cases = [_]Case{
+                .{ .field = "model", .value = "", .code = .invalid_model },
+                .{ .field = "permission", .value = "not-a-mode", .code = .unsupported_permission_mode },
+                .{ .field = "tool", .value = "not-a-tool", .code = .unknown_tool },
+                .{ .field = "workspace", .value = "/rui-no-such-inline-workspace", .code = .invalid_workspace },
+                .{ .field = "label", .value = "bad\nlabel", .code = .invalid_label },
+            };
+            for (cases) |test_case| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var configure = try completeConfiguration("inline-invalid-config", "", workspace, "model-a");
+                const configuration = &configure.configuration;
+                if (std.mem.eql(u8, test_case.field, "model")) try configuration.model.value.set(test_case.value);
+                if (std.mem.eql(u8, test_case.field, "permission")) try configuration.permission_mode.value.set(test_case.value);
+                if (std.mem.eql(u8, test_case.field, "tool")) configuration.tools = try .of(&.{test_case.value});
+                if (std.mem.eql(u8, test_case.field, "workspace")) try configuration.workspace.value.set(test_case.value);
+                if (std.mem.eql(u8, test_case.field, "label")) {
+                    configuration.label.state = .value;
+                    try configuration.label.value.set(test_case.value);
+                }
+                var command: protocol.MessageCommand = .{ .key = configure.key, .configuration = configuration.*, .text = .{ .state = .value, .borrowed = "authored".ptr, .length = 8, .digest = protocol.contentDigest("authored") } };
+                var name: protocol.Bounded(64) = .{};
+                try name.set("missing");
+                command.skills = &.{name};
+                const failed: skills_fixture_domain.Capture = .{ .failed = .{ .code = .unknown_skill, .bytes = "missing skill" } };
+                const baseline = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+                const reply = storage.submitMessageCapturedSkills(&command, null, &skills_fixture_initial, &failed, .{});
+                try std.testing.expect(reply == .rejected);
+                try std.testing.expectEqual(test_case.code, reply.rejected.code);
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission", .{}));
+                try std.testing.expectEqual(baseline, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+            }
+        }
+    }.run);
+}
+
+test "inline skills configuration validation borrows one Store-owned plan through content imports" {
+    const Ready = @FieldType(configuration_domain.ConfigurationValidation, "ready");
+    // The validation-only phase must not return another Settings value onto
+    // the Host's creation/import chain. This is an ownership API contract.
+    try std.testing.expect(Ready == *const configuration_domain.ValidatedConfiguration);
+    if (comptime Ready == *const configuration_domain.ValidatedConfiguration) {
+        try store_testing.forEachEngine(struct {
+            fn run(case: *store_testing.Case) !void {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "borrowed-plan-config");
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var update = try completeConfiguration("borrowed-plan-update", session.slice(), try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                update.configuration.instructions = try testingBytesContent(&tmp, "plan-instructions", "new retained plan instructions");
+                defer update.removeTemporaryContent(std.testing.io) catch unreachable;
+                update.configuration.label.state = .value;
+                try update.configuration.label.value.set("retained");
+                update.configuration.permission_mode.state = .value;
+                try update.configuration.permission_mode.value.set("ask");
+                {
+                    const entry = try store_core.enter(&storage, .none);
+                    defer entry.release();
+                    var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
+                    defer a.deinit();
+                    const reads = storage.configurationReads();
+                    reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
+                    configuration_domain.prepareConfiguration(&a, session.slice(), &update.configuration, reads);
+                    try a.run();
+                    const checked = try configuration_domain.validateConfiguration(&a, storage.io, session.slice(), &update.configuration, null, reads);
+                    try std.testing.expect(checked == .ready);
+                    const plan = checked.ready;
+                    try std.testing.expect(plan == &reads.validated);
+                    const original_instructions = plan.before.?.instructions_id;
+                    try std.testing.expect(plan.before.?.label == null);
+                    const applied = try configuration_domain.applyValidatedConfiguration(&a, storage.io, session.slice(), &update.configuration, null, .{}, reads, plan);
+                    try std.testing.expect(applied == .accepted);
+                    try std.testing.expect(plan == &reads.validated);
+                    try std.testing.expectEqual(original_instructions, plan.before.?.instructions_id);
+                    try std.testing.expect(reads.next.instructions_id != original_instructions);
+                    try std.testing.expect(plan.before.?.label == null);
+                    try std.testing.expectEqualStrings("retained", reads.next.label.?.slice());
+                    const expected: std.EnumSet(protocol.SessionField) = .initMany(&.{ .instructions, .permission_mode, .label });
+                    try std.testing.expectEqual(expected, applied.accepted.changes);
+                    try a.run();
+                    try a.abandon(.{});
+                }
+                const saved = (try store_core.readSessionForTesting(&storage, session.slice())).?;
+                try std.testing.expectEqual(@as(u64, 1), saved.revision);
+                try std.testing.expect(saved.label == null);
+                try std.testing.expect(!storage.isFenced());
+            }
+        }.run);
+    }
+}

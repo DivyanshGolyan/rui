@@ -2119,7 +2119,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     if (configuration == null and !protocol.validSessionId(destination)) {
         return error.InvalidSession;
     }
-    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .skill = parsed.get("skill"), .configuration = if (configuration) |value| value.input else null };
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .skills = parsed.all("skill"), .text = if (parsed.all("skill").len != 0 and std.c.isatty(std.Io.File.stdin().handle) != 0) "" else null, .configuration = if (configuration) |value| value.input else null };
     // Peer context names a Session in its own Store, so it signs only sends
     // to that Store; an explicit --store naming another Store is a plain
     // caller's send there (#957). Incomplete or malformed context never falls

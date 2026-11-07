@@ -23,6 +23,7 @@ const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
 const OverviewPaint = @import("OverviewPaint.zig");
 const ClientTask = @import("ClientTask.zig");
+const SkillMenu = @import("SkillMenu.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
@@ -315,6 +316,7 @@ done: [2]c_int = .{ -1, -1 },
 signalled: [2]c_int = .{ -1, -1 },
 
 worker: ClientTask = .{},
+skill_menu: SkillMenu = .{},
 upgrade_requested: bool = false,
 upgrade_cancel_draining: bool = false,
 upgrade_job: UpgradePanel = .{},
@@ -411,7 +413,10 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
     var terminal = SessionTerminal.begin(screen, !notices.multiplexed) catch |err| return self.failed(err, options.open);
     terminal.notices = notices;
     self.terminal = &terminal;
-    const ended = self.loop();
+    const ended: anyerror!Ending = initialized: {
+        self.skill_menu.init(init.gpa, init.io, options.store, .{ .workspace = options.workspace }) catch |err| break :initialized err;
+        break :initialized self.loop();
+    };
     return self.finish(ended);
 }
 
@@ -490,6 +495,7 @@ fn destroy(self: *Self) void {
     if (self.scratch) |file| file.close(self.init.io);
     if (self.command_page) |file| file.close(self.init.io);
     self.closePipes();
+    self.composer.deinitAttachments(self.init.gpa);
     self.state.deinit();
     self.menu.deinit(self.init.gpa);
     self.init.gpa.destroy(self);
@@ -519,9 +525,11 @@ fn loop(self: *Self) !Ending {
 /// the worker or a signal.
 fn turn(self: *Self) !?Next {
     const now_ms = self.realMs();
+    if (!self.upgrade_requested and !self.upgrade_cancel_draining and !self.state.upgrade_blocked) try self.refreshSkills();
     if (self.upgrade_cancel_draining) {
         if (try self.quiesceUpgrade()) {
             self.upgrade_cancel_draining = false;
+            self.skill_menu.invalidate();
             self.state.upgrade_pending = !self.state.upgrade_blocked;
             self.state.next_list_ms = 0;
         }
@@ -548,6 +556,7 @@ fn turn(self: *Self) !?Next {
                 const outcome = self.upgrade_job.outcome;
                 self.upgrade_running = false;
                 self.upgrade_requested = false;
+                self.skill_menu.invalidate();
                 switch (outcome) {
                     .unchanged => {},
                     .compatible => self.state.upgrade_blocked = false,
@@ -607,10 +616,12 @@ fn proceed(self: *Self, next: Next) ?Ending {
     switch (next) {
         .leave => return .overview,
         .open => |reference| {
+            self.skill_menu.cancel();
             self.opened = reference;
             // Both views paint the SAME retained grid; changing the borrower
             // is not a reason to discard a healthy libvaxis diff reference.
             if (self.ops.converse(self, self.opened)) |left| return .{ .conversation = left };
+            self.skill_menu.invalidate();
             return null;
         },
     }
@@ -649,7 +660,16 @@ fn event(self: *Self, value: view.Event) !?Next {
         .save_default => |binding| self.queue(.{ .save = binding }),
         .command => |command| self.queue(.{ .command = .{ .name = command.name, .session = command.session, .line = try self.init.gpa.dupe(u8, command.text) } }),
         .open => |reference| next = .{ .open = reference },
-        .clear_draft => self.composer = self.emptyComposer(self.composer.edits +% 1),
+        .clear_draft => self.resetComposer(),
+        .attach_skill => |range| {
+            self.composer.attachSkill(self.init.gpa, range.start, range.end, range.name) catch |err| switch (err) {
+                error.SkillCapacityExceeded => return self.event(.skill_refused),
+                else => return err,
+            };
+            self.skill_menu.dismiss(self.composer.edits, self.composer.cursor);
+            self.state.commands = null;
+        },
+        .dismiss_skills => self.skill_menu.dismiss(self.composer.edits, self.composer.cursor),
         // A refused addition says so as a refused key does.
         .append => |text| switch (self.composer.append(text)) {
             .refused => |why| refused = why,
@@ -701,7 +721,33 @@ fn sendStatuses(self: *Self) void {
 }
 
 fn composerDraft(self: *const Self) view.Draft {
-    return .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .anchor = self.draft_anchor, .edits = self.composer.edits };
+    const bytes = self.draft[0..self.composer.length];
+    return .{ .bytes = bytes, .cursor = self.composer.cursor, .anchor = self.draft_anchor, .edits = self.composer.edits, .attachments = self.composer.attachments(), .skill_choices = self.skill_menu.choices(bytes, self.composer.cursor, self.composer.edits) };
+}
+
+/// Metadata follows exactly the Workspace the next start's configuration uses.
+fn skillWorkspace(self: *const Self) []const u8 {
+    for (view.start_options, 0..) |option, index| if (std.mem.eql(u8, option, "workspace")) return self.state.settings.get(index) orelse self.options.workspace;
+    unreachable;
+}
+
+/// No metadata mutation while a frame still borrows its rows.
+fn refreshSkills(self: *Self) !void {
+    if (try self.skill_menu.setScope(.{ .workspace = self.skillWorkspace() })) self.state.commands = null;
+    const draft = self.composerDraft();
+    const attached = draft.attachedToken();
+    if (try self.skill_menu.refresh(if (attached) "" else draft.bytes, if (attached) 0 else draft.cursor, draft.edits)) {
+        self.state.commands = null;
+        if (self.skill_menu.failure() != null) _ = try self.event(.skill_suggestions_unavailable);
+    }
+}
+
+/// Retire discovery without blocking raw-mode editing or starting another read.
+fn pauseSkills(self: *Self) !void {
+    self.skill_menu.cancel();
+    if (try self.skill_menu.refresh("", 0, self.composer.edits)) self.state.commands = null;
+    // Pausing has no user intent to reject. Ordinary metadata failures are
+    // advisory; canonical fencing still propagates directly from refresh.
 }
 
 /// Takes the queued job at `index` out of the queue.
@@ -935,7 +981,7 @@ fn startInput(self: *const Self, start: *const view.OwnedStart, compaction_buffe
     // Read at each start, so an /effort chosen in a conversation since this
     // overview opened applies.
     const saved_effort = start_effort.applied(if (start_effort.readsSaved()) try self.savedEffort() else null);
-    return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .configuration = .{
+    return .{ .store = self.options.store, .session = "", .text_path = "", .text = start.text(), .skills = start.skills(), .configuration = .{
         .store = self.options.store,
         .session = .create,
         .require_model = true,
@@ -1102,7 +1148,11 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
             return null;
         }
     }
-    const input = if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.plainEnter(decoded))
+    const draft = self.composerDraft();
+    const skill_tab = draft.skillChoices() != null;
+    const input = if (self.state.inputMode() == .compose and skill_tab and TerminalEditor.plainTab(decoded))
+        view.Input.complete
+    else if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.plainEnter(decoded))
         view.Input{ .composer = .submit }
     else if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.select(view.keys, decoded) == .enter)
         view.Input{ .composer = .none }
@@ -1111,8 +1161,14 @@ fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
     return self.event(.{ .composed = .{ .input = input, .draft = self.composerDraft() } });
 }
 
-/// An empty draft, whose Tab puts in the command list's highlighted word.
-/// `edits` continues the count, so no two drafts share one.
+/// Clear through the editor owner without losing range storage or revision identity.
+fn resetComposer(self: *Self) void {
+    const revision = self.composer.edits +% 1;
+    self.composer.reset();
+    self.composer.edits = revision;
+}
+
+/// An empty draft whose Tab completes the builtin-only argument list.
 fn emptyComposer(self: *Self, edits: u32) TerminalEditor {
     return .{ .buffer = &self.draft, .completion = .{ .context = self, .add = tabCompletion }, .edits = edits };
 }
@@ -1122,8 +1178,12 @@ fn emptyComposer(self: *Self, edits: u32) TerminalEditor {
 /// the tab.
 fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     const self: *const Self = @ptrCast(@alignCast(context));
+    const current = self.composerDraft();
+    if (current.attachedToken() or current.leadingSkill()) return null;
+    if (current.skill_choices) |choices| if (choices.dismissed) return null;
     if (view.commands.suggest(draft, .{}) == null) return null;
-    const shown = view.nextCommands(&self.state, self.composerDraft()) orelse return "";
+    const shown = view.nextCommands(&self.state, current) orelse return "";
+    if (shown.list.containsSkills()) return "";
     return shown.completion();
 }
 
@@ -1212,9 +1272,10 @@ fn resize(self: *Self, size: std.posix.winsize) !?Next {
 /// frame. Until then only input, the worker or a signal wakes it.
 fn budget(self: *const Self, now_ms: u64, awake_ms: u64, spins: bool) i32 {
     const tick: i32 = if (self.state.upgrade_blocked or self.upgrade_requested or self.upgrade_cancel_draining) 16 else if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
-    if (!spins) return tick;
+    const polled = if (self.skill_menu.busy()) (if (tick < 0) 25 else @min(tick, 25)) else tick;
+    if (!spins) return polled;
     const frame: i32 = @intCast(view.spin_interval_ms - awake_ms % view.spin_interval_ms);
-    return if (tick < 0) frame else @min(tick, frame);
+    return if (polled < 0) frame else @min(polled, frame);
 }
 
 /// Complete the frozen bytes before an ordinary view transition. The first
@@ -1296,6 +1357,7 @@ fn observed(raw: *anyopaque, read: protocol.session_work.Work, name: []const u8,
 fn service(raw: *anyopaque) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
+    try self.pauseSkills();
     if (self.state.upgrade_blocked) return false;
     if (self.upgrade_cancel_draining) {
         if (try self.quiesceUpgrade()) {
@@ -1322,6 +1384,7 @@ fn service(raw: *anyopaque) !bool {
 }
 
 fn quiesceUpgrade(self: *Self) !bool {
+    try self.pauseSkills();
     if (self.worker.thread == null) try self.dispatch(.all);
     if (self.worker.thread != null) {
         switch (self.job.quiescence()) {
@@ -1337,7 +1400,7 @@ fn quiesceUpgrade(self: *Self) !bool {
         }
     }
     self.state.upgrade_pending = true;
-    return self.worker.thread == null and self.job_count == 0;
+    return self.worker.thread == null and self.job_count == 0 and !self.skill_menu.busy();
 }
 
 fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !bool {
@@ -1348,7 +1411,8 @@ fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !boo
             return self.quiesceUpgrade();
         },
         .ready, .incompatible => {
-            self.upgrade_cancel_draining = handoff == .ready and (self.worker.thread != null or self.job_count != 0);
+            self.skill_menu.invalidate();
+            self.upgrade_cancel_draining = handoff == .ready and (self.worker.thread != null or self.job_count != 0 or self.skill_menu.busy());
             self.state.upgrade_pending = handoff == .ready;
             self.state.upgrade_blocked = handoff == .incompatible;
             self.state.next_list_ms = 0;
@@ -1407,10 +1471,12 @@ fn writeUpgradeReports(self: *Self, fatal: bool) !void {
 /// own guidance and the Detached notice follow.
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
+    self.state.commands = null;
     const unfinished_upgrade = self.upgrade_job.started and !self.upgrade_job.finished;
     self.upgrade_job.settle();
     const fatal = (if (ended) |_| self.interrupted.stopped.load(.acquire) else |_| true) or std.meta.isError(restored);
     const receipt = self.writeUpgradeReports(fatal or unfinished_upgrade);
+    const metadata_closed = self.skill_menu.close();
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
     const saved = self.flushSaves();
@@ -1422,6 +1488,7 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
             _ = try answered;
             try saved;
             try receipt;
+            try metadata_closed;
             try self.terminal.detached(self.options.store, null, null);
         },
         .conversation => |*left| {
@@ -1432,6 +1499,9 @@ fn finish(self: *Self, ended: anyerror!Ending) !void {
             receipt catch |err| {
                 if (!std.meta.isError(left.ended)) left.ended = err;
             };
+            if (metadata_closed) |_| {} else |err| {
+                if (!std.meta.isError(left.ended)) left.ended = err;
+            }
             return self.leave(left.*, restored);
         },
     }
@@ -1771,6 +1841,7 @@ const Rig = struct {
     }
 
     fn close(rig: *Rig) void {
+        rig.overview.skill_menu.close() catch unreachable;
         rig.overview.worker.cancel();
         if (rig.overview.worker.thread != null) rig.overview.worker.join() catch {};
         rig.overview.destroy();
@@ -3616,7 +3687,7 @@ test "Tab completes from the draft's own list, however many keys arrive before a
     try std.testing.expectEqualStrings("/help", rig.overview.composerDraft().bytes);
     // Two Tabs in one batch: the second completes from the list the first
     // one's word calls for.
-    rig.overview.composer = rig.overview.emptyComposer(rig.overview.composer.edits +% 1);
+    rig.overview.resetComposer();
     try std.testing.expect(try rig.press("/conf\t\t") == null);
     try std.testing.expectEqualStrings("/configure --permission-mode ", rig.overview.composerDraft().bytes);
 }
@@ -3632,7 +3703,7 @@ test "Shift-Up and Shift-Down select the row above and below, whatever the draft
             .{ .bytes = "\x1b[1;2:1B", .row = 3 },
         }) |case| {
             errdefer std.debug.print("draft={s} key={s}\n", .{ draft, case.bytes[1..] });
-            rig.overview.composer = rig.overview.emptyComposer(rig.overview.composer.edits +% 1);
+            rig.overview.resetComposer();
             try std.testing.expect(try rig.press(draft) == null);
             rig.overview.state.selected = shownRow(rig, 2);
             try std.testing.expect(try rig.press(case.bytes) == null);
@@ -4166,17 +4237,15 @@ test "conversation archive and restore use the exact unlisted opened reference t
     try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
 }
 
-test "upgrade result waits behind an existing notice and stop prompt" {
-    const self = try std.testing.allocator.create(Self);
-    defer std.testing.allocator.destroy(self);
-    self.* = undefined;
+test "upgrade result waits behind an existing notice and stop prompt until a matching frame is written" {
+    const rig = try openComposer();
+    defer rig.close();
+    const self = rig.overview;
     self.upgrade_notice_pending = true;
-    self.upgrade_displayed_len = 0;
+    self.upgrade_note_revision = 17;
     const result = "Upgrade installed; Host ready";
     @memcpy(self.upgrade_note[0..result.len], result);
     self.upgrade_note_len = result.len;
-    self.state.prompt = null;
-    self.state.picker = null;
     var warning: view.Notice = .{ .colour = .attention };
     const text = "Existing safety notice";
     @memcpy(warning.bytes[0..text.len], text);
@@ -4185,14 +4254,43 @@ test "upgrade result waits behind an existing notice and stop prompt" {
     self.offerUpgradeNotice();
     try std.testing.expectEqualStrings(text, self.state.notice.?.text());
     try std.testing.expect(self.upgrade_notice_pending);
+    var output: [4096]u8 = undefined;
+    try std.testing.expect(try self.draw(0) == null);
+    try std.testing.expect(rig.drawn(&output).len != 0);
+    drain(rig.output[0]);
+    try std.testing.expect(self.upgrade_notice_pending);
     self.state.notice = null;
     self.state.prompt = .{ .stop = "k7m2qx".* };
     self.offerUpgradeNotice();
     try std.testing.expect(self.state.notice == null and self.upgrade_notice_pending);
+    try std.testing.expect(try self.draw(0) == null);
+    try std.testing.expect(rig.drawn(&output).len != 0);
+    drain(rig.output[0]);
+    try std.testing.expect(self.upgrade_notice_pending);
     self.state.prompt = null;
     self.offerUpgradeNotice();
     try std.testing.expectEqualStrings(result, self.state.notice.?.text());
-    try std.testing.expect(self.upgrade_notice_pending); // only a delivered frame clears it
+    try std.testing.expect(self.upgrade_notice_pending); // offering is not delivery
+
+    // A newer result has not been offered yet. Writing the old notice must
+    // not acknowledge the latest result, even though it occupies the slot.
+    const latest = "Upgrade cancelled; Host unchanged";
+    @memcpy(self.upgrade_note[0..latest.len], latest);
+    self.upgrade_note_len = latest.len;
+    self.upgrade_note_revision = 18;
+    try std.testing.expect(try self.draw(0) == null);
+    try std.testing.expect(rig.drawn(&output).len != 0);
+    drain(rig.output[0]);
+    try std.testing.expect(self.upgrade_notice_pending);
+    try std.testing.expectEqualStrings(result, self.state.notice.?.text());
+    self.offerUpgradeNotice();
+    try std.testing.expectEqualStrings(latest, self.state.notice.?.text());
+    try std.testing.expect(self.upgrade_notice_pending);
+    try std.testing.expect(try self.draw(0) == null);
+    try std.testing.expect(rig.drawn(&output).len != 0);
+    drain(rig.output[0]);
+    try std.testing.expect(!self.upgrade_notice_pending);
+    try std.testing.expectEqual(@as(u64, 18), self.upgrade_note_revision);
 }
 
 test "a pre-cancellation list cannot release upgrade admission" {
@@ -4302,4 +4400,485 @@ test "upgrade quiescence cancels read jobs rather than granting them mutation cu
     try std.testing.expect(Read.cancelled);
     try std.testing.expect(rig.overview.worker.thread == null);
     try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+}
+
+test "upgrade metadata-only quiescence and ready drain retain authored skill intent without relaunch" {
+    const Borrower = struct {
+        overview: *Self,
+        original: *const view.OwnedStart,
+        entered: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        observed: bool = false,
+
+        fn run(raw: *anyopaque, task: *ClientTask) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.entered.store(true, .release);
+            // Cancellation alone cannot retire this borrower. The test grants
+            // the reply independently, after checking both admission barriers.
+            try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), &self.release, test_poll.isSet);
+            const ranges = self.overview.composer.attachments();
+            const names = self.original.skills();
+            self.observed = task.cancellation.stopped.load(.acquire) and
+                std.mem.eql(u8, self.overview.composerDraft().bytes, "ask /review /rev") and
+                self.overview.composer.cursor == 16 and ranges.len == 1 and
+                ranges[0].start == 4 and ranges[0].end == 11 and
+                std.mem.eql(u8, self.original.original(), "ask /review /rev") and
+                std.mem.eql(u8, self.original.text(), "ask /review /rev") and
+                names.len == 1 and std.mem.eql(u8, names[0], "review");
+            return error.Cancelled;
+        }
+
+        fn completed(task: *ClientTask) bool {
+            return task.completed();
+        }
+    };
+    const rig = try openComposer();
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try rig.press("ask /review /rev") == null);
+    try overview.composer.attachSkill(std.testing.allocator, 4, 11, "review");
+    overview.composer.cursor = overview.composer.length;
+    const revision = overview.composer.edits;
+    var original = try (view.StartRequest{
+        .settings = &overview.state.settings,
+        .text = overview.composerDraft().bytes,
+        .original = overview.composerDraft().bytes,
+        .attachments = overview.composer.attachments(),
+    }).own(std.testing.allocator);
+    defer original.deinit(std.testing.allocator);
+    try overview.inlineTestMenu("rev");
+    var borrower: Borrower = .{ .overview = overview, .original = &original };
+    defer {
+        borrower.release.store(true, .release);
+        // Retire even on an assertion failure, before borrowed test state dies.
+        overview.skill_menu.close() catch unreachable;
+    }
+    try overview.skill_menu.task.start(std.testing.io, &borrower, Borrower.run);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &borrower.entered, test_poll.isSet);
+    try std.testing.expect(overview.worker.thread == null);
+    try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+    try std.testing.expect(!try upgradeHandoff(overview, .quiesce));
+    try std.testing.expect(overview.skill_menu.task.cancellation.stopped.load(.acquire));
+    try std.testing.expect(overview.skill_menu.busy());
+    try std.testing.expect(!overview.skill_menu.task.completed());
+    try std.testing.expect(overview.state.upgrade_pending);
+    try std.testing.expect(!overview.skill_menu.wanted_valid);
+    try std.testing.expect(overview.skill_menu.page == null);
+    try std.testing.expect(try upgradeHandoff(overview, .ready));
+    // Only metadata is busy: neither the main worker nor queued work can
+    // accidentally supply the cancellation-draining admission hold.
+    try std.testing.expect(overview.upgrade_cancel_draining);
+    var output: [4096]u8 = undefined;
+    try std.testing.expect(try overview.turn() == null);
+    drain(rig.output[0]);
+    try std.testing.expect(overview.upgrade_cancel_draining);
+    try std.testing.expect(overview.skill_menu.busy());
+    try std.testing.expect(overview.skill_menu.task.context == @as(*anyopaque, @ptrCast(&borrower)));
+    try std.testing.expect(!overview.skill_menu.wanted_valid);
+    try std.testing.expectEqualStrings("", overview.skill_menu.wanted.slice());
+    try std.testing.expect(!try upgradeHandoff(overview, .quiesce));
+    borrower.release.store(true, .release);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &overview.skill_menu.task, Borrower.completed);
+    try std.testing.expect(try overview.turn() == null);
+    _ = rig.drawn(&output);
+    drain(rig.output[0]);
+    try std.testing.expect(borrower.observed);
+    try std.testing.expect(!overview.upgrade_cancel_draining);
+    try std.testing.expect(overview.state.upgrade_pending); // a fresh list still owes admission
+    try std.testing.expect(!overview.skill_menu.busy());
+    try std.testing.expect(!overview.skill_menu.wanted_valid);
+    try std.testing.expect(overview.skill_menu.allocator != null); // drain is not final disposal
+    try std.testing.expect(overview.worker.thread == null);
+    try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+    try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
+    try std.testing.expectEqualStrings("ask /review /rev", overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 16), overview.composer.cursor);
+    try std.testing.expectEqual(revision, overview.composer.edits);
+    try std.testing.expectEqualSlices(TerminalEditor.Attachment, &.{.{ .start = 4, .end = 11 }}, overview.composer.attachments());
+    overview.resetComposer();
+    try std.testing.expect(try rig.press("next draft") == null);
+    try std.testing.expectEqualStrings("next draft", overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 0), overview.composer.attachments().len);
+    try std.testing.expectEqualStrings("ask /review /rev", original.original());
+    try std.testing.expectEqualStrings("ask /review /rev", original.text());
+    try std.testing.expectEqual(@as(usize, 1), original.skills().len);
+    try std.testing.expectEqualStrings("review", original.skills()[0]);
+}
+
+/// Explicit metadata fixture: the same owned page and borrowed row shape the
+/// shared reader installs, without a Host or skill-file access in UI tests.
+fn inlineTestMenu(self: *Self, prefix: []const u8) !void {
+    return self.inlineTestMenuNamed(prefix, "review");
+}
+
+fn inlineTestMenuNamed(self: *Self, prefix: []const u8, skill_name: []const u8) !void {
+    const suggestions = @import("skill_suggestions.zig");
+    const gpa = self.init.gpa;
+    try self.skill_menu.init(gpa, self.init.io, self.options.store, .{ .workspace = self.skillWorkspace() });
+    errdefer self.skill_menu.close() catch unreachable;
+    try self.skill_menu.wanted.set(prefix);
+    const entries = try gpa.alloc(suggestions.Entry, 1);
+    errdefer gpa.free(entries);
+    const name = try gpa.dupe(u8, skill_name);
+    errdefer gpa.free(name);
+    const description = try gpa.dupe(u8, "Review work");
+    entries[0] = .{ .name = name, .description = description };
+    self.skill_menu.page = .{ .entries = entries, .revision = 1, .total = 1 };
+    const shown = std.fmt.bufPrint(&self.skill_menu.words[0], "/{s}", .{name}) catch unreachable;
+    self.skill_menu.entries[0] = .{ .kind = .skill, .word = name, .shown = shown, .description = description, .runs = false };
+    self.skill_menu.count = 1;
+    self.skill_menu.generation = 1;
+    self.skill_menu.wanted_valid = true;
+}
+
+test "inline overview shell attaches middle UTF8 token on Tab or Enter then sends immutable names" {
+    const Start = struct {
+        fn start(_: *Self, _: client.Requests, input: client.MessageInput, reply: *Reply) !void {
+            try std.testing.expectEqualStrings("é /review, next", input.text.?);
+            try std.testing.expectEqual(@as(usize, 1), input.skills.len);
+            try std.testing.expectEqualStrings("review", input.skills[0]);
+            Seen.now.starts += 1;
+            reply.* = .refused("rejected");
+        }
+    };
+    for ([_][]const u8{ "\t", "\r" }) |key| {
+        var cancellation: client.Cancellation = .{};
+        var ops = fake_operations;
+        ops.start = Start.start;
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+        defer rig.close();
+        try std.testing.expect(try rig.press("é /rev-tail, next\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[C") == null);
+        try std.testing.expectEqual(@as(usize, 6), rig.overview.composer.cursor);
+        try rig.overview.inlineTestMenu("re");
+        try std.testing.expect(try rig.overview.draw(0) == null);
+        try std.testing.expect(try rig.press(key) == null);
+        try std.testing.expectEqualStrings("é /review, next", rig.overview.composerDraft().bytes);
+        try std.testing.expectEqual(@as(usize, 1), rig.overview.composer.attachments().len);
+        try std.testing.expectEqual(@as(usize, 10), rig.overview.composer.cursor);
+        try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+        try std.testing.expect(try rig.press("\r") == null);
+        // A local clear while the owned start waits cannot mutate its text,
+        // selected names or metadata on the worker's later read.
+        try std.testing.expect(try rig.press("\x1b[27u") == null);
+        try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.attachments().len);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
+    }
+}
+
+test "inline overview shell a selected leading skill does not block a different completion target" {
+    const rig = try openComposer();
+    defer rig.close();
+    const self = rig.overview;
+    try std.testing.expect(try rig.press("/help /rev") == null);
+    try self.composer.attachSkill(std.testing.allocator, 0, 5, "help");
+    try std.testing.expect(try rig.press("\x1b[F") == null);
+    try self.inlineTestMenu("rev");
+    try std.testing.expect(try self.draw(0) == null);
+    drain(rig.output[0]);
+    try std.testing.expect(try rig.press("\t") == null);
+    try std.testing.expectEqualStrings("/help /review", self.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 2), self.composer.attachments().len);
+    try std.testing.expect(try rig.press("\r") == null);
+    try std.testing.expectEqual(@as(usize, 1), self.job_count);
+    const names = self.jobs[0].start.skills();
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings("help", names[0]);
+    try std.testing.expectEqualStrings("review", names[1]);
+}
+
+test "inline overview shell selected token interior Tab inserts literally and detaches its edited mark" {
+    const cases = [_]struct { text: []const u8, start: usize, end: usize, name: []const u8, prefix: []const u8, left: usize, expected: []const u8, cursor: usize }{
+        .{ .text = "/help", .start = 0, .end = 5, .name = "help", .prefix = "hel", .left = 1, .expected = "/hel\tp", .cursor = 5 },
+        .{ .text = "é /review, next", .start = 3, .end = 10, .name = "review", .prefix = "rev", .left = 3, .expected = "é /rev\tiew, next", .cursor = 8 },
+    };
+    for (cases) |case| {
+        const rig = try openComposer();
+        defer rig.close();
+        const self = rig.overview;
+        try std.testing.expect(try rig.press(case.text) == null);
+        try self.composer.attachSkill(std.testing.allocator, case.start, case.end, case.name);
+        try self.inlineTestMenuNamed(case.prefix, case.name);
+        self.skill_menu.dismiss(self.composer.edits, self.composer.cursor);
+        for (0..case.left) |_| try std.testing.expect(try rig.press("\x1b[D") == null);
+        try std.testing.expectEqual(case.end - case.left, self.composer.cursor);
+        try std.testing.expectEqualStrings(case.text, self.composerDraft().bytes);
+        try std.testing.expectEqualSlices(TerminalEditor.Attachment, &.{.{ .start = case.start, .end = case.end }}, self.composer.attachments());
+        // The pure renderer already excludes this mark. The shell must not
+        // convert Tab into a completion that no visible list can perform.
+        try std.testing.expect(try self.draw(0) == null);
+        const revision = self.composer.edits;
+        try std.testing.expect(try rig.press("\t") == null);
+        try std.testing.expectEqualStrings(case.expected, self.composerDraft().bytes);
+        try std.testing.expectEqual(case.cursor, self.composer.cursor);
+        try std.testing.expectEqual(revision +% 1, self.composer.edits);
+        try std.testing.expectEqual(@as(usize, 0), self.composer.attachments().len);
+        try std.testing.expectEqual(@as(usize, 0), self.job_count);
+        try std.testing.expectEqual(@as(usize, 0), self.state.request_count);
+        try std.testing.expect(self.worker.thread == null);
+        try std.testing.expect(self.state.panel == null); // selected /help never becomes the builtin
+    }
+}
+
+test "inline overview shell selected token Tab stays literal after an unrelated edit and Enter sends its retained name" {
+    const cases = [_]struct { text: []const u8, start: usize, end: usize, name: []const u8, right: usize, expected: []const u8 }{
+        .{ .text = "/help, next", .start = 0, .end = 5, .name = "help", .right = 5, .expected = "/help\t, next!" },
+        .{ .text = "é /review, next", .start = 3, .end = 10, .name = "review", .right = 9, .expected = "é /review\t, next!" },
+    };
+    for (cases) |case| {
+        const rig = try openComposer();
+        defer rig.close();
+        const self = rig.overview;
+        try std.testing.expect(try rig.press(case.text) == null);
+        try self.composer.attachSkill(std.testing.allocator, case.start, case.end, case.name);
+        try self.inlineTestMenuNamed(case.name, case.name);
+        self.skill_menu.dismiss(self.composer.edits, self.composer.cursor);
+        const attached_revision = self.composer.edits;
+        try std.testing.expect(try rig.press("\x1b[F!\x1b[H") == null);
+        for (0..case.right) |_| try std.testing.expect(try rig.press("\x1b[C") == null);
+        try std.testing.expectEqual(case.end, self.composer.cursor);
+        try std.testing.expect(self.composer.edits != attached_revision);
+        try std.testing.expectEqualSlices(TerminalEditor.Attachment, &.{.{ .start = case.start, .end = case.end }}, self.composer.attachments());
+        try std.testing.expect(try self.draw(0) == null);
+        try std.testing.expect(try rig.press("\t") == null);
+        try std.testing.expectEqualStrings(case.expected, self.composerDraft().bytes);
+        try std.testing.expectEqual(case.end + 1, self.composer.cursor);
+        // A literal delimiter at the end is not an overlapping name edit.
+        try std.testing.expectEqualSlices(TerminalEditor.Attachment, &.{.{ .start = case.start, .end = case.end }}, self.composer.attachments());
+        try std.testing.expectEqual(@as(usize, 0), self.job_count);
+        try std.testing.expectEqual(@as(usize, 0), self.state.request_count);
+        try std.testing.expect(self.worker.thread == null);
+        try std.testing.expect(self.state.panel == null);
+        try std.testing.expect(try rig.press("\x1b[D") == null);
+        try std.testing.expectEqual(case.end, self.composer.cursor);
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expectEqual(@as(usize, 1), self.job_count);
+        try std.testing.expect(self.jobs[0] == .start);
+        const owned = &self.jobs[0].start;
+        try std.testing.expectEqualStrings(case.expected, owned.original());
+        try std.testing.expectEqualStrings(case.expected, owned.text());
+        try std.testing.expectEqual(@as(usize, 1), owned.skills().len);
+        try std.testing.expectEqualStrings(case.name, owned.skills()[0]);
+        try std.testing.expectEqual(@as(usize, 1), self.state.request_count);
+        try std.testing.expect(self.state.panel == null);
+    }
+}
+
+test "inline overview shell selected token interior Enter sends existing intent rather than selecting again" {
+    const cases = [_]struct { text: []const u8, start: usize, end: usize, name: []const u8, prefix: []const u8 }{
+        .{ .text = "/help", .start = 0, .end = 5, .name = "help", .prefix = "hel" },
+        .{ .text = "é /review, next", .start = 3, .end = 10, .name = "review", .prefix = "revie" },
+    };
+    for (cases) |case| {
+        const rig = try openComposer();
+        defer rig.close();
+        const self = rig.overview;
+        try std.testing.expect(try rig.press(case.text) == null);
+        try self.composer.attachSkill(std.testing.allocator, case.start, case.end, case.name);
+        try self.inlineTestMenuNamed(case.prefix, case.name);
+        self.skill_menu.dismiss(self.composer.edits, self.composer.cursor);
+        try std.testing.expect(try rig.press("\x1b[D") == null);
+        try std.testing.expectEqual(case.end - 1, self.composer.cursor);
+        try std.testing.expect(try self.draw(0) == null);
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expectEqual(@as(usize, 1), self.job_count);
+        try std.testing.expect(self.jobs[0] == .start);
+        const owned = &self.jobs[0].start;
+        try std.testing.expectEqualStrings(case.text, owned.original());
+        try std.testing.expectEqualStrings(case.text, owned.text());
+        try std.testing.expectEqual(@as(usize, 1), owned.skills().len);
+        try std.testing.expectEqualStrings(case.name, owned.skills()[0]);
+        try std.testing.expectEqual(@as(usize, 1), self.state.request_count);
+        try std.testing.expect(self.worker.thread == null); // no Session or body read during selection
+        try std.testing.expect(self.state.panel == null);
+    }
+}
+
+test "inline overview shell pending Escape suppresses hidden Tab until cursor changes" {
+    const rig = try openComposer();
+    defer rig.close();
+    try std.testing.expect(try rig.press("ask /rev") == null);
+    try rig.overview.inlineTestMenu("other");
+    // A different wanted prefix means this current token is pending, even
+    // before the shell schedules its metadata request.
+    try std.testing.expect(try rig.press("\t\r") == null);
+    try std.testing.expectEqualStrings("ask /rev", rig.overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+    try std.testing.expect(try rig.press("\x1b[27u") == null);
+    try std.testing.expectEqualStrings("ask /rev", rig.overview.composerDraft().bytes);
+    try std.testing.expect(rig.overview.composerDraft().skill_choices.?.dismissed);
+    try std.testing.expect(try rig.press("\t") == null);
+    try std.testing.expectEqualStrings("ask /rev\t", rig.overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.attachments().len);
+    try std.testing.expect(try rig.press("\x1b[D") == null);
+    try std.testing.expect(!rig.overview.composerDraft().skill_choices.?.dismissed);
+}
+
+test "inline overview shell metadata scope equals effective held creation Workspace" {
+    const rig = try openComposer();
+    defer rig.close();
+    try std.testing.expectEqualStrings("/work", rig.overview.skillWorkspace());
+    try std.testing.expect(try rig.press("/configure --workspace /effective\r") == null);
+    try std.testing.expectEqualStrings("/effective", rig.overview.skillWorkspace());
+    try std.testing.expect(try rig.press("ask /review") == null);
+    try rig.overview.composer.attachSkill(std.testing.allocator, 4, 11, "review");
+    const own = try (view.StartRequest{ .settings = &rig.overview.state.settings, .text = rig.overview.composerDraft().bytes, .attachments = rig.overview.composer.attachments() }).own(std.testing.allocator);
+    defer own.deinit(std.testing.allocator);
+    var buffer: [20]u8 = undefined;
+    const input = try rig.overview.startInput(&own, &buffer);
+    try std.testing.expectEqualStrings(rig.overview.skillWorkspace(), input.configuration.?.workspace.value);
+    try std.testing.expectEqualStrings("review", input.skills[0]);
+    const revision = rig.overview.composer.edits;
+    rig.overview.resetComposer();
+    try std.testing.expect(rig.overview.composer.edits != revision);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.attachments().len);
+}
+
+test "inline overview shell capacity refusal retains draft cursor revision and marks" {
+    const rig = try openComposer();
+    defer rig.close();
+    rig.overview.composer.buffer = rig.overview.draft[0..14];
+    try std.testing.expect(try rig.press("ask /rev, next\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D\x1b[D") == null);
+    try std.testing.expectEqual(@as(usize, 8), rig.overview.composer.cursor);
+    try rig.overview.inlineTestMenu("rev");
+    try std.testing.expect(try rig.overview.draw(0) == null);
+    const revision = rig.overview.composer.edits;
+    try std.testing.expect(try rig.press("\t") == null);
+    try std.testing.expectEqualStrings("ask /rev, next", rig.overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 8), rig.overview.composer.cursor);
+    try std.testing.expectEqual(revision, rig.overview.composer.edits);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.attachments().len);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+    try std.testing.expect(std.mem.indexOf(u8, rig.overview.state.notice.?.text(), "draft retained") != null);
+}
+
+test "inline overview shell finish joins metadata before freeing attachments and preserves primary failure" {
+    const Borrower = struct {
+        overview: *Self,
+        observed: bool = false,
+
+        fn run(raw: *anyopaque, task: *ClientTask) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), &task.cancellation.stopped, test_poll.isSet);
+            // Record the owner boundary before replying: later test teardown
+            // cannot grant credit for an observation made after finish returned.
+            self.observed = !self.overview.terminal.active and self.overview.composer.attachments().len == 1;
+            return error.MetadataFailure;
+        }
+    };
+    for ([_]bool{ false, true }) |primary| {
+        const rig = try openComposer();
+        defer rig.close();
+        // A negative control may leave the deliberate borrower failure to
+        // this cleanup; retire it without masking the earlier assertion.
+        defer rig.overview.skill_menu.close() catch |err| {
+            std.debug.assert(err == error.MetadataFailure);
+        };
+        try std.testing.expect(try rig.press("ask /review") == null);
+        try rig.overview.composer.attachSkill(std.testing.allocator, 4, 11, "review");
+        try rig.overview.inlineTestMenu("review");
+        var borrower: Borrower = .{ .overview = rig.overview };
+        try rig.overview.skill_menu.task.start(std.testing.io, &borrower, Borrower.run);
+        var buffer: [256]u8 = undefined;
+        _ = try finishedWith(rig, .overview, if (primary) error.TerminalRestoreFailed else {}, if (primary) error.TerminalRestoreFailed else error.MetadataFailure, &buffer);
+        try std.testing.expect(borrower.observed);
+        try std.testing.expect(!rig.overview.skill_menu.busy());
+        try std.testing.expect(rig.overview.skill_menu.allocator == null);
+        try std.testing.expectEqual(@as(usize, 1), rig.overview.composer.attachments().len);
+    }
+}
+
+test "inline overview shell metadata failures retain draft and only notify on changed recoverable results" {
+    const Borrower = struct {
+        overview: *Self,
+        entered: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        failure: anyerror,
+        observed: bool = false,
+
+        fn run(raw: *anyopaque, task: *ClientTask) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.entered.store(true, .release);
+            try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), &self.release, test_poll.isSet);
+            // Observation precedes the reply and cannot be repaired by teardown.
+            self.observed = self.overview.composer.attachments().len == 1 and std.mem.eql(u8, self.overview.composerDraft().bytes, "ask /review /rev");
+            return self.failure;
+        }
+
+        fn completed(task: *ClientTask) bool {
+            return task.completed();
+        }
+    };
+    for ([_]bool{ false, true }) |paused| {
+        for ([_]anyerror{ error.HostInvocationFailed, error.CanonicalStoreFailure }) |failure| {
+            const rig = try openComposer();
+            defer rig.close();
+            var borrower: Borrower = .{ .overview = rig.overview, .failure = failure };
+            defer {
+                borrower.release.store(true, .release);
+                // Retire a deliberate failure even when a negative control
+                // makes the production refresh return before joining it.
+                rig.overview.skill_menu.close() catch |err| std.debug.assert(err == failure);
+            }
+            try std.testing.expect(try rig.press("ask /review /rev") == null);
+            try rig.overview.composer.attachSkill(std.testing.allocator, 4, 11, "review");
+            rig.overview.composer.cursor = rig.overview.composer.length;
+            const revision = rig.overview.composer.edits;
+            try rig.overview.inlineTestMenu(if (paused) "" else "rev");
+            rig.overview.skill_menu.page.?.deinit(std.testing.allocator);
+            rig.overview.skill_menu.page = null;
+            rig.overview.skill_menu.count = 0;
+            rig.overview.skill_menu.wanted_valid = !paused;
+            try rig.overview.skill_menu.task.start(std.testing.io, &borrower, Borrower.run);
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &borrower.entered, test_poll.isSet);
+            if (paused) try rig.overview.pauseSkills() else try rig.overview.refreshSkills();
+            try std.testing.expect(rig.overview.state.notice == null);
+            borrower.release.store(true, .release);
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &rig.overview.skill_menu.task, Borrower.completed);
+            const outcome = if (paused) rig.overview.pauseSkills() else rig.overview.refreshSkills();
+            if (failure == error.CanonicalStoreFailure) {
+                try std.testing.expectError(error.CanonicalStoreFailure, outcome);
+                try std.testing.expect(rig.overview.state.notice == null);
+            } else {
+                const actual_failure: ?anyerror = if (outcome) |_| null else |err| err;
+                try std.testing.expectEqual(@as(?anyerror, null), actual_failure);
+                if (paused) {
+                    try std.testing.expect(rig.overview.state.notice == null);
+                } else {
+                    try std.testing.expectEqualStrings("! Skill suggestions unavailable; draft retained.", rig.overview.state.notice.?.text());
+                    _ = try rig.overview.event(.skill_refused);
+                    try rig.overview.refreshSkills();
+                    try std.testing.expectEqualStrings("! Skill does not fit; draft retained.", rig.overview.state.notice.?.text());
+                }
+            }
+            try std.testing.expect(borrower.observed);
+            try std.testing.expectEqualStrings("ask /review /rev", rig.overview.composerDraft().bytes);
+            try std.testing.expectEqual(@as(usize, 16), rig.overview.composer.cursor);
+            try std.testing.expectEqual(revision, rig.overview.composer.edits);
+            try std.testing.expectEqualSlices(TerminalEditor.Attachment, &.{.{ .start = 4, .end = 11 }}, rig.overview.composer.attachments());
+            try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+            try std.testing.expectEqual(@as(usize, 0), rig.overview.state.request_count);
+            try std.testing.expect(!rig.overview.skill_menu.busy());
+        }
+    }
+}
+
+test "inline overview shell dismissed builtin collision and pending builtin Tab remain literal" {
+    for ([_]bool{ false, true }) |pending| {
+        const rig = try openComposer();
+        defer rig.close();
+        try std.testing.expect(try rig.press("/he") == null);
+        try rig.overview.inlineTestMenuNamed("he", "help");
+        if (pending) {
+            rig.overview.skill_menu.page.?.deinit(std.testing.allocator);
+            rig.overview.skill_menu.page = null;
+            rig.overview.skill_menu.count = 0;
+        }
+        try std.testing.expect(try rig.overview.draw(0) == null);
+        try std.testing.expect(try rig.press("\x1b[27u\t") == null);
+        try std.testing.expectEqualStrings("/he\t", rig.overview.composerDraft().bytes);
+        try std.testing.expectEqual(@as(usize, 0), rig.overview.composer.attachments().len);
+        try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+        try std.testing.expect(view.nextCommands(&rig.overview.state, rig.overview.composerDraft()) == null);
+    }
 }

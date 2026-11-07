@@ -14,6 +14,8 @@ const Terminal = @import("SessionTerminal.zig");
 const Screen = @import("SessionScreen.zig");
 const Frame = @import("TerminalFrame.zig");
 const Editor = @import("TerminalEditor.zig");
+const SkillMenu = @import("SkillMenu.zig");
+const skill_completion = @import("skill_completion.zig");
 const keymap = @import("keymap.zig");
 const overview_view = @import("overview_view.zig");
 const test_poll = @import("test_poll");
@@ -65,6 +67,7 @@ colour: bool,
 /// Inside tmux, Shift-Enter reaches Rui as Enter; composing says so.
 tmux: bool = false,
 input: Input = undefined,
+skill_menu: SkillMenu = .{},
 submission: Submission = undefined,
 /// What the latest /requests page offers to act on, which its list shows
 /// while the page does.
@@ -317,7 +320,8 @@ pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []co
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = if (terminal.notices) |notices| notices.tmux else false };
     terminal.screen.home = self.home;
     self.startInput();
-    self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
+    try self.skill_menu.init(init.gpa, init.io, store, .{ .session = session });
+    self.submission = .{ .allocator = init.gpa, .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     terminal.pump = .{ .context = self, .step = pump };
     defer terminal.pump = null;
     defer self.stop();
@@ -445,6 +449,7 @@ fn stop(self: *Self) void {
     if (self.inspection.command_running) self.interrupted.requestStop();
     self.reader.cancel();
     self.submission.cancel();
+    self.skill_menu.cancel();
 }
 
 fn settle(self: *Self, restored: anyerror!void) Settled {
@@ -456,7 +461,12 @@ fn settle(self: *Self, restored: anyerror!void) Settled {
     // One Enter asked for the reason and the denial: leaving after the
     // reason was accepted still sends the denial, and waits for it.
     if (self.submission.task.thread != null) admission = self.joinAdmission();
-    return .{ .restored = restored, .reader = reader, .admission_error = admission.failure() };
+    var metadata_error: ?anyerror = null;
+    self.skill_menu.close() catch |err| {
+        metadata_error = err;
+    };
+    self.input.deinitAttachments(self.submission.allocator);
+    return .{ .restored = restored, .reader = reader, .admission_error = admission.failure(), .metadata_error = metadata_error };
 }
 
 test "run returns detached on Ctrl-D and leaves the lent terminal begun, with no notice written" {
@@ -573,7 +583,7 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
         var stream: TerminalInput = .{};
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
         self.input.init(&stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .accepted = .{ .kind = case[0], .key = key.* } };
+        self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .accepted = .{ .kind = case[0], .key = key.* } };
         self.submission.close(); // Releasing capture custody cannot erase acceptance.
         var bytes: [512]u8 = undefined;
         var out = std.Io.Writer.fixed(&bytes);
@@ -603,6 +613,7 @@ const Slash = union(enum) {
     discard,
     recover: []const u8,
     wait,
+    skill: []const u8,
     login,
     misused: slash_commands.Name,
     unknown,
@@ -625,7 +636,8 @@ fn parse(text: []const u8) Slash {
         .help => .{ .inspection = .help },
         // The table's /copy words are `reads.Copy`'s own names.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
-        .@"inspect-action", .setup, .configure, .result, .rename, .effort, .skill, .@"reload-skills" => .{ .inspection = .command },
+        .@"inspect-action", .setup, .configure, .result, .rename, .effort, .@"reload-skills" => .{ .inspection = .command },
+        .skill => .{ .skill = command.argument },
         .recover => .{ .recover = command.argument },
         .discard => .discard,
         .wait => .wait,
@@ -663,6 +675,7 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         .exit => self.leaving = .detached,
         .history => |history| self.requestHistory(history),
         .inspection => self.input.queueCommand(text),
+        .skill => |name| try self.beginSkillCommand(name),
         .discard => {
             self.submission.discardRejected() catch {
                 self.notice = "! Cannot discard an unresolved submission; Ctrl-R recovers the original.";
@@ -713,7 +726,7 @@ test "frontend answers local and unknown commands in place and keeps Host comman
     var stream: TerminalInput = .{};
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
     self.input.init(&stream);
-    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+    self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
     const cases = .{
         .{ "/foo bar", "! Unknown command /foo · /help" },
         .{ "/\x1b[2J", "! Unknown command · /help" },
@@ -810,7 +823,7 @@ test "frontend consumed canonical reader and admission failures survive external
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
         self.init.io = std.testing.io;
         self.input.init(&stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         const failure: anyerror = blk: {
             if (admission) {
                 self.submission.intent = .{ .message = self.input.submitText("original B") };
@@ -841,7 +854,7 @@ test "Esc goes back to the overview only when the joined reader leaves nothing t
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .leaving = .returned };
         self.init.io = std.testing.io;
         self.input.init(&stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         // The reader is still running as Esc returns.
         try self.reader.start(std.testing.io, &self, case[0]);
         self.stop();
@@ -865,7 +878,7 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .reading = .{ .phase = phase } };
         self.init.io = std.testing.io;
         self.input.init(&stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = self.input.submitText("current original B") } };
+        self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = self.input.submitText("current original B") } };
         try self.reader.start(std.testing.io, &self, Worker.read);
         try self.submission.task.start(std.testing.io, &self, Worker.admit);
         self.stop();
@@ -895,6 +908,8 @@ fn quiesceUpgrade(self: *Self) !bool {
         self.upgrade_note_shown = false;
         self.upgrade_note_revision +%= 1;
     }
+    self.skill_menu.cancel();
+    if (try self.skill_menu.refresh("", 0, self.input.revision)) self.terminal.screen.commands = null;
     self.submission.retry = null;
     self.submission.cancel();
     if (self.submission.task.thread != null and self.submission.task.completed()) {
@@ -909,7 +924,7 @@ fn quiesceUpgrade(self: *Self) !bool {
     if (self.reading.pending_diagnostic != null and self.reader.thread == null) try self.presentReadDiagnostic(self.terminal);
     try self.startQueuedCommand();
     const lender_ready = if (self.lender.upgrade) |handoff| try handoff(self.lender.context, .quiesce) else true;
-    return lender_ready and self.reader.thread == null and self.submission.task.thread == null;
+    return lender_ready and self.reader.thread == null and self.submission.task.thread == null and !self.skill_menu.busy();
 }
 
 /// Keep completed receipts for the restored terminal, even across retries.
@@ -962,6 +977,7 @@ fn advanceUpgrade(self: *Self) !void {
 }
 
 fn applyUpgrade(self: *Self, outcome: UpgradePanel.Outcome) void {
+    self.skill_menu.invalidate();
     switch (outcome) {
         .unchanged => {},
         .compatible => {
@@ -1057,6 +1073,7 @@ fn driveActive(self: *Self) !void {
             _ = try self.step(16);
             continue;
         }
+        try self.refreshSkills();
         try self.admit();
         if (self.input.queuedCommand()) |text| if (parse(text).inspection == .status) {
             // /status is the next scan's: one capture for the page, the
@@ -1210,7 +1227,13 @@ fn drawFrame(self: *Self) !void {
     var context = std.Io.Writer.fixed(&context_buffer);
     if (screen.actionVisible())
         try approvalContext(&context, screen.actionTopHidden(), self.action_summary)
-    else if (self.tmux and !waiting and view.bytes.len != 0)
+    else if (self.input.attachments().len != 0)
+        try context.print("{d} skill{s} selected · Enter sends · editing a token detaches it", .{ self.input.attachments().len, if (self.input.attachments().len == 1) @as([]const u8, "") else "s" })
+    else if (self.skillChoices()) |choices| {
+        if (!choices.dismissed) {
+            if (choices.pending) try context.writeAll("Finding skills · Esc keeps text literal") else if (choices.total > slash_commands_shared.List.capacity) try context.print("{d} matching skills · type more to narrow · Enter/Tab selects", .{choices.total}) else if (choices.entries.len != 0) try context.writeAll("Enter/Tab selects a skill · Esc keeps text literal");
+        }
+    } else if (self.tmux and !waiting and view.bytes.len != 0)
         try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
     var status_buffer: [Frame.status_capacity]u8 = undefined;
     const status = statusLines(&status_buffer, context.buffered(), base_status, self.line.archive_state);
@@ -1228,19 +1251,85 @@ fn drawFrame(self: *Self) !void {
     // Reading completes only after delivery; the receipt stales the frame.
     const notice_revision = self.upgrade_note_revision;
     const rendered_upgrade = said.text == null and self.notice == null and !screen.actionVisible() and self.upgrade_note_len != 0;
-    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
+    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .attachments = self.input.attachments(), .command = self.commandActive(), .status = status, .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
     _ = screen.presented(delivered);
     if (delivered.notice and rendered_upgrade and notice_revision == self.upgrade_note_revision) self.upgrade_note_shown = true;
+}
+
+fn attachedToken(self: *const Self) bool {
+    const view = self.input.composition();
+    const token = skill_completion.candidate(view.bytes, view.cursor) orelse return false;
+    return token.attached(self.input.attachments());
+}
+
+fn skillChoices(self: *const Self) ?slash_commands_shared.SkillChoices {
+    if (self.attachedToken()) return null;
+    const view = self.input.composition();
+    return self.skill_menu.choices(view.bytes, view.cursor, self.input.revision);
+}
+
+fn refreshSkills(self: *Self) !void {
+    const view = self.input.composition();
+    const attached = self.attachedToken();
+    if (try self.skill_menu.refresh(if (attached) "" else view.bytes, if (attached) 0 else view.cursor, self.input.revision)) {
+        self.terminal.screen.commands = null;
+        self.dirty = true;
+        if (self.skill_menu.failure() != null) self.notice = "! Skill suggestions unavailable. Text remains literal; /skill NAME still works.";
+    }
+}
+
+/// Explicit selection is the only composer action that creates skill intent.
+fn attachSkillEvent(self: *Self, decoded: TerminalInput.Decoded) !bool {
+    if (!Editor.plainTab(decoded) and !Editor.plainEnter(decoded)) return false;
+    const view = self.input.composition();
+    const choices = self.skillChoices() orelse return false;
+    if (choices.dismissed) return false;
+    if (choices.pending) {
+        self.dirty = true;
+        return true;
+    }
+    if (self.shownCommands()) |shown| {
+        const entry = shown.list.entries[shown.highlight];
+        if (entry.kind != .skill) return false;
+        const token = skill_completion.candidate(view.bytes, view.cursor).?;
+        self.input.attachSkill(self.submission.allocator, token.start, token.end, entry.word) catch |err| {
+            self.notice = if (err == error.OutOfMemory) "! Not enough memory to attach skill. Draft retained." else "! Skill selection no longer applies. Draft retained.";
+            self.dirty = true;
+            return true;
+        };
+        self.skill_menu.dismiss(self.input.revision, self.input.composition().cursor);
+        self.terminal.screen.commands = null;
+        self.dirty = true;
+        return true;
+    }
+    if (choices.pending or choices.entries.len != 0) {
+        self.dirty = true;
+        return true;
+    }
+    return false;
 }
 
 /// The list above the draft as it is now, after `previous`: the commands
 /// its command word starts, or the choices for the word typed after one.
 /// Null when nothing matches.
 fn nextCommands(self: *Self, previous: ?slash_commands_shared.Shown) ?slash_commands_shared.Shown {
+    if (self.attachedToken()) return null;
     // The Session's model offers its efforts once a read names it.
     const context: slash_commands_shared.Context = if (self.line.read != null) .{ .model = self.line.model.slice(), .effort = self.line.effort } else .{};
-    const draft = self.input.composition().bytes;
-    if (draft.len != 0) return slash_commands_shared.Shown.next(previous, self.input.revision, slash_commands.suggest(draft, context));
+    const view = self.input.composition();
+    const draft = view.bytes;
+    if (self.skillChoices()) |choices| {
+        if (choices.dismissed) return null;
+        const token = skill_completion.candidate(draft, view.cursor).?;
+        const selected_leading = self.input.attachments().len != 0 and self.input.attachments()[0].start == 0;
+        const builtin = if (token.start == 0 and view.cursor == draft.len and !selected_leading) slash_commands.suggest(draft, context) else null;
+        const list = slash_commands_shared.withSkills(builtin, draft[token.start..view.cursor], choices.entries);
+        return slash_commands_shared.Shown.nextAt(previous, self.input.revision, view.cursor, token.start, token.end, choices.generation, list);
+    }
+    if (draft.len != 0) {
+        if (self.input.attachments().len != 0 and self.input.attachments()[0].start == 0) return null;
+        return slash_commands_shared.Shown.next(previous, self.input.revision, slash_commands.suggest(draft, context));
+    }
     // The rows change without the draft: other rows are another list.
     const rows = self.requestList() orelse return null;
     var named = std.hash.Wyhash.init(0);
@@ -1292,6 +1381,15 @@ fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
     // The editor lends back the frontend `startInput` registered, whose
     // rows' lines this writes.
     const self: *Self = @ptrCast(@alignCast(@constCast(context)));
+    if (self.attachedToken()) return null;
+    if (self.skillChoices()) |choices| {
+        if (choices.dismissed) return null;
+        if (choices.pending) return "";
+        const shown = self.shownCommands() orelse return if (choices.entries.len != 0) "" else null;
+        if (shown.list.entries[shown.highlight].kind == .skill) return "";
+        return shown.completion();
+    }
+    if (self.input.attachments().len != 0 and self.input.attachments()[0].start == 0) return null;
     if (draft.len == 0) {
         const rows = self.nextCommands(self.terminal.screen.commands) orelse return null;
         return rows.completion();
@@ -1504,6 +1602,25 @@ fn perform(self: *Self, action: ConversationAction) !void {
         return;
     }
     const screen = self.terminal.screen;
+    if (screen.inputRow() == .draft) {
+        const view = self.input.composition();
+        if (self.skillChoices()) |choices| {
+            if (!choices.dismissed) {
+                if (action == .close) {
+                    self.skill_menu.dismiss(self.input.revision, view.cursor);
+                    screen.commands = null;
+                    self.dirty = true;
+                    return;
+                }
+                if ((action == .previous or action == .next or action == .scroll_up or action == .scroll_down) and
+                    (choices.pending or choices.entries.len != 0) and self.shownCommands() == null)
+                {
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
+    }
     switch (action) {
         // A shown list takes the arrows, as the overview's model list does.
         .previous, .next => if (if (screen.inputRow() == .draft) self.shownCommands() else null) |shown| {
@@ -1879,6 +1996,7 @@ fn reasonNotice(self: *const Self, letter: bool) []const u8 {
 /// denies the Action.
 fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
+    if (try self.attachSkillEvent(decoded)) return;
     const submission = self.submission.view();
     // Only the first key after an offered frame carries an offer, so the
     // geometry probe runs at most once per frame.
@@ -1892,7 +2010,17 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
         .command = self.commandActive(),
         .original = if (submission) |value| (if (value.kind == .decision) .decision else .message) else .none,
     });
-    if (Editor.select(conversation_keys, decoded) == .enter and self.startChange()) return;
+    if (Editor.select(conversation_keys, decoded) == .enter) {
+        const view = self.input.composition();
+        const marks = self.input.attachments();
+        if (marks.len != 0 and marks[0].start != 0 and view.bytes.len != 0 and view.bytes[0] == '/' and
+            !std.mem.startsWith(u8, view.bytes, "//"))
+        {
+            self.notice = "! Command has selected skills. Remove them or send literal text with //. Draft retained.";
+            return;
+        }
+        if (self.startChange()) return;
+    }
     switch (self.input.applySelected(conversation_keys, decoded, allowed)) {
         .message => |ticket| if (reason) |denial| {
             // Consumption precedes fallible submission. The Message goes
@@ -1925,15 +2053,39 @@ fn commandLine(self: *Self) !void {
         const taken = shown.list.enter(shown.highlight);
         switch (self.input.append(taken.rest)) {
             .refused => |why| self.notice = refusedNotice(why),
-            else => if (taken.runs) {
-                defer if (!self.upgradeHeld()) self.input.clear();
-                try self.slashCommand(self.input.composition().bytes);
-            },
+            else => if (taken.runs) try self.runCommandDraft(),
         }
-    } else {
-        defer if (!self.upgradeHeld()) self.input.clear();
-        try self.slashCommand(self.input.composition().bytes);
+    } else try self.runCommandDraft();
+}
+
+fn runCommandDraft(self: *Self) !void {
+    const text = self.input.composition().bytes;
+    if (parse(text) == .skill) {
+        try self.beginSkillCommand(parse(text).skill);
+        return;
     }
+    defer if (!self.upgradeHeld()) self.input.clear();
+    try self.slashCommand(text);
+}
+
+fn beginSkillCommand(self: *Self, name: []const u8) !void {
+    if (self.upgradeHeld()) {
+        self.notice = upgrade_recovery;
+        return;
+    }
+    const original = self.submission.view();
+    const allowed = ConsentPolicy.messageAllowed(self.terminal.screen.consent, false, .{
+        .opening = self.reading.opening,
+        .permission_preparing = self.reading.phase == .permission,
+        .command = self.commandActive(),
+        .original = if (original) |value| (if (value.kind == .decision) .decision else .message) else .none,
+    });
+    if (!allowed or original != null) {
+        self.notice = "! Input still pending. Skill command retained; resolve the original or Action first.";
+        return;
+    }
+    const ticket = self.input.sealCommand();
+    try self.beginMessage(.{ .skill_message = .{ .ticket = ticket, .name = name } });
 }
 
 fn refusedNotice(why: keymap.Refusal) []const u8 {
@@ -2051,6 +2203,7 @@ fn settleReader(self: *Self) !void {
     } else if (end == .complete and (self.reading.phase == .details or self.reading.phase == .inspection)) {
         if (self.reading.phase != .details or self.admission.details_sent == self.admission.sent) try self.showInspection();
         self.inspection.command_running = false; // Shown; exit no longer prints it.
+        if (self.reading.phase == .inspection and self.inspection.kind == .command) self.skill_menu.invalidate();
         // A /setup run over the page may have changed the defaults it shows.
         if (self.reading.phase == .inspection and self.inspection.kind == .command and self.statusShown()) {
             self.inspection.defaults = savedDefaults(self.home);
@@ -2260,7 +2413,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             try self.reader.start(std.testing.io, &self, Worker.idle);
             try self.reader.join();
             self.input.init(&stream);
-            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+            self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
             self.stop();
             const settled = self.settle({});
             for ([_]anyerror{ error.WriteFailed, error.SystemResources }) |cause|
@@ -2630,7 +2783,7 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page, .actions = .{ actions, actions } }, .command = undefined, .terminal = &terminal, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         self.init.io = std.testing.io;
         self.input.init(&self.terminal.stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         try screen.latest();
         screen.action_view = .{ .io = std.testing.io, .file = page };
         self.live.work.first_action = 7;
@@ -2746,10 +2899,11 @@ const HeldFrontend = struct {
         const directory = try held.tmp.dir.realPath(std.testing.io, &held.directory);
         held.self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = held.directory[0..directory], .files = undefined, .command = undefined, .terminal = &held.terminal, .interrupted = &held.interrupted, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         held.self.init.io = std.testing.io;
+        held.self.init.gpa = std.testing.allocator;
         held.self.live.work = .{};
         held.terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = pipes[0][0], .output = pipes[1][1], .pump = .{ .context = held, .step = pumpHeld } };
         held.self.startInput();
-        held.self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = held.self.directory, .input = &held.self.input, .environment = .empty };
+        held.self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = "unused", .session = "unused", .directory = held.self.directory, .input = &held.self.input, .environment = .empty };
         return held;
     }
 
@@ -2757,6 +2911,8 @@ const HeldFrontend = struct {
         held.self.submission.cancel();
         _ = held.self.submission.join();
         held.self.submission.close();
+        held.self.skill_menu.close() catch unreachable;
+        held.self.input.deinitAttachments(std.testing.allocator);
         for (held.pipes) |pipe| for (pipe) |fd| {
             _ = std.c.close(fd);
         };
@@ -4171,7 +4327,7 @@ test "a details page read before a Message was sent never covers it" {
             self.submission.cancel();
             _ = self.submission.join();
             self.submission.close();
-            self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .input = &self.input, .environment = .empty };
+            self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .input = &self.input, .environment = .empty };
             self.input.init(&self.terminal.stream);
         }
         Worker.release.store(true, .release);
@@ -4717,7 +4873,7 @@ test "upgrade command stays local and preserves the actual draft cursor and orig
     var stream: TerminalInput = .{};
     self.input.init(&stream);
     const original = self.input.submitText("original indeterminate model input");
-    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('K'), .retry = @splat('K') };
+    self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('K'), .retry = @splat('K') };
     _ = self.input.append("/upgrade");
     const before = self.input.composition();
     const revision = self.input.revision;
@@ -4734,6 +4890,61 @@ test "upgrade command stays local and preserves the actual draft cursor and orig
     try std.testing.expectEqualStrings(&@as([36]u8, @splat('K')), &self.submission.view().?.key);
     try std.testing.expectEqual(Submission.State.unconfirmed, self.submission.view().?.state);
     try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
+}
+
+test "inline session upgrade quiescence drains metadata without spending marks or delivery credit" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const original = held.self.input.submitText("retained original");
+    held.self.submission.intent = .{ .message = original };
+    held.self.submission.state = .unconfirmed;
+    held.self.submission.key = @splat('K');
+    _ = held.self.input.append("/demo");
+    try held.self.input.attachSkill(std.testing.allocator, 0, 5, "demo");
+    const revision = held.self.input.revision;
+    const cursor = held.self.input.composition().cursor;
+    try fixtureSkillMenu(&held.self, "demo", "demo");
+    const Borrower = struct {
+        release: std.Io.Event = .unset,
+        fn run(raw: *anyopaque, task: *Task) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            gate.release.waitUncancelable(task.io);
+        }
+        fn completed(task: *Task) bool {
+            return task.completed();
+        }
+    };
+    var borrower: Borrower = .{};
+    defer {
+        borrower.release.set(std.testing.io);
+        held.self.skill_menu.task.join() catch unreachable;
+    }
+    held.self.upgrade_requested = true;
+    try held.self.skill_menu.task.start(std.testing.io, &borrower, Borrower.run);
+    try std.testing.expect(!try held.self.quiesceUpgrade());
+    try std.testing.expect(held.self.skill_menu.busy());
+    try std.testing.expect(held.self.skill_menu.task.cancellation.stopped.load(.acquire));
+    try std.testing.expect(!held.self.upgrade_job.started);
+    try std.testing.expect(!held.self.upgrade_note_shown);
+    try std.testing.expectEqualStrings("Upgrade: waiting for client work · Esc cancels", held.self.upgrade_note[0..held.self.upgrade_note_len]);
+    borrower.release.set(std.testing.io);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(5)), &held.self.skill_menu.task, Borrower.completed);
+    try std.testing.expect(try held.self.quiesceUpgrade());
+    try std.testing.expect(!held.self.skill_menu.busy());
+    try std.testing.expect(try held.self.quiesceUpgrade());
+    try std.testing.expect(!held.self.skill_menu.busy());
+    try std.testing.expectEqualStrings("/demo", held.self.input.composition().bytes);
+    try std.testing.expectEqual(cursor, held.self.input.composition().cursor);
+    try std.testing.expectEqual(revision, held.self.input.revision);
+    try std.testing.expectEqual(@as(usize, 1), held.self.input.attachments().len);
+    try std.testing.expectEqualStrings("retained original", try held.self.input.message(original));
+    try std.testing.expectEqual(Submission.State.unconfirmed, held.self.submission.view().?.state);
+    const note_revision = held.self.upgrade_note_revision;
+    held.self.upgrade_running = true;
+    held.self.upgrade_note_shown = true;
+    try std.testing.expect(try held.self.quiesceUpgrade());
+    try std.testing.expectEqual(note_revision, held.self.upgrade_note_revision);
+    try std.testing.expect(held.self.upgrade_note_shown);
 }
 
 test "cancelling a quiescing upgrade keeps the draft without starting a worker" {
@@ -4760,7 +4971,7 @@ test "upgrade outcomes retain Unicode draft cursor selection and unresolved orig
             var stream: TerminalInput = .{};
             self.input.init(&stream);
             const original = self.input.submitText("the original request");
-            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('H') };
+            self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('H') };
             for ("next é!\x1b[D") |byte| _ = self.input.feed(byte);
             const draft = self.input.composition();
             const revision = self.input.revision;
@@ -4795,7 +5006,7 @@ test "upgrade quiescing reobservation and protocol holds refuse a fresh Message 
         self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false }, .upgrade_requested = hold == 0, .upgrade_reobserving = hold == 1, .upgrade_blocked = hold == 2 };
         var stream: TerminalInput = .{};
         self.input.init(&stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        self.submission = .{ .allocator = std.testing.allocator, .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         _ = self.input.append("never send before safe reattachment");
         try self.draftEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }, null);
         try std.testing.expect(self.submission.view() == null);
@@ -5270,4 +5481,273 @@ test "upgrade reobservation retains a refused archive command from the completio
         try std.testing.expectEqual(@as(usize, 0), overview.host_inputs);
         try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
     }
+}
+
+fn fixtureSkillMenu(frontend: *Self, prefix: []const u8, name: []const u8) !void {
+    const gpa = std.testing.allocator;
+    try frontend.skill_menu.init(gpa, std.testing.io, "unused", .{ .session = "k7m2qx" });
+    const entries = try gpa.alloc(@import("skill_suggestions.zig").Entry, 1);
+    entries[0] = .{ .name = try gpa.dupe(u8, name), .description = try gpa.dupe(u8, "fixture skill") };
+    frontend.skill_menu.page = .{ .entries = entries, .revision = 1, .total = 1 };
+    frontend.skill_menu.wanted_valid = true;
+    try frontend.skill_menu.wanted.set(prefix);
+    frontend.skill_menu.generation = 1;
+    frontend.skill_menu.count = 1;
+    const shown = try std.fmt.bufPrint(&frontend.skill_menu.words[0], "/{s}", .{name});
+    frontend.skill_menu.entries[0] = .{ .kind = .skill, .word = entries[0].name, .shown = shown, .description = entries[0].description, .runs = false };
+}
+
+const SkillEntropyFailure = struct {
+    fn random(_: ?*anyopaque, _: []u8) std.Io.RandomSecureError!void {
+        return error.EntropyUnavailable;
+    }
+};
+
+test "inline session drawn Tab replaces the middle UTF8 token and second Enter seals names" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "é /de, suffix");
+    for (0..8) |_| try sendKeys(self, "\x1b[D");
+    try std.testing.expectEqual(@as(usize, 6), self.input.composition().cursor);
+    try fixtureSkillMenu(self, "de", "demo");
+    try held.settle();
+    try sendKeys(self, "\t");
+    try std.testing.expectEqualStrings("é /demo, suffix", self.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 8), self.input.composition().cursor);
+    try std.testing.expectEqual(@as(usize, 1), self.input.attachments().len);
+    try std.testing.expect(self.submission.view() == null);
+    var vtable = std.testing.io.vtable.*;
+    vtable.randomSecure = SkillEntropyFailure.random;
+    self.submission.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    try std.testing.expectError(error.EntropyUnavailable, sendKeys(self, "\r"));
+    const ticket = self.submission.intent.?.message;
+    const names = try self.input.skillNames(ticket, std.testing.allocator);
+    defer std.testing.allocator.free(names);
+    try std.testing.expectEqual(@as(usize, 1), names.len);
+    try std.testing.expectEqualStrings("demo", names[0]);
+    try std.testing.expectEqualStrings("é /demo, suffix", try self.input.message(ticket));
+    try sendKeys(self, "next");
+    try std.testing.expectEqualStrings("demo", names[0]);
+}
+
+test "inline session attached tokens stay out of completion after caret movement and unrelated edits" {
+    for ([_]bool{ false, true }) |leading| {
+        for ([_]bool{ false, true }) |edited| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            const self = &held.self;
+            const text = if (leading) "/help" else "ask /demo, later";
+            const name = if (leading) "help" else "demo";
+            const start: usize = if (leading) 0 else 4;
+            const end = start + 5;
+            try sendKeys(self, text);
+            try self.input.attachSkill(std.testing.allocator, start, end, name);
+            try fixtureSkillMenu(self, if (leading) "he" else "de", if (leading) "hello" else "delete");
+            self.skill_menu.dismiss(self.input.revision, end);
+            if (edited) {
+                for (end..text.len) |_| try sendKeys(self, "\x1b[C");
+                try sendKeys(self, "!");
+            }
+            const cursor = start + 3;
+            const at = self.input.composition().cursor;
+            for (cursor..at) |_| try sendKeys(self, "\x1b[D");
+            try std.testing.expectEqual(cursor, self.input.composition().cursor);
+            try std.testing.expect(self.nextCommands(null) == null);
+            try std.testing.expect(tabCompletion(self, self.input.composition().bytes) == null);
+            try std.testing.expect(!try self.attachSkillEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }));
+            var vtable = std.testing.io.vtable.*;
+            vtable.randomSecure = SkillEntropyFailure.random;
+            self.submission.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+            try std.testing.expectError(error.EntropyUnavailable, sendKeys(self, "\r"));
+            const ticket = self.submission.intent.?.message;
+            const names = try self.input.skillNames(ticket, std.testing.allocator);
+            defer std.testing.allocator.free(names);
+            try std.testing.expectEqual(@as(usize, 1), names.len);
+            try std.testing.expectEqualStrings(name, names[0]);
+            var expected: [32]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{s}{s}", .{ text, if (edited) @as([]const u8, "!") else "" }), try self.input.message(ticket));
+            try std.testing.expect(self.input.queuedCommand() == null);
+        }
+    }
+}
+
+test "inline session Tab inside an attached builtin spelling is ordinary editor input" {
+    for ([_]bool{ false, true }) |at_end| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try sendKeys(self, "/help");
+        try self.input.attachSkill(std.testing.allocator, 0, 5, "help");
+        try fixtureSkillMenu(self, if (at_end) "help" else "he", if (at_end) "help" else "hello");
+        self.skill_menu.dismiss(self.input.revision, 5);
+        if (!at_end) try sendKeys(self, "\x1b[D\x1b[D");
+        try sendKeys(self, "\t");
+        try std.testing.expectEqualStrings(if (at_end) "/help\t" else "/he\tlp", self.input.composition().bytes);
+        try std.testing.expectEqual(@as(usize, if (at_end) 6 else 4), self.input.composition().cursor);
+        try std.testing.expectEqual(@as(usize, if (at_end) 1 else 0), self.input.attachments().len);
+        try std.testing.expect(self.submission.view() == null);
+        try std.testing.expect(self.input.queuedCommand() == null);
+    }
+}
+
+test "inline session a selected leading skill does not block a different completion target" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "/help /de");
+    try self.input.attachSkill(std.testing.allocator, 0, 5, "help");
+    for (0..4) |_| try sendKeys(self, "\x1b[C");
+    try fixtureSkillMenu(self, "de", "demo");
+    try held.settle();
+    try sendKeys(self, "\t");
+    try std.testing.expectEqualStrings("/help /demo", self.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 2), self.input.attachments().len);
+    var vtable = std.testing.io.vtable.*;
+    vtable.randomSecure = SkillEntropyFailure.random;
+    self.submission.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    try std.testing.expectError(error.EntropyUnavailable, sendKeys(self, "\r"));
+    const names = try self.input.skillNames(self.submission.intent.?.message, std.testing.allocator);
+    defer std.testing.allocator.free(names);
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expectEqualStrings("help", names[0]);
+    try std.testing.expectEqualStrings("demo", names[1]);
+}
+
+test "inline session pending hidden cursor and catalog changes cannot select or send" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "use /de");
+    try fixtureSkillMenu(self, "de", "demo");
+    try sendKeys(self, "\t\r");
+    try std.testing.expectEqualStrings("use /de", self.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 0), self.input.attachments().len);
+    try std.testing.expect(self.submission.view() == null);
+    try held.settle();
+    try sendKeys(self, "\x1b[D\r");
+    try std.testing.expectEqual(@as(usize, 0), self.input.attachments().len);
+    try std.testing.expect(self.submission.view() == null);
+    try sendKeys(self, "\x1b[C");
+    try held.settle();
+    self.skill_menu.generation += 1;
+    try sendKeys(self, "\r");
+    try std.testing.expectEqual(@as(usize, 0), self.input.attachments().len);
+    try std.testing.expect(self.submission.view() == null);
+    try self.perform(.close);
+    try std.testing.expect(self.skill_menu.choices(self.input.composition().bytes, self.input.composition().cursor, self.input.revision).?.dismissed);
+    try std.testing.expectEqualStrings("use /de", self.input.composition().bytes);
+}
+
+test "inline session command skill collision keeps explicit roles and selected leading intent" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "/he");
+    try fixtureSkillMenu(self, "he", "help");
+    try held.settle();
+    const shown = self.shownCommands().?;
+    try std.testing.expectEqual(@as(usize, 2), shown.list.count);
+    try std.testing.expectEqual(.command, shown.list.entries[0].kind);
+    try std.testing.expectEqual(.skill, shown.list.entries[1].kind);
+    try self.perform(.next);
+    try sendKeys(self, "\r");
+    try std.testing.expectEqualStrings("/help", self.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 1), self.input.attachments().len);
+    try std.testing.expect(self.input.queuedCommand() == null);
+    try std.testing.expect(self.submission.view() == null);
+}
+
+test "inline session unmarked builtin refuses to discard other selected skills" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "/status /demo");
+    try self.input.attachSkill(std.testing.allocator, 8, 13, "demo");
+    try sendKeys(self, "\r");
+    try std.testing.expectEqualStrings("/status /demo", self.input.composition().bytes);
+    try std.testing.expect(self.input.queuedCommand() == null);
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expect(std.mem.startsWith(u8, self.notice.?, "! Command has selected skills"));
+}
+
+test "inline session legacy skill command uses retained submission and original bank" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "/skill demo");
+    var vtable = std.testing.io.vtable.*;
+    vtable.randomSecure = SkillEntropyFailure.random;
+    self.submission.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    try std.testing.expectError(error.EntropyUnavailable, sendKeys(self, "\r"));
+    const intent = self.submission.intent.?.skill_message;
+    try std.testing.expectEqualStrings("demo", intent.name);
+    try std.testing.expectEqualStrings("/skill demo", try self.input.message(intent.ticket));
+    try std.testing.expect(self.input.queuedCommand() == null);
+    try sendKeys(self, "next draft");
+    try std.testing.expectEqualStrings("demo", intent.name);
+    try std.testing.expectEqualStrings("next draft", self.input.composition().bytes);
+}
+
+test "inline session Enter replaces the whole token beyond a middle cursor" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "é /debug, suffix");
+    for (0..11) |_| try sendKeys(self, "\x1b[D");
+    try std.testing.expectEqual(@as(usize, 6), self.input.composition().cursor);
+    try fixtureSkillMenu(self, "de", "demo");
+    try held.settle();
+    try sendKeys(self, "\r");
+    try std.testing.expectEqualStrings("é /demo, suffix", self.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 8), self.input.composition().cursor);
+    try std.testing.expectEqual(@as(usize, 1), self.input.attachments().len);
+    try std.testing.expect(self.submission.view() == null);
+}
+
+test "inline session busy legacy skill command retains the whole draft" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "/skill demo");
+    self.reading.opening = true;
+    try sendKeys(self, "\r");
+    try std.testing.expectEqualStrings("/skill demo", self.input.composition().bytes);
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expect(self.input.queuedCommand() == null);
+}
+
+test "inline session legacy skill command obeys permission preparation blocker" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "/skill demo");
+    self.reading.phase = .permission;
+    var vtable = std.testing.io.vtable.*;
+    vtable.randomSecure = SkillEntropyFailure.random;
+    self.submission.io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    try sendKeys(self, "\r");
+    try std.testing.expectEqualStrings("/skill demo", self.input.composition().bytes);
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expect(self.input.queuedCommand() == null);
+}
+
+test "inline session pending metadata blocks drawn builtin Enter and Tab" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try sendKeys(self, "/he");
+    try fixtureSkillMenu(self, "he", "help");
+    self.skill_menu.page.?.deinit(std.testing.allocator);
+    self.skill_menu.page = null;
+    self.skill_menu.count = 0;
+    try held.settle();
+    try std.testing.expectEqual(.command, self.shownCommands().?.list.entries[0].kind);
+    try sendKeys(self, "\t");
+    try std.testing.expectEqualStrings("/he", self.input.composition().bytes);
+    try sendKeys(self, "\r");
+    try std.testing.expectEqualStrings("/he", self.input.composition().bytes);
+    try std.testing.expect(self.input.queuedCommand() == null);
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expect(self.leaving == null);
 }

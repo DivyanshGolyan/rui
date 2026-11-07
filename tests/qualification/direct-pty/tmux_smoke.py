@@ -152,6 +152,12 @@ def smoke(fixture, row):
         terminal.call("set-buffer", "--", payload.decode())
         terminal.call("paste-buffer", "-p", "-t", "td4:0.0")
         terminal.call("send-keys", "-t", "td4:0.0", "Enter")
+    elif row["name"] == "tmux-status":
+        # Keep the inventory's command bytes, but explicitly dismiss pending
+        # metadata at this fixture-control submit boundary (not a key vector).
+        assert payload == b"/status\r", payload
+        terminal.call("send-keys", "-t", "td4:0.0", "-H", *(f"{byte:02x}" for byte in payload[:-1]))
+        terminal.call("send-keys", "-t", "td4:0.0", "C-g", "Enter")
     else:
         if row["name"] == "tmux-resize":
             terminal.call("resize-window", "-t", "td4:0", "-x", "32", "-y", "12")
@@ -172,5 +178,6 @@ def smoke(fixture, row):
         terminal.wait(lambda text: "TD4 tmux answer" in text, "answer")
         assert_submitted(fixture.endpoint.requests, [row["expected"]])
     terminal.call("send-keys", "-t", "td4:0.0", "-l", "/exit")
-    terminal.call("send-keys", "-t", "td4:0.0", "Enter")
+    # Fixture control explicitly dismisses pending skill choices before Enter.
+    terminal.call("send-keys", "-t", "td4:0.0", "C-g", "Enter")
     terminal.finish()

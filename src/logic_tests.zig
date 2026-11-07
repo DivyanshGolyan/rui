@@ -66,6 +66,7 @@ const cores = .{
     .{ "session_line.zig", @import("session_line.zig") },
     .{ "session_work.zig", @import("session_work.zig") },
     .{ "session_archive.zig", @import("session_archive.zig") },
+    .{ "skill_completion.zig", @import("skill_completion.zig") },
     .{ "slash_commands.zig", @import("slash_commands.zig") },
     .{ "status_page.zig", @import("status_page.zig") },
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },

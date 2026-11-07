@@ -251,6 +251,16 @@ A repository skill wins a same-name home skill; other roots, including `.claude`
 Each skill directory contains a `SKILL.md` with required YAML `name` and `description`.
 Optional metadata cannot grant permissions or tools; `disable-model-invocation` is ignored.
 
+In either composer, type `/` at a word boundary, including in the middle of your prompt, to see matching skills alongside commands.
+Use the arrows to choose a Skill row, then Enter or Tab to attach it.
+Selected tokens are underlined; Enter again sends your text and all selected skills in one Message.
+Repeating a selected name includes its file only once, in first textual order.
+Editing a selected token detaches it; pasting or typing a name alone never attaches it.
+Esc dismisses the suggestions without attaching anything.
+Leading slash commands retain their command meaning; use `//` to send literal leading-slash prose.
+
+Ctrl-P recalls the authored prompt, without expanded skill bodies or restored selections.
+Historical skill-only messages saved before authored-prompt tracking retain their best-available expanded text.
 Use `/skill NAME` to send the full current `SKILL.md` and its absolute path as ordinary conversation input.
 The model can invoke the `skill` tool when your chosen tool set includes it.
 Skills run nothing on load and do not bypass approvals.
