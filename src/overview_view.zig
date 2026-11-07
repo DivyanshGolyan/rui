@@ -2829,6 +2829,8 @@ pub const Screen = struct {
     /// It drew the spinner, which changes with the frame: the shell draws
     /// the next one in `spin_interval_ms`.
     spins: bool = false,
+    /// The complete ordinary notice was rendered in this frame.
+    notice_visible: bool = false,
     depth: Caps.Depth = .none,
     skin: Skin = .night,
 
@@ -3064,6 +3066,11 @@ pub fn render(gpa: Allocator, state: *const State, draft: Draft, caps: Caps, fra
         const hinted = height - hintRows(state);
         try composer(&painter, state, draft, &input, lines[at.commands.end..hinted]);
         lines[hinted] = try hints(&painter, state, draft, at.commands.len() != 0);
+        if (state.notice) |*notice| {
+            screen.notice_visible = state.prompt == null and state.shownPicker() == null and
+                std.mem.indexOfScalar(u8, notice.text(), '\n') == null and
+                gwidth.gwidth(notice.firstLine(), caps.width) <= width -| 2;
+        }
         // A notice's further lines follow its first.
         if (hinted + 1 < height) {
             const notice = &state.notice.?;
@@ -4275,6 +4282,26 @@ const kind_cases = [_]struct { state: WorkState, heading: []const u8, unicode: [
     .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .heading = " Stopped or failed", .unicode = "  × Write the notes                                                          3h", .ascii = "  x Write the notes                                                          3h", .colour = .failure, .stoppable = false },
     .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .heading = " Stopped or failed", .unicode = "  ■ Write the notes                                                          2d", .ascii = "  # Write the notes                                                          2d", .colour = .normal, .stoppable = false },
 };
+
+test "overview receipt does not credit a hidden or clipped notice" {
+    var state: State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+    defer state.deinit();
+    var notice: Notice = .{ .colour = .normal };
+    const text = "Upgrade installed; Host ready";
+    @memcpy(notice.bytes[0..text.len], text);
+    notice.len = text.len;
+    state.notice = notice;
+    var tiny = try sizedRender(&state, .{}, 5, 5, .{}, 0);
+    defer tiny.deinit();
+    try std.testing.expect(!tiny.notice_visible);
+    var narrow = try sizedRender(&state, .{}, 12, 24, .{}, 0);
+    defer narrow.deinit();
+    try std.testing.expect(!narrow.notice_visible);
+    var full = try sizedRender(&state, .{}, 80, 24, .{}, 0);
+    defer full.deinit();
+    try std.testing.expect(full.notice_visible);
+}
 
 test "every work state follows the rules table, in Unicode and ASCII" {
     comptime std.debug.assert(kind_cases.len == std.enums.values(Kind).len);
@@ -7488,7 +7515,7 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
         " /setup [OPTIONS]      future defaults",
         " /unarchive            restore the selected Session without restarting work",
         " /undo                 restore the last Session archived here",
-        " /upgrade              check stable Rui; install restarts this Store's Host",
+        " /upgrade              install stable Rui; may restart this Store's Host",
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
     try std.testing.expect(std.mem.indexOf(u8, shown, label) == null);
     // The line under the input says Esc closes it, over held settings or a

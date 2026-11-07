@@ -1,26 +1,16 @@
+//! The /upgrade command's joined worker. The owner keeps this value at a
+//! stable address from begin through completion and continues servicing input.
 const std = @import("std");
-const vaxis = @import("vaxis");
-const client = @import("client.zig");
 const upgrade = @import("upgrade.zig");
 const ClientTask = @import("ClientTask.zig");
-const SessionScreen = @import("SessionScreen.zig");
-const SessionTerminal = @import("SessionTerminal.zig");
-const TerminalInput = @import("TerminalInput.zig");
-const TerminalText = @import("TerminalText.zig");
-const TerminalEditor = @import("TerminalEditor.zig");
-const View = @import("session_view.zig");
-const stderr = @import("stderr.zig");
 const Self = @This();
 
 pub const Outcome = enum { unchanged, compatible, incompatible };
 const Operation = enum { check, install };
 
-init: std.process.Init,
-store: []const u8,
-allocator: std.mem.Allocator,
-terminal: *SessionTerminal,
-interrupted: *client.Cancellation,
-screen: *SessionScreen,
+init: std.process.Init = undefined,
+store: []const u8 = "",
+allocator: std.mem.Allocator = undefined,
 task: ClientTask = .{},
 phase: std.atomic.Value(upgrade.Phase) = .init(.checking),
 operation: Operation = .check,
@@ -30,82 +20,22 @@ cleanup: upgrade.CleanupReceipts = .{},
 failure: ?anyerror = null,
 outcome: Outcome = .unchanged,
 cancelling: bool = false,
-close: bool = false,
-install_requested: bool = false,
-offered: bool = false,
-dirty: bool = true,
-shown_phase: ?upgrade.Phase = null,
+started: bool = false,
+finished: bool = false,
 
-pub fn run(init: std.process.Init, store: []const u8, terminal: *SessionTerminal, interrupted: *client.Cancellation) !Outcome {
-    var arena: std.heap.ArenaAllocator = .init(init.gpa);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const screen = try allocator.create(SessionScreen);
-    try screen.init(init.io, init.environ_map, terminal.screen.colour);
-    defer screen.deinit();
-    screen.setWidth(terminal.screen.vx.caps.unicode);
-    screen.view = .inspection;
-    const original = terminal.screen;
-    const pump_before = terminal.pump;
-    var self: Self = .{ .init = init, .store = store, .allocator = allocator, .terminal = terminal, .interrupted = interrupted, .screen = screen };
-    defer self.dispose();
-    terminal.screen = screen;
-    terminal.pump = .{ .context = &self, .step = pump };
-    defer {
-        terminal.screen = original;
-        terminal.pump = pump_before;
-        original.vx.queueRefresh();
-    }
-    try self.task.start(init.io, &self, work);
-    const driven: anyerror!void = self.drive() catch |err| if (err == error.InteractiveInterrupted and self.close) {} else err;
-    const restored: anyerror!void = if (std.meta.isError(driven)) terminal.finish() else {};
-    self.task.cancel();
-    const joined = self.task.join();
-    var report: std.Io.Writer.Allocating = .init(allocator);
-    defer report.deinit();
-    const finalized = self.finalize(restored, driven, joined, &report.writer);
-    if (report.written().len != 0) stderr.diagnosticBytes(report.written());
-    if (finalized.report_failure) |err| stderr.diagnostic("rui: Upgrade exit receipt could not be completely rendered ({s}).\n", .{@errorName(err)});
-    return finalized.outcome;
-}
-
-const Finalization = struct {
-    outcome: anyerror!Outcome,
-    report_failure: ?anyerror,
-};
-
-fn finalize(self: *const Self, restored: anyerror!void, driven: anyerror!void, joined: anyerror!void, writer: *std.Io.Writer) Finalization {
-    std.debug.assert(self.task.thread == null);
-    const outcome: anyerror!Outcome = ended: {
-        driven catch |err| break :ended err;
-        restored catch |err| break :ended err;
-        joined catch |err| break :ended err;
-        break :ended self.outcome;
+/// The owner and its init/store must outlive the worker. Never move the job
+/// between begin and join. Call deinit even when begin fails.
+pub fn begin(self: *Self, init: std.process.Init, store: []const u8) !void {
+    std.debug.assert(!self.started and self.task.thread == null);
+    self.init = init;
+    self.store = store;
+    self.allocator = init.gpa;
+    self.started = true;
+    self.task.start(init.io, self, work) catch |err| {
+        self.failure = err;
+        self.finished = true;
+        return err;
     };
-    const reported: anyerror!void = if (std.meta.isError(outcome)) self.writeExitReport(restored, joined, writer) else {};
-    return .{ .outcome = outcome, .report_failure = if (reported) |_| null else |err| err };
-}
-
-fn writeExitReport(self: *const Self, restored: anyerror!void, joined: anyerror!void, writer: *std.Io.Writer) !void {
-    if (self.result) |*result| {
-        try writer.writeAll("\n");
-        try upgrade.writeResult(writer, result);
-    }
-    try self.cleanup.write(writer);
-    restored catch |err| try writer.print("\nrui: Upgrade terminal restoration failed ({s}).\n", .{@errorName(err)});
-    const worker_error: ?anyerror = if (joined) |_| self.failure else |err| err;
-    if (worker_error) |err| {
-        try writer.print("\nrui: Upgrade worker ended with {s}.\n", .{@errorName(err)});
-        if (self.result == null and self.operation == .install) try writer.writeAll("Installation failed before publication; selected command and Host unchanged.\n");
-    }
-}
-
-fn dispose(self: *Self) void {
-    std.debug.assert(self.task.thread == null);
-    if (self.result) |*result| result.deinit(self.allocator);
-    self.result = null;
-    if (self.checked) |*checked| checked.deinit(self.allocator);
-    self.checked = null;
 }
 
 fn work(raw: *anyopaque, task: *ClientTask) !void {
@@ -121,200 +51,160 @@ fn progress(raw: *anyopaque, phase: upgrade.Phase) void {
     self.phase.store(phase, .release);
 }
 
-fn drive(self: *Self) !void {
-    while (!self.close) {
-        if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-        if (self.task.thread != null and self.task.completed()) {
-            self.task.join() catch |err| {
-                self.failure = err;
-            };
-            if (self.operation == .install) {
-                self.outcome = self.installationOutcome();
-                self.phase.store(.finished, .release);
-            }
-            self.dirty = true;
-            try self.document();
-        }
-        if (self.install_requested) {
-            self.install_requested = false;
+/// Poll, join completed work, and automatically install an eligible check.
+/// Worker failures are retained for status/writeReport rather than replacing
+/// a caller's primary input, output or terminal-restoration failure.
+pub fn advance(self: *Self) !bool {
+    return self.advanceWith(work);
+}
+
+fn advanceWith(self: *Self, worker: ClientTask.Run) !bool {
+    std.debug.assert(self.started);
+    if (self.finished) return true;
+    if (!self.task.completed()) return false;
+    self.joinWorker();
+    if (self.operation == .check and self.failure == null and !self.cancelling) {
+        if (self.checked) |*checked| if (upgrade.canInstall(checked)) {
             self.operation = .install;
-            self.cancelling = false;
-            self.offered = false;
             self.phase.store(.preparing, .release);
-            try self.task.start(self.init.io, self, work);
-            self.dirty = true;
-        }
-        const phase = self.phase.load(.acquire);
-        if (self.shown_phase != phase) self.dirty = true;
-        const size = self.terminal.geometry();
-        if (size.row != self.terminal.size.row or size.col != self.terminal.size.col) self.dirty = true;
-        if (self.dirty) try self.draw();
-        _ = try self.step(16);
+            self.task.start(self.init.io, self, worker) catch |err| {
+                self.failure = err;
+                self.finished = true;
+                return true;
+            };
+            return false;
+        };
     }
+    self.finish();
+    return true;
 }
 
-fn installationOutcome(self: *const Self) Outcome {
-    std.debug.assert(self.task.thread == null);
-    return if (self.result) |*result| if (upgrade.compatible(result)) .compatible else .incompatible else .unchanged;
+fn joinWorker(self: *Self) void {
+    self.task.join() catch |err| {
+        self.failure = err;
+    };
 }
 
-fn document(self: *Self) !void {
+fn finish(self: *Self) void {
     std.debug.assert(self.task.thread == null);
-    var raw: std.Io.Writer.Allocating = .init(self.allocator);
-    defer raw.deinit();
-    try raw.writer.writeAll("Upgrade Rui\n\n");
-    if (self.checked) |*checked| try upgrade.writeCheck(&raw.writer, checked);
-    try raw.writer.writeAll("\nInstall restarts an already-running supported Host and affects ALL Sessions in this Store.\nActive model/tool work may be interrupted; indeterminate work is never replayed.\nNo running Host means install only; no Host is started.\n\n");
-    if (self.result) |*result| try upgrade.writeResult(&raw.writer, result);
+    if (self.operation == .install) self.outcome = if (self.result) |*result| if (upgrade.compatible(result)) .compatible else .incompatible else .unchanged;
+    self.phase.store(.finished, .release);
+    self.finished = true;
+}
+
+/// Cancellation is a request, never a promise that publication rolled back.
+pub fn cancel(self: *Self) void {
+    if (!self.started or self.finished) return;
+    self.cancelling = true;
+    self.task.cancel();
+}
+
+/// On a fatal UI exit, preserve the joined outcome for writeReport before
+/// deinit. The caller retains its own primary error independently.
+pub fn settle(self: *Self) void {
+    if (!self.started or self.finished) return;
+    self.cancel();
+    self.joinWorker();
+    self.finish();
+}
+
+pub fn deinit(self: *Self) void {
+    self.settle();
+    if (self.result) |*result| result.deinit(self.allocator);
+    if (self.checked) |*checked| checked.deinit(self.allocator);
+    self.* = .{};
+}
+
+pub fn status(self: *const Self) []const u8 {
+    if (!self.started) return "Upgrade idle";
+    if (self.finished) {
+        const retained = self.cleanup.any();
+        if (self.result) |*result| return switch (result.installation) {
+            .installed => resultStatus("Upgrade installed", result.activation, retained),
+            .unchanged => switch (result.activation) {
+                .not_needed, .already_ready, .ready => resultStatus("Upgrade up to date", result.activation, retained),
+                else => resultStatus("Upgrade installation unchanged", result.activation, retained),
+            },
+        };
+        if (self.failure != null) {
+            if (self.cancelling) return if (retained) "Upgrade cancelled; cleanup retained" else "Upgrade cancelled";
+            if (self.operation == .check) return "Upgrade check failed";
+            return if (retained) "Upgrade install failed; cleanup retained" else "Upgrade install failed";
+        }
+        if (self.cancelling) return "Upgrade cancelled before installation";
+        return "Upgrade ineligible for this installation";
+    }
+    if (self.cancelling) return "Upgrade cancellation requested; waiting for outcome";
+    return switch (self.phase.load(.acquire)) {
+        .checking => "Upgrade: checking release and installation · Esc cancels",
+        .preparing => "Upgrade: preparing and verifying · Esc cancels",
+        .publishing => "Upgrade: publishing; Esc cancels, not rollback",
+        .stopping => "Upgrade: stopping Host · Esc cancels",
+        .awaiting_retirement => "Upgrade: waiting for Host retirement · Esc cancels",
+        .starting => "Upgrade: starting Host · Esc cancels",
+        .verifying => "Upgrade: verifying Host compatibility · Esc cancels",
+        .finished => "Upgrade: finishing",
+    };
+}
+
+fn resultStatus(comptime installation: []const u8, activation: @FieldType(upgrade.Result, "activation"), retained: bool) []const u8 {
+    inline for (.{ false, true }) |has_cleanup| {
+        if (retained == has_cleanup) return switch (activation) {
+            .not_needed => installation ++ "; activation not needed" ++ (if (has_cleanup) "; cleanup retained" else ""),
+            .superseded => installation ++ "; activation superseded" ++ (if (has_cleanup) "; cleanup retained" else ""),
+            .already_ready => installation ++ "; Host already ready" ++ (if (has_cleanup) "; cleanup retained" else ""),
+            .ready => installation ++ "; Host ready" ++ (if (has_cleanup) "; cleanup retained" else ""),
+            .unsupported => installation ++ "; activation unsupported" ++ (if (has_cleanup) "; cleanup retained" else ""),
+            .replacement_observed => installation ++ "; replacement Host observed" ++ (if (has_cleanup) "; cleanup retained" else ""),
+            .cancelled => installation ++ "; activation cancelled" ++ (if (has_cleanup) "; cleanup retained" else ""),
+            .failed => installation ++ "; activation failed" ++ (if (has_cleanup) "; cleanup retained" else ""),
+            .unconfirmed => installation ++ "; activation unconfirmed" ++ (if (has_cleanup) "; cleanup retained" else ""),
+        };
+    }
+    unreachable;
+}
+
+/// Write into a caller-owned bounded writer. The caller may retain its buffer
+/// after deinit; WriteFailed means the supplied buffer was too small.
+pub fn writeSummary(self: *const Self, writer: *std.Io.Writer) !void {
+    try writer.writeAll(self.status());
+    if (!self.finished) return;
+    if (self.failure) |err| try writer.print(" ({s})", .{@errorName(err)});
+    if (self.result == null and self.failure == null and !self.cancelling) {
+        if (self.checked) |*checked| switch (checked.selected) {
+            .source, .unknown_managed, .absent => try writer.writeAll("; use the release installer"),
+            .ineligible => try writer.writeAll("; use its installer or package manager"),
+            .released => {},
+        };
+    }
+    if (self.cleanup.any()) try writer.writeAll("; exit to see retained cleanup paths");
+}
+
+/// The concise but durable installation and activation receipt for an ordinary
+/// exit or a subsequent command. The full check remains in writeReport.
+pub fn writeReceipt(self: *const Self, writer: *std.Io.Writer) !void {
+    std.debug.assert(!self.started or self.finished);
+    if (self.result) |*result| try upgrade.writeResult(writer, result);
+    try self.cleanup.write(writer);
+}
+
+/// Read only after finished/settle; always render the actual publication and
+/// activation receipt and copied cleanup facts, including on cancellation.
+pub fn writeReport(self: *const Self, writer: *std.Io.Writer) !void {
+    std.debug.assert(!self.started or self.finished);
+    if (self.checked) |*checked| try upgrade.writeCheck(writer, checked);
+    if (self.result) |*result| {
+        try writer.writeAll("\n");
+        try upgrade.writeResult(writer, result);
+    }
     if (self.failure) |err| {
-        try raw.writer.print("\nUpgrade {s}: {s}\n", .{ if (self.operation == .check) "check failed" else "operation failed", @errorName(err) });
-        if (self.operation == .install) try raw.writer.writeAll("Installation failed before publication; selected command and Host unchanged. Retained files, if any, below.\n");
+        try writer.print("\nUpgrade {s} ended with {s}.\n", .{ if (self.operation == .check) "check" else "installation", @errorName(err) });
+        if (self.operation == .install and self.result == null) try writer.writeAll("No completed installation receipt; inspect the selected command and Host before retrying.\n");
+    } else if (self.cancelling and self.result == null) {
+        try writer.writeAll("\nUpgrade cancelled before installation.\n");
     }
-    try self.cleanup.write(&raw.writer);
-    if (self.outcome == .incompatible) try raw.writer.writeAll("\nThis running client cannot safely resume Host requests.\nDraft and recovery handles remain held. Use the selected Rui in a new terminal\nto resume this Session and inspect saved requests; do not resend indeterminate work.\n");
-    var safe: std.Io.Writer.Allocating = .init(self.allocator);
-    defer safe.deinit();
-    var text: TerminalText = .{ .mode = .multiline };
-    try text.feed(&safe.writer, raw.written());
-    try text.finish(&safe.writer);
-    self.screen.browsing.clear();
-    try self.screen.browsing.append(safe.written());
-    self.screen.browsing.top = .{};
-}
-
-fn installable(self: *const Self) bool {
-    return self.task.thread == null and self.operation == .check and self.failure == null and !self.cancelling and
-        if (self.checked) |*checked| upgrade.canInstall(checked) else false;
-}
-
-fn draw(self: *Self) !void {
-    self.dirty = false;
-    self.offered = false;
-    if (self.checked == null and self.failure == null) {
-        self.screen.browsing.clear();
-        try self.screen.browsing.append("Upgrade Rui\n\nChecking the published stable release and local installation.\nThis check does not install or start a Host.\n");
-    }
-    const phase = self.phase.load(.acquire);
-    const hint = if (self.task.thread != null)
-        (if (self.cancelling) "Cancellation requested; waiting for the actual outcome" else "esc Cancel")
-    else if (self.installable()) "enter Install · esc Cancel · pgup/pgdn Scroll" else "esc Return · pgup/pgdn Scroll";
-    const live: View.Live = .{};
-    _ = try self.terminal.redraw("", 0, .{ .status = phaseText(phase), .notice = hint }, &live);
-    self.shown_phase = phase;
-    for (0..1024) |_| {
-        if (!try self.step(0)) {
-            self.offered = self.installable() and self.terminal.stream.pending() == .none;
-            break;
-        }
-        if (self.close) break;
-    }
-}
-
-fn phaseText(phase: upgrade.Phase) []const u8 {
-    return switch (phase) {
-        .checking => "Read-only check",
-        .preparing => "Installation: preparing and verifying download",
-        .publishing => "Installation: publishing; cancellation is not rollback",
-        .stopping => "Activation: stopping the observed Host",
-        .awaiting_retirement => "Activation: waiting for Host retirement",
-        .starting => "Activation: starting the installed build",
-        .verifying => "Activation: verifying readiness and protocol",
-        .finished => "Upgrade result",
-    };
-}
-
-fn pump(raw: *anyopaque) !void {
-    const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.interrupted.stopped.load(.acquire)) return error.InteractiveInterrupted;
-    _ = try self.step(16);
-    if (self.close) return error.InteractiveInterrupted;
-}
-
-fn step(self: *Self, wait: i32) !bool {
-    const read = self.terminal.next(self.init.io, wait) catch |err| switch (err) {
-        error.InputDeadline => {
-            try self.input(try self.terminal.stream.expire());
-            return true;
-        },
-        else => return err,
-    };
-    if (read) |byte| {
-        var decoded = self.terminal.stream.feed(byte.byte, byte.at);
-        while (decoded != .none) : (decoded = self.terminal.stream.next()) try self.input(decoded);
-        return true;
-    }
-    return false;
-}
-
-fn input(self: *Self, decoded: TerminalInput.Decoded) !void {
-    switch (decoded) {
-        .report => |report| switch (report) {
-            .width => |method| self.screen.setWidth(method),
-            .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
-            .focus => |focused| self.terminal.focused = focused,
-            .program_status => _ = self.terminal.answered(.program_status),
-            .device_attributes => _ = self.terminal.answered(.device_attributes),
-        },
-        .event => |event| {
-            if (event.pasted or event.event != .key_press) return;
-            const key = event.event.key_press;
-            if (key.codepoint == vaxis.Key.escape or (key.mods.ctrl and key.codepoint == 'c') or key.codepoint == 3) {
-                self.offered = false;
-                if (self.task.thread != null) {
-                    self.cancelling = true;
-                    self.task.cancel();
-                } else self.close = true;
-            } else if (TerminalEditor.isEnter(key) and self.offered and self.installable()) {
-                self.offered = false;
-                self.install_requested = true;
-            } else if (key.codepoint == vaxis.Key.page_up or key.codepoint == vaxis.Key.page_down) {
-                _ = self.screen.browse(key.codepoint == vaxis.Key.page_down, true);
-            }
-        },
-        .none, .invalid => {},
-    }
-    self.dirty = true;
-}
-
-test "upgrade panel phases distinguish publication from activation and cancellation" {
-    try std.testing.expect(std.mem.indexOf(u8, phaseText(.checking), "Read-only") != null);
-    try std.testing.expect(std.mem.indexOf(u8, phaseText(.publishing), "not rollback") != null);
-    for ([_]upgrade.Phase{ .stopping, .awaiting_retirement, .starting, .verifying }) |phase|
-        try std.testing.expect(std.mem.startsWith(u8, phaseText(phase), "Activation:"));
-}
-
-test "upgrade panel Escape requests cancellation and waits for the joined outcome at every phase" {
-    const Gate = struct {
-        entered: std.Io.Event = .unset,
-        release: std.Io.Event = .unset,
-
-        fn run(raw: *anyopaque, task: *ClientTask) !void {
-            const gate: *@This() = @ptrCast(@alignCast(raw));
-            gate.entered.set(task.io);
-            gate.release.waitUncancelable(task.io);
-            if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
-            return error.TestUnexpectedResult;
-        }
-    };
-    for (std.enums.values(upgrade.Phase)) |phase| {
-        var gate: Gate = .{};
-        var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .phase = .init(phase) };
-        try self.task.start(std.testing.io, &gate, Gate.run);
-        defer {
-            gate.release.set(std.testing.io);
-            self.task.join() catch |err| std.debug.assert(err == error.Cancelled);
-        }
-        gate.entered.waitUncancelable(std.testing.io);
-        try self.input(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } }, .pasted = true } });
-        try std.testing.expect(!self.task.cancellation.stopped.load(.acquire));
-        try self.input(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } }, .pasted = false } });
-        try std.testing.expect(self.task.cancellation.stopped.load(.acquire));
-        try std.testing.expect(self.cancelling and !self.close);
-        try std.testing.expectEqual(Outcome.unchanged, self.outcome);
-        gate.release.set(std.testing.io);
-        try std.testing.expectError(error.Cancelled, self.task.join());
-        try std.testing.expectEqual(Outcome.unchanged, self.outcome);
-    }
+    try self.cleanup.write(writer);
+    if (self.outcome == .incompatible) try writer.writeAll("\nThis client cannot safely resume Host requests. Keep the draft and recovery handles; use the selected Rui in a new terminal. Do not resend indeterminate work.\n");
 }
 
 test "upgrade panel owner wipes its private Host snapshot before freeing with or without an install result" {
@@ -365,9 +255,6 @@ test "upgrade panel owner wipes its private Host snapshot before freeing with or
             .init = undefined,
             .store = "unused",
             .allocator = allocator,
-            .terminal = undefined,
-            .interrupted = undefined,
-            .screen = undefined,
             .checked = .{
                 .candidate = .{ .version = .{ .schema = 99, .patch = 0 }, .tag = try allocator.dupe(u8, "v0.99.0"), .archive_name = try allocator.dupe(u8, "fixture"), .archive_url = try allocator.dupe(u8, "fixture"), .checksum_url = try allocator.dupe(u8, "fixture"), .sha256 = @splat(0) },
                 .selected = .absent,
@@ -378,224 +265,155 @@ test "upgrade panel owner wipes its private Host snapshot before freeing with or
             },
         };
         if (installed) self.result = .{ .installation = .{ .unchanged = .{ .operation_build = try allocator.dupe(u8, "/synthetic/build"), .selected_after = try allocator.dupe(u8, "/synthetic/build") } }, .activation = .not_needed, .store = try allocator.dupe(u8, "/synthetic/store") };
-        self.dispose();
+        self.deinit();
         try std.testing.expect(capture.wiped);
         try std.testing.expectEqual(@as(usize, 1), capture.freed);
         try std.testing.expect(self.result == null and self.checked == null);
-        self.dispose();
+        self.deinit();
         try std.testing.expectEqual(@as(usize, 1), capture.freed);
     }
 }
 
-const test_checked: upgrade.Check = .{
-    .candidate = .{ .version = .{ .schema = 99, .patch = 1 }, .tag = "v0.99.1", .archive_name = "synthetic", .archive_url = "synthetic", .checksum_url = "synthetic", .sha256 = @splat(0) },
-    .selected = .{ .released = .{ .build = "/synthetic/build", .version = .{ .schema = 99, .patch = 0 } } },
-    .host = .absent,
-    .home = "/synthetic/home",
-    .store = "/synthetic/store",
-    .running_executable = "/synthetic/rui",
-};
-
-test "upgrade panel accepts semantic Enter only when typed pressed offered and installable" {
-    const Case = struct { key: vaxis.Key, accepts: bool = false };
-    const cases = [_]Case{
-        .{ .key = .{ .codepoint = vaxis.Key.enter }, .accepts = true },
-        .{ .key = .{ .codepoint = 'j', .mods = .{ .ctrl = true } }, .accepts = true },
-        .{ .key = .{ .codepoint = vaxis.Key.enter, .mods = .{ .shift = true }, .text = "\r" } },
-        .{ .key = .{ .codepoint = vaxis.Key.enter, .mods = .{ .alt = true }, .text = "\r" } },
-        .{ .key = .{ .codepoint = vaxis.Key.enter, .mods = .{ .ctrl = true } } },
-        .{ .key = .{ .codepoint = 'j', .mods = .{ .ctrl = true, .shift = true }, .text = "j" } },
-        .{ .key = .{ .codepoint = 'j', .mods = .{ .alt = true } } },
-        .{ .key = .{ .codepoint = 'j' } },
-        .{ .key = .{ .codepoint = vaxis.Key.enter, .mods = .{ .super = true } } },
-        .{ .key = .{ .codepoint = vaxis.Key.enter, .mods = .{ .hyper = true } } },
-        .{ .key = .{ .codepoint = vaxis.Key.enter, .mods = .{ .meta = true } } },
-    };
-    for (cases) |case| {
-        for ([_]bool{ false, true }) |pasted| {
-            for ([_]bool{ false, true }) |released| {
-                for ([_]bool{ false, true }) |offered| {
-                    for ([_]bool{ false, true }) |eligible| {
-                        var checked = test_checked;
-                        if (!eligible) checked.selected = .ineligible;
-                        var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .checked = checked, .offered = offered };
-                        try self.input(.{ .event = .{ .event = if (released) .{ .key_release = case.key } else .{ .key_press = case.key }, .pasted = pasted } });
-                        const accepted = case.accepts and !pasted and !released and offered and eligible;
-                        try std.testing.expectEqual(accepted, self.install_requested);
-                        try std.testing.expectEqual(offered and !accepted, self.offered);
-                    }
-                }
-            }
-        }
-    }
-}
-
-test "upgrade panel accepts CR LF and exact Kitty ctrl-J through the terminal decoder without accepting preprompt input" {
-    for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[106;5u" }) |sequence| {
-        for ([_]bool{ false, true }) |offered| {
-            var terminal: SessionTerminal = .{ .original = undefined, .flags = undefined, .screen = undefined };
-            var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = &terminal, .interrupted = undefined, .screen = undefined, .checked = test_checked, .offered = offered };
-            for (sequence) |byte| {
-                var decoded = terminal.stream.feed(byte, 0);
-                while (decoded != .none) : (decoded = terminal.stream.next()) try self.input(decoded);
-            }
-            try std.testing.expectEqual(offered, self.install_requested);
-            try std.testing.expect(!self.offered);
-        }
-    }
-}
-
-test "settled upgrade Escape retains the next arrow and paste in the invocation decoder" {
-    for ([_]struct { suffix: []const u8, key: u21, pasted: bool }{
-        .{ .suffix = "B", .key = vaxis.Key.down, .pasted = false },
-        .{ .suffix = "200~x\x1b[201~", .key = 'x', .pasted = true },
-    }) |case| {
-        var stage: usize = 0;
-        errdefer std.debug.print("upgrade handoff key={d} stage={d}\n", .{ case.key, stage });
-        var pipes: [2]c_int = undefined;
-        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&pipes));
-        defer _ = std.c.close(pipes[0]);
-        defer _ = std.c.close(pipes[1]);
-        const prefix = "\x1b\x1b[";
-        try std.testing.expectEqual(@as(isize, prefix.len), std.c.write(pipes[1], prefix.ptr, prefix.len));
-        var terminal: SessionTerminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = undefined, .input = pipes[0] };
-        var init: std.process.Init = undefined;
-        init.io = std.testing.io;
-        var panel: Self = .{ .init = init, .store = "unused", .allocator = std.testing.allocator, .terminal = &terminal, .interrupted = undefined, .screen = undefined };
-        for (0..prefix.len) |_| try std.testing.expect(try panel.step(0));
-        stage = 1;
-        try std.testing.expect(panel.close);
-        try std.testing.expectEqual(TerminalInput.Pending.incomplete, terminal.stream.pending());
-        stage = 2;
-        var seen = false;
-        var starts: usize = 0;
-        var ends: usize = 0;
-        for (case.suffix) |byte| {
-            var decoded = terminal.stream.feed(byte, std.Io.Clock.awake.now(std.testing.io).nanoseconds);
-            while (decoded != .none) : (decoded = terminal.stream.next()) {
-                try std.testing.expect(decoded == .event);
-                switch (decoded.event.event) {
-                    .paste_start => starts += 1,
-                    .paste_end => ends += 1,
-                    .key_press => |key| {
-                        try std.testing.expectEqual(case.key, key.codepoint);
-                        try std.testing.expectEqual(case.pasted, decoded.event.pasted);
-                        try std.testing.expect(!seen);
-                        seen = true;
-                    },
-                    else => return error.TestUnexpectedResult,
-                }
-            }
-        }
-        stage = 3;
-        try std.testing.expect(seen);
-        try std.testing.expectEqual(@as(usize, if (case.pasted) 1 else 0), starts);
-        try std.testing.expectEqual(starts, ends);
-        try std.testing.expectEqual(TerminalInput.Pending.none, terminal.stream.pending());
-    }
-}
-
-const test_installed_result: upgrade.Result = .{
+const test_result: upgrade.Result = .{
     .installation = .{ .installed = .{ .operation_build = "/synthetic/installed", .selected_after = "/synthetic/installed" } },
     .activation = .cancelled,
     .store = "/synthetic/store",
 };
 
-test "upgrade panel failing exits report the actual joined installation receipt and preserve the primary failure" {
-    const Case = struct { restored: anyerror!void = {}, driven: anyerror!void, joined: anyerror!void = {}, failure: anyerror };
-    const cases = [_]Case{
-        .{ .driven = error.TerminalCleanupFailed, .failure = error.TerminalCleanupFailed },
-        .{ .driven = error.InteractiveInterrupted, .failure = error.InteractiveInterrupted },
-        .{ .restored = error.TerminalRestoreFailed, .driven = error.InteractiveInterrupted, .joined = error.Cancelled, .failure = error.InteractiveInterrupted },
-    };
-    const expected =
-        "\nInstalled Rui. Complete build: /synthetic/installed\n" ++
-        "Activation: cancelled after installation; publication was not rolled back.\n" ++
-        "Store: /synthetic/store\n" ++
-        "Next: inspect rui host status --store $'/synthetic/store'. Do not restore/reset the Store or replay uncertain requests.\n";
-    for (cases) |case| {
-        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = test_installed_result };
-        var bytes: [2048]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&bytes);
-        const finalized = self.finalize(case.restored, case.driven, case.joined, &writer);
-        try std.testing.expectError(case.failure, finalized.outcome);
-        try std.testing.expect(finalized.report_failure == null);
-        if (std.meta.isError(case.joined)) {
-            try std.testing.expectEqualStrings(expected ++ "\nrui: Upgrade terminal restoration failed (TerminalRestoreFailed).\n\nrui: Upgrade worker ended with Cancelled.\n", writer.buffered());
-        } else try std.testing.expectEqualStrings(expected, writer.buffered());
-        try std.testing.expect(self.result != null);
-        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "No completed installation receipt") == null);
-    }
+test "joined installation cancellation retains the actual publication receipt" {
+    var job: Self = .{ .started = true, .operation = .install, .result = test_result, .cancelling = true };
+    job.finish();
+    try std.testing.expectEqual(Outcome.compatible, job.outcome);
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try job.writeReport(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Installed Rui. Complete build: /synthetic/installed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "publication was not rolled back") != null);
+    var receipt_bytes: [4096]u8 = undefined;
+    var receipt = std.Io.Writer.fixed(&receipt_bytes);
+    try job.writeReceipt(&receipt);
+    try std.testing.expect(std.mem.indexOf(u8, receipt.buffered(), "Installed Rui. Complete build: /synthetic/installed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, receipt.buffered(), "publication was not rolled back") != null);
+    var summary_bytes: [256]u8 = undefined;
+    var summary = std.Io.Writer.fixed(&summary_bytes);
+    try job.writeSummary(&summary);
+    try std.testing.expectEqualStrings("Upgrade installed; activation cancelled", summary.buffered());
+    // Fixture strings are static, not owned allocations.
+    job.result = null;
 }
 
-test "upgrade panel receipt rendering failure never replaces the primary terminal failure" {
-    const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = test_installed_result };
-    var writer = std.Io.Writer.fixed(&.{});
-    const finalized = self.finalize({}, error.TerminalCleanupFailed, {}, &writer);
-    try std.testing.expectError(error.TerminalCleanupFailed, finalized.outcome);
-    try std.testing.expectEqual(error.WriteFailed, finalized.report_failure.?);
-    try std.testing.expect(self.result != null);
+test "upgrade status distinguishes verified current from superseded or cancelled" {
+    var result = test_result;
+    result.installation = .{ .unchanged = .{ .operation_build = "/synthetic/installed", .selected_after = "/synthetic/installed" } };
+    var job: Self = .{ .started = true, .finished = true, .result = result };
+    job.result.?.activation = .not_needed;
+    try std.testing.expectEqualStrings("Upgrade up to date; activation not needed", job.status());
+    job.result.?.activation = .superseded;
+    try std.testing.expectEqualStrings("Upgrade installation unchanged; activation superseded", job.status());
+    job.result.?.activation = .cancelled;
+    try std.testing.expectEqualStrings("Upgrade installation unchanged; activation cancelled", job.status());
+    job.result = null; // static fixture storage
 }
 
-test "upgrade panel retains copied cleanup facts in its joined document and restored exit report" {
-    const screen = try std.testing.allocator.create(SessionScreen);
-    defer std.testing.allocator.destroy(screen);
-    inline for (.{ .preparation, .publication, .disposal }) |phase| {
-        screen.* = .{ .colour = false };
-        const primary: ?anyerror = if (phase == .disposal) null else error.ReleaseChecksumMismatch;
-        var self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = screen, .operation = .install, .result = if (phase == .disposal) test_installed_result else null, .failure = primary };
-        var source_path = "/synthetic/retained-stage".*;
-        const reporter = self.cleanup.reporter(phase);
-        reporter.report(reporter.context, .{ .primary = primary, .secondary = error.AccessDenied, .retained_path = &source_path });
-        @memset(&source_path, 'x');
-        try self.document();
-        const document_text = screen.browsing.text();
-        try std.testing.expect(std.mem.indexOf(u8, document_text, "AccessDenied") != null);
-        try std.testing.expect(std.mem.indexOf(u8, document_text, "$'/synthetic/retained-stage'") != null);
-        if (primary != null) try std.testing.expect(std.mem.indexOf(u8, document_text, "ReleaseChecksumMismatch") != null);
-        var bytes: [4096]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&bytes);
-        const finalized = self.finalize({}, error.InteractiveInterrupted, {}, &writer);
-        try std.testing.expectError(error.InteractiveInterrupted, finalized.outcome);
-        try std.testing.expect(finalized.report_failure == null);
-        const report_text = writer.buffered();
-        try std.testing.expect(std.mem.indexOf(u8, report_text, "AccessDenied") != null);
-        const retained_at = std.mem.indexOf(u8, report_text, "$'/synthetic/retained-stage'").?;
-        if (primary != null) {
-            try std.testing.expect(std.mem.indexOf(u8, report_text, "ReleaseChecksumMismatch") != null);
-        } else {
-            const installed_at = std.mem.indexOf(u8, report_text, "Installed Rui. Complete build: /synthetic/installed").?;
-            try std.testing.expect(installed_at < retained_at);
+test "cleanup report retains copied paths and the worker error" {
+    var job: Self = .{ .started = true, .finished = true, .operation = .install, .failure = error.ReleaseChecksumMismatch };
+    var source = "/synthetic/retained-stage".*;
+    const reporter = job.cleanup.reporter(.preparation);
+    reporter.report(reporter.context, .{ .primary = error.ReleaseChecksumMismatch, .secondary = error.AccessDenied, .retained_path = &source });
+    @memset(&source, 'x');
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try job.writeReport(&writer);
+    var summary_bytes: [4096]u8 = undefined;
+    var summary = std.Io.Writer.fixed(&summary_bytes);
+    try job.writeSummary(&summary);
+    try std.testing.expect(std.mem.indexOf(u8, summary.buffered(), "ReleaseChecksumMismatch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary.buffered(), "exit to see retained cleanup paths") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "ReleaseChecksumMismatch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "AccessDenied") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "$'/synthetic/retained-stage'") != null);
+}
+
+test "settle requests cancellation and joins before returning the failure" {
+    const Gate = struct {
+        entered: std.Io.Event = .unset,
+        released: std.Io.Event = .unset,
+        fn run(raw: *anyopaque, task: *ClientTask) !void {
+            const gate: *@This() = @ptrCast(@alignCast(raw));
+            gate.entered.set(task.io);
+            gate.released.waitUncancelable(task.io);
+            return error.Cancelled;
         }
-        try std.testing.expect(std.mem.indexOf(u8, report_text, "No completed installation receipt") == null);
-        try std.testing.expect(self.cleanup.any());
+    };
+    var gate: Gate = .{};
+    var job: Self = .{ .started = true };
+    try job.task.start(std.testing.io, &gate, Gate.run);
+    defer {
+        gate.released.set(std.testing.io);
+        job.task.join() catch {};
     }
+    gate.entered.waitUncancelable(std.testing.io);
+    job.cancel();
+    try std.testing.expect(job.cancelling);
+    try std.testing.expect(job.task.thread != null);
+    gate.released.set(std.testing.io);
+    job.settle();
+    try std.testing.expect(job.finished and job.task.thread == null);
+    try std.testing.expectEqual(error.Cancelled, job.failure.?);
+    job.deinit();
 }
 
-test "upgrade panel prepublication errors retain unchanged Host access while actual activation outcomes govern compatibility" {
-    for ([_]anyerror{ error.ReleaseChecksumMismatch, error.Cancelled, error.AccessDenied }) |failure| {
-        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .failure = failure };
-        try std.testing.expectEqual(Outcome.unchanged, self.installationOutcome());
-        var bytes: [1024]u8 = undefined;
-        var writer = std.Io.Writer.fixed(&bytes);
-        const finalized = self.finalize({}, error.InteractiveInterrupted, failure, &writer);
-        try std.testing.expectError(error.InteractiveInterrupted, finalized.outcome);
-        try std.testing.expect(finalized.report_failure == null);
-        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Installation failed before publication; selected command and Host unchanged.") != null);
-        try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "incomplete") == null);
-    }
-    const Activation = @FieldType(upgrade.Result, "activation");
-    const Case = struct { activation: Activation, outcome: Outcome };
-    for ([_]Case{
-        .{ .activation = .cancelled, .outcome = .compatible },
-        .{ .activation = .not_needed, .outcome = .compatible },
-        .{ .activation = .{ .failed = .starting }, .outcome = .incompatible },
-        .{ .activation = .{ .unconfirmed = .verifying }, .outcome = .incompatible },
-        .{ .activation = .replacement_observed, .outcome = .incompatible },
-    }) |case| {
-        var result = test_installed_result;
-        result.activation = case.activation;
-        const self: Self = .{ .init = undefined, .store = "unused", .allocator = std.testing.allocator, .terminal = undefined, .interrupted = undefined, .screen = undefined, .operation = .install, .result = result };
-        try std.testing.expectEqual(case.outcome, self.installationOutcome());
+test "failed check finishes without installation" {
+    const Worker = struct {
+        fn run(_: *anyopaque, _: *ClientTask) !void {
+            return error.ReleaseChecksumMismatch;
+        }
+    };
+    var job: Self = .{ .started = true };
+    try job.task.start(std.testing.io, &job, Worker.run);
+    while (!try job.advance()) std.Thread.yield() catch {};
+    try std.testing.expect(job.operation == .check);
+    try std.testing.expectEqual(error.ReleaseChecksumMismatch, job.failure.?);
+    try std.testing.expectEqual(Outcome.unchanged, job.outcome);
+    job.deinit();
+}
+
+test "completed check starts install automatically only when eligible and not cancelled" {
+    const check: upgrade.Check = .{
+        .candidate = .{ .version = .{ .schema = 99, .patch = 1 }, .tag = "v0.99.1", .archive_name = "fixture", .archive_url = "fixture", .checksum_url = "fixture", .sha256 = @splat(0) },
+        .selected = .{ .released = .{ .build = "/synthetic/build", .version = .{ .schema = 99, .patch = 0 } } },
+        .host = .absent,
+        .home = "/synthetic/home",
+        .store = "/synthetic/store",
+        .running_executable = "/synthetic/rui",
+    };
+    const Worker = struct {
+        fn run(raw: *anyopaque, _: *ClientTask) !void {
+            const job: *Self = @ptrCast(@alignCast(raw));
+            if (job.operation == .install) job.result = test_result;
+        }
+    };
+    for (0..3) |case| {
+        var init: std.process.Init = undefined;
+        init.io = std.testing.io;
+        var job: Self = .{ .init = init, .started = true, .checked = check };
+        if (case == 1) job.checked.?.selected = .absent;
+        try job.task.start(init.io, &job, Worker.run);
+        while (!job.task.completed()) std.Thread.yield() catch {};
+        if (case == 2) job.cancel();
+        const finished = try job.advanceWith(Worker.run);
+        if (case == 0) {
+            try std.testing.expect(!finished and job.operation == .install);
+            while (!try job.advanceWith(Worker.run)) std.Thread.yield() catch {};
+            try std.testing.expect(job.result != null);
+            try std.testing.expectEqual(Outcome.compatible, job.outcome);
+        } else {
+            try std.testing.expect(finished and job.operation == .check);
+            try std.testing.expect(job.result == null);
+        }
+        // These checks and receipts use static fixture strings.
+        job.checked = null;
+        job.result = null;
+        job.deinit();
     }
 }

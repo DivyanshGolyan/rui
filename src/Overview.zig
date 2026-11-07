@@ -313,6 +313,16 @@ signalled: [2]c_int = .{ -1, -1 },
 
 worker: ClientTask = .{},
 upgrade_requested: bool = false,
+upgrade_cancel_draining: bool = false,
+upgrade_job: UpgradePanel = .{},
+upgrade_running: bool = false,
+upgrade_shown: []const u8 = "",
+upgrade_note: [768]u8 = undefined,
+upgrade_note_len: usize = 0,
+upgrade_displayed: [768]u8 = undefined,
+upgrade_displayed_len: usize = 0,
+upgrade_notice_pending: bool = false,
+upgrade_report: ?std.Io.Writer.Allocating = null,
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
 /// The job the worker runs or last ran, and its output.
@@ -474,6 +484,8 @@ fn closePipes(self: *Self) void {
 }
 
 fn destroy(self: *Self) void {
+    self.upgrade_job.deinit();
+    if (self.upgrade_report) |*report| report.deinit();
     std.debug.assert(self.worker.thread == null);
     self.job.deinit(self.init.gpa);
     for (self.jobs[0..self.job_count]) |job| job.deinit(self.init.gpa);
@@ -511,18 +523,42 @@ fn loop(self: *Self) !Ending {
 /// the worker or a signal.
 fn turn(self: *Self) !?Next {
     const now_ms = self.realMs();
-    if (self.upgrade_requested) {
+    if (self.upgrade_cancel_draining) {
         if (try self.quiesceUpgrade()) {
-            const outcome = try UpgradePanel.run(self.init, self.options.store, self.terminal, self.interrupted);
-            self.upgrade_requested = false;
-            switch (outcome) {
-                .unchanged => {},
-                .compatible => self.state.upgrade_blocked = false,
-                .incompatible => self.state.upgrade_blocked = true,
-            }
+            self.upgrade_cancel_draining = false;
             self.state.upgrade_pending = !self.state.upgrade_blocked;
             self.state.next_list_ms = 0;
-            self.forget();
+        }
+    } else if (self.upgrade_requested) {
+        if (self.upgrade_running or try self.quiesceUpgrade()) {
+            if (!self.upgrade_running) {
+                try self.keepUpgrade();
+                try self.upgrade_job.begin(self.init, self.options.store);
+                self.upgrade_running = true;
+                self.upgrade_shown = "";
+            }
+            const done = try self.upgrade_job.advance();
+            const status = self.upgrade_job.status();
+            if (done or !std.mem.eql(u8, status, self.upgrade_shown)) {
+                self.upgrade_shown = status;
+                var out = std.Io.Writer.fixed(&self.upgrade_note);
+                self.upgrade_job.writeSummary(&out) catch {};
+                const summary = out.buffered();
+                self.upgrade_note_len = std.mem.indexOfScalar(u8, summary, '\n') orelse summary.len;
+                self.upgrade_notice_pending = true;
+            }
+            if (done) {
+                const outcome = self.upgrade_job.outcome;
+                self.upgrade_running = false;
+                self.upgrade_requested = false;
+                switch (outcome) {
+                    .unchanged => {},
+                    .compatible => self.state.upgrade_blocked = false,
+                    .incompatible => self.state.upgrade_blocked = true,
+                }
+                self.state.upgrade_pending = !self.state.upgrade_blocked;
+                self.state.next_list_ms = 0;
+            }
         }
     } else if (!self.state.upgrade_blocked) {
         if (self.state.wakeAt()) |at| if (now_ms >= at) if (try self.event(.{ .tick = now_ms })) |next| return next;
@@ -532,7 +568,13 @@ fn turn(self: *Self) !?Next {
     // stall or race the spinner; ticks keep the Host's wall clock.
     const awake_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds;
     const awake_ms: u64 = @intCast(@max(@divFloor(awake_ns, std.time.ns_per_ms), 0));
+    self.offerUpgradeNotice();
     if (try self.draw(awake_ms / view.spin_interval_ms)) |next| return next;
+    if (self.upgrade_notice_pending) if (self.shown) |*frame| {
+        if (frame.notice_visible) if (self.state.notice) |*notice| if (std.mem.eql(u8, notice.text(), self.upgrade_note[0..self.upgrade_note_len])) {
+            self.upgrade_notice_pending = false;
+        };
+    };
     const spins = if (self.shown) |*held| held.spins else false;
     const timeout = switch (self.terminal.stream.wait(awake_ns, self.budget(now_ms, awake_ms, spins))) {
         .expire => 0,
@@ -547,10 +589,26 @@ fn turn(self: *Self) !?Next {
     if (fds[2].revents != 0) drain(self.signalled[0]);
     if (fds[1].revents != 0) {
         drain(self.done[0]);
-        if (try self.complete()) |next| return next;
+        const next = try self.complete();
+        if (self.upgrade_cancel_draining) self.state.upgrade_pending = true;
+        if (next) |value| return value;
     }
     if (fds[0].revents != 0 or timeout == 0) return self.readInput(0, 4096);
     return null;
+}
+
+/// Do not replace an approval, stop prompt or another notice. Keep the latest
+/// command result pending until the ordinary notice slot can show it.
+fn offerUpgradeNotice(self: *Self) void {
+    if (!self.upgrade_notice_pending or self.state.prompt != null or self.state.picker != null) return;
+    if (self.state.notice) |*notice| if (!std.mem.eql(u8, notice.text(), self.upgrade_displayed[0..self.upgrade_displayed_len])) return;
+    var notice: view.Notice = .{ .colour = .normal };
+    @memcpy(notice.bytes[0..self.upgrade_note_len], self.upgrade_note[0..self.upgrade_note_len]);
+    notice.len = self.upgrade_note_len;
+    @memcpy(self.upgrade_displayed[0..notice.len], notice.bytes[0..notice.len]);
+    self.upgrade_displayed_len = notice.len;
+    self.state.notice = notice;
+    self.forget();
 }
 
 /// Leaves, or lends the terminal to a Session until the person returns.
@@ -576,6 +634,9 @@ fn drain(fd: c_int) void {
 /// Session and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
     const effects = try view.step(&self.state, value);
+    // An older read may settle after cancellation; its view event cannot
+    // release admission before that borrower is drained and a fresh list runs.
+    if (self.upgrade_requested or self.upgrade_cancel_draining) self.state.upgrade_pending = true;
     var next: ?Next = null;
     var refused: ?keymap.Refusal = null;
     for (effects.slice()) |effect| switch (effect) {
@@ -1021,6 +1082,18 @@ fn askBackground(self: *Self) !?Next {
 /// Every input takes one route, the one the core's input mode names, then
 /// one core step, whether or not anything changed.
 fn compose(self: *Self, decoded: TerminalInput.Decoded) !?Next {
+    if (self.upgrade_requested and decoded == .event and !decoded.event.pasted and decoded.event.event == .key_press) {
+        const key = decoded.event.event.key_press;
+        if (key.codepoint == vaxis.Key.escape or (key.mods.ctrl and key.codepoint == 'c') or key.codepoint == 3) {
+            if (self.upgrade_running) self.upgrade_job.cancel() else {
+                self.upgrade_requested = false;
+                self.upgrade_cancel_draining = true;
+                self.state.upgrade_pending = true;
+                self.state.next_list_ms = 0;
+            }
+            return null;
+        }
+    }
     const input = if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.plainEnter(decoded))
         view.Input{ .composer = .submit }
     else if (self.state.prompt != null and self.state.prompt.?.action == .archive and TerminalEditor.select(view.keys, decoded) == .enter)
@@ -1123,7 +1196,7 @@ fn forget(self: *Self) void {
 /// core's next tick, and while the screen spins, no later than its next
 /// frame. Until then only input, the worker or a signal wakes it.
 fn budget(self: *const Self, now_ms: u64, awake_ms: u64, spins: bool) i32 {
-    const tick: i32 = if (self.state.upgrade_blocked or self.upgrade_requested) 16 else if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
+    const tick: i32 = if (self.state.upgrade_blocked or self.upgrade_requested or self.upgrade_cancel_draining) 16 else if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
     if (!spins) return tick;
     const frame: i32 = @intCast(view.spin_interval_ms - awake_ms % view.spin_interval_ms);
     return if (tick < 0) frame else @min(tick, frame);
@@ -1176,6 +1249,13 @@ fn converse(self: *Self, session: view.Reference) ?Left {
     self.caps.width = screen.vx.caps.unicode;
     const returned = if (ended) |outcome| outcome == .returned else |_| false;
     if (returned) ended = frontend.back() orelse {
+        frontend.keepUpgrade() catch |err| return .{ .session = session, .frontend = frontend, .files = files, .ended = err };
+        if (frontend.upgrade_report) |*report| {
+            if (self.upgrade_report == null) self.upgrade_report = .init(self.init.gpa);
+            self.upgrade_report.?.writer.writeAll(report.written()) catch |err| return .{ .session = session, .frontend = frontend, .files = files, .ended = err };
+            report.deinit();
+            frontend.upgrade_report = null;
+        }
         self.init.gpa.destroy(frontend);
         for (opened) |file| file.close(io);
         return null;
@@ -1211,6 +1291,14 @@ fn service(raw: *anyopaque) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
     if (self.state.upgrade_blocked) return false;
+    if (self.upgrade_cancel_draining) {
+        if (try self.quiesceUpgrade()) {
+            self.upgrade_cancel_draining = false;
+            self.state.upgrade_pending = true;
+            self.state.next_list_ms = 0;
+        }
+        return true;
+    }
     const now_ms = self.realMs();
     if (self.state.wakeAt()) |at| if (now_ms >= at) {
         _ = try self.event(.{ .tick = now_ms });
@@ -1254,6 +1342,7 @@ fn upgradeHandoff(raw: *anyopaque, handoff: SessionFrontend.UpgradeHandoff) !boo
             return self.quiesceUpgrade();
         },
         .ready, .incompatible => {
+            self.upgrade_cancel_draining = handoff == .ready and (self.worker.thread != null or self.job_count != 0);
             self.state.upgrade_pending = handoff == .ready;
             self.state.upgrade_blocked = handoff == .incompatible;
             self.state.next_list_ms = 0;
@@ -1269,6 +1358,31 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
     return .{ .text = said.text, .asking = said.asking, .stoppable = said.stoppable };
 }
 
+fn keepUpgrade(self: *Self) !void {
+    if (!self.upgrade_job.started) return;
+    if (self.upgrade_job.result != null or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible) {
+        if (self.upgrade_report == null) self.upgrade_report = .init(self.init.gpa);
+        if (self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible)
+            try self.upgrade_job.writeReport(&self.upgrade_report.?.writer)
+        else
+            try self.upgrade_job.writeReceipt(&self.upgrade_report.?.writer);
+    }
+    self.upgrade_job.deinit();
+}
+
+fn writeUpgradeReports(self: *Self, fatal: bool) void {
+    if (self.upgrade_report) |*report| stderr.diagnosticBytes(report.written());
+    if (self.upgrade_job.started and (fatal or self.upgrade_job.result != null or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible)) {
+        var out: std.Io.Writer.Allocating = .init(self.init.gpa);
+        defer out.deinit();
+        const detailed = fatal or self.upgrade_job.failure != null or self.upgrade_job.cleanup.any() or self.upgrade_job.outcome == .incompatible;
+        const rendered = if (detailed) self.upgrade_job.writeReport(&out.writer) else self.upgrade_job.writeReceipt(&out.writer);
+        if (rendered) |_| {
+            stderr.diagnosticBytes(out.written());
+        } else |err| stderr.diagnostic("rui: Upgrade receipt failed ({s}).\n", .{@errorName(err)});
+    }
+}
+
 /// Every way out: restores the terminal, answers the worker's job through
 /// `complete` as the loop does, runs the saves the core asked for, then
 /// writes the ledger's guidance before anything that can return. The
@@ -1276,6 +1390,10 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
 /// own guidance and the Detached notice follow.
 fn finish(self: *Self, ended: anyerror!Ending) !void {
     const restored = self.terminal.finish();
+    const unfinished_upgrade = self.upgrade_job.started and !self.upgrade_job.finished;
+    self.upgrade_job.settle();
+    const fatal = (if (ended) |_| self.interrupted.stopped.load(.acquire) else |_| true) or std.meta.isError(restored);
+    self.writeUpgradeReports(fatal or unfinished_upgrade);
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
     const saved = self.flushSaves();
@@ -3749,6 +3867,58 @@ test "conversation archive and restore use the exact unlisted opened reference t
     try std.testing.expectEqualStrings("x9y8z7", &Seen.now.archive_session);
     try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.?);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+}
+
+test "upgrade result waits behind an existing notice and stop prompt" {
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    self.* = undefined;
+    self.shown = null;
+    self.upgrade_notice_pending = true;
+    self.upgrade_displayed_len = 0;
+    const result = "Upgrade installed; Host ready";
+    @memcpy(self.upgrade_note[0..result.len], result);
+    self.upgrade_note_len = result.len;
+    self.state.prompt = null;
+    self.state.picker = null;
+    var warning: view.Notice = .{ .colour = .attention };
+    const text = "Existing safety notice";
+    @memcpy(warning.bytes[0..text.len], text);
+    warning.len = text.len;
+    self.state.notice = warning;
+    self.offerUpgradeNotice();
+    try std.testing.expectEqualStrings(text, self.state.notice.?.text());
+    try std.testing.expect(self.upgrade_notice_pending);
+    self.state.notice = null;
+    self.state.prompt = .{ .stop = "k7m2qx".* };
+    self.offerUpgradeNotice();
+    try std.testing.expect(self.state.notice == null and self.upgrade_notice_pending);
+    self.state.prompt = null;
+    self.offerUpgradeNotice();
+    try std.testing.expectEqualStrings(result, self.state.notice.?.text());
+    try std.testing.expect(self.upgrade_notice_pending); // only a delivered frame clears it
+}
+
+test "a pre-cancellation list cannot release upgrade admission" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    _ = try overview.event(.{ .tick = test_now_s * 1000 });
+    overview.upgrade_cancel_draining = true;
+    overview.state.upgrade_pending = true;
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(overview.state.upgrade_pending);
+    const before = overview.state.request_count;
+    _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = .{ .archive = .active } } });
+    try std.testing.expectEqual(before, overview.state.request_count);
+    // A list started after the old work has drained is the first one that
+    // may release the hold.
+    overview.upgrade_cancel_draining = false;
+    overview.state.next_list_ms = 0;
+    _ = try overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms });
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(!overview.state.upgrade_pending);
 }
 
 test "upgrade quiescence settles accepted queued and running archive mutations before releasing the panel" {

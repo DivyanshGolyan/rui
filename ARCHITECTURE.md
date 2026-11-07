@@ -1459,7 +1459,7 @@ MySQL schema application and backup remain operator-owned.
 
 `rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
 `rui upgrade --check` is read-only and starts no Host.
-The shared local `UpgradePanel` offers explicit Install and Cancel from both overview and conversation, without sending `/upgrade` to the model or adding an updater service.
+The local `/upgrade` command checks and installs an eligible stable release from both overview and conversation, without sending the command to the model or adding an updater service.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
 Restart can interrupt work in every Session in that Store, not other Stores.
 No running Host means install only.
