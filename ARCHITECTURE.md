@@ -494,7 +494,10 @@ A valid repository skill wins a same-name home skill.
 No `.claude` roots, marketplace discovery, installation or package machinery participates.
 
 Pinned LibYAML validates the complete frontmatter document, including quoted, literal and folded scalars.
-Required `name` and `description` follow the Agent Skills format, and the name must match its candidate directory.
+Required `name` and nonempty Unicode `description` follow the Agent Skills format, except that overlong descriptions remain discoverable.
+The name must match its candidate directory.
+Catalog descriptions longer than 1,024 Unicode code points are shortened to the first 1,023 followed by `…`, keeping discovery useful without unbounded model metadata.
+This changes only catalog metadata; the source file and full invocation content remain unchanged.
 Unknown optional/vendor fields are ignored, including `disable-model-invocation` even when true and tool/permission metadata.
 Discovery reads no sibling resources and runs no script.
 The initial nonempty Catalog appends an immutable catalog-origin System Instruction before any model Operation; an empty Catalog is still captured durably but adds no instruction.
