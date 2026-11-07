@@ -3,7 +3,8 @@
 //!
 //! It owns the terminal and one loop. Keys, ticks at `State.wakeAt` and the
 //! worker's replies enter `overview_view.step` as events; the loop runs the
-//! effects `step` returns and draws `overview_view.render`. It branches only
+//! effects `step` returns and paints `OverviewPaint.draw` into the shared backend.
+//! It branches only
 //! on which effect to run, so every screen decision stays in the core. One
 //! worker runs the client requests in order, so one list read is in flight
 //! at a time, and the core only ever hears list replies for the listing it
@@ -20,12 +21,14 @@ const model_picker = @import("model_picker.zig");
 const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
+const OverviewPaint = @import("OverviewPaint.zig");
 const ClientTask = @import("ClientTask.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
 const SessionFrontend = @import("SessionFrontend.zig");
 const session_reads = @import("session_reads.zig");
 const SessionInput = @import("SessionInput.zig");
 const SessionScreen = @import("SessionScreen.zig");
+const RenderBackend = @import("RenderBackend.zig");
 const SessionTerminal = @import("SessionTerminal.zig");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalInput = @import("TerminalInput.zig");
@@ -1079,48 +1082,58 @@ fn route(mode: view.InputMode, composer: *TerminalEditor, decoded: TerminalInput
 /// Paints semantic rows at animation `frame`; libvaxis alone diffs its grid.
 /// Encoded bytes remain frozen until the existing pumped write completes.
 fn draw(self: *Self, frame: u64) !?Next {
-    if (try self.resize()) |next| return next;
-    var screen = try view.render(self.init.gpa, &self.state, self.composerDraft(), self.caps, frame);
-    errdefer screen.deinit();
-    self.draft_anchor = screen.draft_anchor;
-    self.state.commands = screen.commands;
-    self.frame.clearRetainingCapacity();
-    var bytes: std.Io.Writer.Allocating = .fromArrayList(self.init.gpa, &self.frame);
-    // Waiting reports and a notification go first, through the frame's
-    // pumped write.
-    self.terminal.writeWaiting(&bytes.writer) catch return error.OutOfMemory;
-    screen.writeFrame(if (self.shown) |*held| held else null, &bytes.writer) catch return error.OutOfMemory;
-    self.frame = bytes.toArrayList();
-    // The terminal already shows it; keep the new screen, whose spinner is
-    // current.
-    if (self.frame.items.len == 0) {
-        self.forget();
-        self.shown = screen;
-        return null;
+    // Domain and grid must share one snapshot, even during a terminal resize.
+    return self.drawFrame(frame, self.terminal.geometry());
+}
+
+fn drawFrame(self: *Self, frame: u64, size: std.posix.winsize) !?Next {
+    if (try self.resize(size)) |next| return next;
+    self.terminal.applyReports();
+    const backend = self.terminal.screen.backend;
+    _ = backend.setPolicy(.{ .width = self.caps.width, .depth = switch (self.caps.depth) {
+        .none => .none,
+        .indexed => .indexed,
+        .direct => .direct,
+    } });
+    try backend.begin(.{ .cols = size.col, .rows = size.row, .x_pixel = size.xpixel, .y_pixel = size.ypixel });
+    defer {
+        backend.end();
+        self.terminal.applyReports();
     }
+    errdefer backend.poison();
+    // Waiting reports go first, while this is still only allocating memory.
+    self.terminal.writeWaiting(backend.prefixWriter()) catch return error.OutOfMemory;
+    const drawn = try OverviewPaint.draw(backend.window(), backend.scratch(), &self.state, self.composerDraft(), self.caps, frame);
+    self.draft_anchor = drawn.draft_anchor;
+    self.state.commands = drawn.commands;
+    self.spins = drawn.spins;
+    const bytes = try backend.encode();
     self.terminal.pump = .{ .context = self, .step = pump };
     defer self.terminal.pump = null;
-    // A failed write leaves the screen unknown: the next frame draws whole.
-    self.forget();
     self.pumped = null;
-    self.terminal.write(self.frame.items) catch |err| {
-        const next = self.pumped orelse return err;
-        screen.deinit();
-        return next;
+    defer self.pumped = null;
+    self.terminal.write(bytes) catch |err| {
+        // A normal leave is still a failed frozen frame: poison BEFORE the
+        // catch converts the I/O interruption into the loop's normal result.
+        backend.poison();
+        if (err == error.InteractiveInterrupted) return .leave;
+        return err;
     };
+    // Also the existing acknowledgement point for a genuinely empty frame.
     self.terminal.wrote();
-    self.shown = screen;
-    return null;
+    return self.pumped;
 }
 
 /// Steps the terminal's size when it changed, so the frame drawn next and
 /// the keys read until the one after act on one layout.
-fn resize(self: *Self) !?Next {
-    const size = self.terminal.geometry();
+fn resize(self: *Self, size: std.posix.winsize) !?Next {
     if (size.col == self.state.size.width and size.row == self.state.size.height) return null;
     return self.event(.{ .resized = .{ .width = size.col, .height = size.row } });
 }
 
+/// How long the loop may wait, in milliseconds, -1 for ever: until the
+/// core's next tick, and while the screen spins, no later than its next
+/// frame. Until then only input, the worker or a signal wakes it.
 fn budget(self: *const Self, now_ms: u64, awake_ms: u64, spins: bool) i32 {
     const tick: i32 = if (self.state.upgrade_blocked or self.upgrade_requested) 16 else if (self.state.wakeAt()) |at| @intCast(@min(at -| now_ms, std.math.maxInt(i32))) else -1;
     if (!spins) return tick;
@@ -3792,6 +3805,91 @@ test "a command that fails while it runs is the failure reported, even when taki
     defer rig.overview.state.gpa = gpa;
     try std.testing.expectError(error.CanonicalStoreFailure, rig.settle());
     try std.testing.expect(failing.has_induced_failure);
+}
+
+test "one captured overview frame geometry sizes the domain and backend through shrink and grow" {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    const selected = overview.state.selected.?;
+    const backend = rig.screen.backend;
+    const decoder = &rig.terminal.stream;
+    const fallback = rig.terminal.geometry();
+    const captured = [_]std.posix.winsize{
+        .{ .col = 60, .row = 20, .xpixel = 600, .ypixel = 400 },
+        .{ .col = 120, .row = 40, .xpixel = 1200, .ypixel = 800 },
+        .{ .col = 100, .row = 30, .xpixel = 1000, .ypixel = 600 },
+        .{ .col = 132, .row = 44, .xpixel = 1320, .ypixel = 880 },
+    };
+    var buffer: [64 * 1024]u8 = undefined;
+    for (captured) |size| {
+        // The real frame consumes its snapshot, not another terminal read.
+        try std.testing.expect(size.col != fallback.col and size.row != fallback.row);
+        try std.testing.expect(try overview.drawFrame(0, size) == null);
+        try std.testing.expectEqual(size.col, overview.state.size.width);
+        try std.testing.expectEqual(size.row, overview.state.size.height);
+        const actual = backend.geometry();
+        try std.testing.expectEqual(size.col, actual.cols);
+        try std.testing.expectEqual(size.row, actual.rows);
+        try std.testing.expectEqual(size.xpixel, actual.x_pixel);
+        try std.testing.expectEqual(size.ypixel, actual.y_pixel);
+        try std.testing.expectEqualStrings(&selected, &overview.state.selected.?);
+        try std.testing.expect(rig.screen.backend == backend and &rig.terminal.stream == decoder);
+        try std.testing.expect(backend.idle());
+        try std.testing.expect(rig.drawn(&buffer).len != 0);
+        try std.testing.expect(try overview.drawFrame(0, size) == null);
+        try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+    }
+}
+
+test "overview detail overview paints one healthy backend and retains the invocation decoder" {
+    var phase: []const u8 = "setup";
+    errdefer std.debug.print("roundtrip phase={s}\n", .{phase});
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.caps = .{ .depth = .indexed };
+    Seen.now.listed = 3;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    const backend = rig.screen.backend;
+    const decoder = &rig.terminal.stream;
+    overview.state.selected = shownRow(rig, 1);
+    const selected = overview.state.selected.?;
+    var buffer: [64 * 1024]u8 = undefined;
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(rig.drawn(&buffer).len != 0);
+    // A borrower that changes no cell needs no cache retirement at either boundary.
+    phase = "healthy empty borrower";
+    try std.testing.expect(overview.proceed(.{ .open = selected }) == null);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+    // Carry an unfinished CSI across actual overview/detail/overview painting.
+    phase = "split prefix";
+    try std.testing.expect(try rig.press("\x1b[") == null);
+    rig.screen.init(backend);
+    try rig.screen.append("A detail answer\n");
+    phase = "detail redraw";
+    const delivered = try rig.terminal.redraw("detail draft", 12, .{}, &.{});
+    phase = "detail receipt";
+    try std.testing.expect(!rig.screen.ticket.?.delivered);
+    _ = rig.screen.presented(delivered);
+    try std.testing.expect(rig.screen.ticket.?.delivered);
+    try std.testing.expect(rig.drawn(&buffer).len != 0);
+    phase = "return to overview";
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expect(rig.drawn(&buffer).len != 0);
+    try std.testing.expect(try overview.draw(0) == null);
+    try std.testing.expectEqualStrings("", rig.drawn(&buffer));
+    try std.testing.expect(rig.screen.backend == backend and &rig.terminal.stream == decoder);
+    try std.testing.expectEqualStrings(&selected, &overview.state.selected.?);
+    phase = "split tail";
+    try std.testing.expectEqual(@as(@import("TerminalInput.zig").Pending, .incomplete), decoder.pending());
+    try std.testing.expect(try rig.press("B") == null);
+    try std.testing.expectEqual(@as(@import("TerminalInput.zig").Pending, .none), decoder.pending());
+    try std.testing.expect(!std.mem.eql(u8, &selected, &overview.state.selected.?));
+    try std.testing.expectEqualStrings("", overview.composerDraft().bytes);
 }
 
 test "overview archive effects preserve server filter, pending visibility, and restore intent" {
