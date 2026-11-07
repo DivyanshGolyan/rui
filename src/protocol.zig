@@ -1465,6 +1465,10 @@ pub const Ingress = struct {
     skill_names: std.ArrayList(Bounded(64)) = .empty,
     received: u64 = 0,
     lexical: enum { plain, string, escape } = .plain,
+    /// Valid content strings never occur within metadata arrays. Defer
+    /// speculative prefix parses until their close, so a large skills vector
+    /// is scanned linearly rather than once per member/token.
+    metadata_array_depth: usize = 0,
     /// Where the next byte goes: the metadata, the opening quote of a
     /// content string, or `capture`.
     content_state: enum { metadata, awaiting_quote, capturing } = .metadata,
@@ -1541,7 +1545,12 @@ pub const Ingress = struct {
                         continue;
                     },
                     '"' => self.lexical = .string,
-                    '{', '}', '[', ']', ',', ':' => boundary = true,
+                    '[' => self.metadata_array_depth += 1,
+                    ']' => {
+                        if (self.metadata_array_depth != 0) self.metadata_array_depth -= 1;
+                        boundary = true;
+                    },
+                    '{', '}', ',', ':' => boundary = true,
                     else => {},
                 },
                 .string => switch (byte) {
@@ -1555,7 +1564,7 @@ pub const Ingress = struct {
                 .escape => self.lexical = .string,
             }
             try self.append(byte);
-            if (boundary) try self.preview();
+            if (boundary and self.metadata_array_depth == 0) try self.preview();
         }
     }
 
@@ -4975,4 +4984,113 @@ test "inline skills digest binds ordered names and authored identity without cha
     command.skills = &.{ first, second };
     command.text.digest = contentDigest("changed");
     try std.testing.expect(!std.mem.eql(u8, &forward, &command.semanticDigest()));
+}
+
+test "inline skills ingress accepts ordered text references and rejects ambiguous vectors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [max_store_bytes]u8 = undefined;
+    const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"vector\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
+    const cases = [_]struct { bytes: []const u8, valid: bool }{
+        .{ .bytes = head ++ "\"skills\":[\"demo\",\"other\"],\"text\":{\"state\":\"value\",\"value\":\"literal /demo 雪\"}}", .valid = true },
+        .{ .bytes = head ++ "\"skills\":[],\"text\":{\"state\":\"value\",\"value\":\"\"}}", .valid = true },
+        .{ .bytes = head ++ "\"skills\":[\"demo\",\"demo\"],\"text\":{\"state\":\"value\",\"value\":\"x\"}}", .valid = false },
+        .{ .bytes = head ++ "\"skills\":[\"\"],\"text\":{\"state\":\"value\",\"value\":\"x\"}}", .valid = false },
+        .{ .bytes = head ++ "\"skills\":[],\"skill\":\"demo\"}", .valid = false },
+        .{ .bytes = head ++ "\"skills\":[\"demo\"]}", .valid = false },
+    };
+    for (cases, 0..) |case, index| {
+        const ingress = try std.testing.allocator.create(Ingress);
+        defer std.testing.allocator.destroy(ingress);
+        var retained: ?named_scratch.Owner = null;
+        var used: std.atomic.Value(u64) = .init(0);
+        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = case.bytes.len, .scratch_path = path, .request_number = index, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 128 } });
+        if (case.valid) {
+            for (case.bytes) |byte| try ingress.feed(&.{byte});
+            const request = try ingress.finish();
+            try std.testing.expectEqual(@as(usize, if (index == 0) 2 else 0), request.message.skills.len);
+            if (index == 0) try std.testing.expectEqualStrings("demo", request.message.skills[0].slice());
+            try request.removeTemporaryContent(std.testing.io);
+        } else try std.testing.expectError(error.InvalidMessage, ingress.feed(case.bytes));
+        ingress.deinit();
+        try std.testing.expect(retained == null);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+}
+
+test "inline skills recover all wire10 canonical mutation shapes with pinned legacy digests" {
+    const head = "{\"version\":\"10\",\"store\":\"s\",\"key\":\"old\",";
+    const Case = struct { body: []const u8, digest: []const u8 };
+    // Independent SHA-256 expectations over the pre-vector v1/v4 grammars.
+    const cases = [_]Case{
+        .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{}}", .digest = "db4015965f28197d8bfae4b13f61edb8b1047904643d764a7cc8ce10f9680e30" },
+        .{ .body = head ++ "\"kind\":\"configure\",\"session\":\"k7m2qx\",\"configuration\":{},\"reload_skills\":true}", .digest = "14764e8bb9e20125961c2b950bac15e919dfc6653fe2cc7359b027faa0ee89b5" },
+        .{ .body = head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"\"}}", .digest = "e8cea677d75e3de98bcb68ccbbfcc6cda23fe42bd180da1c742f741f8c73975f" },
+        .{ .body = head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skill\":\"demo\"}", .digest = "ea06c3a3dd1e358d9f9b5a10ac2ad6897642f32fbedc8244aafbe43c90d4bcad" },
+        .{ .body = head ++ "\"kind\":\"session_stop\",\"session\":\"k7m2qx\"}", .digest = "f8e8c1514a14cc72fe18bad111508cffa2b5b55812f6ba2deaed959740940d48" },
+        .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":true}", .digest = "ab777e65fc2476bbadf1d8eb793e2bf4d7d3bd49334bd79b4ca15a0f0c536d6b" },
+        .{ .body = head ++ "\"kind\":\"session_archive\",\"session\":\"k7m2qx\",\"archived\":false}", .digest = "07e24427f9ec75478b887d3d2e5bd3a072bcc57a587c6d0826eb5bf0f6aa86df" },
+        .{ .body = head ++ "\"kind\":\"model_interruption\",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"7\",\"operation\":\"9\"}}", .digest = "0fd58dfc4f6ddff0f7f9da78e88e4fa50d596a623e161646c0c5082ba4350bf4" },
+        .{ .body = head ++ "\"kind\":\"permission_decision\",\"session\":\"k7m2qx\",\"action\":\"11\",\"decision\":\"allow_once\"}", .digest = "58a41dbeb05f94c0a10bf02ec6dc5bf3b39a50dbfa4af591364f001c4008be79" },
+    };
+    for (cases) |case| {
+        var source: MetadataSource = .{ .input = case.body };
+        var retained: ?named_scratch.Owner = null;
+        const captured: ContentField = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
+        var parser: Parser = .{ .source = &source, .captured = &.{captured}, .options = .{ .io = std.testing.io, .content_length = case.body.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        const request = try parseForTest(&parser);
+        const digest = switch (request) {
+            .configure => |*command| command.semanticDigest(),
+            .message => |*command| command.semanticDigest(),
+            .session_stop => |*command| command.semanticDigest(),
+            .session_archive => |*command| command.semanticDigest(),
+            .model_interruption => |*command| command.semanticDigest(),
+            .permission_decision => |*command| command.semanticDigest(),
+            else => unreachable,
+        };
+        try std.testing.expectEqualStrings(case.digest, &std.fmt.bytesToHex(digest, .lower));
+    }
+    // The exception is canonical mutations only, never old read requests or new
+    // Message fields smuggled under the old grammar (including an empty vector).
+    for ([_][]const u8{
+        "{\"version\":\"10\",\"kind\":\"host_info\",\"store\":\"s\"}",
+        head ++ "\"kind\":\"message\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skills\":[],\"text\":{\"state\":\"value\",\"value\":\"\"}}",
+    }, 0..) |body, index| {
+        var source: MetadataSource = .{ .input = body };
+        var retained: ?named_scratch.Owner = null;
+        var parser: Parser = .{ .source = &source, .captured = &.{.{ .state = .value }}, .options = .{ .io = std.testing.io, .content_length = body.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        try std.testing.expectError(if (index == 0) error.WrongWireVersion else error.UnexpectedField, parseForTest(&parser));
+    }
+}
+
+test "inline skills ingress admits 4096 worst-escaped chunked names with arbitrary field order" {
+    var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer bytes.deinit();
+    try bytes.writer.writeAll("{\"skills\":[");
+    for (0..4096) |index| {
+        if (index != 0) try bytes.writer.writeByte(',');
+        try bytes.writer.writeByte('"');
+        var name_buffer: [64]u8 = @splat('x');
+        _ = try std.fmt.bufPrint(name_buffer[59..], "{d:0>5}", .{index});
+        for (name_buffer) |byte| try bytes.writer.print("\\u00{x:0>2}", .{byte});
+        try bytes.writer.writeByte('"');
+    }
+    try bytes.writer.writeAll("],\"version\":\"" ++ wire_version ++ "\",\"store\":\"s\",\"kind\":\"message\",\"key\":\"max-vector\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"text\":{\"state\":\"value\",\"value\":\"x\"}}");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [max_store_bytes]u8 = undefined;
+    const path = root[0..try tmp.dir.realPath(std.testing.io, &root)];
+    const ingress = try std.testing.allocator.create(Ingress);
+    defer std.testing.allocator.destroy(ingress);
+    var retained: ?named_scratch.Owner = null;
+    ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.written().len, .scratch_path = path, .request_number = 1, .retained_scratch = &retained });
+    defer ingress.deinit();
+    // Every escape and multibyte boundary can cross a transport fragment.
+    for (bytes.written()) |byte| try ingress.feed(&.{byte});
+    const request = try ingress.finish();
+    try std.testing.expectEqual(@as(usize, 4096), request.message.skills.len);
+    try std.testing.expectEqualStrings("04095", request.message.skills[4095].slice()[59..]);
+    try std.testing.expectEqual(@as(u64, 1), request.message.text.length);
+    try request.removeTemporaryContent(std.testing.io);
 }

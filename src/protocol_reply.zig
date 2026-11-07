@@ -2481,7 +2481,7 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
                 _ = std.fmt.hexToBytes(&digest, input.sha256.slice()) catch return error.InvalidResponse;
                 const input_bytes = try mutationId(input.bytes, true);
                 confirmed_input = .{ .bytes = input_bytes, .digest = digest };
-                if (!expected.invokes_skill and (input_bytes != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest))) return error.RequestBindingMismatch;
+                if ((!expected.invokes_skill or !accepted) and (input_bytes != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest))) return error.RequestBindingMismatch;
                 if (accepted) {
                     const admission = try mutationId(answer.admission.value orelse return error.InvalidResponse, false);
                     const queue = wire.queue.value orelse return error.InvalidResponse;
@@ -4097,4 +4097,17 @@ pub fn decodeSkillSuggestions(gpa: std.mem.Allocator, bytes: []const u8) !@impor
         initialized += 1;
     }
     return .{ .entries = entries, .revision = revision, .total = total };
+}
+
+test "inline skills suggestion decoder owns bounded metadata and rejects path or count forgery" {
+    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"skill_suggestions\",\"revision\":\"7\",\"total\":\"1\",\"entries\":[";
+    var page = try decodeSkillSuggestions(std.testing.allocator, prefix ++ "{\"name\":\"demo\",\"description\":\"A skill\"}]}");
+    defer page.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("demo", page.entries[0].name);
+    try std.testing.expectEqual(@as(u64, 7), page.revision);
+    for ([_][]const u8{
+        prefix ++ "{\"name\":\"demo\",\"description\":\"A skill\",\"path\":\"/not-public\"}]}",
+        prefix ++ "]}",
+        prefix ++ "{\"name\":3,\"description\":\"A skill\"}]}",
+    }) |wire| try std.testing.expectError(error.InvalidResponse, decodeSkillSuggestions(std.testing.allocator, wire));
 }

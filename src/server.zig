@@ -1493,12 +1493,15 @@ const Header = struct {
 /// the Turn's Bash before the environment is in place. The register keeps
 /// `offer`'s allocation or leaves it, with what it released, to be freed
 /// right after admission.
-noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer, capture_options: protocol.ParseOptions) store_module.MessageReply {
+noinline fn submitMessage(host: *Host, command: *const protocol.MessageCommand, offer: *SessionEnvironments.Offer, capture_options: protocol.ParseOptions) error{ScratchCapacityExhausted}!store_module.MessageReply {
     std.debug.assert(offer.value() != null);
     defer offer.deinit(host.allocator);
     var memory: std.heap.ArenaAllocator = .init(host.allocator);
     defer memory.deinit();
-    const prepared = @import("session_skills.zig").prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home, capture_options) catch return .infrastructure_failure;
+    const prepared = @import("session_skills.zig").prepareMessage(memory.allocator(), host.allocator, host.io, host.store, command, host.bash_facts.home, capture_options) catch |err| switch (err) {
+        error.ScratchCapacityExhausted => return error.ScratchCapacityExhausted,
+        else => return .infrastructure_failure,
+    };
     defer prepared.deinit(host.io);
     const initial_skills = prepared.initial;
     const captured_skill = prepared.captured;
@@ -1624,7 +1627,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(status, protocol.max_response_bytes, renderConfigureReply, .{ command, result });
         },
         .message => |*command| {
-            const result = submitMessage(host, command, client_environment.?, .{ .io = host.io, .content_length = 0, .scratch_path = host.lease.paths.scratch.slice(), .request_number = request_number, .retained_scratch = retained_scratch, .scratch_budget = host.retention.sharedBudget() });
+            const result = try submitMessage(host, command, client_environment.?, .{ .io = host.io, .content_length = 0, .scratch_path = host.lease.paths.scratch.slice(), .request_number = request_number, .retained_scratch = retained_scratch, .scratch_budget = host.retention.sharedBudget() });
             if (result == .infrastructure_failure) {
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
@@ -1856,13 +1859,12 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         },
         .skill_suggestions => |*command| {
             const scope: @import("skill_suggestions.zig").Scope = if (command.session) |*session| .{ .session = session.slice() } else .{ .workspace = command.workspace.?.slice() };
-            var page = @import("session_skills.zig").suggestions(host.allocator, host.allocator, host.io, host.store, scope, command.prefix.slice(), host.bash_facts.home) catch |err| switch (err) {
-                error.SessionNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                error.CorruptStore, error.StoreFenced => {
+            var page = @import("session_skills.zig").suggestions(host.allocator, host.allocator, host.io, host.store, scope, command.prefix.slice(), host.bash_facts.home) catch |err| {
+                if (scope == .session and err != error.SessionNotFound) {
                     fenceDispatch(host, "skill suggestions", err);
                     return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
-                else => return respondStatic(fd, 409, .activity_unavailable, "skills_unavailable"),
+                }
+                return respondStatic(fd, 409, .activity_unavailable, if (err == error.SessionNotFound) "SessionNotFound" else "skills_unavailable");
             };
             defer page.deinit(host.allocator);
             try fd.jsonGrowing(200, protocol.skill_suggestions_reply.max_bytes, renderSkillSuggestions, .{&page});
@@ -4899,4 +4901,68 @@ test "session archive renders accepted intent and completion for both archive an
         const decoded = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "k7m2qx", .{ .session_archive = .{ .archived = true } }).answer;
         try std.testing.expectEqualStrings(@tagName(code), decoded.result.rejected.slice());
     }
+}
+
+test "inline skills overlapping capture pressure returns 507 without key admission or Host fencing" {
+    const store_testing = @import("store/testing.zig");
+    const skills = @import("skills.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const file = try tmp.dir.createFile(std.testing.io, "SKILL.md", .{});
+    try file.writeStreamingAll(std.testing.io, &@as([512]u8, @splat('x')));
+    file.close(std.testing.io);
+    var path_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/SKILL.md", .{root});
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const initial = try skills.initialCatalog(arena.allocator(), .{ .entries = &.{.{ .name = "demo", .description = "Metadata", .path = path }} });
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/pressure.sqlite", .{root});
+    var storage: store_module.Store = undefined;
+    try storage.open(std.testing.io, database, root);
+    defer storage.close() catch unreachable;
+    const configure = try store_testing.completeConfiguration("pressure-config", "", root, "model-a");
+    const configured = storage.configureWithInitialSkills(&configure, null, &.{ .ready = .{ .encoded = initial.encoded, .instruction = initial.instruction } }, .{});
+    try std.testing.expect(configured == .accepted);
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.store.set(root);
+    try lease.paths.scratch.set(root);
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage };
+    var retention = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &host.scratch_used, .limit = 128 }, &.{});
+    host.retention = &retention;
+    var retained: ?named_scratch.Owner = null;
+    const options: protocol.ParseOptions = .{ .io = std.testing.io, .content_length = 0, .scratch_path = root, .request_number = 1, .retained_scratch = &retained, .scratch_budget = retention.sharedBudget() };
+    var input_capture: protocol.ContentCapture = undefined;
+    try input_capture.init(options, 1);
+    defer input_capture.deinit();
+    try input_capture.write("prompt");
+    var command: protocol.MessageCommand = .{ .session = configured.accepted.session, .text = try input_capture.seal() };
+    defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+    try command.key.set("pressure-key");
+    var name: protocol.Bounded(64) = .{};
+    try name.set("demo");
+    command.skills = &.{name};
+    var offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+    try std.testing.expectError(error.ScratchCapacityExhausted, submitMessage(&host, &command, &offer, options));
+    try std.testing.expect(!try storage.commandExists(command.key.slice()));
+    try std.testing.expect(!storage.isFenced() and host.launchAllowed());
+    try std.testing.expectEqual(@as(u64, 6), host.scratch_used.load(.acquire));
+    try std.testing.expect(retained == null);
+    var intake: Intake = .{ .host = &host };
+    var exchange: Intake.Exchange = .{ .owner = &intake, .host = &host, .fd = -1, .accepted_at_ns = 0, .deadline = 0 };
+    defer if (exchange.reply) |reply| {
+        reply.deinit();
+        host.allocator.destroy(reply);
+    };
+    exchange.fail(error.ScratchCapacityExhausted);
+    try std.testing.expect(std.mem.startsWith(u8, exchange.reply.?.header[0..exchange.reply.?.header_length], "HTTP/1.1 507 "));
+    // Ordinary work remains admissible under the same key after reclamation.
+    command.skills = &.{};
+    var retry_offer = try SessionEnvironments.Offer.init(std.testing.allocator, 0);
+    const accepted = try submitMessage(&host, &command, &retry_offer, options);
+    try std.testing.expect(accepted == .accepted);
+    try std.testing.expect(host.launchAllowed() and !storage.isFenced());
 }

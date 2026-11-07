@@ -488,22 +488,27 @@ noinline fn submitCreating(
         .model_capability_unavailable
     else
         null;
-    // A failed batch must refuse before configuration queues any creation writes.
-    // An unavailable initial catalog goes through configuration validation so an
-    // invalid Workspace keeps its established typed refusal and replay.
-    if (rejection == null and (command.skill != null or command.skills.len != 0) and !(initial_skills != null and initial_skills.?.* == .unavailable)) {
+    if (rejection != null) return rejectMessage(a, command, reads, command.sender != null and sender_valid, rejection.?, faults);
+    const checked = try configuration_domain.validateConfiguration(a, io, "", configuration, initial_skills, creation);
+    const plan = switch (checked) {
+        .rejected => |code| return rejectMessage(a, command, reads, command.sender != null and sender_valid, std.meta.stringToEnum(protocol.MessageRejection, @tagName(code)).?, faults),
+        .ready => |value| value,
+    };
+    // Configuration's validation-only phase owns ordinary refusal precedence.
+    // No configuration/content/Session writes exist when a batch refuses.
+    if (command.skill != null or command.skills.len != 0) {
         const captured = captured_skill orelse return rejectMessage(a, command, reads, command.sender != null and sender_valid, .skills_unavailable, faults);
         if (captured.* == .failed) return rejectMessageWithFailure(a, command, reads, command.sender != null and sender_valid, captured.failed.rejection(protocol.MessageRejection), captured.failed, faults);
         try prepareMessageReads(a, command, reads, captured);
     }
-    if (rejection == null) switch (try configuration_domain.applyConfiguration(a, io, "", configuration, initial_skills, faults, creation)) {
+    switch (try configuration_domain.applyValidatedConfiguration(a, io, "", configuration, initial_skills, faults, creation, &plan)) {
         .rejected => |code| rejection = std.meta.stringToEnum(protocol.MessageRejection, @tagName(code)).?,
         .accepted => |applied| {
             content_domain.lookup(a, &reads.text);
             try a.run();
             return admitMessage(a, io, command, reads, applied.head, applied.session, &applied, committed, faults);
         },
-    };
+    }
     return rejectMessage(a, command, reads, command.sender != null and sender_valid, rejection.?, faults);
 }
 

@@ -848,15 +848,22 @@ fn targetRejection(session: []const u8) ?protocol.ConfigurationRejection {
 /// first Message can share this owner without an intermediate commit. The
 /// answer names the Session either way; the caller records an accepted
 /// one with `queueConfiguredCommand`.
-pub fn applyConfiguration(
+pub const ValidatedConfiguration = struct {
+    content_actions: @FieldType(ConfigurationUpdatePlan, "update"),
+    before: ?Settings,
+};
+pub const ConfigurationValidation = union(enum) { ready: ValidatedConfiguration, rejected: protocol.ConfigurationRejection };
+
+/// Validates without queuing content, tool-set or Session writes. The resulting
+/// plan borrows the same transaction's reads and is applied exactly once.
+pub fn validateConfiguration(
     a: anytype,
     io: std.Io,
     session: []const u8,
     configuration: *const protocol.Configuration,
     initial_skills: ?*const skills_domain.Initial,
-    faults: Faults,
     reads: *ConfigurationReads,
-) !Application {
+) !ConfigurationValidation {
     const creating = session.len == 0;
     if (targetRejection(session)) |code| return .{ .rejected = code };
     if (configuration.permission_mode.state == .value and
@@ -926,6 +933,23 @@ pub fn applyConfiguration(
     // discovery capture, but reject it before any content or Session writes.
     if (creating) if (initial_skills) |captured| if (captured.* == .unavailable) return .{ .rejected = .skills_unavailable };
 
+    return .{ .ready = .{ .content_actions = content_actions, .before = before } };
+}
+
+pub fn applyConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const protocol.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads) !Application {
+    const checked = try validateConfiguration(a, io, session, configuration, initial_skills, reads);
+    return switch (checked) {
+        .rejected => |code| .{ .rejected = code },
+        .ready => |*plan| try applyValidatedConfiguration(a, io, session, configuration, initial_skills, faults, reads, plan),
+    };
+}
+
+pub fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, configuration: *const protocol.Configuration, initial_skills: ?*const skills_domain.Initial, faults: Faults, reads: *ConfigurationReads, plan: *const ValidatedConfiguration) !Application {
+    const creating = session.len == 0;
+    const created = !reads.found.get();
+    const next = &reads.next;
+    const before = plan.before;
+    const content_actions = plan.content_actions;
     var command_instructions_id: ?u64 = null;
     switch (content_actions.instructions) {
         .preserve => {},

@@ -44,11 +44,7 @@ pub fn capture(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocato
             } else return .{ .failed = .{ .code = .unknown_skill, .bytes = "No advertised skill has that name. Reload skills to refresh the catalog." } };
             const bytes = catalog.invocation(allocator, io, selected) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => return .{ .failed = .{ .code = switch (err) {
-                    error.SkillFileTooLarge => .skill_file_too_large,
-                    error.InvalidUtf8 => .skill_text_invalid,
-                    else => .skill_file_unavailable,
-                }, .bytes = try std.fmt.allocPrint(allocator, "Rui could not read skill {s}: {s}. The catalog was not changed.", .{ name, @errorName(err) }) } },
+                else => return readFailure(allocator, name, err),
             };
             return .{ .invocation = bytes };
         },
@@ -61,6 +57,14 @@ pub fn capture(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocato
 
 /// One request owner, borrowed by the Store through synchronous settlement.
 /// Its expanded descriptor shares the Ingress scratch budget and cleanup home.
+fn readFailure(allocator: std.mem.Allocator, name: []const u8, err: anyerror) !Capture {
+    return .{ .failed = .{ .code = switch (err) {
+        error.SkillFileTooLarge, error.SkillBatchTooLarge => .skill_file_too_large,
+        error.InvalidUtf8 => .skill_text_invalid,
+        else => .skill_file_unavailable,
+    }, .bytes = try std.fmt.allocPrint(allocator, "Rui could not read skill {s}: {s}. The catalog was not changed.", .{ name, @errorName(err) }) } };
+}
+
 pub const PreparedMessage = struct {
     initial: ?*const storage.InitialSkills = null,
     captured: ?Capture = null,
@@ -102,11 +106,10 @@ pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.A
         found = state.catalog;
     }
     if (!invokes) return prepared;
-    preparePayload(prepared, scratch_allocator, io, command, found, options) catch |err| switch (err) {
+    preparePayload(prepared, allocator, scratch_allocator, io, command, found, options) catch |err| switch (err) {
         error.OutOfMemory, error.ScratchCapacityExhausted => return err,
         else => prepared.captured = .{ .failed = .{ .code = switch (err) {
-            error.UnknownSkill => .unknown_skill,
-            error.SkillFileTooLarge, error.SkillBatchTooLarge => .skill_file_too_large,
+            error.SkillBatchTooLarge => .skill_file_too_large,
             error.InvalidUtf8 => .skill_text_invalid,
             else => .skill_file_unavailable,
         }, .bytes = try std.fmt.allocPrint(allocator, "Rui could not prepare skills: {s}. No Message was admitted.", .{@errorName(err)}) } },
@@ -116,7 +119,21 @@ pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.A
 
 const max_batch_body_bytes = 1024 * 1024;
 
-fn preparePayload(prepared: *PreparedMessage, allocator: std.mem.Allocator, io: std.Io, command: *const protocol.MessageCommand, found: catalog.Catalog, options: protocol.ParseOptions) !void {
+fn preparePayload(prepared: *PreparedMessage, result_allocator: std.mem.Allocator, allocator: std.mem.Allocator, io: std.Io, command: *const protocol.MessageCommand, found: catalog.Catalog, options: protocol.ParseOptions) !void {
+    const names = if (command.skill) |*name| @as([]const protocol.Bounded(64), @as([*]const protocol.Bounded(64), @ptrCast(name))[0..1]) else command.skills;
+    if (names.len > catalog.max_entries) return error.SkillCatalogLimit;
+    // Resolve the complete intent before prompt copying, scratch acquisition or
+    // skill I/O. Entries borrow this request's one authoritative snapshot.
+    const selected = try allocator.alloc(catalog.Entry, names.len);
+    defer allocator.free(selected);
+    for (names, selected) |name, *selected_entry| {
+        selected_entry.* = for (found.entries) |entry| {
+            if (std.mem.eql(u8, entry.name, name.slice())) break entry;
+        } else {
+            prepared.captured = .{ .failed = .{ .code = .unknown_skill, .bytes = "No advertised skill has that name. Reload skills to refresh the catalog." } };
+            return;
+        };
+    }
     // Capture is >1KiB; one heap home, never copied on a Host stack.
     const destination = try allocator.create(protocol.ContentCapture);
     defer allocator.destroy(destination);
@@ -124,16 +141,21 @@ fn preparePayload(prepared: *PreparedMessage, allocator: std.mem.Allocator, io: 
     defer destination.deinit();
     if (command.skill == null) try destination.copy(&command.text);
     var total: usize = 0;
-    const names = if (command.skill) |*name| @as([]const protocol.Bounded(64), @as([*]const protocol.Bounded(64), @ptrCast(name))[0..1]) else command.skills;
-    for (names, 0..) |name, index| {
-        const entry = for (found.entries) |entry| {
-            if (std.mem.eql(u8, entry.name, name.slice())) break entry;
-        } else return error.UnknownSkill;
+    for (selected, names, 0..) |entry, name, index| {
         // The per-file allocation is released before the next file is read.
-        const invocation = try catalog.invocationWithLength(allocator, io, entry);
+        const invocation = catalog.invocationWithLength(allocator, io, entry) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                prepared.captured = try readFailure(result_allocator, name.slice(), err);
+                return;
+            },
+        };
         defer allocator.free(invocation.bytes);
         total = std.math.add(usize, total, invocation.raw_length) catch return error.SkillBatchTooLarge;
-        if (total > max_batch_body_bytes) return error.SkillBatchTooLarge;
+        if (total > max_batch_body_bytes) {
+            prepared.captured = try readFailure(result_allocator, name.slice(), error.SkillBatchTooLarge);
+            return;
+        }
         if (command.skill == null and (command.text.length != 0 or index != 0)) try destination.write("\n\n");
         try destination.write(invocation.bytes);
     }
@@ -201,4 +223,57 @@ test "inline skills suggestions bound pages and retain prefix-independent revisi
     try std.testing.expectEqual(@as(usize, 3), all.total);
     try std.testing.expectEqual(@as(usize, 1), filtered.total);
     try std.testing.expectEqualStrings("beta", filtered.entries[0].name);
+}
+
+test "inline skills resolve complete snapshot before prompt scratch or any selected file I/O" {
+    var prepared: PreparedMessage = .{};
+    defer prepared.deinit(std.testing.io);
+    var first: protocol.Bounded(64) = .{};
+    var missing: protocol.Bounded(64) = .{};
+    try first.set("known");
+    try missing.set("missing");
+    const command: protocol.MessageCommand = .{ .skills = &.{ first, missing }, .text = .{ .state = .value, .length = 100, .digest = protocol.contentDigest("unavailable source") } };
+    var retained: ?@import("named_scratch.zig").Owner = null;
+    try preparePayload(&prepared, std.testing.allocator, std.testing.allocator, std.testing.io, &command, .{ .entries = &.{.{ .name = "known", .description = "Metadata", .path = "/must-not-open/SKILL.md" }} }, .{ .io = std.testing.io, .content_length = 0, .scratch_path = "/must-not-create", .request_number = 0, .retained_scratch = &retained });
+    try std.testing.expect(prepared.captured.? == .failed);
+    try std.testing.expectEqual(.unknown_skill, prepared.captured.?.failed.code);
+    try std.testing.expect(retained == null);
+}
+
+test "inline skills aggregate raw body cap reclaims all sequential capture custody" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const raw = try std.testing.allocator.alloc(u8, 600 * 1024);
+    defer std.testing.allocator.free(raw);
+    @memset(raw, 'x');
+    for ([_][]const u8{ "first.md", "second.md" }) |name| {
+        const file = try tmp.dir.createFile(std.testing.io, name, .{});
+        defer file.close(std.testing.io);
+        try file.writeStreamingAll(std.testing.io, raw);
+    }
+    var first_path: [protocol.max_workspace_bytes]u8 = undefined;
+    var second_path: [protocol.max_workspace_bytes]u8 = undefined;
+    const entries = [_]catalog.Entry{
+        .{ .name = "first", .description = "Metadata", .path = try std.fmt.bufPrint(&first_path, "{s}/first.md", .{root}) },
+        .{ .name = "second", .description = "Metadata", .path = try std.fmt.bufPrint(&second_path, "{s}/second.md", .{root}) },
+    };
+    var first: protocol.Bounded(64) = .{};
+    var second: protocol.Bounded(64) = .{};
+    try first.set("first");
+    try second.set("second");
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    var prepared: PreparedMessage = .{};
+    defer prepared.deinit(std.testing.io);
+    var retained: ?@import("named_scratch.zig").Owner = null;
+    var used: std.atomic.Value(u64) = .init(0);
+    const command: protocol.MessageCommand = .{ .skills = &.{ first, second }, .text = .{ .state = .value, .digest = protocol.contentDigest("") } };
+    try preparePayload(&prepared, memory.allocator(), std.testing.allocator, std.testing.io, &command, .{ .entries = &entries }, .{ .io = std.testing.io, .content_length = 0, .scratch_path = root, .request_number = 0, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 4 * 1024 * 1024 } });
+    try std.testing.expect(prepared.captured.? == .failed);
+    try std.testing.expectEqual(.skill_file_too_large, prepared.captured.?.failed.code);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expect(prepared.payload.file == null and retained == null);
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "request-0-3.tmp", .{}));
 }
