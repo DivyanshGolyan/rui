@@ -300,7 +300,6 @@ state: view.State,
 caps: view.Caps,
 terminal: *SessionTerminal,
 interrupted: *client.Cancellation,
-input: TerminalInput = .{},
 /// The composer's line editor, the conversation's, which owns the draft.
 composer: TerminalEditor = undefined,
 draft: [view.draft_capacity]u8 = undefined,
@@ -514,7 +513,7 @@ fn turn(self: *Self) !?Next {
     const now_ms = self.realMs();
     if (self.upgrade_requested) {
         if (try self.quiesceUpgrade()) {
-            const outcome = try UpgradePanel.run(self.init, self.options.store, self.terminal, &self.input, self.interrupted);
+            const outcome = try UpgradePanel.run(self.init, self.options.store, self.terminal, self.interrupted);
             self.upgrade_requested = false;
             switch (outcome) {
                 .unchanged => {},
@@ -535,7 +534,7 @@ fn turn(self: *Self) !?Next {
     const awake_ms: u64 = @intCast(@max(@divFloor(awake_ns, std.time.ns_per_ms), 0));
     if (try self.draw(awake_ms / view.spin_interval_ms)) |next| return next;
     const spins = if (self.shown) |*held| held.spins else false;
-    const timeout = switch (self.input.wait(awake_ns, self.budget(now_ms, awake_ms, spins))) {
+    const timeout = switch (self.terminal.stream.wait(awake_ns, self.budget(now_ms, awake_ms, spins))) {
         .expire => 0,
         .poll => |milliseconds| milliseconds,
     };
@@ -966,7 +965,7 @@ fn readInput(self: *Self, wait: i32, bytes: usize) !?Next {
             },
             .report => |report| switch (report) {
                 .width => |method| {
-                    self.terminal.widthReported(method);
+                    self.terminal.screen.setWidth(method);
                     self.caps.width = method;
                 },
                 .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
