@@ -43,6 +43,30 @@ class TerminalProcessTest(unittest.TestCase):
                 os.fstat(fd)
             self.assertEqual(raised.exception.errno, errno.EBADF)
 
+    def test_upgrade_capture_drains_bytes_pending_after_exit(self):
+        from upgrade_integration import TerminalScreen
+
+        payload = b"\x1b[?1049lreceipt\x00retained/path"
+        command = [sys.executable, "-c", f"import os; os.write(1, {payload!r})"]
+        with terminal_process(command, env=os.environ) as (process, master):
+            screen = TerminalScreen(master, process)
+            host_process.wait_for(lambda: process.poll() is not None, "output child exit")
+            # Simulate a read just before the exit becomes observable: the real
+            # bytes remain queued when wait_for_exit sees the already-exited child.
+            read_output = screen.read_output
+            calls = 0
+
+            def raced_read():
+                nonlocal calls
+                calls += 1
+                return False if calls == 1 else read_output()
+
+            with patch.object(screen, "read_output", side_effect=raced_read):
+                screen.wait_for_exit("queued output after child exit")
+            self.assertEqual(bytes(screen.tail), payload)
+            self.assertGreaterEqual(calls, 3)  # race, data, then EAGAIN/EOF
+        self.assert_retired(process)
+
     def test_failed_launch_closes_terminal(self):
         with self.assertRaises(FileNotFoundError):
             with terminal_process(["/nonexistent/rui-terminal-test"], env=os.environ):
