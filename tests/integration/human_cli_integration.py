@@ -941,9 +941,109 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
     return "\n".join(frames + ([plain()] if plain() else []))
 
 
-def permanent_tool_count(screen, heading):
-    """Count a call heading's rows in one frame (not repeated frames)."""
-    return len(re.findall(r"(?m)^" + re.escape(heading) + r"$", screen))
+def permission_frame(capture, screen):
+    """Project railed rows of this committed conversation, never full-width chrome."""
+    assert screen == capture.completed, "permission observer needs current committed frame"
+    cells = capture.completed_cells
+    columns = capture.screen.columns
+    assert cells and columns > 1 and all(len(row) == columns for row in cells), "invalid permission frame geometry"
+    raw = [row.rstrip(" ") for row in cell_rows(cells, 0, len(cells), 0, columns)]
+    assert "\n".join(raw) == screen and not screen.startswith("Browsing"), "not the current conversation"
+    assert len(raw) >= 3 and raw[-3] == "─" * columns, "invalid conversation rule"
+    railed = [row[-1].data == "▐" for row in cells]
+    body_end = len(cells) - 3
+    rail_end = next((i for i in range(body_end) if not railed[i]), body_end)
+    assert rail_end > 0 and not any(railed[rail_end:body_end]), "missing or noncontiguous physical rail"
+    source = [cell_rows(cells, i, i + 1, 0, columns - 1)[0].rstrip(" ") if i < rail_end else raw[i]
+              for i in range(len(cells))]
+    railed = [i < rail_end for i in range(len(cells))]
+    return source, railed
+
+
+def permission_matches(rows, railed, pattern):
+    """Exact whole rows, with a physical rail where source is expected."""
+    matches = [i for i, row in enumerate(rows) if pattern.fullmatch(row)]
+    assert all(railed[i] for i in matches), ("tool row missing physical rail", matches, rows)
+    return matches
+
+
+def permanent_tool_count(rows, railed, heading):
+    """Count exact indented tool rows in this one committed frame."""
+    return len(permission_matches(rows, railed, re.compile(re.escape("  " + heading))))
+
+
+def permission_clock(rows, railed, description):
+    pattern = re.compile(re.escape("  • " + description) + r" · [0-9]+s")
+    matches = permission_matches(rows, railed, pattern)
+    assert len(matches) == 1, ("the running call's row carries the clock", rows)
+    return matches[0]
+
+
+def permission_adjacent(rows, railed, first, second):
+    matches = permission_matches(rows, railed, re.compile(re.escape("  ✓ " + first)))
+    adjacent = [i + 1 for i in matches if i + 1 < len(rows) and rows[i + 1] == "  ✓ " + second]
+    assert len(adjacent) == 1 and railed[adjacent[0]], (first, second, rows)
+    return adjacent[0]
+
+
+def permission_compact_group(rows, railed, expected):
+    pattern = re.compile(r"  ✓ (Compact item [0-9]+|Wait for compact tail)")
+    indices = permission_matches(rows, railed, pattern)
+    assert [pattern.fullmatch(rows[i])[1] for i in indices] == expected, rows
+    assert all(b == a + 1 for a, b in zip(indices, indices[1:])), ("successful group gained a separator across reads", rows)
+
+
+def permission_observer_oracles():
+    """Read source, counts and clocks at the real committed-cell seam."""
+    from terminal_screen import ScreenCapture
+    capture = ScreenCapture(100, 24)
+    def draw(body):
+        assert len(body) <= 21
+        lines = [row.ljust(99) + "▐" for row in body] + [" " * 99 + "▐"] * (21 - len(body))
+        lines += ["─" * 100, "›", "Session · model"]
+        capture.feed(terminal_frame(lines, (23, 3)))
+        return permission_frame(capture, capture.completed)
+    def refuse(action):
+        try:
+            action()
+        except AssertionError:
+            return
+        raise AssertionError("corrupt permission observation accepted")
+    rows, rails = draw(["literal ▐", "  • Wait for bypass café · 1s",
+        "  ✓ Wait for bypass café", "  ✓ Wait for bypass café", "  ✓ Check final sibling"])
+    assert rows[0] == "literal ▐" and permission_clock(rows, rails, "Wait for bypass café") == 1
+    assert permanent_tool_count(rows, rails, "✓ Wait for bypass café") == 2
+    assert permission_adjacent(rows, rails, "Wait for bypass café", "Check final sibling") == 4
+    edge = "literal ▐".rjust(99)
+    rows, rails = draw([edge, "  ✓ Wait for bypass café"])
+    assert rows[0] == edge and permanent_tool_count(rows, rails, "✓ Wait for bypass café") == 1
+    refuse(lambda: permission_frame(capture, capture.completed + "\n"))
+    def exactly_two(rows, rails):
+        assert permanent_tool_count(rows, rails, "✓ Wait for bypass café") == 2
+    for body in (["  ✓ Wait for bypass café"],
+                 ["  ✓ Wait for bypass café"] * 3,
+                 ["✓ Wait for bypass café"] * 2):
+        rows, rails = draw(body)
+        refuse(lambda: exactly_two(rows, rails))
+    for wrong in ("  • Wait for bypass café", "  • Wait for bypass café · xs", "• Wait for bypass café · 1s"):
+        rows, rails = draw([wrong])
+        refuse(lambda: permission_clock(rows, rails, "Wait for bypass café"))
+    rows, rails = draw(["  • Wait for bypass café · 1s", "  • Wait for bypass café · 2s"])
+    refuse(lambda: permission_clock(rows, rails, "Wait for bypass café"))
+    rows, rails = draw(["  ✓ Wait for bypass café", "", "  ✓ Check final sibling"])
+    refuse(lambda: permission_adjacent(rows, rails, "Wait for bypass café", "Check final sibling"))
+    rows, rails = draw(["  ✓ Compact item 0", "  ✓ Compact item 1", "  ✓ Wait for compact tail"])
+    permission_compact_group(rows, rails, ["Compact item 0", "Compact item 1", "Wait for compact tail"])
+    refuse(lambda: permission_compact_group(rows, rails, ["Compact item 1", "Compact item 0", "Wait for compact tail"]))
+    rows, rails = draw(["  ✓ Compact item 0", "", "  ✓ Compact item 1", "  ✓ Wait for compact tail"])
+    refuse(lambda: permission_compact_group(rows, rails, ["Compact item 0", "Compact item 1", "Wait for compact tail"]))
+    # Missing and displaced physical rails cannot authorize a target row.
+    for bad in ("  • Wait for bypass café · 1s".ljust(100),
+                "  • Wait for bypass café · 1s".ljust(98) + "▐ "):
+        lines = [bad] + [" " * 99 + "▐"] * 20 + ["─" * 100, "›", "Session · model"]
+        capture.feed(terminal_frame(lines, (23, 3)))
+        refuse(lambda: permission_frame(capture, capture.completed))
+    print("permission cells: exact clock, count, adjacency, order, literal rail and malformed geometry negatives passed", flush=True)
 
 
 def pipe_wait_oracles():
@@ -994,6 +1094,7 @@ def terminal_frame(lines, cursor=None):
 
 def terminal_wait_oracles():
     """Committed frames are evidence; partial frames and diagnostics are not."""
+    permission_observer_oracles()
     raw_export_oracles()
     def collect(frames, marker, *, composer=False, error=None, close_output=False, initial=b""):
         reader, writer = os.pipe()
@@ -3800,8 +3901,12 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 os.write(master, b"run without approval\n")
                 live = read_terminal(master, "+1 more calls · /status", composer=True)
                 fixture.wait_for(lambda: all((state / f"bypass-started-{index}").exists() for index in range(4)), "held bypass effects")
-                assert live.index(f"• {bypass_description}") < live.index("• Inspect application settings"), live
-                assert re.search(rf"^• {bypass_description} · \d+s$", live, re.M), ("the running call's row carries the clock", live)
+                current = current_screen(master)
+                assert "+1 more calls · /status" in current, current
+                source, rails = permission_frame(terminal_capture(master), current)
+                clock_index = permission_clock(source, rails, bypass_description)
+                failure_rows = [i for i, row in enumerate(source) if row.startswith("  • Inspect application settings")]
+                assert len(failure_rows) == 1 and rails[failure_rows[0]] and clock_index < failure_rows[0], current
                 assert "Check final sibling" not in live, live
                 assert "Allow once" not in live and "Approval" not in live, live
                 os.write(master, "live café!\x1b[D\x1b[DX".encode())
@@ -3850,7 +3955,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     read_terminal(master, "› live", composer=True)
                 os.write(master, b"\x05\x1b[D\x1b[D")
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 32, 0, 0))
-                wrapped = read_terminal(master, "— Failed", composer=True)
+                wrapped = read_terminal(master, "Failed", composer=True)
+                # Narrow previews are full-width, not transcript rail cells.
+                from terminal_screen import shown as wrapped_status
+                wrapped_frame = current_screen(master)
+                assert wrapped_status("! " + bypass_descriptions[1] + " — Failed", wrapped_frame), wrapped_frame
                 assert "! Inspect application settings" in wrapped and "+1 more calls · /status" in wrapped, wrapped
                 assert "› live cafXé!" in wrapped, wrapped
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 100, 0, 0))
@@ -3872,10 +3981,11 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     release.touch()
                 read_terminal(master, "bypass complete", composer=True)
                 outcome = settle_screen(master)
-                assert permanent_tool_count(outcome, f"✓ {bypass_description}") == 2, outcome
+                outcome_source, outcome_rails = permission_frame(terminal_capture(master), outcome)
+                assert permanent_tool_count(outcome_source, outcome_rails, f"✓ {bypass_description}") == 2, outcome
                 assert "! Inspect application settings" in outcome and "— Failed (exit 7)" in outcome and "Exit code:" not in outcome, outcome
                 assert "✓ Check final sibling" in outcome, outcome
-                assert f"✓ {bypass_description}\n✓ Check final sibling\n" in outcome, ("adjacent successful calls kept a blank line", outcome)
+                permission_adjacent(outcome_source, outcome_rails, bypass_description, "Check final sibling")
                 assert "Bash succeeded." not in outcome and "Tool result:" not in outcome, outcome
                 assert "Process retirement confirmed" not in outcome, ("sibling retirement diagnostics leaked", outcome)
                 assert "› live cafXé!" in outcome, outcome
@@ -3883,7 +3993,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 assert bypass_description not in page, ("status page repeated a presented result", page)
                 return_to_live(master)
                 refreshed = settle_screen(master)
-                assert permanent_tool_count(refreshed, f"✓ {bypass_description}") == 2, ("presented bypass result repeated", refreshed)
+                refreshed_source, refreshed_rails = permission_frame(terminal_capture(master), refreshed)
+                assert permanent_tool_count(refreshed_source, refreshed_rails, f"✓ {bypass_description}") == 2, ("presented bypass result repeated", refreshed)
                 assert len(endpoint.requests) == 5, "bypass refresh repeated provider work"
                 # Eighteen results cross the 16-item Activity page. A second
                 # group is held until the first is permanently presented,
@@ -3913,15 +4024,15 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     read_terminal(master, "• Wait for compact tail", composer=True)
                     compact_release.touch()
                     read_terminal(master, "• Check after notice", composer=True)
-                    while "✓ Wait for compact tail\n" not in (compact := current_screen(master)):
+                    while True:
+                        compact = current_screen(master)
+                        compact_source, compact_rails = permission_frame(terminal_capture(master), compact)
+                        if "  ✓ Wait for compact tail" in compact_source:
+                            break
                         remaining = compact_deadline - time.monotonic()
                         assert remaining > 0, ("compact tail never permanently presented", compact)
                         next_frame(master, remaining)
-                    headings = list(re.finditer(r"✓ (Compact item [0-9]+|Wait for compact tail)\n", compact))
-                    assert [match[1] for match in headings] == compact_labels + ["Wait for compact tail"], compact
-                    for match in headings[1:]:
-                        assert compact[match.start() - 2:match.start()] not in ("\n\n", "\r\n"), (
-                            "successful group gained a separator across reads", compact)
+                    permission_compact_group(compact_source, compact_rails, compact_labels + ["Wait for compact tail"])
                     def hold_notice_result(response):
                         page = json.loads(response.split(b"\r\n\r\n", 1)[1])
                         if any("tool_result" in item["value"] for item in page["items"]):
@@ -3939,7 +4050,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                     after_notice = settle_screen(master)
                     # A notice is status, not conversation: it neither enters
                     # nor splits the success group around it.
-                    assert "✓ Wait for compact tail\n✓ Check after notice\n" in after_notice, after_notice
+                    notice_source, notice_rails = permission_frame(terminal_capture(master), after_notice)
+                    permission_adjacent(notice_source, notice_rails, "Wait for compact tail", "Check after notice")
                     assert after_notice.index("compact complete") < after_notice.index("! Input rejected; nothing sent."), after_notice
                     proxy.route = "/v1/message"
                     proxy.rewrite = lambda response: response
@@ -4014,17 +4126,18 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                             # The released page applies whole: its approval
                             # never shows without the success it read with.
                             if f"? {label}" in before_notice:
-                                assert f"✓ {prior_label}\n" in before_notice, before_notice
+                                before_source, before_rails = permission_frame(terminal_capture(master), before_notice)
+                                assert permanent_tool_count(before_source, before_rails, f"✓ {prior_label}") == 1, before_notice
                             prefix = b""
                         refreshed_release.set()
                         await_screen(master, f"✓ {label}", composer=True)
                         shown = settle_screen(master)
-                        start = shown.index(f"✓ {label}\n")
+                        shown_source, shown_rails = permission_frame(terminal_capture(master), shown)
                         # A notice is status only; neither it nor the stale
                         # page separates the two successes, and the next page
                         # retires the stale page's approval.
-                        assert f"✓ {prior_label}\n✓ {label}\n" in shown, ("stale permission scan separated successes", with_notice, shown)
-                        assert "Allow once" not in shown and f"? {label}" not in shown[start:], ("stale approval outlived the next page", shown)
+                        start = permission_adjacent(shown_source, shown_rails, prior_label, label)
+                        assert "Allow once" not in shown and f"? {label}" not in "\n".join(shown_source[start:]), ("stale approval outlived the next page", shown)
                         answer_release.set()
                         read_terminal(master, answer, composer=True)
                     finally:
@@ -4061,7 +4174,9 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
         assert "Process retirement confirmed" not in reopened and "macOS group signaling returned EPERM" not in reopened, (
             "routine retirement diagnostics leaked on reopening", reopened)
         if decision == "allow-action" and not any((exit_code, signal_failure, lost_reply, timed_out)):
-            assert "✓ Prepare external approval 1\n✓ External approval 1\n" in reopened, ("reopening lost compact successes", reopened)
+            reopened_frame = current_screen(master)
+            reopened_source, reopened_rails = permission_frame(terminal_capture(master), reopened_frame)
+            permission_adjacent(reopened_source, reopened_rails, "Prepare external approval 1", "External approval 1")
         assert all(hidden not in reopened for hidden in (
             "Process-group signaling reported a failure.", "inspection-only-output",
             "stdout tail:", "stderr tail:", "[summary shortened; /details]",
@@ -4092,7 +4207,8 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
             history_top(master)
             scroll_until(master, b"\x1b[5~", "Start of conversation")
             history = current_screen(master)
-            assert f"! {description} — Failed (exit {exit_code})\n" in history, history
+            history_source, history_rails = permission_frame(terminal_capture(master), history)
+            assert permanent_tool_count(history_source, history_rails, f"! {description} — Failed (exit {exit_code})") == 1, history
             assert all(hidden not in history for hidden in (
                 "inspection-only-output", "Historical item omitted", "Raw export:",
                 "/details for full output.", "Process-group signaling reported a failure.",
