@@ -1,7 +1,7 @@
 # Land a change
 
 [AGENTS.md](../../AGENTS.md#authority) owns authorization and the [standing landing grant](../../AGENTS.md#landing).
-[Landing cadence](../../VERIFICATION.md#landing-cadence) owns qualification, promotion, Auto-land, releases, strict paths and recovery.
+[Landing cadence](../../VERIFICATION.md#landing-cadence) owns candidate admission, releases, strict paths and recovery.
 
 ## Publish and merge
 
@@ -11,15 +11,17 @@ Every PR commit states its actual test commands and results.
 Performance changes include A/B numbers, and TUI changes include a real-screen tmux capture.
 Keep published commits unchanged so their CI evidence retains its SHA.
 
-Green means the `linux` check completed successfully on the PR's current head.
+Green means the required `admission` check completed successfully for the current, up-to-date PR merge candidate.
+[The main ruleset](../../.github/main-ruleset.json) records the required GitHub enforcement.
+Its active remote configuration must match before the publication cutover.
 Pending, skipped, cancelled or earlier-head success is not green.
-A green PR lands without waiting for review signoff or checks CI repeats.
+A green PR squash-merges without waiting for review signoff or repeated correctness checks after main.
 Follow [Review](../../CODING_STANDARDS.md#review) for Codex requests and findings.
 Ship later fixes as follow-up PRs.
 
-Merge `origin/main` into a PR only when GitHub reports a conflict.
-After that merge, run `python3 tests/ci/prepush.py` and wait for the new head's CI.
-A PR that merely trails main merges as it is.
+Update the PR when its base advances or GitHub reports a conflict.
+After updating it, run `python3 tests/ci/prepush.py` and wait for the current candidate's CI.
+An earlier green candidate does not qualify a stale base.
 
 ## Concurrent PRs
 
@@ -33,11 +35,11 @@ Only its front PR takes `origin/main`; each later PR takes main once, after its 
 
 Diagnose failures through [rui-ci-triage](../../.claude/skills/rui-ci-triage/SKILL.md) and follow [Evidence](../../CODING_STANDARDS.md#evidence) for reruns, strict-path holds and failure retention.
 A red counts as fixed only when a commit between the red and a later green changed its failing fixture or owner.
-For a recurring fixture-and-assertion signature on SHAs that did not touch its code, update or file one `stable-red` issue for that signature and own the race fix.
+For a recurring fixture-and-assertion signature on SHAs that did not touch its code, update or file one issue for that signature and own the race fix.
 Preserve the assertion's strength.
 The fixing commit says `Fixes #N`, and a recurrence reopens the issue.
 For bot-filed issues, the coordinating agent hands the fix to the thread that owns the fixture.
 
-Before opening a fix, search open `stable-red` issues for the touched fixture and include `Fixes #N` for each issue it fixes.
-The policy job warns when a PR touches a held fixture without `Fixes #N` or `Refs #N`.
-When investigating stable promotion, run `python3 tests/ci/stable_hold.py status` for open holds and time since the last promotion.
+Before opening a fix, search open CI issues for the touched fixture and include `Fixes #N` for each issue it fixes.
+Issues record defects; they do not form a separate publication gate.
+Diagnose publication failures in the single Release workflow, and recover the same release without rerunning product correctness.

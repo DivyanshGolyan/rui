@@ -32,7 +32,7 @@ Where the shell is root, as in many containers, use an ordinary account that own
 | --- | --- |
 | Documentation | References, consistency and `git diff --check` |
 | Runtime behavior | Subsystem mapping below on the PR head for Linux main acceptance; Mac mapping and full Debug recovery on the exact main SHA before stable promotion. A skip is not evidence |
-| Build or dependency | Linux `check-full` and mapped checks on the PR head; macOS `check-full` and empty-cache acceptance daily |
+| Build or dependency | Linux and macOS `check-full` and mapped checks before merge; manual empty-cache acceptance |
 | Resource owner | Comparable measurements and lifecycle evidence on applicable runners |
 
 The executable minimum is [select_tests.py](tests/ci/select_tests.py), using targets from [build.zig](build.zig).
@@ -66,8 +66,8 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | Shared control, model and Host-process fixture helpers | `check`, both H2 targets and affected standalone Current or reply-delivery targets | `model_fixture.py` keeps all shared consumers. H2 and standalone consumers are outside the composed driver |
 | Standalone Current, reply-delivery and login-signal oracles | Owning integration target; login signal on Linux only | Neither composed gate runs them. Changes to their helpers keep these targets |
 | Canonical-failure oracle | `canonical-failure-integration` on both systems | Skip it when a composed gate is selected; the human CLI fixture runs all cases |
-| Build, dependencies or bootstrap | `check-full`, full Debug admission, long timeout and churn witnesses, relevant H2 and standalone targets, scheduled empty-cache evidence | Transport build, dependency pins and bootstrap select both H2 targets |
-| Stable promotion (all paths) | Mac Selected and the [upgrade check](.github/workflows/previous-release-upgrade.yml) on hosted Linux and macOS, all on the exact main SHA | `previous_release_upgrade.py` installs the pinned prior build, saves real work, then restarts the same Store under the candidate. Strict paths add no main gate |
+| Build, dependencies or bootstrap | `check-full`, full Debug admission, long timeout and churn witnesses, relevant H2 and standalone targets, manual empty-cache evidence | Transport build, dependency pins and bootstrap select both H2 targets |
+| Main admission, every ready PR | Native Mac core checks and the [upgrade check](.github/workflows/previous-release-upgrade.yml) on hosted Linux and macOS, all on the immutable merge candidate | `previous_release_upgrade.py` installs the pinned prior build, saves real work, then restarts the same Store under the candidate. Required admission runs before main |
 | Host stack frames (Zig under `src/` outside frontend owners, `build.zig`, `tests/ci/stack_frames.*`) | `stack-frames` on x86-64 Linux; `check` runs it, `check-full` does not | [stack_frames.py](tests/ci/stack_frames.py) reads the ReleaseSafe binary's prologues and direct calls. It fails on a frame over 8 KiB reachable from a Host thread or a function of a module in `host_modules` unless an exception in [stack_frames.json](tests/ci/stack_frames.json) names its cause, and on a thread whose deepest chain passes its `chain_ceiling`. Exceptions and ceilings only shrink. Calls through function pointers outside `host_modules` are not followed, and no other platform is measured |
 | Caller error coverage (`cli.zig`, `cli_args.zig`, `client.zig`, `preferences.zig` and root `caller_*.zig` under `src/`) | `python3 tests/ci/caller_errors.py`, the prepush driver and CI policy | Caller-facing CLI modules cannot use raw `@errorName`; every literal production error reference or declaration in that inventory needs a catalog mapping or an existing pending entry. The trusted `origin/main` pending set only shrinks; first rollout bootstraps from the same trusted CLI-owned sources and the exact pinned Zig standard library. Closed inferred sets also fail compilation through `caller_error.of`; unmapped errors widened from other owners remain `internal_unexpected`, exit 1 (unclassified), without extending the CLI inventory. |
 | CI policy | Selector tests, workflow validation and `test-logic` on both runner architectures | Exercise actual CI bootstrap |
@@ -77,7 +77,8 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 Neither composed gate covers that root, so run it with a selected composed gate.
 The compiler and dependency setup action is bootstrap, not CI policy.
 An unavailable selection base is an error.
-A stable qualification qualifies a main SHA only if stable contains its `base` and `base..sha` spans `stable..sha`'s paths.
+PR selection uses its recorded base and immutable merge candidate.
+Required core native and historical-upgrade checks do not disappear for a narrow diff.
 
 Qualification Go changes select `measurement-check`.
 Linux-memory Python or C changes also run the collector unittests and compile the diagnostic probe on Linux.
@@ -87,59 +88,37 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 
 ### Landing cadence
 
-[AGENTS.md](AGENTS.md#landing) owns the landing grant.
-[Landing procedures](docs/agents/landing.md) own PR operations and per-commit proof.
-[strict_paths.py](tests/ci/strict_paths.py) owns the strict paths, whose failures are diagnosed rather than retried.
-Each small, coherent change lands on main by merging its PR.
-Lane completion and review signoff are not prerequisites.
-Focused checks on changed layers are development feedback.
-Daily suites do not qualify intermediate merges.
+`main` is the releasable source branch.
+Required product correctness runs before merge, not between `main` and a release.
+GitHub must require pull requests, an up-to-date base and the GitHub Actions `admission` check on `main`, with no bypass.
+Use squash merges under linear history.
+The checked PR merge commit and final squash commit have different identities; qualification applies to their identical source tree, not an identical commit SHA.
+A changed head or base requires current candidate checks before merge.
 
-Selected CI runs affected-owner targets on Linux for PRs; upgrade checks run once, on stable candidates.
-Linux predicts Mac except where code may differ by platform: a ready PR that changes a Mac-specific path also runs its native mapping on Mac (`check` when none is mapped).
-[platform_boundary.py](tests/ci/platform_boundary.py) owns those paths: C, patches, build and packaging inputs, Mac CI wiring, `src/os/` and `tests/integration/os_semantics.py`.
-Its test fails when any other Zig source or fixture names the platform or calls a syscall whose Darwin semantics diverge.
-The scan cannot see runtime divergence such as socket buffering or process timing, so a change to a fixture that uses raw sockets or waits on process lifetime also runs [on-demand Mac qualification](#hosted-qualification) (`qualify-macos.yml`, `suite=native`) on its revision before landing.
-Every Linux Selected run with targets also runs `zig build typecheck-macos`, which type-checks the product and unit tests for Apple Silicon without an SDK, link or run, so a Darwin-only compile error fails the Linux gate.
-The `linux` aggregate alone gates main, including strict paths; overall Selected status cannot turn a Mac failure into a main gate.
-After landing, Auto-land explicitly dispatches Mac Selected and the upgrade workflow on main because GITHUB_TOKEN pushes do not emit ordinary push workflows.
-A merged PR's push to main wakes the same promotion phase.
-Stable qualification selects from the previous stable, forces Mac `check` and full `admission-debug-integration` even for an empty native mapping, and retains additional mapped targets.
-Both upgrade platforms always execute for stable candidates.
+[Selected checks](.github/workflows/check.yml) qualify each ready PR's immutable merge candidate.
+Linux runs the affected targets from [select_tests.py](tests/ci/select_tests.py).
+Native macOS runs the affected targets plus `check`, or its selected `check-full` superset, and full Debug admission recovery.
+The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs internally on Linux and macOS against that same candidate.
+The always-run `admission` aggregate requires every selected job, including cache-execution checks when selected.
+Failed, cancelled, missing or unexpectedly skipped required jobs do not qualify a candidate.
+Draft development checks never satisfy admission.
+Correctness failures are fixed on the PR before it reaches `main`.
 
-Stable advances non-force to the newest main SHA with successful exact-SHA Mac and upgrade evidence.
-The recorded selection base must be an ancestor of current stable, and its candidate delta must cover every path current stable..candidate changes, including reversions after the base.
-Candidate-as-base and noncovering ancestry cannot qualify.
-Absent, skipped, red or older checks cannot qualify a descendant or rewind stable.
-While any `stable-red` issue is open, no candidate promotes, however green: a later green run is not evidence that the race is gone, and only the fixing commit's `Fixes #N` closes the issue.
-GitHub ignores closing keywords in GITHUB_TOKEN pushes, so before reading the hold the promotion phase closes every open issue in this repository that a closing keyword in a stable..main commit names, commenting with that commit, as a user push would.
-Each commit closes its issue once: after a closure that follows the commit's reference or comment, a reopened issue is a recurrence and stays open.
-A failed close warns and leaves the issue holding stable until the next pass.
-A stable red adds the label to an issue another workflow filed, and any later failure with that signature reopens it, holding stable again.
-A stable qualification wakes Auto-land only after its report job, and a failed issue listing also holds promotion.
-A failed report job is red and leaves no hold; file that red by hand.
-Missing/offline Mac holds only stable.
-Fix Mac reds forward on main; revert only if the fix is slow.
-Daily full Linux and macOS qualification remains a backstop and files an issue when red.
-Renderer-only Linux diffs omit `check`; strict mixed changes retain it.
-Other branches run nothing.
-Draft PRs keep `test-logic`; ready PRs test the merge ref.
+[Release](.github/workflows/release.yml) is the only automatic publishing pipeline.
+A push to `main` selects that immutable commit for cold versioned builds and packaging.
+It publishes those artifacts without another native correctness campaign.
+The publisher owns release identity, schema compatibility checks, complete assets and monotonic publication.
+Its serialized recovery entry accepts only a commit on `main`; an arbitrary PR ref cannot publish.
+Pending runs may coalesce, so not every merge is promised its own release.
+The `stable` branch remains only a non-rewinding compatibility pointer to a successfully published release.
+No qualification dispatcher, completion callback or global open-issue hold owns that pointer.
+
+There are no scheduled CI workflows.
+Manual qualification and resource campaigns remain diagnostics, not a second release authority.
+Record recurring failures by fixture and assertion, preserve their counterexamples, and close them through the fixing commit.
+An unrelated issue does not freeze publication of qualified main commits.
 Report native architecture, skips and unrun cases; cross-compilation and skips are not native passes.
-Keep sensible timeouts and cleanup and resource guards.
-
-The existing always-run Auto-land promotion phase reconciles missing current-main dispatches before deciding stable.
-It submits only an absent stable-titled Selected run or absent upgrade run; queued, running, offline, failed, cancelled and skipped attempts are retained, not relaunched.
-Ordinary diagnostic Selected dispatches do not hide a stable qualification.
-Each main qualification explicitly dispatches a completion callback.
-Its bounded CLI wait runs outside the ref-writer lock and supplies no acceptance evidence.
-Failed or timed-out waits skip that callback's writer; incomplete workflows remain ineligible, and the next normal promotion pass rechecks completed evidence.
-To recover a lost completion without rerunning tests, run `gh workflow run auto-land.yml --ref main -f completed_run=<main-qualification-run-ID>`.
-After a runner failure, rerun the diagnosed Auto-land job, not the native qualification workflows.
-After a diagnosed interruption that left current main's qualification absent, the agent that diagnosed it runs `GITHUB_REPOSITORY=DivyanshGolyan/rui python3 -B tests/ci/auto_land.py --qualify-main`, never while an Auto-land promotion job is running.
-It fills only absent runs, keeps existing attempts, and does nothing when main already equals stable.
-No timer or automatic native-test retry is part of this recovery.
-Control-plane calls whose repetition creates no test evidence make up to three attempts: Auto-land's qualification and release dispatches, the completion wake and the release artifact download annotate each retry as a warning, and toolchain and dependency downloads use curl's own retry.
-Before resubmitting a qualification dispatch, Auto-land checks whether the failed submission created the run; a repeated wake or release dispatch is harmless because the writer and release are serialized and release skips a released SHA.
+Keep cleanup and resource bounds, and do not retry failed required acceptance to obtain a pass.
 
 ### Composed gates
 
@@ -153,7 +132,7 @@ The driver waits for every peer before isolated cases and fails if any peer fail
 The unsplit serial gate retains its original case order and assertions.
 
 `zig build check-full` runs routine native tests and process integrations serially after formatting and production builds.
-Selected CI runs it on Linux for build or dependency changes; macOS `check-full` runs in Daily Mac CI.
+Selected CI runs it on Linux for build or dependency changes; macOS Selected CI also keeps `check-full` for those changes, and manual qualification runs it on request.
 Run the unsplit default locally for release qualification and isolated process-latency claims.
 It is not an every-edit gate.
 Serial execution reduces unrelated load but does not establish scheduler order; use owner-visible outcomes or handshakes for ordering claims.
@@ -176,9 +155,10 @@ Artificial shared setup or pair deadlines and prelaunch fit reserves are not rou
 
 ### Renderer contracts
 
-[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch source or the harnesses, and nightly: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix with tmux smoke and Ghostty vectors, `direct-pty-controls`, `input-equivalence`, unattended input replay and `sequence-model`.
+[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch source or the harnesses, and on manual dispatch: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix with tmux smoke and Ghostty vectors, `direct-pty-controls`, `input-equivalence`, unattended input replay and `sequence-model`.
 No gate root imports their sources, and neither Selected checks nor merging requires them; a red result is a defect to fix, not a waiver.
-The nightly run adds the [renderer mutation runner](tests/ci/renderer_mutation.py) for `test`, `test-logic` and `sequence-model` and files an issue on failure.
+Manual dispatch adds the [renderer mutation runner](tests/ci/renderer_mutation.py) for `test`, `test-logic` and `sequence-model`.
+Failures remain visible in workflow results; there is no scheduled campaign or automatic issue report.
 Its anchors are checked per change: [`renderer_mutation_test.py`](tests/ci/renderer_mutation_test.py), run by the Selected `policy` job, requires each mutation's anchor exactly once in current source, so moving a protection re-anchors its mutation in the same change.
 
 Run decoded-input replay with `zig build terminal-restoration-integration -- input-replay`; the default restoration gate excludes it.
@@ -207,10 +187,12 @@ The Mac cross-build requires an Apple SDK.
 
 ### CI artifacts and caches
 
-[Selected CI](.github/workflows/check.yml) cancels superseded checks per branch; main stable qualification keeps distinct SHAs so a newer candidate cannot cancel an older candidate's evidence.
+[Selected CI](.github/workflows/check.yml) cancels superseded PR checks per branch.
+The release publisher is serialized and never treats cancelled acceptance as a pass.
 Build caches hold compilation inputs and outputs, not acceptance.
 All Zig unit Run steps bypass Zig acceptance caching, and Go tests use `-count=1`.
-Cache-policy changes run [the fixed-seed execution regression](tests/ci/cache_execution.py) on Linux before main and Mac during stable qualification, in a job the `linux` and `macos` statuses do not require.
+Cache-policy changes run [the fixed-seed execution regression](tests/ci/cache_execution.py) on Linux and macOS before main.
+The required `admission` aggregate includes this job when selected.
 Build-cache keys separate native tools, Apple SDK, architecture, dependency pins, scripts, source inputs and shard.
 PR caches never feed a privileged workflow.
 
@@ -238,7 +220,7 @@ Uploads expire after three days.
 Successful gates do not capture.
 Native observation failure metadata is copied after reap and before temporary-root deletion.
 
-[Cache maintenance](.github/workflows/cache-maintenance.yml) warms production compilation daily and after trusted main pushes that change build, dependency or maintenance inputs.
+[Cache maintenance](.github/workflows/cache-maintenance.yml) warms production compilation after trusted main pushes that change build, dependency or maintenance inputs.
 Cleanup keeps the newest snapshot per platform and partition for open PRs and two for main, and removes closed PR caches; these are targets, not a quota.
 Warm baselines are not test acceptance.
 Maintenance also builds the pinned previous release per platform for the read-only upgrade check.
@@ -250,13 +232,13 @@ Apart from the shard rerun above, test execution has no automatic retry.
 
 ### Hosted qualification
 
-[Linux qualification](.github/workflows/qualify-linux.yml) runs full native gates in isolated jobs on demand and daily, including credentials, measurement checks and long witnesses.
-[Daily Mac CI](.github/workflows/daily-macos.yml) runs full sharded native qualification, including macOS `check-full`, and the complete resource campaign when main changed since its last completed scheduled attempt.
-[report_issue.py](tests/ci/report_issue.py) files each failure under its cause signature: the failing fixture and its raising line, a Zig test, or a gate's own error, read from the full job logs.
-One `ci-red` issue holds each signature and its recurrences.
-Stable qualification files its reds the same way, labelled `stable-red`.
-A later green run never closes an issue: the commit that fixes the fixture or its owner says `Fixes #N`, and a recurrence reopens the issue.
-These backstops report the actual main SHA, not coverage of intermediate merges.
+[Linux qualification](.github/workflows/qualify-linux.yml) runs full native gates in isolated jobs on demand, including credentials, measurement checks and long witnesses.
+CI has no scheduled workflows.
+Full native and resource campaigns remain available through manual qualification on both platforms.
+[report_issue.py](tests/ci/report_issue.py) remains an on-demand tool for recording failure signatures from full job logs.
+A signature names the failing fixture and assertion, a Zig test, or a gate's own error.
+A later green run alone does not prove a recurring defect fixed; retain the counterexample and name the fixing commit.
+Manual qualification reports the requested SHA, not coverage of intermediate merges, and does not file issues automatically.
 A failed, cancelled or skipped attempt is never a pass.
 
 [On-demand Mac qualification](.github/workflows/qualify-macos.yml) resolves a requested ref once and runs existing targets on `macos-15` VMs: `gh workflow run qualify-macos.yml -f ref=<revision> -f suite=<suite>`.
@@ -274,13 +256,13 @@ Hosted counters describe that VM, not a physical Mac; physical comparisons and d
 Live-provider checks need authorized credentials.
 Hosted runs establish no power-loss durability, mixed-workload qualification or aggregate memory from Host-only evidence.
 
-The macOS resource campaign runs daily in Daily Mac CI, not per candidate; Linux resource campaigns run on request.
+Resource campaigns run on request on both platforms, not per candidate.
 The workflow offers all ten resource targets on macOS and the six portable ones on Linux; admission, message admission, model dispatch and model retry reject Linux.
 Linux cannot qualify the macOS footprint counter and shared-runner pacing is unqualified, so the campaign is not candidate acceptance.
-Its nonzero exits remain failures and file an issue.
+Its nonzero exits remain failures.
 
-[Scheduled cold acceptance](.github/workflows/cold-acceptance.yml) builds and runs the serial full gate daily on both platforms with empty local, global and package caches.
-Cold findings stay attached to the scheduled SHA.
+Empty-cache serial full acceptance is manual on both platforms; no automatic cold-build backstop remains.
+The reproduction below uses empty local, global and package caches.
 Routine orb work is incremental rebuilding, the affected mapping and reproducing one failure; full, churn, long, credential and measurement campaigns belong in hosted qualification.
 Keep timing-sensitive measurements on an isolated native machine when shared-runner evidence is invalid.
 

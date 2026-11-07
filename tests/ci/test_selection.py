@@ -43,6 +43,28 @@ def covered(target, targets):
             or target == "stack-frames" and "check" in targets)
 
 
+class WorkflowEntrypointsTest(unittest.TestCase):
+    def test_workflows_have_no_scheduled_triggers_or_branches(self):
+        workflows = sorted(Path(".github/workflows").glob("*.y*ml"))
+        self.assertTrue(workflows)
+        for path in workflows:
+            with self.subTest(workflow=path.name):
+                self.assertNotRegex(path.read_text(), r"(?m)^\s*schedule\s*:")
+                self.assertNotRegex(path.read_text(), r"github\.event_name\s*==\s*[\"']schedule[\"']")
+
+    def test_removed_scheduled_wrappers_have_no_live_references(self):
+        removed = ("daily-macos.yml", "cold-acceptance.yml",
+                   "Daily changed-main macOS", "Scheduled cold acceptance")
+        paths = [*Path(".github").rglob("*.y*ml"), Path("VERIFICATION.md"),
+                 Path("tests/ci/platform_boundary.py")]
+        for name in removed[:2]:
+            self.assertFalse(Path(".github/workflows", name).exists(), name)
+        for path in paths:
+            with self.subTest(path=str(path)):
+                for name in removed:
+                    self.assertNotIn(name, path.read_text())
+
+
 class RuleMatchTest(unittest.TestCase):
     def test_a_lone_change_to_any_path_a_rule_names_selects_that_rule(self):
         # A shortcut in select() may add to a path's selection but never skip
@@ -120,6 +142,18 @@ class SelectionTest(unittest.TestCase):
                     self.assertEqual(result["native_targets"], [])
                 else:
                     self.assertEqual(expected - set(result["native_targets"]), set())
+
+    def test_release_publication_composes_with_dependency_and_panel_owners(self):
+        expected = {"test-vaxis", "upgrade-integration", "installer-integration"}
+        for publication in ("tests/ci/release_publication.py", "tests/ci/test_release_publication.py"):
+            for phase in ("development", "review"):
+                with self.subTest(publication=publication, phase=phase):
+                    result = select([publication, "src/vaxis-parser.patch", "src/UpgradePanel.zig"], phase, AVAILABLE)
+                    self.assertEqual(expected - set(result["targets"]), set())
+                    if phase == "review":
+                        self.assertEqual(expected - set(result["native_targets"]), set())
+                    else:
+                        self.assertEqual(result["native_targets"], [])
 
     def test_request_wait_selects_its_native_oracle_and_portable_core(self):
         for path in ("src/client.zig", "src/cli_args.zig", "src/server.zig",
@@ -469,7 +503,7 @@ class SelectionTest(unittest.TestCase):
             job = jobs[name]
             self.assertIn('needs: plan', job)
             self.assertIn('runs-on: macos-15', job)
-            self.assertIn('timeout-minutes: 15', job)
+            self.assertIn('timeout-minutes: ' + ('60' if name == 'macos_build' else '15'), job)
             self.assertIn('check-part: ' + part + '\n', job)
             self.assertIn('TARGETS: ${{ needs.plan.outputs.native_targets }}', job)
             self.assertIn('artifact: ${{ steps.publish.outputs.artifact-id }}', job)
@@ -491,8 +525,8 @@ class SelectionTest(unittest.TestCase):
         self.assertIn('needs: [plan, macos_build, macos_build_unit, macos_suites]', jobs['macos'])
         self.assertIn('UNIT_RESULT: ${{ needs.macos_build_unit.result }}', jobs['macos'])
         self.assertIn('SPLIT: ${{ needs.plan.outputs.macos_split }}', jobs['macos'])
-        # These jobs observe the aggregate, so neither can outrun the unit producer.
-        for name in ('report', 'completion'):
+        # Admission cannot outrun the native unit producer.
+        for name in ('admission',):
             self.assertRegex(jobs[name], r'needs: \[[^\n]*\bmacos\b')
 
     def test_macos_suites_and_aggregate_require_the_expected_unit_result(self):
@@ -599,9 +633,8 @@ class SelectionTest(unittest.TestCase):
             self.assertTrue({"admission-debug-integration",
                              "test-full", "current-facts-integration", "server-delivery-integration"}
                             <= set(result[family]))
-        # Mac check-full belongs to the daily macOS workflow, not Selected.
         self.assertIn("check-full", result["targets"])
-        self.assertNotIn("check-full", result["native_targets"])
+        self.assertIn("check-full", result["native_targets"])
         self.assertIn("login-signal-integration", result["targets"])
         self.assertNotIn("login-signal-integration", result["native_targets"])
 
@@ -646,7 +679,7 @@ class SelectionTest(unittest.TestCase):
                       ["tests/integration/check.sh", "tests/integration/terminal_restoration_integration.py"]):
             result = select(paths, "review", AVAILABLE)
             self.assertIn("check-full", result["targets"])
-            self.assertNotIn("check-full", result["native_targets"])
+            self.assertIn("check-full", result["native_targets"])
             for family in ("targets", "native_targets"):
                 self.assertNotIn("check", result[family])
                 self.assertNotIn("terminal-restoration-integration", result[family])
@@ -692,7 +725,7 @@ class SelectionTest(unittest.TestCase):
                 with self.subTest(name=name, composed=composed):
                     result = select(paths, "review", AVAILABLE)
                     self.assertTrue({composed, *standalone} <= set(result["targets"]))
-                    native = standalone | ({composed} - {"check-full"})
+                    native = standalone | {composed}
                     self.assertTrue(native <= set(result["native_targets"]))
                     for family in ("targets", "native_targets"):
                         self.assertNotIn("control-integration", result[family])
@@ -955,7 +988,7 @@ fi
         self.assertEqual(sum("-Dcheck-part=execution" in batch for batch in batches), 1)
         self.assertEqual(sum("-Dcheck-part=callers" in batch for batch in batches), 1)
 
-    def test_daily_native_and_all_include_standalone_installer(self):
+    def test_native_and_all_include_standalone_installer(self):
         for platform in ("linux", "macos"):
             for suite in ("native", "all"):
                 with self.subTest(platform=platform, suite=suite):
@@ -996,8 +1029,22 @@ fi
                 self.assertRegex(workflow, r'(?m)^cache-mode: read$')
                 self.assertEqual(len(re.findall(r'(?m)^\s*cache-mode:', workflow)), 1,
                                  'a job override could restore cache-write authority')
-                self.assertEqual(workflow.count('persist-credentials: false'),
-                                 workflow.count('uses: actions/checkout@'))
+                checkouts = re.findall(r'(?ms)^      - uses: actions/checkout@.*?(?=^      - |\Z)', workflow)
+                if name == 'release.yml':
+                    publisher = re.search(r'(?ms)^  publish:\n(.*?)(?=^  [\w-]+:|\Z)', workflow)[1]
+                    self.assertIn("github.ref == 'refs/heads/main'", publisher)
+                    self.assertIn("needs.plan.result == 'success'", publisher)
+                    self.assertNotIn('uses: ./.github/actions/setup', publisher)
+                    self.assertNotIn('uses: actions/cache', publisher)
+                    trusted = re.search(r'(?ms)^      - uses: actions/checkout@.*?(?=^      - |\Z)', publisher)[0]
+                    self.assertEqual([line.strip() for line in trusted.splitlines()[1:] if line.strip()], [
+                        'with:', 'ref: ${{ github.sha }}', 'fetch-depth: 0', 'persist-credentials: true',
+                    ])
+                    self.assertEqual(workflow.count('persist-credentials: true'), 1)
+                    checkouts.remove(trusted)
+                for checkout in checkouts:
+                    self.assertIn('persist-credentials: false', checkout)
+                    self.assertNotIn('persist-credentials: true', checkout)
                 if name == 'qualify-macos.yml':
                     self.assertIn('workflow_call:', workflow)
                 # A save the token refuses only warns; restore-only setup is quiet.
@@ -1073,7 +1120,7 @@ fi
                      ".github/scripts/prune-caches.cjs"):
             self.assertTrue(select([path], "review", AVAILABLE)["cache_execution_checks"])
         self.assertEqual([path for path in CACHE_POLICY if not Path(path).is_file()], [])
-        for path in ("src/store.zig", ".github/workflows/auto-land.yml", ".github/workflows/renderer-contracts.yml"):
+        for path in ("src/store.zig", ".github/main-ruleset.json", ".github/workflows/renderer-contracts.yml"):
             self.assertFalse(select([path], "review", AVAILABLE)["cache_execution_checks"])
 
     def test_cache_maintenance_preserves_unowned_and_current_caches(self):
@@ -1094,15 +1141,15 @@ fi
             execution_batches(["test-logic"], "execution")
 
     def test_a_dispatch_selects_from_its_explicit_base(self):
-        # A stable qualification's base decides what it covers; nothing replaces it.
+        # Manual diagnostic selection uses its explicit base.
         workflow = Path('.github/workflows/check.yml').read_text()
         prefix = dedent(re.search(
             r'(?s)        run: \|\n(          set -euo pipefail\n.*?)'
             r'          python3 tests/ci/select_tests.py', workflow)[1])
-        with tempfile.TemporaryDirectory() as directory, \
-                patch.dict(os.environ, BASE='1' * 40, EVENT_NAME='workflow_dispatch'):
+        candidate = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+        with patch.dict(os.environ, BASE='1' * 40, EVENT_NAME='workflow_dispatch', CANDIDATE_REF=candidate):
             result = subprocess.run(['bash', '-c', prefix + 'printf "%s" "$BASE"'],
-                                    cwd=directory, capture_output=True, text=True, check=True)
+                                    capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout, '1' * 40)
 
 
