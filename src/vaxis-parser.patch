@@ -908,3 +908,22 @@ index 2c6edb6..81acf55 100644
  const Cell = @import("../Cell.zig");
  
  /// View Allocator
+--- a/src/widgets/ScrollView.zig
++++ b/src/widgets/ScrollView.zig
+@@ -13,6 +13,7 @@
+ 
+ pub const VerticalScrollbar = struct {
+     character: vaxis.Cell.Character = .{ .grapheme = "▐", .width = 1 },
++    track_character: ?vaxis.Cell.Character = null,
+     fg: vaxis.Style = .{},
+     bg: vaxis.Style = .{ .fg = .{ .index = 8 } },
+ };
+@@ -68,7 +69,7 @@
+             .width = opts.character.width,
+             .height = parent.height,
+         });
+-        bg.fill(.{ .char = opts.character, .style = opts.bg });
++        bg.fill(.{ .char = opts.track_character orelse opts.character, .style = opts.bg });
+         vbar.draw(bg);
+     }
+ }

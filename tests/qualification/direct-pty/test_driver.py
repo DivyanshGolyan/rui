@@ -53,13 +53,13 @@ finally:
         self.assertNotEqual(history_rows(screen), ["History line 081", "History line 080  ▐"])
 
     def test_navigation_oracle_distinguishes_views_and_exact_source(self):
-        self.assertTrue(lookback("History line 059\nLooking back · Ctrl-End: latest"))
-        self.assertTrue(lookback("History line 059\nLooking back · More output below · Ctrl-End: latest"))
-        self.assertFalse(lookback("Looking back · Ctrl-End: latest\nordinary footer"))
+        self.assertTrue(lookback("History line 059\nLooking back · Ctrl-G: latest"))
+        self.assertTrue(lookback("History line 059\nLooking back · More output below · Ctrl-G: latest"))
+        self.assertFalse(lookback("Looking back · Ctrl-G: latest\nordinary footer"))
         self.assertFalse(lookback("Browsing · Esc returns\n Status · k7m2qx"))
         self.assertTrue(inspection("Browsing · Esc returns\n Status · k7m2qx", "k7m2qx"))
         self.assertFalse(inspection("Browsing · Esc returns\n Status · other", "k7m2qx"))
-        self.assertFalse(inspection("Looking back · Ctrl-End: latest\n Status · k7m2qx", "k7m2qx"))
+        self.assertFalse(inspection("Looking back · Ctrl-G: latest\n Status · k7m2qx", "k7m2qx"))
 
         def frame(first, last, *, browsing, ending=False, wrong=None):
             screen = ScreenCapture(80, 24)
@@ -71,7 +71,7 @@ finally:
             parts = ["\x1b[?2026h"]
             for index, line in enumerate(lines):
                 parts.append(f"\x1b[{index + 1};1H{line}\x1b[{index + 1};80H▐")
-            parts.append("\x1b[24;1H" + ("Looking back · Ctrl-End: latest" if browsing else "Session · model"))
+            parts.append("\x1b[24;1H" + ("Looking back · Ctrl-G: latest" if browsing else "Session · model"))
             parts.append("\x1b[?2026l")
             screen.feed("".join(parts).encode())
             return screen

@@ -38,7 +38,7 @@ def lookback(screen):
     """A transcript has a footer; a selected inspection has a heading."""
     lines = screen.splitlines()
     return bool(lines and lines[-1].startswith("Looking back · ")
-                and lines[-1].endswith("Ctrl-End: latest"))
+                and lines[-1].endswith("Ctrl-G: latest"))
 
 
 def inspection(screen, session):
