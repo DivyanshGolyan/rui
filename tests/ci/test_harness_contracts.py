@@ -568,15 +568,17 @@ class FixtureEntryTest(unittest.TestCase):
     def test_importing_the_boundary_leaves_the_process_alone(self):
         source = ("import json, os, sys\n"
                   "sys.path.insert(0, sys.argv[1])\n"
+                  "before = dict(os.environ)\n"
                   "import host_process\n"
-                  "print(json.dumps(dict(os.environ)))\n")
+                  "print(json.dumps([before, dict(os.environ)]))\n")
         with tempfile.TemporaryDirectory() as directory:
             environment = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "RUI_STORE": "inherited",
                            "HTTPS_PROXY": "http://127.0.0.1:9", "PYTHONPATH": self.simulated_user(directory, 0)}
             result = subprocess.run([sys.executable, "-B", "-c", source, str(ROOT / "tests/integration")],
                                     env=environment, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout), environment)
+            before, after = json.loads(result.stdout)
+            self.assertEqual(after, before)
 
     def test_fixture_children_receive_only_the_fixture_environment(self):
         source = ("import json, subprocess, sys\n"
@@ -625,8 +627,11 @@ class FixtureEntryTest(unittest.TestCase):
             admitted = subprocess.run(command, env={**caller, "PYTHONPATH": self.simulated_user(directory, 30033)},
                                       capture_output=True, text=True, timeout=30)
             self.assertEqual(admitted.returncode, 0, admitted.stderr)
-            self.assertEqual(json.loads(ran.read_text()),
-                             {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8", "TERM": "xterm-256color", "RUI_TEST_MODELS_DEV_URL": ""})
+            clean = {"PATH": os.environ["PATH"], "HOME": directory, "LANG": "C.UTF-8",
+                     "TERM": "xterm-256color", "RUI_TEST_MODELS_DEV_URL": ""}
+            control = subprocess.run([sys.executable, "-c", "import json, os; print(json.dumps(dict(os.environ)))"],
+                                     env=clean, capture_output=True, text=True, check=True, timeout=30)
+            self.assertEqual(json.loads(ran.read_text()), json.loads(control.stdout))
 
     def test_go_measurements_run_through_the_exec_entry(self):
         build = (ROOT / "build.zig").read_text()
@@ -650,19 +655,49 @@ class ProcessCensusTest(unittest.TestCase):
 
     def test_ownership_is_the_executed_image_whatever_the_process_is_called(self):
         with tempfile.TemporaryDirectory() as directory:
-            copy = Path(directory) / "owned-sleep"
-            copy.write_bytes(Path("/bin/sleep").read_bytes())
-            copy.chmod(0o755)
-            owned = subprocess.Popen(["renamed", "30"], executable=copy)
-            named = subprocess.Popen([str(copy), "30"], executable="/bin/sleep")
+            source = Path(directory) / "owned.c"
+            image = Path(directory) / "owned"
+            source.write_text('#include <unistd.h>\n'
+                              'int main(void) { if (write(1, "R", 1) != 1) return 1; for (;;) pause(); }\n')
+            subprocess.run(["cc", str(source), "-o", str(image)], check=True, capture_output=True, timeout=30)
+            owned = subprocess.Popen(["renamed"], executable=image, stdout=subprocess.PIPE)
             try:
-                found = self.semantics.processes_executing(copy)
-                self.assertIn(owned.pid, found)
-                self.assertNotIn(named.pid, found)
+                os.set_blocking(owned.stdout.fileno(), False)
+
+                def readiness():
+                    try:
+                        value = os.read(owned.stdout.fileno(), 1)
+                    except BlockingIOError:
+                        return None
+                    self.assertEqual(value, b"R", "owned image exited before readiness")
+                    return value
+
+                HOST.wait_for(readiness, "owned image readiness")
+                named = subprocess.Popen([str(image), "30"], executable="/bin/sleep")
+                try:
+                    self.assertIsNone(owned.poll())
+                    self.assertIsNone(named.poll())
+                    def identity(path):
+                        stat = path.stat()
+                        return stat.st_dev, stat.st_ino
+
+                    self.assertEqual(identity(self.semantics.process_executable(owned.pid)), identity(image))
+                    self.assertEqual(identity(self.semantics.process_executable(named.pid)), identity(Path("/bin/sleep")))
+                    self.assertNotEqual(identity(image), identity(Path("/bin/sleep")))
+                    found = self.semantics.processes_executing(image)
+                    self.assertIsNone(owned.poll())
+                    self.assertIsNone(named.poll())
+                    self.assertIn(owned.pid, found)
+                    self.assertNotIn(named.pid, found)
+                finally:
+                    if named.poll() is None:
+                        named.kill()
+                    named.wait()
             finally:
-                for process in (owned, named):
-                    process.kill()
-                    process.wait()
+                if owned.poll() is None:
+                    owned.kill()
+                owned.wait()
+                owned.stdout.close()
 
     def test_darwin_census_fails_loudly_when_lsof_fails(self):
         def lsof(returncode, stdout="", stderr=""):

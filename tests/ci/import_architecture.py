@@ -20,7 +20,8 @@ ROOTS = ("src/cli.zig",)
 # something the tests run uses it. A test that names the file is the
 # guarantee. The test-only roots name their imports from tests, so each
 # of their imports counts; a module root counts only what its tests name.
-TEST_ONLY_ROOTS = ("src/tests.zig", "src/logic_tests.zig", "tests/integration/mysql_wire_test.zig")
+TEST_ONLY_ROOTS = ("src/tests.zig", "src/logic_tests.zig", "tests/integration/mysql_wire_test.zig",
+                   "tests/vaxis/layout.zig")
 MODULE_TEST_ROOTS = ("src/h2/h2.zig", "src/store/wire/pg.zig")
 BASELINE = Path(__file__).with_name("import_cycles.json")
 STORE_DIRECTORY = "src/store/"
