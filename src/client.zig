@@ -2629,7 +2629,7 @@ test "upgrade Host observation headers preserve strict framing and profile ident
             defer std.testing.allocator.free(bad);
             try std.testing.expectError(error.InvalidResponse, parseResponseHeadForProfile(bad, profile));
         }
-        for ([_][]const u8{ "8", "11", "09", "unknown", "" }) |wire| {
+        for ([_][]const u8{ "8", protocol.next_wire_version, "09", "unknown", "" }) |wire| {
             const field = try std.fmt.allocPrint(std.testing.allocator, "X-Rui-Wire-Version: {s}", .{wire});
             defer std.testing.allocator.free(field);
             const bad = try std.mem.replaceOwned(u8, std.testing.allocator, good, if (profile == .released_9) legacy_field else "X-Rui-Wire-Version: " ++ protocol.wire_version, field);
@@ -3887,6 +3887,7 @@ test "every request renders its exact worst-case bound from the shape it writes"
     const token = @as([protocol.SinceToken.max_bytes]u8, @splat('9'));
     const observation_token = @as([protocol_reply.SessionToken.max_bytes]u8, @splat(1));
     const reference = @as([protocol.session_id_bytes]u8, @splat(1));
+    const skill_prefix = @as([64]u8, @splat(1));
     const id: u64 = std.math.maxInt(u64);
     const optional_id: ?u64 = std.math.maxInt(u64);
     const Direction = @FieldType(protocol.ActivityPage, "direction");
@@ -3908,7 +3909,10 @@ test "every request renders its exact worst-case bound from the shape it writes"
         .{ protocol.conversation_page_request, .{ &store, &session, id, id, id }, protocol.max_conversation_page_request_bytes },
         .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id }, comptime protocol.shapeBytes(protocol.activity_page_request) },
         .{ protocol.activity_page_since_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id, @as(?[]const u8, &observation_token) }, protocol.max_activity_page_request_bytes },
-        .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
+        .{ protocol.activity_content_request, .{ &store, &session, id, id }, comptime protocol.shapeBytes(protocol.activity_content_request) },
+        .{ protocol.activity_authored_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
+        .{ protocol.skill_suggestions_session_request, .{ &store, &session, &skill_prefix }, comptime protocol.shapeBytes(protocol.skill_suggestions_session_request) },
+        .{ protocol.skill_suggestions_workspace_request, .{ &store, &workspace, &skill_prefix }, comptime protocol.shapeBytes(protocol.skill_suggestions_workspace_request) },
         .{ protocol.model_list_request, .{&store}, protocol.max_model_list_request_bytes },
     };
     var largest: usize = 0;
@@ -4875,7 +4879,7 @@ test "inline skills native suggestion read rejects invalid scope before Store di
 }
 
 test "inline skills native vector canonical capture retains authored bytes and supports empty text" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -4906,7 +4910,7 @@ test "inline skills native capture permits empty stdin only with explicit refere
     var vtable = std.testing.io.vtable.*;
     vtable.operate = Stdin.operate;
     const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -4919,7 +4923,7 @@ test "inline skills native capture permits empty stdin only with explicit refere
 }
 
 test "inline skills canonical binding streams maximum vector metadata without fixed stack expansion" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
@@ -4944,7 +4948,7 @@ test "inline skills canonical binding streams maximum vector metadata without fi
 }
 
 test "inline skills native recovery opens every old wire10 canonical command without rewrites" {
-    var tmp = std.testing.tmpDir(.{});
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;

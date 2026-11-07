@@ -263,7 +263,7 @@ pub const routes = [_]Route{
         .path = "/v1/skill-suggestions",
         .kind = .skill_suggestions,
         .summary = "Bounded skill metadata from a Session catalog or prospective Workspace discovery.",
-        .variants = &.{ variant(protocol.skill_suggestions_session_request, .{}), variant(protocol.skill_suggestions_workspace_request, .{}) },
+        .variants = &.{ variant(protocol.skill_suggestions_session_request, .{.{ 1, "\"k7m2qx\"" }}), variant(protocol.skill_suggestions_workspace_request, .{}) },
         .reply = jsonReply(.{protocol.skill_suggestions_reply.head ++ .{BoundedListOf(protocol.skill_suggestions_reply.entry, 24, false)} ++ .{protocol.skill_suggestions_reply.tail}}),
     },
     .{
