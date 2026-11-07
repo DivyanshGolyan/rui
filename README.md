@@ -4,7 +4,8 @@ Rui is a memory-efficient agent runtime.
 Build applications that run multiple agents without starting a separate runtime process for each one.
 Give agents work, connect your tools, and collect their results through a TypeScript client.
 
-**100 waiting agents. 2.5 MB of private memory.**
+**100 waiting agents.
+2.5 MB of private memory.**
 
 ![Private memory at 0, 1, 10, and 100 waiting agents for Rui, pi, fx, Codex app-server, and OpenCode, from the published Linux benchmark.](docs/assets/waiting-agent-memory.svg)
 
