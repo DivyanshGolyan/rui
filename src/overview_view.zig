@@ -544,6 +544,7 @@ pub const Effect = union(enum) {
     /// Save the person's default for new Sessions, as `rui defaults
     /// configure --provider --model` does, and answer with `saved`.
     save_default: Default,
+    upgrade,
     /// Empty the line editor.
     clear_draft,
     /// Add these static bytes at the draft's end, as Tab does.
@@ -852,6 +853,8 @@ pub const State = struct {
     /// The Workspace the composer starts Sessions in, as an index in `workspaces`.
     cwd: u32,
     now_ms: u64 = 0,
+    upgrade_blocked: bool = false,
+    upgrade_pending: bool = false,
     /// The terminal's own last successful `rui auth login`, Unix seconds.
     login_at: ?u64 = null,
 
@@ -1449,17 +1452,15 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .first_line => |result| try firstLine(state, result),
         .conversed => |input| {
-            state.notice = null;
-            const prompt = state.prompt;
-            state.prompt = null;
             switch (input.input) {
-                .other => {},
-                .stop => stopKey(state, prompt, input.reference, input.work, &effects),
-                .archive => |archive| askArchive(state, input.reference, input.work, archive, .keep, &effects),
-                .unarchive => archiveSession(state, .{ .reference = input.reference, .archived = false }, &effects),
-                .confirm_archive => if (prompt) |open| {
-                    if (open.action == .archive and std.mem.eql(u8, &open.stop, &input.reference)) archiveSession(state, .{ .reference = open.stop }, &effects);
+                .other => {
+                    state.notice = null;
+                    state.prompt = null;
                 },
+                .stop => stopKey(state, .{ .reference = input.reference, .work = input.work }, &effects),
+                .archive => |archive| archiveIntent(state, .{ .ask = .{ .reference = input.reference, .work = input.work, .archive = archive } }, &effects),
+                .unarchive => archiveIntent(state, .{ .restore = input.reference }, &effects),
+                .confirm_archive => archiveIntent(state, .{ .confirm = input.reference }, &effects),
             }
         },
         .archive => |result| {
@@ -1753,6 +1754,7 @@ fn listPage(state: *State, page: Page, effects: *Effects) error{OutOfMemory}!voi
         effects.add(.{ .notify = .{ .name = title(state, row).text, .kind = found.kind, .more = found.more } });
     }
     state.listing = false;
+    state.upgrade_pending = false;
     try readFirstLines(state, effects);
 }
 
@@ -1995,21 +1997,36 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
     retitle(state, row, was);
 }
 
-/// Any input clears the notice and cancels a prompt. Ctrl-X confirms
-/// the prompt and Esc only cancels it. Keys act on the picker only while
+/// Ordinary input cancels a prompt; admitted Ctrl-X or archive Enter
+/// confirms it, and Esc only cancels it. Keys act on the picker only while
 /// the screen shows it. A key that acts on a Session closes a panel, so it
 /// acts where the Sessions show.
 fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}!void {
-    state.notice = null;
     const prompt = state.prompt;
-    state.prompt = null;
     if (prompt != null and prompt.?.action == .archive) {
         const confirms = switch (value.input) {
             .choice => |choice| choice == .enter,
             .composer => |outcome| outcome == .submit,
         };
-        if (confirms) return archiveSession(state, .{ .reference = prompt.?.stop }, effects);
+        if (confirms) return archiveIntent(state, .{ .confirm = null }, effects);
     }
+    // Session mutations enter their semantic owner before generic input
+    // cancellation can discard a confirmation or a submitted draft.
+    const action: ?Action = switch (value.input) {
+        .choice => |choice| if (choice == .action) choice.action else null,
+        .composer => |outcome| if (outcome == .action) outcome.action else null,
+    };
+    if (action) |pressed| switch (pressed) {
+        .archive => return archiveIntent(state, .{ .selected_archive = .keep }, effects),
+        .stop => return stopKey(state, null, effects),
+        else => {},
+    };
+    state.notice = null;
+    const submits = switch (value.input) {
+        .choice => false,
+        .composer => |outcome| outcome == .submit,
+    };
+    if (!submits) state.prompt = null;
     const mode = state.inputMode();
     const outcome: keymap.Outcome(Action) = switch (value.input) {
         .choice => |choice| choice: {
@@ -2059,22 +2076,17 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
                 state.settings = .{};
             },
             .exit => effects.add(.exit),
-            .archive => {
-                state.closePanel();
-                const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-                askArchive(state, row.reference, row.state.asOf(state.now_ms), row.archive_state, .keep, effects);
-            },
-            .stop => {
-                state.closePanel();
-                const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-                stopKey(state, prompt, row.reference, row.state.asOf(state.now_ms), effects);
-            },
+            .archive, .stop => unreachable, // Routed before input cancellation.
+
         },
         .none, .append, .redraw => {},
         // Enter in a list the latest frame drew takes the highlighted
         // entry: it runs the command that entry completes, or adds the word
         // another follows. A screen too short for the list shows none.
-        .submit => if (picker != null) pick(state, effects) else if (shownCommands(state, value.draft)) |shown| {
+        .submit => if (picker != null) {
+            state.prompt = null;
+            pick(state, effects);
+        } else if (shownCommands(state, value.draft)) |shown| {
             const taken = shown.list.enter(shown.highlight);
             if (taken.runs and value.draft.bytes.len + taken.rest.len <= draft_capacity) {
                 var line: [draft_capacity]u8 = undefined;
@@ -2084,6 +2096,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             } else {
                 // The draft grows, or refuses a word it cannot hold, so the
                 // next list starts at its top.
+                state.prompt = null;
                 shown.highlight = 0;
                 effects.add(.{ .append = taken.rest });
             }
@@ -2100,10 +2113,22 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
     }
 }
 
-/// Ctrl-X on either screen, for the Session `ref` whose work shows as
-/// `work`: the first asks, and a second while `prompt` names it sends the stop.
-fn stopKey(state: *State, prompt: ?Prompt, ref: Reference, work: Kind, effects: *Effects) void {
-    const kind = kindShown(state, ref, work);
+const StopTarget = struct { reference: Reference, work: Kind };
+
+/// Ctrl-X on either screen: null targets the selection, otherwise the exact
+/// conversation. Admission precedes asking or confirming the captured stop.
+fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
+    if (!admitHostRequest(state)) return;
+    state.notice = null;
+    const prompt = state.prompt;
+    state.prompt = null;
+    const target = exact orelse selected: {
+        state.closePanel();
+        const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
+        break :selected StopTarget{ .reference = row.reference, .work = row.state.asOf(state.now_ms) };
+    };
+    const ref = target.reference;
+    const kind = kindShown(state, ref, target.work);
     if (!rules.get(kind).stoppable) return refuseStop(state, ref, kind);
     const asked = if (prompt) |open| open.action == .stop and std.mem.eql(u8, &open.stop, &ref) else false;
     if (!asked) {
@@ -2149,7 +2174,38 @@ fn select(state: *State, action: Action) void {
     move(state, action);
 }
 
+pub const upgrade_recovery = "! Host requests paused after Upgrade; draft retained. /upgrade or reopen with the selected Rui.";
+
+/// Admission applies only to new Host intents, never to their completions.
+fn admitHostRequest(state: *State) bool {
+    if (!state.upgrade_blocked and !state.upgrade_pending) return true;
+    state.say(.attention, upgrade_recovery, .{});
+    return false;
+}
+
 fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
+    const parsed: ?commands.Parsed = if (text.len != 0 and text[0] == '/' and !std.mem.startsWith(u8, text, "//")) commands.parse(text) else null;
+    if (parsed) |result| switch (result) {
+        .command => |command| switch (command.name) {
+            .archive => return archiveIntent(state, .{ .selected_archive = .submitted }, effects),
+            .unarchive => return archiveIntent(state, .selected_restore, effects),
+            .undo => return archiveIntent(state, .undo, effects),
+            else => {},
+        },
+        else => {},
+    };
+    if (!admitHostRequest(state)) {
+        if (parsed) |result| switch (result) {
+            .command => |command| switch (command.name) {
+                .upgrade => return effects.add(.upgrade),
+                .exit => return effects.add(.exit),
+                else => {},
+            },
+            else => {},
+        };
+        return;
+    }
+    state.prompt = null;
     // As in a conversation, the draft is sent byte for byte; only a blank
     // draft opens the selected row instead.
     if (std.mem.trim(u8, text, " \t\r\n").len == 0) {
@@ -2165,7 +2221,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         if (!state.request(.start, null)) return;
         return effects.add(.{ .start = .{ .settings = &state.settings, .text = if (text[0] == '/') text[1..] else text, .binding = state.nextBinding() } });
     }
-    const command = switch (commands.parse(text)) {
+    const command = switch (parsed.?) {
         .unknown => {
             var buffer: [slash_commands.unknown_bytes]u8 = undefined;
             return state.say(.attention, "{s}", .{slash_commands.unknown(&buffer, text)});
@@ -2174,22 +2230,7 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
         .command => |command| command,
     };
     switch (command.name) {
-        .archive => {
-            state.closePanel();
-            const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-            askArchive(state, row.reference, row.state.asOf(state.now_ms), row.archive_state, .submitted, effects);
-        },
-        .unarchive => {
-            state.closePanel();
-            const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-            archiveSession(state, .{ .reference = row.reference, .archived = false }, effects);
-            effects.add(.clear_draft);
-        },
-        .undo => {
-            const ref = state.last_archived orelse return state.say(.quiet, "No archive to undo here. /sessions archived shows the archive.", .{});
-            archiveSession(state, .{ .reference = ref, .archived = false }, effects);
-            effects.add(.clear_draft);
-        },
+        .archive, .unarchive, .undo => unreachable, // Routed through archiveIntent.
         .sessions => {
             const filter: ArchiveFilter = if (std.mem.eql(u8, command.argument, "archived")) .archived else if (std.mem.eql(u8, command.argument, "all")) .all else if (std.mem.eql(u8, command.argument, "unarchived")) .active else {
                 state.say(.quiet, "Sessions: {s}. /sessions unarchived|archived|all", .{archiveViewName(state.archive)});
@@ -2200,6 +2241,10 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
             try changeArchiveView(state, filter, effects);
         },
         .exit => effects.add(.exit),
+        .upgrade => {
+            state.upgrade_pending = true;
+            effects.add(.upgrade);
+        },
         .model => {
             state.picker = .{};
             // Visible equals actionable: a picker the screen cannot show never opens.
@@ -2230,8 +2275,51 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
     }
 }
 
+const ArchiveDraft = enum { keep, submitted };
+const ArchiveIntent = union(enum) {
+    selected_archive: ArchiveDraft,
+    selected_restore,
+    undo,
+    ask: struct { reference: Reference, work: Kind, archive: ArchiveState },
+    restore: Reference,
+    /// Null confirms the overview's captured target; a conversation must match it.
+    confirm: ?Reference,
+};
+
+/// All archive surfaces converge here, before prompts, the request ledger or
+/// submitted drafts change. Transport completions settle outside admission.
+fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
+    if (!admitHostRequest(state)) return;
+    state.notice = null;
+    const prompt = state.prompt;
+    state.prompt = null;
+    switch (intent) {
+        .selected_archive => |draft| {
+            state.closePanel();
+            const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
+            askArchive(state, row.reference, row.state.asOf(state.now_ms), row.archive_state, draft, effects);
+        },
+        .selected_restore => {
+            state.closePanel();
+            const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
+            archiveSession(state, .{ .reference = row.reference, .archived = false }, effects);
+            effects.add(.clear_draft);
+        },
+        .undo => {
+            const ref = state.last_archived orelse return state.say(.quiet, "No archive to undo here. /sessions archived shows the archive.", .{});
+            archiveSession(state, .{ .reference = ref, .archived = false }, effects);
+            effects.add(.clear_draft);
+        },
+        .ask => |target| askArchive(state, target.reference, target.work, target.archive, .keep, effects),
+        .restore => |ref| archiveSession(state, .{ .reference = ref, .archived = false }, effects),
+        .confirm => |ref| if (prompt) |open| {
+            if (open.action == .archive and (ref == null or std.mem.eql(u8, &open.stop, &ref.?))) archiveSession(state, .{ .reference = open.stop }, effects);
+        },
+    }
+}
+
 /// Slash commands consume their submitted line; a key leaves its draft alone.
-fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, draft: enum { keep, submitted }, effects: *Effects) void {
+fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, draft: ArchiveDraft, effects: *Effects) void {
     if (archive == .archiving) {
         state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref});
         return;
@@ -3091,7 +3179,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                 try std.testing.expectEqualStrings(command.text, got.command.text);
                 try std.testing.expectEqual(command.session, got.command.session);
             },
-            .list_models, .clear_draft, .exit => {},
+            .list_models, .clear_draft, .upgrade, .exit => {},
         }
     }
 }
@@ -4015,6 +4103,43 @@ test "a command the person did not see end is named on the way out" {
     }
 }
 
+test "upgrade emits only its local effect and preserves selection settings and unresolved handles" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    const selected = state.selected;
+    const configured = try typeText(&state, "/configure --permission-mode ask");
+    _ = try submit(&state, configured);
+    const settings = state.settings;
+    try std.testing.expect(state.request(.stop, selected));
+    state.answer(0, .unknown, "01234567-89ab-4cde-8012-0123456789ab");
+    const request = state.requests[0];
+    const draft = try typeText(&state, "/upgrade");
+    try expectEffects(&.{.upgrade}, try submit(&state, draft));
+    try std.testing.expectEqual(selected, state.selected);
+    try std.testing.expect(std.meta.eql(settings, state.settings));
+    try std.testing.expectEqual(@as(usize, 1), state.request_count);
+    try std.testing.expect(std.meta.eql(request, state.requests[0]));
+    try std.testing.expectEqualStrings("/upgrade", draft.bytes);
+    try std.testing.expect(state.command == null);
+}
+
+test "upgrade protocol hold refuses starts opens stops and Host commands but permits local recovery" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    state.upgrade_blocked = true;
+    const selected = state.selected;
+    for ([_][]const u8{ "new model work", "", "/rename new name", "/setup --model gpt-5.5" }) |text| {
+        try expectEffects(&.{}, try submit(&state, try typeText(&state, text)));
+        try std.testing.expectEqual(selected, state.selected);
+        try std.testing.expectEqual(@as(usize, 0), state.request_count);
+        try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
+    }
+    try expectEffects(&.{}, try press(&state, try typeText(&state, "draft"), .stop));
+    try std.testing.expectEqual(@as(usize, 0), state.request_count);
+    try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
+}
+
 test "archive views remove changed rows outside the server filter and select the nearest Session" {
     const a = session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "first" });
     var b = session("bbbbbb", .{ .finished = ago(2) }, .{ .label = "second" });
@@ -4265,3 +4390,185 @@ pub const Test = struct {
     pub const test_now_s = Core.test_now_s;
     pub const typeText = Core.typeText;
 };
+
+test "upgrade holds admit no archive surface before prompt draft or ledger mutation" {
+    const ref = "aaaaaa".*;
+    const draft: Draft = .{ .bytes = "/rename unfinished", .cursor = 4, .anchor = 1, .edits = 17 };
+    for ([_]bool{ false, true }) |blocked| {
+        for ([_]bool{ false, true }) |busy| {
+            for ([_]ArchiveState{ .active, .archiving, .archived }) |archive| {
+                const work: Kind = if (busy) .working else .idle;
+                var row = session(&ref, if (busy) .{ .working = ago(1) } else .{ .idle = ago(1) }, .{});
+                row.archive_state = archive;
+                const cases = [_]struct { event: Event, confirms: bool = false }{
+                    .{ .event = .{ .composed = .{ .draft = draft, .input = .{ .composer = .{ .action = .archive } } } } },
+                    .{ .event = .{ .composed = .{ .draft = draft, .input = .{ .choice = .{ .action = .archive } } } } },
+                    .{ .event = .{ .composed = .{ .draft = draft, .input = .{ .composer = .submit } } }, .confirms = true },
+                    .{ .event = .{ .composed = .{ .draft = .{}, .input = .{ .choice = .enter } } }, .confirms = true },
+                    .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/archive", .cursor = 3, .edits = 18 }, .input = .{ .composer = .submit } } } },
+                    .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/unarchive", .cursor = 3, .edits = 19 }, .input = .{ .composer = .submit } } } },
+                    .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/undo", .cursor = 3, .edits = 20 }, .input = .{ .composer = .submit } } } },
+                    .{ .event = .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = .{ .archive = archive } } } },
+                    .{ .event = .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = .unarchive } } },
+                    .{ .event = .{ .conversed = .{ .reference = ref, .work = work, .input = .confirm_archive } }, .confirms = true },
+                };
+                for (cases) |case| {
+                    var state = try testState();
+                    defer state.deinit();
+                    // Set the server view before its first listing: opened's
+                    // default active view correctly excludes archived rows.
+                    state.archive = .all;
+                    _ = try step(&state, .{ .tick = test_now_s * 1000 });
+                    _ = try respond(&state, .full, testToken(1), &.{row});
+                    try std.testing.expectEqual(@as(?Reference, ref), state.selected);
+                    state.upgrade_blocked = blocked;
+                    state.upgrade_pending = !blocked;
+                    state.last_archived = "bbbbbb".*;
+                    state.panel = .help;
+                    state.prompt = .{ .stop = ref, .action = if (case.confirms) .archive else .stop };
+                    const prompt = state.prompt;
+                    // Preserve both an unknown handle and accepted in-flight work.
+                    try std.testing.expect(state.request(.stop, "zzzzzz".*));
+                    state.answer(0, .unknown, "01234567-89ab-4cde-8012-0123456789ab");
+                    try std.testing.expect(state.request(.archive, "yyyyyy".*));
+                    const unknown = state.requests[0];
+                    const pending = state.requests[1];
+                    // Exercise the drawn command-list Enter as well as direct
+                    // shortcut/confirmation routing. No effect may consume,
+                    // append to or otherwise replace the shell-owned draft.
+                    if (case.event == .composed) drawWithRoom(&state, case.event.composed.draft);
+                    try expectEffects(&.{}, try step(&state, case.event));
+                    try std.testing.expectEqual(prompt, state.prompt);
+                    try std.testing.expectEqual(@as(usize, 2), state.request_count);
+                    try std.testing.expectEqual(unknown, state.requests[0]);
+                    try std.testing.expectEqual(pending, state.requests[1]);
+                    try std.testing.expectEqualStrings("bbbbbb", &state.last_archived.?);
+                    try std.testing.expectEqualStrings(&ref, &state.selected.?);
+                    try std.testing.expectEqual(archive, state.find(ref).?.archive_state);
+                    try std.testing.expect(state.panel != null and state.panel.? == .help);
+                    try std.testing.expect(state.command == null);
+                    try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
+                }
+            }
+        }
+    }
+}
+
+test "upgrade holds share stop admission for both screens and preserve captured confirmation" {
+    const ref = "aaaaaa".*;
+    const draft: Draft = .{ .bytes = "unfinished draft", .cursor = 4, .edits = 71 };
+    const events = [_]Event{
+        .{ .composed = .{ .draft = draft, .input = .{ .composer = .{ .action = .stop } } } },
+        .{ .composed = .{ .draft = draft, .input = .{ .choice = .{ .action = .stop } } } },
+        .{ .conversed = .{ .reference = ref, .work = .working, .input = .stop } },
+    };
+    for ([_]bool{ false, true }) |blocked| {
+        for ([_]bool{ false, true }) |confirming| {
+            for (events) |event| {
+                var state = try opened(&.{session(&ref, .{ .working = ago(1) }, .{})});
+                defer state.deinit();
+                state.upgrade_blocked = blocked;
+                state.upgrade_pending = !blocked;
+                state.prompt = if (confirming) .{ .stop = ref } else null;
+                const prompt = state.prompt;
+                state.panel = .help;
+                try expectEffects(&.{}, try step(&state, event));
+                try std.testing.expectEqual(prompt, state.prompt);
+                try std.testing.expectEqual(@as(usize, 0), state.request_count);
+                try std.testing.expect(state.panel != null and state.panel.? == .help);
+                try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
+                // Clearing the hold resumes the same stop owner and target.
+                state.upgrade_blocked = false;
+                state.upgrade_pending = false;
+                if (confirming) {
+                    try expectEffects(&.{.{ .stop = ref }}, try step(&state, event));
+                } else {
+                    try expectEffects(&.{}, try step(&state, event));
+                    try std.testing.expectEqual(@as(?Prompt, .{ .stop = ref }), state.prompt);
+                }
+            }
+        }
+    }
+}
+
+test "upgrade holds retain archive confirmation until admitted and allow local draft recovery" {
+    const ref = "aaaaaa".*;
+    const draft: Draft = .{ .bytes = "/rename unfinished", .cursor = 4, .edits = 31 };
+    for ([_]bool{ false, true }) |blocked| {
+        var state = try opened(&.{session(&ref, .{ .working = ago(1) }, .{})});
+        defer state.deinit();
+        try expectEffects(&.{}, try press(&state, draft, .archive));
+        const prompt = state.prompt;
+        state.upgrade_blocked = blocked;
+        state.upgrade_pending = !blocked;
+        try expectEffects(&.{}, try submit(&state, draft));
+        try std.testing.expectEqual(prompt, state.prompt);
+        // Escape cancels locally without clearing the draft; edits stay local.
+        try expectEffects(&.{}, try press(&state, draft, .clear));
+        try std.testing.expect(state.prompt == null);
+        try expectEffects(&.{}, try step(&state, .{ .composed = .{ .draft = draft, .input = .{ .composer = .redraw } } }));
+        // Existing local exit and recovery commands still bypass the hold.
+        try expectEffects(&.{.upgrade}, try submit(&state, try typeText(&state, "/upgrade")));
+        try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
+        state.prompt = prompt;
+        state.upgrade_blocked = false;
+        state.upgrade_pending = false;
+        try expectEffects(&.{.{ .archive = .{ .reference = ref } }}, try submit(&state, draft));
+        try std.testing.expectEqual(@as(usize, 1), state.request_count);
+    }
+}
+
+test "upgrade holds settle accepted archive restore and stop completions without readmission" {
+    const ref = "aaaaaa".*;
+    const outcomes = [_]@FieldType(ArchiveResult, "outcome"){
+        .{ .requested = .pending }, .{ .requested = .completed }, .{ .failed = "archive_pending" }, .{ .unconfirmed = "saved-handle" },
+    };
+    for ([_]bool{ false, true }) |blocked| for ([_]bool{ false, true }) |left| {
+        for ([_]bool{ false, true }) |archived| {
+            for (outcomes) |outcome| {
+                var state = try testState();
+                defer state.deinit();
+                // Admit before the hold, then deliver the worker's answer.
+                try std.testing.expect(state.request(if (archived) .archive else .unarchive, ref));
+                state.left = left;
+                state.upgrade_blocked = blocked;
+                state.upgrade_pending = !blocked;
+                try expectEffects(&.{}, try step(&state, .{ .archive = .{ .request = .{ .reference = ref, .archived = archived }, .outcome = outcome } }));
+                // A confirmed answer retires from the attached ledger; only
+                // unknown outcomes or departure custody retain a record.
+                const retained = left or outcome == .unconfirmed;
+                try std.testing.expectEqual(@as(usize, if (retained) 1 else 0), state.request_count);
+                if (retained) {
+                    const expected: @FieldType(Request, "status") = switch (outcome) {
+                        .requested => .done,
+                        .failed => .failed,
+                        .unconfirmed => .unknown,
+                    };
+                    try std.testing.expectEqual(expected, state.requests[0].status);
+                    if (outcome == .unconfirmed) try std.testing.expectEqualStrings("saved-handle", state.requests[0].text.slice());
+                }
+                if (outcome == .requested and archived) try std.testing.expectEqual(@as(?Reference, ref), state.last_archived);
+            }
+        }
+        for ([_]StopOutcome{ .stopped, .{ .failed = "stop_failed" }, .{ .unconfirmed = "saved-handle" } }) |outcome| {
+            var state = try testState();
+            defer state.deinit();
+            try std.testing.expect(state.request(.stop, ref));
+            state.left = left;
+            state.upgrade_blocked = blocked;
+            state.upgrade_pending = !blocked;
+            try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = outcome } }));
+            const retained = left or outcome == .unconfirmed;
+            try std.testing.expectEqual(@as(usize, if (retained) 1 else 0), state.request_count);
+            if (retained) {
+                const expected: @FieldType(Request, "status") = switch (outcome) {
+                    .stopped => .done,
+                    .failed => .failed,
+                    .unconfirmed => .unknown,
+                };
+                try std.testing.expectEqual(expected, state.requests[0].status);
+                if (outcome == .unconfirmed) try std.testing.expectEqualStrings("saved-handle", state.requests[0].text.slice());
+            }
+        }
+    };
+}

@@ -3752,6 +3752,10 @@ const MemoPrepared = struct { bytes: []u8, copied: usize };
 /// Prepare one Attempt, optionally through the memo table, with small
 /// allowances so a memo copy spans many chunks.
 fn prepareMemoForTesting(setup: *PreparationTestSetup, binding: store.AttemptBinding, memos: ?*history_memo.Table, faults: PreparationFaults) !MemoPrepared {
+    return prepareMemoWithAllowanceForTesting(setup, binding, memos, faults, 7);
+}
+
+fn prepareMemoWithAllowanceForTesting(setup: *PreparationTestSetup, binding: store.AttemptBinding, memos: ?*history_memo.Table, faults: PreparationFaults, allowance: usize) !MemoPrepared {
     var used: std.atomic.Value(u64) = .init(0);
     var retained: ?named_scratch.Owner = null;
     var preparation: Preparation = undefined;
@@ -3763,7 +3767,7 @@ fn prepareMemoForTesting(setup: *PreparationTestSetup, binding: store.AttemptBin
     var steps: usize = 0;
     const request = while (true) : (steps += 1) {
         try std.testing.expect(steps < 1 << 16);
-        switch (preparation.advance(7, 3)) {
+        switch (preparation.advance(allowance, 3)) {
             .pending => {},
             .prepared => |sealed| break sealed,
             .failed => |err| return err,
@@ -4605,4 +4609,193 @@ test "a preparation cancelled while keeping its memo keeps nothing of it" {
     try expectMemoStoreCancelForTesting(&setup, session.slice(), binding, &memos);
     binding = try advanceMemoHistoryForTesting(&setup, session, binding, 1);
     try expectMemoStoreCancelForTesting(&setup, session.slice(), binding, &memos);
+}
+
+fn skillsConfigurationForTesting(setup: *PreparationTestSetup, key: []const u8, command: *protocol.ConfigureCommand) !void {
+    command.* = .{};
+    try command.key.set(key);
+    command.configuration.workspace.state = .value;
+    try command.configuration.workspace.value.set(setup.root);
+    command.configuration.provider.state = .value;
+    try command.configuration.provider.value.set("codex");
+    command.configuration.model.state = .value;
+    try command.configuration.model.value.set("model-a");
+    command.configuration.tools = try .of(&.{"skill"});
+    command.configuration.permission_mode.state = .value;
+    try command.configuration.permission_mode.value.set("bypass");
+    command.configuration.compaction_trigger.state = .value;
+    try command.configuration.compaction_trigger.value.set("115200");
+    command.configuration.reasoning_effort.state = .explicit_null;
+}
+
+fn writeSkillForTesting(setup: *PreparationTestSetup, path: []const u8, bytes: []const u8) !void {
+    const file = try setup.tmp.dir.createFile(std.testing.io, path, .{});
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, bytes);
+}
+
+fn skillReportForTesting(setup: *PreparationTestSetup, session: []const u8) ![]u8 {
+    var used: std.atomic.Value(u64) = .init(0);
+    var report = try setup.storage.captureSessionReport(session, .{
+        .scratch_path = setup.root,
+        .scratch_budget = .{ .used = &used, .limit = 4 * 1024 * 1024 },
+        .request_number = 291,
+        .profile = .full,
+        .execution = .{ .dispatch_fenced = false, .custody_occupied = 0, .scratch_used_bytes = 0 },
+    });
+    defer report.deinit();
+    const bytes = try std.testing.allocator.alloc(u8, @intCast(report.length));
+    errdefer std.testing.allocator.free(bytes);
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const read = try report.read(offset, bytes[offset..@min(offset + store.SessionReport.read_window_bytes, bytes.len)]);
+        if (read == 0) return error.ShortReportRead;
+        offset += read;
+    }
+    return bytes;
+}
+
+fn expectSkillsMemoRebuildEqualForTesting(setup: *PreparationTestSetup, binding: store.AttemptBinding, memos: *history_memo.Table) !usize {
+    const memo = try prepareMemoWithAllowanceForTesting(setup, binding, memos, .{}, 1024);
+    defer std.testing.allocator.free(memo.bytes);
+    const full = try prepareMemoWithAllowanceForTesting(setup, binding, null, .{}, 1024);
+    defer std.testing.allocator.free(full.bytes);
+    try std.testing.expectEqualStrings(full.bytes, memo.bytes);
+    return memo.copied;
+}
+
+test "skills native conversation is append-only across invoke reload replay and reopen" {
+    var setup: PreparationTestSetup = undefined;
+    try setup.init();
+    defer setup.close();
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    const arena = memory.allocator();
+    const skill_owner = @import("session_skills.zig");
+    try setup.tmp.dir.createDirPath(std.testing.io, ".agents/skills/demo");
+    try writeSkillForTesting(&setup, ".git", "gitdir: /fixture/not-used\n");
+    const body = try arena.alloc(u8, 16384);
+    @memset(body, 'x');
+    const raw = try std.fmt.allocPrint(arena, "---\r\nname: demo\r\ndescription: initial-demo-desc\r\ndisable-model-invocation: true\r\nallowed-tools: [made_up]\r\n---\r\n{s}\r\n雪 trailing\r\n", .{body});
+    try writeSkillForTesting(&setup, ".agents/skills/demo/SKILL.md", raw);
+    var configure: protocol.ConfigureCommand = .{};
+    try skillsConfigurationForTesting(&setup, "skills-create", &configure);
+    const initial = (try skill_owner.initial(arena, std.testing.allocator, std.testing.io, &setup.storage, configure.key.slice(), &configure.configuration, null)).?;
+    const creation = setup.storage.configureWithInitialSkills(&configure, null, initial, .{});
+    try std.testing.expect(creation == .accepted);
+    const session = creation.accepted.session;
+    const state = try setup.storage.readSkills(arena, session.slice());
+    try std.testing.expectEqual(@as(usize, 1), state.catalog.entries.len);
+    try std.testing.expectEqualStrings("initial-demo-desc", state.catalog.entries[0].description);
+    try std.testing.expect(std.fs.path.isAbsolute(state.catalog.entries[0].path));
+    try std.testing.expect((try skill_owner.initial(arena, std.testing.allocator, std.testing.io, &setup.storage, configure.key.slice(), &configure.configuration, null)) == null);
+    try std.testing.expect(setup.storage.configureWithInitialSkills(&configure, null, null, .{}).accepted.replayed);
+
+    var reload: protocol.ConfigureCommand = .{ .session = session, .reload_skills = true };
+    try reload.key.set("skills-initial-noop");
+    var candidate = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .reload }, null);
+    const no_work = setup.storage.configureWithCapturedSkills(&reload, null, null, &candidate, .{});
+    try std.testing.expect(no_work == .accepted);
+    try std.testing.expectEqual(protocol.SkillsReloadStatus.unchanged, no_work.accepted.skills.?);
+    try std.testing.expectEqual(@as(u64, 1), no_work.accepted.revision);
+    try std.testing.expect((try setup.storage.admitNextModelAttempt(.{})) == null);
+    const initial_report = try skillReportForTesting(&setup, session.slice());
+    defer std.testing.allocator.free(initial_report);
+    try std.testing.expect(std.mem.indexOf(u8, initial_report, "\"turn\":null") != null);
+
+    var invoke: protocol.MessageCommand = .{ .session = session, .skill = .{} };
+    try invoke.key.set("skills-user-invoke");
+    try invoke.skill.?.set("demo");
+    const captured = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = invoke.skill }, null);
+    try std.testing.expect(captured == .invocation);
+    try std.testing.expect(std.mem.endsWith(u8, captured.invocation, raw));
+    const admitted_message = setup.storage.submitMessageCapturedSkills(&invoke, null, null, &captured, .{});
+    try std.testing.expect(admitted_message == .accepted);
+    try std.testing.expectEqual(captured.invocation.len, admitted_message.accepted.content.length);
+    var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    var binding = try admitted.permit.consume();
+    var memo_entries: [2]history_memo.Table.Entry = @splat(.{});
+    var memos: history_memo.Table = .{ .entries = &memo_entries, .scratch_path = setup.root };
+    defer memos.deinit(std.testing.io);
+    _ = try expectSkillsMemoRebuildEqualForTesting(&setup, binding, &memos);
+    const first = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 1024);
+    defer std.testing.allocator.free(first.bytes);
+    const first_parsed = try std.json.parseFromSlice(std.json.Value, arena, first.bytes, .{});
+    try std.testing.expect(std.mem.indexOf(u8, first_parsed.value.object.get("instructions").?.string, "initial-demo-desc") == null);
+    var exact_user = false;
+    for (first_parsed.value.object.get("input").?.array.items) |item| {
+        const role = item.object.get("role") orelse continue;
+        if (std.mem.eql(u8, role.string, "user")) exact_user = std.mem.eql(u8, item.object.get("content").?.array.items[0].object.get("text").?.string, captured.invocation);
+    }
+    try std.testing.expect(exact_user);
+
+    const current_raw = "---\r\nname: demo\r\ndescription: initial-demo-desc\r\n---\r\nnew current body 雪\r\n";
+    try writeSkillForTesting(&setup, ".agents/skills/demo/SKILL.md", current_raw);
+    candidate = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .reload }, null);
+    try reload.key.set("skills-body-only");
+    try std.testing.expectEqual(protocol.SkillsReloadStatus.unchanged, setup.storage.configureWithCapturedSkills(&reload, null, null, &candidate, .{}).accepted.skills.?);
+    try settleItemsForTesting(&setup, binding, "skills-invoke-call", &.{
+        "{\"type\":\"function_call\",\"id\":\"skill-invoke-item\",\"call_id\":\"skill-invoke-call\",\"name\":\"skill\",\"arguments\":\"{\\\"operation\\\":\\\"invoke\\\",\\\"name\\\":\\\"demo\\\"}\"}",
+    });
+    const action = (try setup.storage.nextCoreWork()).?.action;
+    try std.testing.expectEqual(@TypeOf(action.tool).skill, action.tool);
+    const current = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .invoke, .name = invoke.skill }, null);
+    try std.testing.expect(std.mem.endsWith(u8, current.invocation, current_raw));
+    try std.testing.expect(try setup.storage.settleSkillTool(action.binding, arena, &current, .{}));
+    admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    binding = try admitted.permit.consume();
+    _ = try expectSkillsMemoRebuildEqualForTesting(&setup, binding, &memos);
+    const second = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 1024);
+    defer std.testing.allocator.free(second.bytes);
+    const first_end = std.mem.indexOf(u8, first.bytes, "],\"tools\":[").?;
+    try std.testing.expectStringStartsWith(second.bytes, first.bytes[0..first_end]);
+    const second_parsed = try std.json.parseFromSlice(std.json.Value, arena, second.bytes, .{});
+    var exact_tool = false;
+    for (second_parsed.value.object.get("input").?.array.items) |item| {
+        const kind = item.object.get("type") orelse continue;
+        if (std.mem.eql(u8, kind.string, "function_call_output")) exact_tool = std.mem.eql(u8, item.object.get("output").?.string, current.invocation);
+    }
+    try std.testing.expect(exact_tool);
+
+    try writeSkillForTesting(&setup, ".agents/skills/demo/SKILL.md", "---\nname: demo\ndescription: changed-demo-desc\n---\nlatest body\n");
+    candidate = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .reload }, null);
+    try reload.key.set("skills-description-reload");
+    const changed = setup.storage.configureWithCapturedSkills(&reload, null, null, &candidate, .{});
+    try std.testing.expect(changed == .accepted);
+    try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, changed.accepted.skills.?);
+    try std.testing.expectEqual(@as(u64, 1), changed.accepted.revision);
+    const frozen = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 1024);
+    defer std.testing.allocator.free(frozen.bytes);
+    try std.testing.expectEqualStrings(second.bytes, frozen.bytes);
+    try settleItemsForTesting(&setup, binding, "skills-reload-call", &.{
+        "{\"type\":\"function_call\",\"id\":\"skill-reload-item\",\"call_id\":\"skill-reload-call\",\"name\":\"skill\",\"arguments\":\"{\\\"operation\\\":\\\"reload\\\"}\"}",
+    });
+    const reload_action = (try setup.storage.nextCoreWork()).?.action;
+    const no_change = try skill_owner.capture(arena, std.testing.allocator, std.testing.io, &setup.storage, session.slice(), &.{ .operation = .reload }, null);
+    try std.testing.expect(try setup.storage.settleSkillTool(reload_action.binding, arena, &no_change, .{}));
+    admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
+    binding = try admitted.permit.consume();
+    _ = try expectSkillsMemoRebuildEqualForTesting(&setup, binding, &memos);
+    const third = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 1024);
+    defer std.testing.allocator.free(third.bytes);
+    const second_end = std.mem.indexOf(u8, second.bytes, "],\"tools\":[").?;
+    try std.testing.expectStringStartsWith(third.bytes, second.bytes[0..second_end]);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, third.bytes, "Skill catalog changes"));
+    try std.testing.expect(std.mem.indexOf(u8, third.bytes, "changed-demo-desc") != null);
+    try setup.tmp.dir.deleteFile(std.testing.io, ".agents/skills/demo/SKILL.md");
+    try setup.storage.close();
+    const database = try std.fmt.allocPrint(arena, "{s}/store.sqlite3", .{setup.root});
+    try setup.storage.open(std.testing.io, database, setup.root);
+    const reopened = try prepareMemoWithAllowanceForTesting(&setup, binding, null, .{}, 1024);
+    defer std.testing.allocator.free(reopened.bytes);
+    try std.testing.expectEqualStrings(third.bytes, reopened.bytes);
+    const replay = setup.storage.configureWithCapturedSkills(&reload, null, null, null, .{});
+    try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+    try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, replay.accepted.skills.?);
+    const invoke_replay = setup.storage.submitMessageCapturedSkills(&invoke, null, null, null, .{});
+    try std.testing.expect(invoke_replay == .accepted and invoke_replay.accepted.replayed);
+    try std.testing.expectEqualSlices(u8, &admitted_message.accepted.content.digest, &invoke_replay.accepted.content.digest);
+    const report = try skillReportForTesting(&setup, session.slice());
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, "\"turn\":null") != null);
 }

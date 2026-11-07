@@ -2,14 +2,14 @@
 """Public-CLI evidence for detached Host launch and convergence."""
 
 import errno
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
 import fcntl
 import hashlib
 import os
 import pathlib
 import pty
-from terminal_process import COLUMNS, ROWS, open_pty
+from terminal_process import COLUMNS, ROWS, open_pty, terminal_process
 from terminal_screen import ScreenCapture
 import re
 import resource
@@ -132,7 +132,8 @@ def assert_launch_adapter(root, env):
     source, actor = root / "launch-probe.c", root / "launch-probe"
     source.write_text(LAUNCH_PROBE)
     adapter = pathlib.Path(__file__).resolve().parents[2] / "src/host_launch.c"
-    subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(source), str(adapter),
+    identity = adapter.with_name("host_identity.c")
+    subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", str(source), str(adapter), str(identity),
                     "-pthread", "-o", str(actor)], check=True)
     output = root / "launch-probe-output"
     probe_env = {**env, "RUI_LAUNCH_PROBE_OUTPUT": str(output),
@@ -578,6 +579,61 @@ def startup_limits(root, env):
     print("startup limits passed: soft raise, hard-limit minimum boundary, below-minimum and unsupported-version fast failure", flush=True)
 
 
+def moved_store_identity(root, env, *, terminal=False):
+    original = root / ("a" if terminal else 'saved-' + '\u0080' * 80 + '-\u202e-"-\\-store')
+    moved = root / ("b" if terminal else 'moved-' + '\u0080' * 80 + '-\u202e-"-\\-store')
+    child, _ = start_ready_process([RUI, "host", "serve", "--store", original], env=env)
+    stop_process(child)
+    database = original / "rui.sqlite3"
+    assert database.is_file(), list(original.iterdir())
+    with closing(sqlite3.connect(database)) as connection:
+        metadata = connection.execute("SELECT meta_key,meta_value FROM store_meta ORDER BY meta_key").fetchall()
+    original.rename(moved)
+    database = moved / database.name
+    digest = hashlib.sha256(database.read_bytes()).digest()
+    escaped = lambda path: str(path).replace("\\", "\\\\").replace('"', '\\"').replace("\u0080", "\\u0080").replace("\u202e", "\\u202e")
+    credential = root / "identity-credentials"
+    codex_fixture.credentials(credential)
+    interactive_env = {**env, "RUI_CODEX_CREDENTIAL_FILE": str(credential)}
+    try:
+        for alias in (False, True):
+            if alias:
+                original.symlink_to(moved, target_is_directory=True)
+            selected = original if alias else moved
+            for command in (("interactive",) if terminal else ("serve", "start")):
+                if command == "interactive":
+                    with terminal_process([RUI, "--store", selected, "--provider", "codex"], env=interactive_env, cwd=root) as (caller, master):
+                        output = bytearray()
+                        code = wait_for_terminal_exit(caller, master, output, time.monotonic() + COMMAND_TIMEOUT)
+                        diagnostic = output.decode().replace("\r\n", "\n")
+                else:
+                    failed = subprocess.run([RUI, "host", command, "--store", selected],
+                        env=env, capture_output=True, text=True, timeout=COMMAND_TIMEOUT)
+                    code, diagnostic = failed.returncode, failed.stderr
+                assert code == 6, (command, alias, code, diagnostic)
+                assert f"Saved original canonical folder: {escaped(original)}\n" in diagnostic, diagnostic
+                assert f"Actual canonical folder: {escaped(moved)}\n" in diagnostic, diagnostic
+                assert "[store_identity_mismatch]" in diagnostic and "internal_unexpected" not in diagnostic, diagnostic
+                assert "Stop Hosts" in diagnostic and "preserve the complete Store" in diagnostic, diagnostic
+                assert "symlink" in diagnostic and "back up" in diagnostic and "--store" in diagnostic, diagnostic
+                assert all(control not in diagnostic for control in ("\x1b", "\u0080", "\u202e")), diagnostic
+                assert hashlib.sha256(database.read_bytes()).digest() == digest
+                with closing(sqlite3.connect(database)) as connection:
+                    assert connection.execute("SELECT meta_key,meta_value FROM store_meta ORDER BY meta_key").fetchall() == metadata
+        failures = [json.loads(line) for path in (moved / "diagnostics").glob("host-*.jsonl")
+                    for line in path.read_text().splitlines() if json.loads(line).get("phase") == "failed"]
+        assert len(failures) == (2 if terminal else 4) and all(row["detail"] == "store_identity_mismatch" for row in failures), failures
+        original.unlink()
+        moved.rename(original)
+        restored, _ = start_ready_process([RUI, "host", "serve", "--store", original], env=env)
+        stop_process(restored)
+    finally:
+        forced_crash_cleanup(moved)
+        forced_crash_cleanup(original)
+    surface = "all-streams PTY interactive" if terminal else "foreground and detached escaped paths"
+    print(f"moved Store identity passed: {surface}, old-path symlink, unchanged identity, restored readiness", flush=True)
+
+
 def wait_for_terminal_exit(caller, master, output, deadline):
     """Drain output through reap, including a retained slave without EOF."""
     while True:
@@ -640,7 +696,7 @@ def launch_fixture_root():
 
 
 def main():
-    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits]"
+    assert len(sys.argv) in (2, 3), "usage: host_launch_integration.py /absolute/path/to/rui [startup-limits|store-identity]"
     from host_launch_exit_test import check_exit_reader, check_process_discovery, check_failure_retention
     check_process_discovery(forced_crash_cleanup)
     check_exit_reader(wait_for_terminal_exit)
@@ -651,6 +707,12 @@ def main():
         home.mkdir(mode=0o700)
         credential = root / "credentials" / "missing.json"
         env = environment(home, credential)
+        if len(sys.argv) == 3 and sys.argv[2] == "store-identity":
+            moved_store_identity(root, env)
+            moved_store_identity(root, env, terminal=True)
+            return
+        moved_store_identity(root, env)
+        moved_store_identity(root, env, terminal=True)
         startup_limits(root, env)
         if len(sys.argv) == 3:
             assert sys.argv[2] == "startup-limits"

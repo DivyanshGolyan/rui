@@ -2,6 +2,7 @@
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -72,6 +73,40 @@ class DialectTest(unittest.TestCase):
         with patch.object(upgrade.subprocess, "run", return_value=subprocess.CompletedProcess([], 2, "", "")):
             with self.assertRaisesRegex(AssertionError, "No command help"):
                 upgrade.Dialect(Path("/installed/rui"))
+
+
+class SupportedRangeTest(unittest.TestCase):
+    def test_range_comes_from_target_migrations_not_version_punctuation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            source = checkout / "src/store/schema.zig"
+            source.parent.mkdir(parents=True)
+            source.write_text("pub const schema_version: u32 = 56;\n"
+                              "pub const migration_baseline: u32 = 51;\n")
+            self.assertEqual(upgrade.supported_range(checkout), (51, 56))
+            source.write_text("pub const schema_version: u32 = 40;\n")
+            self.assertEqual(upgrade.supported_range(checkout), (40, 40))
+            source.unlink()
+            (checkout / "src/store.zig").write_text("pub const schema_version: u32 = 37;\n")
+            self.assertEqual(upgrade.supported_range(checkout), (37, 37))
+
+    def test_historical_source_build_uses_current_native_publisher_not_old_installer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            library = home / ".local/lib/rui"
+            library.mkdir(parents=True)
+            command = home / ".local/bin/rui"
+            command.parent.mkdir()
+            command.write_bytes(b"historical fixture artifact")
+            with patch.dict(upgrade.os.environ, {"HOME": str(home)}), \
+                 patch.object(upgrade.subprocess, "check_output", return_value="pinned-sha\n"), \
+                 patch.object(upgrade.subprocess, "run") as run:
+                upgrade.install(Path("/historical-checkout"), Path("/current-native-rui"))
+            calls = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(calls[0][:4], ["zig", "build", "-Doptimize=ReleaseSafe", "--prefix"])
+            self.assertEqual(calls[1], [Path("/current-native-rui"), "--publish-install", str(home),
+                                       calls[0][4], "intentional-source"])
+            self.assertFalse(any("install.sh" in str(argument) for call in calls for argument in call))
 
 
 if __name__ == "__main__":

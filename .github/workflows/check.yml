@@ -345,7 +345,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
-          targets: ${{ needs.plan.outputs.targets }}
+          targets: ${{ toJSON(matrix.targets) }}
           compiled: 'true'
       - name: Start MySQL 8.4 for the live dialect and launch-frame checks
         if: ${{ env.LIVE_MYSQL == 'true' }}
@@ -490,7 +490,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
-          targets: ${{ needs.plan.outputs.native_targets }}
+          targets: ${{ toJSON(matrix.targets) }}
           compiled: 'true'
       - name: Use the verified producer artifact or compile locally
         env:

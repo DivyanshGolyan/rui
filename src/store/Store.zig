@@ -3,6 +3,7 @@
 //! identities and traces. The facade re-exports only the Store type and its value types.
 
 const std = @import("std");
+const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
 const retry_policy = @import("../retry_policy.zig");
@@ -10,6 +11,7 @@ const change_ring = @import("../change_ring.zig");
 const action_domain = @import("domain/action.zig");
 const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
+const skills_domain = @import("domain/skills.zig");
 const content_domain = @import("domain/content.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
 const model_facts_domain = @import("domain/model_facts.zig");
@@ -21,7 +23,8 @@ const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
 const rsql = @import("rsql.zig");
-const Access = @import("access.zig").Access;
+const store_access = @import("access.zig");
+const Access = store_access.Access;
 const ReadAccess = reads_domain.ReadAccess;
 const Engine = @import("engine.zig").Engine;
 const Sqlite = @import("engine/Sqlite.zig");
@@ -568,6 +571,58 @@ pub const Store = struct {
         try retry_policy.validateWaits(waits_ms, try readUnixMilliseconds(self.io));
     }
 
+    /// Admission preparation uses this only as a replay hint. The writer always
+    /// checks the original key and digest again before applying captured effects.
+    pub fn commandExists(self: *Store, key: []const u8) !bool {
+        return self.queue().run(commandExistsHeld, .{ self, key });
+    }
+
+    fn commandExistsHeld(self: *Store, key: []const u8) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, Ordinary.none) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(Ordinary.none, commandExistsOn(&access, key));
+    }
+
+    fn commandExistsOn(a: anytype, key: []const u8) !bool {
+        var saved: command_domain.saved_command.Result = undefined;
+        command_domain.lookupCommand(a, key, &saved);
+        try a.run();
+        return saved != null;
+    }
+
+    pub const SkillsState = struct {
+        workspace: protocol.Bounded(protocol.max_workspace_bytes) = .{ .len = 0 },
+        catalog: @import("../skills.zig").Catalog = .{ .entries = &.{} },
+    };
+
+    /// The immutable workspace and current metadata are copied before filesystem
+    /// effects. No Store lock remains held while a skill is read or scanned.
+    pub fn readSkills(self: *Store, allocator: std.mem.Allocator, session: []const u8) !*SkillsState {
+        const out = try allocator.create(SkillsState);
+        out.* = .{ .workspace = .{ .len = 0 } };
+        try self.queue().run(readSkillsHeld, .{ self, allocator, session, out });
+        return out;
+    }
+
+    fn readSkillsHeld(self: *Store, allocator: std.mem.Allocator, session: []const u8, out: *SkillsState) !void {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{SessionNotFound}) = .open(&entry);
+        defer access.deinit();
+        return entry.finish(error{SessionNotFound}, readSkillsOn(&access, allocator, session, out));
+    }
+
+    fn readSkillsOn(a: anytype, allocator: std.mem.Allocator, session: []const u8, out: *SkillsState) !void {
+        var row: skills_domain.latest.Row = .{ .workspace = &out.workspace, .session = undefined, .catalog_content_id = null, .byte_length = null, .digest = null };
+        var found: store_access.Found = .missing;
+        a.readInto(skills_domain.latest, .{ .session = session }, &row, &found);
+        try a.run();
+        if (!found.get()) return error.SessionNotFound;
+        out.catalog = try skills_domain.read(a, allocator, session);
+    }
+
     /// A configuration that requires a model is rejected when the Host does
     /// not serve its Session's provider.
     pub fn configure(
@@ -575,7 +630,7 @@ pub const Store = struct {
         command: *const protocol.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, @as(?*const configuration_domain.PresetDecision, null), faults });
+        return self.configureWithInitialSkills(command, null, null, faults);
     }
 
     /// A Host-resolved preset or its refusal uses the same key lookup,
@@ -587,20 +642,30 @@ pub const Store = struct {
         preset: *const configuration_domain.PresetDecision,
         faults: Faults,
     ) ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, @as(?*const configuration_domain.PresetDecision, preset), faults });
+        return self.configureWithInitialSkills(command, preset, null, faults);
+    }
+
+    pub fn configureWithInitialSkills(self: *Store, command: *const protocol.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) ConfigureReply {
+        return self.configureWithCapturedSkills(command, preset, initial_skills, null, faults);
+    }
+
+    pub fn configureWithCapturedSkills(self: *Store, command: *const protocol.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) ConfigureReply {
+        return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, faults });
     }
 
     fn configureHeld(
         self: *Store,
         command: *const protocol.ConfigureCommand,
         preset: ?*const configuration_domain.PresetDecision,
+        initial_skills: ?*const skills_domain.Initial,
+        reload_capture: ?*const skills_domain.Capture,
         faults: Faults,
     ) ConfigureReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, faults))) catch .infrastructure_failure;
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, faults))) catch .infrastructure_failure;
     }
 
     /// A fresh Message admission, as `MessageCommitted` receives it.
@@ -630,20 +695,30 @@ pub const Store = struct {
         committed: ?MessageCommitted,
         faults: Faults,
     ) MessageReply {
-        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, faults });
+        return self.submitMessageWithInitialSkills(command, committed, null, faults);
+    }
+
+    pub fn submitMessageWithInitialSkills(self: *Store, command: *const protocol.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) MessageReply {
+        return self.submitMessageCapturedSkills(command, committed, initial_skills, null, faults);
+    }
+
+    pub fn submitMessageCapturedSkills(self: *Store, command: *const protocol.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.Capture, faults: Faults) MessageReply {
+        return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, faults });
     }
 
     fn submitMessageWithModelHeld(
         self: *Store,
         command: *const protocol.MessageCommand,
         committed: ?MessageCommitted,
+        initial_skills: ?*const skills_domain.Initial,
+        captured_skill: ?*const skills_domain.Capture,
         faults: Faults,
     ) MessageReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, faults))) catch .infrastructure_failure;
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, initial_skills, captured_skill, faults))) catch .infrastructure_failure;
     }
 
     pub fn stopSession(
@@ -1218,15 +1293,19 @@ pub const Store = struct {
     /// arguments, in one transaction; `configuration` is the agent's spec,
     /// which this completes. `committed` runs once the task is admitted.
     pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
-        return self.queue().write(startAgentHeld, .{ self, binding, caller, task, attached, configuration, committed, faults });
+        return self.startAgentWithInitialSkills(binding, caller, task, attached, configuration, committed, null, faults);
     }
 
-    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
+    pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
+        return self.queue().write(startAgentHeld, .{ self, binding, caller, task, attached, configuration, committed, initial_skills, faults });
+    }
+
+    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *protocol.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.agent_start) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, faults)));
+        return entry.finishTransaction(Ordinary.agent_start, faults, access.end(faults, command_domain.startAgent(&access, self.io, binding, caller, task, attached, configuration, committed, initial_skills, faults)));
     }
 
     /// Loads matching saved tools and resolves the call in one transaction.
@@ -1240,6 +1319,18 @@ pub const Store = struct {
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
         defer access.deinit();
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, @import("domain/find_tools.zig").run(&access, binding, arena, words, refusal, faults)));
+    }
+
+    pub fn settleSkillTool(self: *Store, binding: ActionAttemptBinding, allocator: std.mem.Allocator, captured: *const skills_domain.Capture, faults: Faults) !bool {
+        return self.queue().write(settleSkillToolHeld, .{ self, binding, allocator, captured, faults });
+    }
+
+    fn settleSkillToolHeld(self: *Store, binding: ActionAttemptBinding, allocator: std.mem.Allocator, captured: *const skills_domain.Capture, faults: Faults) !bool {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
+        defer access.deinit();
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, skills_domain.runTool(&access, allocator, binding, captured, faults)));
     }
 
     /// Fails the core tool call `binding` names with `result`, in one
@@ -1530,6 +1621,8 @@ pub const OpenOptions = struct {
     cache_spill: bool = true,
     cache_kib: u32 = 1024,
     found_schema_version: ?*u32 = null,
+    /// Caller-owned evidence retained after a failed open destroys the Store.
+    identity_mismatch: ?*store_schema.IdentityMismatch = null,
     /// The tools the Host offers, which it keeps for the Store's life.
     /// Null saves none: the Host reads the last one back (`readCatalog`)
     /// and saves its own (`saveCatalog`) before it serves.
@@ -1603,10 +1696,10 @@ const accepted_settlement_growth = 14352;
 comptime {
     // The settlement batch is the larger use: 19240 bytes, the original
     // 14480 plus 4760 for per-batch call names, membership flags and their
-    // lookup visitor. The configure reads use 13552, including the saved
-    // parent reference and the saved tool and loaded names a subset update
-    // reads. Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 13552 or scratch_bytes != 19240)
+    // lookup visitor. The creation reads use 14472, including command/Message
+    // facts, saved parent reference and the saved tool and loaded names a
+    // subset update reads. Exact, so a change to either size is a decision.
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 14472 or scratch_bytes != 19240)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }

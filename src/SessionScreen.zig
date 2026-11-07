@@ -163,6 +163,39 @@ fn reflowHiddenTranscript(self: *Self, columns: u16, method: vaxis.gwidth.Method
     self.browsing.restore(paneLayout(.transcript, columns, method, self.home), .{ .offset = first.offset }, self.height, true);
 }
 
+/// Stack-lived source coordinates while another screen borrows this backend.
+/// Contains no ticket, read credit, offer, or navigation state.
+pub const BorrowedLayout = struct { view: ViewKind, active: ?Position, transcript: ?Position };
+
+pub fn suspendLayout(self: *Self) BorrowedLayout {
+    const active = if (self.view == .live or self.view == .action) null else Position{ .offset = self.viewed().anchor(self.textLayout()).offset };
+    const transcript = if (self.view == .message and self.message_return == .transcript)
+        Position{ .offset = self.browsing.anchor(paneLayout(.transcript, self.backend.geometry().cols, self.backend.widthMethod(), self.home)).offset }
+    else
+        null;
+    self.invalidateLayout();
+    return .{ .view = self.view, .active = active, .transcript = transcript };
+}
+
+pub fn resumeLayout(self: *Self, saved: BorrowedLayout) void {
+    std.debug.assert(self.view == saved.view);
+    self.invalidateLayout();
+    // A failed borrower cannot revive an uncertain encoded diff or receipt.
+    if (!self.backend.idle()) return;
+    self.adoptWidth(self.backend.widthMethod());
+    if (saved.transcript) |at| self.browsing.restore(paneLayout(.transcript, self.backend.geometry().cols, self.backend.widthMethod(), self.home), at, self.height, true);
+    if (saved.active) |at| self.viewed().restore(self.textLayout(), at, self.height, self.view == .transcript);
+}
+
+fn adoptWidth(self: *Self, method: vaxis.gwidth.Method) void {
+    inline for (.{ &self.live, &self.browsing, &self.staging }) |pane| {
+        if (pane.text.width_method != method) {
+            pane.text.width_method = method;
+            pane.text.dirty = true;
+        }
+    }
+}
+
 pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
     if (self.backend.widthMethod() == method) return;
     const anchor = self.viewed().anchor(self.textLayout());
@@ -171,10 +204,7 @@ pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
     var policy = self.backend.policy();
     policy.width = method;
     _ = self.backend.setPolicy(policy);
-    inline for (.{ &self.live, &self.browsing, &self.staging }) |pane| {
-        pane.text.width_method = method;
-        pane.text.dirty = true;
-    }
+    self.adoptWidth(method);
     if (self.view != .live and self.view != .action) self.viewed().restore(self.textLayout(), .{ .offset = anchor.offset }, self.height, self.view == .transcript);
 }
 
@@ -2478,6 +2508,59 @@ fn expectHiddenTranscriptReflow(width_report: bool) !void {
     try std.testing.expectEqual(@as(u16, 0), returned.row);
 }
 
+fn expectBorrowedScreenReflow(overlay: bool) !void {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    const borrower = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(borrower);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var page = try ActionFixture.init(30);
+    defer page.deinit();
+    const line = "👩‍🚀👩‍🚀👩‍🚀\n";
+    for (0..40) |_| try screen.append(line);
+    const old_size: std.posix.winsize = .{ .row = 12, .col = 10, .xpixel = 0, .ypixel = 0 };
+    _ = screen.presented(try Test.render(screen, &out.writer, old_size, "", 0, .{}, &.{}));
+    try screen.beginTranscript(0);
+    screen.browsing.scroll.scroll.y = 20;
+    _ = screen.presented(try Test.render(screen, &out.writer, old_size, "", 0, .{}, &.{}));
+    const transcript_first = screen.browsing.anchor(screen.textLayout());
+    try std.testing.expectEqual(10 * line.len, transcript_first.offset);
+    if (overlay) {
+        try screen.showMessage(std.testing.io, page.file);
+        screen.staging.scroll.scroll.y = 4;
+        _ = screen.presented(try Test.render(screen, &out.writer, old_size, "", 0, .{}, &.{}));
+    }
+    const active_first = screen.viewed().anchor(screen.textLayout());
+    const saved = screen.suspendLayout();
+    const backend = screen.backend;
+    borrower.init(backend);
+    borrower.view = .inspection;
+    try borrower.browsing.text.append("A synthetic upgrade panel; no upgrade operations run.\n");
+    borrower.setWidth(.unicode);
+    const size: std.posix.winsize = .{ .row = 14, .col = 20, .xpixel = 0, .ypixel = 0 };
+    _ = try Test.render(borrower, &out.writer, size, "", 0, .{}, &.{});
+    screen.resumeLayout(saved);
+    try std.testing.expectEqual(active_first.offset, screen.viewed().anchor(screen.textLayout()).offset);
+    _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+    if (overlay) try screen.leaveMessage();
+    try std.testing.expectEqual(transcript_first.offset, screen.browsing.anchor(screen.textLayout()).offset);
+    try std.testing.expectEqual(@as(u16, 0), screen.browsing.anchor(screen.textLayout()).row);
+    try std.testing.expect(screen.backend == backend and borrower.backend == backend and backend.idle());
+}
+
+test "a borrowed screen restores transcript source across backend resize and width reports" {
+    try expectBorrowedScreenReflow(false);
+}
+
+test "a borrowed screen restores Message and hidden transcript at their own layouts" {
+    try expectBorrowedScreenReflow(true);
+}
+
 test "a width report on a Message overlay reflows its hidden transcript at its own width" {
     try expectHiddenTranscriptReflow(true);
 }
@@ -2782,4 +2865,75 @@ test "typed rich cell scratch refusal cannot select fallback geometry or grant f
     try std.testing.expect(screen.backend.usage().peak <= Backend.memory_limit);
     try std.testing.expect(screen.offer == null);
     std.debug.print("output generated-cell refusal chargedPeak={d}B; source geometry remains {d} rows, no encoded receipt\n", .{ screen.backend.usage().peak, rows });
+}
+
+test "a borrowed layout keeps live following and never restores Action offers or read credit" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    const borrower = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(borrower);
+    for ([_]bool{ false, true }) |action| {
+        try Test.init(screen, std.testing.io, &environ, false);
+        defer Test.deinit(screen);
+        var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer out.deinit();
+        var page = try ActionFixture.init(2);
+        defer page.deinit();
+        for (0..30) |_| try screen.append("live source\n");
+        const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+        if (action) try screen.adopt(std.testing.io, page.file, 0x11, true);
+        _ = screen.select(false);
+        _ = screen.presented(try Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
+        _ = screen.select(false);
+        const delivered = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+        _ = screen.presented(delivered);
+        if (action) {
+            try std.testing.expect(screen.actionRead());
+            try std.testing.expect(screen.promptCompleted(.empty, false, false));
+            try std.testing.expect(screen.offered() != null);
+        }
+        const saved = screen.suspendLayout();
+        try std.testing.expect(saved.active == null and saved.transcript == null);
+        try std.testing.expect(screen.stale() and screen.offered() == null);
+        borrower.init(screen.backend);
+        borrower.view = .inspection;
+        try borrower.browsing.text.append("Synthetic panel\n");
+        borrower.setWidth(.unicode);
+        const resized: std.posix.winsize = .{ .row = 14, .col = 50, .xpixel = 0, .ypixel = 0 };
+        _ = try Test.render(borrower, &out.writer, resized, "", 0, .{}, &.{});
+        try screen.append("output while another screen borrowed the grid\n");
+        screen.resumeLayout(saved);
+        try std.testing.expect(!screen.presented(delivered).read_completed);
+        if (action) {
+            try std.testing.expect(!screen.actionRead());
+            try std.testing.expectEqual(@as(usize, 0), screen.browsing.scroll.scroll.y);
+            try std.testing.expect(screen.offered() == null);
+            try std.testing.expectEqual(@as(u64, 0x11), screen.consent.?.action);
+        } else {
+            _ = try Test.render(screen, &out.writer, resized, "", 0, .{}, &.{});
+            try std.testing.expectEqual(ViewKind.live, screen.view);
+            try std.testing.expect(screen.live.scroll.scroll.y + screen.height >= screen.live.projection(screen.textLayout()).total);
+        }
+    }
+}
+
+test "a borrowed layout cannot revive a poisoned backend or a prior delivered receipt" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    const size: std.posix.winsize = .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const delivered = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
+    const saved = screen.suspendLayout();
+    screen.backend.poison();
+    screen.resumeLayout(saved);
+    try std.testing.expect(!screen.backend.idle());
+    try std.testing.expect(!screen.presented(delivered).read_completed);
+    try std.testing.expectError(error.RenderBackendPoisoned, Test.render(screen, &out.writer, size, "", 0, .{}, &.{}));
 }

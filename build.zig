@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
             }));
         }
         configureSqlite(b, compile);
+        configureYaml(b, compile);
         configureBashPlatform(b, compile);
         configureHostLaunch(b, compile);
         configureTerminalEditor(b, compile);
@@ -115,6 +116,7 @@ pub fn build(b: *std.Build) void {
         .filters = if (test_filters.len != 0) test_filters else &.{"Host processing wait does not consume response transfer inactivity"},
     });
     configureSqlite(b, deadline_witness);
+    configureYaml(b, deadline_witness);
     configureBashPlatform(b, deadline_witness);
     configureHostLaunch(b, deadline_witness);
     configureTerminalEditor(b, deadline_witness);
@@ -373,6 +375,11 @@ pub fn build(b: *std.Build) void {
     );
     dispatch_integration_step.dependOn(&dispatch_integration.step);
 
+    const skills_integration = b.addSystemCommand(&.{"python3"});
+    skills_integration.addFileArg(b.path("tests/integration/skills_integration.py"));
+    skills_integration.addFileArg(ci.path(release_safe));
+    b.step("skills-integration", "Run isolated native skills capture, replay and creation cases").dependOn(&skills_integration.step);
+
     const login_signal_integration = b.addSystemCommand(&.{"python3"});
     login_signal_integration.addFileArg(b.path("tests/integration/login_signal_integration.py"));
     login_signal_integration.addFileArg(ci.path(release_safe));
@@ -600,6 +607,23 @@ pub fn build(b: *std.Build) void {
     const host_launch_step = b.step("host-launch-integration", "Run detached Host launch, alias convergence and startup-failure cases");
     host_launch_step.dependOn(&host_launch_integration.step);
 
+    const installer_integration = b.addSystemCommand(&.{"python3"});
+    installer_integration.addFileArg(b.path("tests/integration/installer_integration.py"));
+    installer_integration.addFileArg(ci.path(release_safe));
+    b.step("installer-integration", "Run source and release installer cases through the production publication owner").dependOn(&installer_integration.step);
+
+    const upgrade_release = addRuiWithIdentity(b, target, .ReleaseSafe, "rui-upgrade-release-fixture", pinned_transport, .{
+        .version = b.fmt("0.{d}.10000", .{@import("src/store/schema.zig").schema_version}),
+        .revision = buildRevision(b),
+    });
+    const upgrade_fixture_step = b.step("upgrade-fixture", "Build the same-source native actor with synthetic release identity for upgrade evidence");
+    upgrade_fixture_step.dependOn(&b.addInstallArtifact(upgrade_release, .{}).step);
+    const upgrade_integration = b.addSystemCommand(&.{"python3"});
+    upgrade_integration.addFileArg(b.path("tests/integration/upgrade_integration.py"));
+    upgrade_integration.addFileArg(ci.path(upgrade_release));
+    const upgrade_step = b.step("upgrade-integration", "Run isolated release publication and exact Host upgrade lifecycle cases");
+    upgrade_step.dependOn(&upgrade_integration.step);
+
     const launch_frame_integration = b.addSystemCommand(&.{"python3"});
     launch_frame_integration.addFileArg(b.path("tests/integration/launch_frame_integration.py"));
     launch_frame_integration.addFileArg(ci.path(release_safe));
@@ -762,6 +786,23 @@ pub fn build(b: *std.Build) void {
         "cross-check-linux",
         "Compile Linux x86-64 and experimental Linux ARM64",
     );
+    const yaml_linux_step = b.step(
+        "yaml-linux-compile",
+        "Compile pinned libyaml as strict C99 for Linux x86-64 and ARM64 without running it",
+    );
+    for ([_]std.Target.Cpu.Arch{ .x86_64, .aarch64 }) |arch| {
+        const yaml_linux = b.addLibrary(.{
+            .name = b.fmt("yaml-linux-{s}", .{@tagName(arch)}),
+            .linkage = .static,
+            .root_module = b.createModule(.{
+                .target = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux, .abi = .gnu }),
+                .optimize = .ReleaseSafe,
+                .link_libc = true,
+            }),
+        });
+        configureYaml(b, yaml_linux);
+        yaml_linux_step.dependOn(&yaml_linux.step);
+    }
     const macos_cross_step = b.step(
         "cross-check-macos",
         "Compile Apple Silicon macOS and experimental Intel macOS (requires Xcode/Command Line Tools)",
@@ -788,6 +829,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         configureSqlite(b, apple_tests);
+        configureYaml(b, apple_tests);
         configureBashPlatform(b, apple_tests);
         configureHostLaunch(b, apple_tests);
         configureTerminalEditor(b, apple_tests);
@@ -1109,6 +1151,19 @@ fn addRui(
     name: []const u8,
     pinned_transport: ?PinnedTransport,
 ) *std.Build.Step.Compile {
+    return addRuiWithIdentity(b, target, optimize, name, pinned_transport, .{ .version = buildVersion(b), .revision = buildRevision(b) });
+}
+
+const BuildIdentity = struct { version: []const u8, revision: []const u8 };
+
+fn addRuiWithIdentity(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    name: []const u8,
+    pinned_transport: ?PinnedTransport,
+    identity: BuildIdentity,
+) *std.Build.Step.Compile {
     const executable = b.addExecutable(.{
         .name = name,
         .root_module = b.createModule(.{
@@ -1119,10 +1174,11 @@ fn addRui(
     });
     executable.root_module.link_libc = true;
     configureSqlite(b, executable);
+    configureYaml(b, executable);
     configureBashPlatform(b, executable);
     configureHostLaunch(b, executable);
     configureTerminalEditor(b, executable);
-    configureTransport(b, executable, target, pinned_transport);
+    configureTransportWithIdentity(b, executable, target, pinned_transport, identity);
     return executable;
 }
 
@@ -1180,10 +1236,20 @@ fn configureTransport(
     /// Null type-checks without the built transport: headers only, no link.
     maybe_pinned: ?PinnedTransport,
 ) void {
+    configureTransportWithIdentity(b, compile, target, maybe_pinned, .{ .version = buildVersion(b), .revision = buildRevision(b) });
+}
+
+fn configureTransportWithIdentity(
+    b: *std.Build,
+    compile: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    maybe_pinned: ?PinnedTransport,
+    identity: BuildIdentity,
+) void {
     const options = b.addOptions();
     options.addOption(bool, "enabled", transportEnabled(target));
-    options.addOption([]const u8, "revision", buildRevision(b));
-    options.addOption([]const u8, "version", buildVersion(b));
+    options.addOption([]const u8, "revision", identity.revision);
+    options.addOption([]const u8, "version", identity.version);
     compile.root_module.addOptions("transport_options", options);
     const test_poll = addTestPoll(b);
     compile.root_module.addImport("test_poll", test_poll);
@@ -1275,6 +1341,29 @@ fn transportEnabled(target: std.Build.ResolvedTarget) bool {
         (target.result.cpu.arch == .aarch64 or target.result.cpu.arch == .x86_64);
 }
 
+fn configureYaml(b: *std.Build, compile: *std.Build.Step.Compile) void {
+    const module = compile.root_module;
+    const yaml = b.dependency("yaml", .{});
+    if (module.root_source_file != null) {
+        const yaml_bindings = addBindings(b, module, "yaml", "#include <yaml.h>\n");
+        yaml_bindings.addIncludePath(yaml.path("include"));
+    }
+    module.addIncludePath(yaml.path("include"));
+    module.addIncludePath(yaml.path("src"));
+    module.addCMacro("YAML_VERSION_STRING", "\"0.2.5\"");
+    module.addCMacro("YAML_VERSION_MAJOR", "0");
+    module.addCMacro("YAML_VERSION_MINOR", "2");
+    module.addCMacro("YAML_VERSION_PATCH", "5");
+    for ([_][]const u8{ "api.c", "reader.c", "scanner.c", "parser.c", "loader.c", "writer.c", "emitter.c", "dumper.c" }) |source| {
+        // api.c uses POSIX strdup; expose its declaration in strict C99 only
+        // for these dependency sources, never the consumer's other C files.
+        module.addCSourceFile(.{
+            .file = yaml.path(b.fmt("src/{s}", .{source})),
+            .flags = &.{ "-std=c99", "-D_POSIX_C_SOURCE=200809L" },
+        });
+    }
+}
+
 fn configureSqlite(b: *std.Build, compile: *std.Build.Step.Compile) void {
     const sqlite = b.dependency("sqlite", .{});
     const module = compile.root_module;
@@ -1321,6 +1410,10 @@ fn configureBashPlatform(b: *std.Build, compile: *std.Build.Step.Compile) void {
 fn configureHostLaunch(b: *std.Build, compile: *std.Build.Step.Compile) void {
     compile.root_module.addCSourceFile(.{
         .file = b.path("src/host_launch.c"),
+        .flags = &.{"-std=c11"},
+    });
+    compile.root_module.addCSourceFile(.{
+        .file = b.path("src/host_identity.c"),
         .flags = &.{"-std=c11"},
     });
 }

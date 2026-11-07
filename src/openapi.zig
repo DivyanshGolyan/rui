@@ -103,11 +103,13 @@ pub const routes = [_]Route{
         .summary = "Creates or reconfigures a Session. Retried by its key.",
         .variants = &.{
             variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.tail, .{}),
+            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.reload_skills_tail, .{}),
+            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.reload_require_model_tail, .{}),
             variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.require_model_tail, .{}),
             variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.preset_tail, .{}),
             variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.preset_require_model_tail, .{}),
         },
-        .reply = jsonReply(.{ protocol.configuration_reply.accepted, protocol.configuration_reply.rejected }),
+        .reply = jsonReply(.{ protocol.configuration_reply.accepted, protocol.configuration_reply.accepted_skills, protocol.configuration_reply.rejected }),
         .conflict = jsonReply(.{protocol.configuration_reply.conflict}),
     },
     .{
@@ -115,6 +117,8 @@ pub const routes = [_]Route{
         .kind = .message,
         .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
         .variants = &.{
+            variant(protocol.message_request.head ++ protocol.message_request.skill, .{}),
+            variant(protocol.message_request.sender_head ++ protocol.message_request.skill, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
             variant(protocol.message_request.head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{}),
             // A sending Session's address: an absolute Store path and a Session id.
             variant(protocol.message_request.sender_head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
@@ -1452,4 +1456,18 @@ test "Activity schema requires a nullable failed-send target without weakening o
         const value = try std.json.parseFromSliceLeaky(Value, allocator, case[0], .{});
         try std.testing.expectEqual(case[1], conforms(schemas, schema, value));
     }
+}
+
+test "catalog full report schema represents turnless catalog source facts" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var document: Document = .init(arena.allocator());
+    const shape = try document.shapeSchema(store.session_report_shapes.conversation);
+    const json = try std.json.parseFromSliceLeaky(
+        Value,
+        arena.allocator(),
+        "{\"ordinal\":\"1\",\"position\":\"1\",\"kind\":\"settings\",\"turn\":null,\"source_admission\":null,\"source_revision\":null,\"source_catalog_position\":\"1\",\"source_operation\":null,\"content\":{\"bytes\":\"12\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}}",
+        .{},
+    );
+    try std.testing.expect(conforms(document.schemas, shape, json));
 }

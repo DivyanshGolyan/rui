@@ -1578,7 +1578,7 @@ test "typing / lists the overview's commands between the rule and the draft, as 
         " /help                 keys and commands",
         " /model                choose the model new Sessions use",
         " /rename NAME          name the selected Session",
-        " +4 more · type to narrow",
+        " +5 more · type to narrow",
         " › /",
         " esc close",
     });
@@ -1607,7 +1607,7 @@ test "a short screen lists the commands it has rows for and counts the rest" {
     const text = try draftLines(&state, try typeText(&state, "/"), 80, 11);
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, " /archive              archive the selected Session; stop active work first") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, " +9 more · type to narrow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, " +10 more · type to narrow") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "/exit ") == null);
 }
 
@@ -3462,6 +3462,7 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
         " /setup [OPTIONS]      future defaults",
         " /unarchive            restore the selected Session without restarting work",
         " /undo                 restore the last Session archived here",
+        " /upgrade              check stable Rui; install restarts this Store's Host",
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
     try std.testing.expect(std.mem.indexOf(u8, shown, label) == null);
     // The line under the input says Esc closes it, over held settings or a

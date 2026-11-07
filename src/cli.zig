@@ -110,6 +110,23 @@ fn run(init: std.process.Init) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--version")) {
         return std.Io.File.stdout().writeStreamingAll(init.io, version_text);
     }
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "upgrade")) return runUpgrade(init, args[2..]);
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "--publish-install")) return publishInstall(init, args[2..]);
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path")) {
+        const advice = @import("installation_path.zig");
+        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+        var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+        defer observed.deinit(allocator);
+        var output: std.Io.Writer.Allocating = .init(allocator);
+        defer output.deinit();
+        try advice.write(&output.writer, &observed, home);
+        return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
+    }
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-facts")) {
+        const schema = @import("store.zig");
+        var output: [128]u8 = undefined;
+        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&output, "{{\"schema_version\":{d},\"minimum_schema_version\":{d}}}\n", .{ schema.schema_version, schema.minimum_schema_version }));
+    }
     if (args.len < 2 or std.mem.startsWith(u8, args[1], "--")) return @call(.never_inline, newSession, .{ init, args[1..] }) catch |err| return if (reportedByOwner(err)) reportedFailure(err) else err;
     if (cli_args.retired(args[1])) |replacement| {
         const replacement_resource = replacement[0..std.mem.indexOfScalar(u8, replacement, ' ').?];
@@ -529,6 +546,99 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
 // omitted destinations use the same saved/HOME rule in every CLI mode.
 // Missing HOME is an environment repair, not a Store or request outcome:
 // report what needed it before any capture or transmission.
+const upgrade_usage = "Usage: rui upgrade [--check] [--store PATH]\nInstall the latest published stable release in the managed user installation.\nRestart the selected Store's Host only if already running; affects ALL Sessions there.\n--check only observes, without installation, Host startup, restart or Store migration.\n";
+
+noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
+    failure_held.resource = "upgrade";
+    failure_held.operation = "install";
+    var checking = false;
+    var explicit: ?[]const u8 = null;
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        if (args.len == 1 and (std.mem.eql(u8, args[index], "--help") or std.mem.eql(u8, args[index], "-h"))) return std.Io.File.stdout().writeStreamingAll(init.io, upgrade_usage);
+        if (std.mem.eql(u8, args[index], "--check") and !checking) {
+            checking = true;
+        } else if (std.mem.eql(u8, args[index], "--store") and explicit == null and index + 1 < args.len) {
+            index += 1;
+            explicit = args[index];
+        } else {
+            stderr.diagnostic("rui: invalid upgrade arguments. Nothing installed or sent. {s}", .{upgrade_usage});
+            return error.InvalidInvocation;
+        }
+    }
+    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+    var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = explicit orelse if (init.environ_map.get("RUI_STORE")) |inherited| inherited else selected: {
+        const defaults = preferences.load(home) catch |err| return preferenceFailure(err);
+        if (defaults.store.len != 0) {
+            @memcpy(fallback[0..defaults.store.len], defaults.store.slice());
+            break :selected fallback[0..defaults.store.len];
+        }
+        break :selected try preferences.defaultStore(home, &fallback);
+    };
+    try validateStoreSpelling(store);
+    holdStore(store);
+    const upgrade = @import("upgrade.zig");
+    const allocator = std.heap.c_allocator;
+    var checked = upgrade.check(init, allocator, store, null) catch |err| {
+        stderr.diagnostic("rui: upgrade check failed; no installation or Host was changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
+        recordExit(.environment);
+        return error.Reported;
+    };
+    defer checked.deinit(allocator);
+    var buffer: [16384]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try upgrade.writeCheck(&writer, &checked);
+    try std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered());
+    if (checking) return;
+    if (!upgrade.canInstall(&checked)) {
+        recordExit(.environment);
+        return error.Reported;
+    }
+    var cleanup: upgrade.CleanupReceipts = .{};
+    defer {
+        var cleanup_buffer: [512]u8 = undefined;
+        var output = std.Io.File.stdout().writerStreaming(init.io, &cleanup_buffer);
+        const written: anyerror!void = emitted: {
+            cleanup.write(&output.interface) catch |err| break :emitted err;
+            break :emitted output.flush();
+        };
+        written catch |err| stderr.diagnostic("rui: could not write the retained installation cleanup receipt ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
+    }
+    var result = upgrade.install(init, allocator, &checked, null, null, &cleanup) catch |err| {
+        stderr.diagnostic("rui: upgrade failed before publication; the selected build and Host were not changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
+        recordExit(.environment);
+        return error.Reported;
+    };
+    defer result.deinit(allocator);
+    writer = .fixed(&buffer);
+    try upgrade.writeResult(&writer, &result);
+    try std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered());
+    switch (result.activation) {
+        .failed, .unconfirmed, .replacement_observed, .unsupported, .cancelled => recordExit(.environment),
+        else => {},
+    }
+    if (exit_status != .done) return error.Reported;
+}
+
+fn publishInstall(init: std.process.Init, args: []const []const u8) !void {
+    if (args.len != 3) return error.InvalidInvocation;
+    const Installation = @import("Installation.zig");
+    const intent: Installation.Intent = if (std.mem.eql(u8, args[2], "intentional-source")) .intentional_source else if (std.mem.eql(u8, args[2], "released-install")) .released_install else if (std.mem.eql(u8, args[2], "released-upgrade")) .released_upgrade else return error.InvalidInvocation;
+    var outcome = try Installation.publishExisting(std.heap.c_allocator, init.io, args[0], args[1], intent, null);
+    defer outcome.deinit(std.heap.c_allocator);
+    var output: JsonOutput = undefined;
+    const writer = output.init(init.io, .stdout);
+    try writer.writeAll("{\"outcome\":");
+    try std.json.Stringify.value(@tagName(outcome), .{}, writer);
+    try writer.writeAll(",\"operation_build\":");
+    try std.json.Stringify.value(outcome.receipt().operation_build, .{}, writer);
+    try writer.writeAll(",\"selected_after\":");
+    try std.json.Stringify.value(outcome.receipt().selected_after, .{}, writer);
+    try writer.writeAll("}\n");
+    try output.finish();
+}
+
 fn homeRequired(comptime _: []const u8) error{HomeUnavailable} {
     return error.HomeUnavailable;
 }
@@ -702,7 +812,7 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
             const writer = output.init(io, .stdout);
             try writer.print("{{\"version\":\"{s}\",\"type\":\"host_pause\",\"status\":\"acknowledged\",\"store\":", .{protocol.wire_version});
             try std.json.Stringify.value(paths.store.slice(), .{}, writer);
-            const retired = try awaitRetirement(io, paths.store.slice());
+            const retired = try @import("HostLifecycle.zig").awaitRetirement(io, paths.store.slice());
             try writer.print(",\"instance\":\"{s}\",\"retirement\":\"{s}\"}}\n", .{ &hex, if (retired) "confirmed" else "unconfirmed" });
             try output.finish();
             if (!retired) stderr.diagnostic("rui: the Host acknowledged the pause but still holds this Store after {d} seconds, usually because cleanup is still running. A new Host can start once rui host status reports unavailable.\n", .{product_defaults.host_shutdown_seconds});
@@ -716,20 +826,6 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
             return error.HostStopUnconfirmed;
         },
     }
-}
-
-/// The old Host holds the Store's lease until it lets go of the Store, so a
-/// free lease confirms retirement. Only the lease is observed: asking the
-/// Host would add exchanges to the shutdown being watched. The wait shares
-/// the launched Host's drain bound.
-fn awaitRetirement(io: std.Io, store: []const u8) !bool {
-    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + product_defaults.host_shutdown_seconds * std.time.ns_per_s;
-    while (platform.StoreLease.observe(io, store) != .unowned) {
-        const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-        if (remaining <= 0) return false;
-        try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 50 * std.time.ns_per_ms))), .awake);
-    }
-    return true;
 }
 
 /// Null capacity leaves a new Host on product_defaults.active_capacity.
@@ -824,6 +920,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                     stderr.diagnostic("Startup output exceeded 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
                     return error.HostReadinessUnconfirmed;
                 }
+                if (std.mem.endsWith(u8, startup, "[store_identity_mismatch]\n")) return error.StoreIdentityMismatch;
                 return error.HostStartupFailed;
             }
         }
@@ -1875,7 +1972,9 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     var input = client.ConfigureInput{
         .store = "",
         .session = if (named) |reference| .{ .named = reference } else .create,
+        .reload_skills = parsed.has("reload-skills"),
     };
+    if (input.reload_skills and named == null) return usage();
     if (named != null and named.?.len == 0) return usage();
     if (parsed.get("provider")) |name| input.provider = .{ .present = true, .value = name };
     if (parsed.get("model")) |model| {
@@ -2020,7 +2119,7 @@ fn messageWithStep(init: std.process.Init, parsed: *const cli_args.Parsed, confi
     if (configuration == null and !protocol.validSessionId(destination)) {
         return error.InvalidSession;
     }
-    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .configuration = if (configuration) |value| value.input else null };
+    var input = client.MessageInput{ .store = "", .session = destination, .text_path = "-", .skill = parsed.get("skill"), .configuration = if (configuration) |value| value.input else null };
     // Peer context names a Session in its own Store, so it signs only sends
     // to that Store; an explicit --store naming another Store is a plain
     // caller's send there (#957). Incomplete or malformed context never falls
@@ -2385,6 +2484,15 @@ fn sessionCommand(init: std.process.Init, requests_context: client.Requests, des
                 if (err == error.CanonicalStoreFailure) return err;
                 stderr.diagnostic("rui: result: {s}\n", .{@tagName(caller_error.of(err))});
             };
+        },
+        .skill => {
+            var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            var captured = try client.captureMessage(init.io, .{ .store = destination, .session = reference, .text_path = "", .skill = argument }, .{ .generated = try requestDirectory(init, &directory_buffer) }).get();
+            var step: ?client.Step = null;
+            try sendCapturedMutation(requests_context, &captured, .{ .map = init.environ_map }, &step, .json);
+        },
+        .@"reload-skills" => {
+            _ = try liveConfigure(init, requests_context, live, &.{"--reload-skills"}, "Usage: /reload-skills\n");
         },
         .configure, .effort, .rename => {
             const typed_usage = liveUsage(command.name);
@@ -3275,7 +3383,9 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
     };
     if (code) |value| try writeMutationField(writer, "code: ", value);
     if (answer.result == .accepted) switch (answer.result.accepted) {
-        .configure => |value| try writer.print("revision: {d}; created: {}\n", .{ value.revision, value.created }),
+        .configure => |value| {
+            if (value.skills) |status| try writer.print("skills: {s}\n", .{@tagName(status)}) else try writer.print("revision: {d}; created: {}\n", .{ value.revision, value.created });
+        },
         .message => |value| try writer.print("queue admission: {d}\n", .{value.admission}),
         .session_stop => |value| {
             if (value.turn) |turn| try writer.print("selected Turn: {d}\n", .{turn}) else try writeMutationField(writer, "selected Turn: ", "none");
@@ -3347,7 +3457,10 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     if (reply.target == .permission_decision) try writer.print(",\"action\":\"{d}\",\"decision\":\"{s}\"", .{ reply.target.permission_decision.action, @tagName(reply.target.permission_decision.decision) });
     switch (answer.result) {
         .accepted => |accepted| switch (accepted) {
-            .configure => |value| try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ value.revision, value.created }),
+            .configure => |value| {
+                try writer.print(",\"revision\":\"{d}\",\"created\":{}", .{ value.revision, value.created });
+                if (value.skills) |status| try writer.print(",\"skills\":\"{s}\"", .{@tagName(status)});
+            },
             .message => |value| try writer.print(",\"admission\":\"{d}\"", .{value.admission}),
             .session_stop => |value| {
                 try writer.writeAll(",\"selection\":{\"turn\":");
@@ -3365,7 +3478,7 @@ fn writeMutationJson(writer: *std.Io.Writer, reply: protocol_reply.MutationReply
     }
     try writer.writeByte('}');
     if (reply.target == .message and answer.result != .conflict) {
-        const input = reply.target.message;
+        const input = answer.input orelse protocol_reply.CommandObservation.ContentReference{ .bytes = reply.target.message.bytes, .digest = reply.target.message.digest };
         try writer.print(",\"input\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}}", .{ input.bytes, std.fmt.bytesToHex(input.digest, .lower) });
         if (answer.result == .accepted) try writer.print(",\"queue\":{{\"status\":\"queued\",\"admission\":\"{d}\"}}", .{answer.result.accepted.message.admission});
     }
@@ -3432,6 +3545,19 @@ test "session start mutation receipt adds configuration without changing send" {
     reply.target.message.creates_session = false;
     try writeMutationJson(&writer, reply, null);
     try std.testing.expectEqualStrings(context ++ tail, writer.buffered());
+}
+
+test "skills native receipt uses Host captured input rather than the intent placeholder" {
+    const digest = protocol.contentDigest("complete skill body");
+    const wire = try std.fmt.allocPrint(std.testing.allocator, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":true,\"session\":\"k7m2qx\",\"admission\":\"7\"}},\"input\":{{\"type\":\"text\",\"bytes\":\"19\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{std.fmt.bytesToHex(digest, .lower)});
+    defer std.testing.allocator.free(wire);
+    const reply = protocol_reply.decodeMutationReply(.{ .status = 200, .body = wire }, "k7m2qx", .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } });
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeMutationJson(&writer, reply, null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"bytes\":\"19\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), &std.fmt.bytesToHex(digest, .lower)) != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"bytes\":\"0\"") == null);
 }
 
 test "mutation presentation renders owned diagnostics and context with bounded writer" {
@@ -3888,6 +4014,8 @@ const usage_text =
     \\    Resources: session, request, action, host, defaults, auth, store.
     \\  rui RESOURCE COMMAND --help
     \\    Installed operation help owns exact options. Help needs no Host or credentials.
+    \\  rui upgrade [--check] [--store PATH]
+    \\    Check/install published stable; restart only an already-running managed Host.
     \\  rui --version
     \\    Print the release version and source revision.
     \\

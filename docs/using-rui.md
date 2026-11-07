@@ -16,6 +16,7 @@ Enter these at the `›` prompt.
 | `/requests` | Lists saved requests for recovery. |
 | `/configure` | Changes settings for the current Session only. |
 | `/setup` | Changes defaults for future Sessions, not the current one. |
+| `/upgrade` | Opens the local Upgrade panel in the overview or conversation; choose Install or Cancel. |
 | `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
@@ -33,6 +34,11 @@ Very narrow or oversized rows stay readable as literal, safely escaped source in
 Quoted lines retain their original first-row markers and continue with an ASCII `>` gutter when they wrap; fenced code stays literal.
 Your submitted Messages get quote gutters too, but their Markdown emphasis and tables stay literal.
 Copy/export still uses the original saved bytes, not the visual columns or generated gutters.
+
+Upgrade installs the latest published stable release and restarts the selected Store's Host only if it is already running and its launch is supported.
+Restart affects all Sessions in that Store and may interrupt work; no running Host means install only.
+The panel retains your draft, selected Session and unresolved capture handles without replaying uncertain effects.
+It reports installation separately from activation, including when an application-owned or unsupported Host cannot be restarted safely.
 
 ## Approve Bash commands
 
@@ -216,8 +222,8 @@ Rui does not compact unchanged input again.
 
 ### Loading tools on demand
 
-The built-in catalog, in name order, is `bash`, `find_tools`, `message_agent`, `read_transcript`, `start_agent`, `web_search`.
-Fresh Sessions still default to `bash` and `web_search`.
+The built-in catalog, in name order, is `bash`, `find_tools`, `message_agent`, `read_transcript`, `skill`, `start_agent`, `web_search`.
+Fresh Sessions default to `bash`, `skill` and `web_search`.
 
 Set `--tools` to the tools a Session may use and `--loaded-tools` to the subset
 initially offered to its model.
@@ -226,7 +232,7 @@ For example:
 
 ```sh
 rui session configure --store "$RUI_STORE" --session "$RUI_ADDRESS" \
-  --tools bash,find_tools,message_agent,read_transcript,start_agent,web_search \
+  --tools bash,find_tools,message_agent,read_transcript,skill,start_agent,web_search \
   --loaded-tools bash,find_tools
 ```
 
@@ -237,3 +243,17 @@ Words are split on ASCII spaces; supply one to eight, at most 64 bytes each.
 The result lists loaded names and description previews.
 They become callable on the next request.
 Searches that find nothing report how many tools remain unloaded.
+
+## Skills
+
+Rui advertises valid skills from your repository's `.agents/skills` and the Host user's `~/.agents/skills` when a Session is created.
+A repository skill wins a same-name home skill; other roots, including `.claude`, are not scanned.
+Each skill directory contains a `SKILL.md` with required YAML `name` and `description`.
+Optional metadata cannot grant permissions or tools; `disable-model-invocation` is ignored.
+
+Use `/skill NAME` to send the full current `SKILL.md` and its absolute path as ordinary conversation input.
+The model can invoke the `skill` tool when your chosen tool set includes it.
+Skills run nothing on load and do not bypass approvals.
+Use `/reload-skills` to refresh this Session's advertised names, descriptions and paths without starting a model turn.
+Only changes append a new catalog instruction; editing only a body needs no reload before the next invocation.
+Earlier catalog instructions and invocation results stay unchanged, and skills receive no special retention during compaction.

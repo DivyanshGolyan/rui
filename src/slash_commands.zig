@@ -117,12 +117,15 @@ const ConversationName = enum {
     login,
     model,
     recover,
+    @"reload-skills",
     rename,
     requests,
     result,
     setup,
+    skill,
     status,
     unarchive,
+    upgrade,
     wait,
 };
 
@@ -141,12 +144,15 @@ pub const conversation = Commands(ConversationName, .{
     .login = .{ .description = null },
     .model = .{ .description = "this Session's model and sign-in" },
     .recover = .{ .argument = .{ .required = "KEY" }, .description = "the original request", .listed = false },
+    .@"reload-skills" = .{ .description = "rescan skills and append catalog changes without model work" },
     .rename = .{ .argument = .{ .required = "NAME" }, .description = "name this Session" },
     .requests = .{ .description = "recovery handles; pick one to recover it or read its answer", .listed = false },
     .result = .{ .argument = .{ .required = "KEY" }, .description = "a saved answer", .listed = false },
     .setup = .{ .argument = .{ .options = setup_options }, .description = "future defaults" },
+    .skill = .{ .argument = .{ .required = "NAME" }, .description = "invoke an advertised skill as ordinary input" },
     .status = .{ .description = "settings and work" },
     .unarchive = .{ .description = "restore this Session without restarting work" },
+    .upgrade = .{ .description = "check stable Rui; install restarts this Store's Host" },
     .wait = .{ .description = null },
 });
 
@@ -162,7 +168,7 @@ const session_views = &[_]Choice{
     .{ .word = "all", .description = "unarchived and archived Sessions" },
 };
 
-pub const overview = Commands(enum { archive, configure, exit, help, model, rename, sessions, setup, unarchive, undo }, .{
+pub const overview = Commands(enum { archive, configure, exit, help, model, rename, sessions, setup, unarchive, undo, upgrade }, .{
     .archive = .{ .description = "archive the selected Session; stop active work first" },
     .configure = .{ .argument = .{ .options = start_options }, .description = "hold settings for the next Session" },
     .exit = .{ .description = "leave; Host work continues" },
@@ -173,6 +179,7 @@ pub const overview = Commands(enum { archive, configure, exit, help, model, rena
     .setup = conversation.table.get(.setup),
     .unarchive = .{ .description = "restore the selected Session without restarting work" },
     .undo = .{ .description = "restore the last Session archived here" },
+    .upgrade = conversation.table.get(.upgrade),
 });
 
 /// What both screens say for a line that names no command: the name typed,
@@ -757,11 +764,14 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "rename ", "setup ", "status", "unarchive" } },
+        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "reload-skills", "rename ", "setup ", "skill ", "status", "unarchive", "upgrade" } },
         .{ .draft = "/c", .shown = &.{ "configure ", "copy " }, .first = "onfigure " },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
         .{ .draft = "/st", .shown = &.{"status"}, .first = "atus" },
-        .{ .draft = "/re", .shown = &.{"rename "} },
+        .{ .draft = "/re", .shown = &.{ "reload-skills", "rename " } },
+        .{ .draft = "/rel", .shown = &.{"reload-skills"}, .first = "oad-skills" },
+        .{ .draft = "/s", .shown = &.{ "setup ", "skill ", "status" }, .first = "etup " },
+        .{ .draft = "/sk", .shown = &.{"skill "}, .first = "ill " },
         // Recovery commands work, and /help names them, but the list leaves them out.
         .{ .draft = "/req", .shown = &.{} },
         .{ .draft = "/w", .shown = &.{} },
@@ -771,6 +781,8 @@ test "the list names the listed commands a command word starts, and Tab puts the
         .{ .draft = "/copy f", .shown = &.{"file"}, .first = "ile" },
         .{ .draft = "/copy file ", .shown = null },
         .{ .draft = "/rename ", .shown = null },
+        .{ .draft = "/skill ", .shown = null },
+        .{ .draft = "/reload-skills ", .shown = null },
         .{ .draft = "/status ", .shown = null },
         .{ .draft = "/nope ", .shown = null },
         .{ .draft = "/c\n", .shown = null },
@@ -789,6 +801,15 @@ test "the list names the listed commands a command word starts, and Tab puts the
         for (case.shown.?, list.shown()) |expected, entry| try std.testing.expectEqualStrings(expected, entry.word);
         if (case.first) |first| try std.testing.expectEqualStrings(first, list.completion(0));
     }
+}
+
+test "skills completion distinguishes immediate reload from invocation awaiting a name" {
+    const reload = conversation.suggest("/reload", .{}).?.shown()[0];
+    try std.testing.expectEqualStrings("reload-skills", reload.word);
+    try std.testing.expect(reload.runs);
+    const invoke = conversation.suggest("/skill", .{}).?.shown()[0];
+    try std.testing.expectEqualStrings("skill ", invoke.word);
+    try std.testing.expect(!invoke.runs);
 }
 
 test "/effort offers every grammar value for an unlisted model" {
@@ -904,12 +925,14 @@ test "a key's list is the draft's own, and counts as drawn when the latest frame
 test "the list order is the names' order and every listed usage fits before the descriptions" {
     inline for (.{ conversation, overview }) |screen| {
         const names = std.enums.values(screen.Name);
-        for (names[1..], 0..) |name, index| try std.testing.expect(std.mem.order(u8, @tagName(names[index]), @tagName(name)) == .lt);
+        for (names[1..], 0..) |name, index| try std.testing.expectEqual(.lt, std.mem.order(u8, @tagName(names[index]), @tagName(name)));
     }
     try std.testing.expectEqualStrings("/copy [code|file]", conversation.usage.get(.copy));
     try std.testing.expectEqualStrings("/rename NAME", conversation.usage.get(.rename));
     try std.testing.expectEqualStrings("/effort LEVEL", conversation.usage.get(.effort));
     try std.testing.expectEqualStrings("/configure [OPTIONS]", conversation.usage.get(.configure));
+    try std.testing.expectEqualStrings("/reload-skills", conversation.usage.get(.@"reload-skills"));
+    try std.testing.expectEqualStrings("/skill NAME", conversation.usage.get(.skill));
 }
 
 test "/copy takes each Copy's name but the answer's, which it copies alone" {
@@ -921,8 +944,8 @@ test "/copy takes each Copy's name but the answer's, which it copies alone" {
 }
 
 test "both screens' shared commands take the same arguments and say the same things" {
-    inline for (.{ "help", "rename", "setup" }) |name| try std.testing.expectEqualStrings(conversation.usage.get(@field(conversation.Name, name)), overview.usage.get(@field(overview.Name, name)));
-    for ([_][]const u8{ "/rename", "/rename lane four", "/setup", "/setup --model gpt-5.5", "/help", "/help me" }) |text| {
+    inline for (.{ "help", "rename", "setup", "upgrade" }) |name| try std.testing.expectEqualStrings(conversation.usage.get(@field(conversation.Name, name)), overview.usage.get(@field(overview.Name, name)));
+    for ([_][]const u8{ "/rename", "/rename lane four", "/setup", "/setup --model gpt-5.5", "/help", "/help me", "/upgrade", "/upgrade now" }) |text| {
         errdefer std.debug.print("line={s}\n", .{text});
         try std.testing.expectEqualStrings(@tagName(conversation.parse(text)), @tagName(overview.parse(text)));
     }
@@ -953,6 +976,22 @@ test "a command's short output is the same notice on both screens, and longer ou
     try std.testing.expectEqual(@as(usize, short_result_bytes), resultNotice(&buffer, long[0..short_result_bytes]).?.len);
 }
 
+test "upgrade is a local no-argument command on both screens" {
+    inline for (.{ conversation, overview }) |screen| {
+        const command = screen.parse("/upgrade").command;
+        try std.testing.expectEqualStrings("upgrade", @tagName(command.name));
+        try std.testing.expectEqualStrings("", command.argument);
+        try std.testing.expectEqualStrings("/upgrade", screen.usage.get(command.name));
+        for ([_][]const u8{ "/upgrade now", "/upgrade --check", "/upgrade --store other" }) |text| {
+            try std.testing.expectEqualStrings("upgrade", @tagName(screen.parse(text).misused));
+        }
+        const list = screen.suggest("/up", .{}).?;
+        try std.testing.expectEqual(@as(usize, 1), list.count);
+        try std.testing.expectEqualStrings("upgrade", list.shown()[0].word);
+        try std.testing.expect(list.enter(0).runs);
+    }
+}
+
 test "archive commands and server archive view choices parse on their owning screens" {
     for ([_][]const u8{ "/archive", "/unarchive" }) |line| {
         try std.testing.expect(conversation.parse(line) == .command);
@@ -973,4 +1012,23 @@ test "archive commands and server archive view choices parse on their owning scr
     try std.testing.expect(overview.parse("/sessions active") == .misused);
     try std.testing.expect(overview.parse("/undo") == .command);
     try std.testing.expect(conversation.parse("/sessions archived") == .unknown);
+}
+
+test "archive and upgrade retain separate local command identities after merge" {
+    inline for (.{ conversation, overview }) |screen| {
+        inline for (.{ "archive", "unarchive", "upgrade", "exit" }) |name| {
+            const parsed = screen.parse("/" ++ name);
+            try std.testing.expect(parsed == .command);
+            try std.testing.expectEqualStrings(name, @tagName(parsed.command.name));
+            try std.testing.expectEqualStrings("", parsed.command.argument);
+            try std.testing.expect(screen.parse("/" ++ name ++ " other") == .misused);
+            const list = screen.suggest("/" ++ name, .{}).?;
+            try std.testing.expectEqual(@as(usize, 1), list.count);
+            try std.testing.expectEqualStrings(name, list.shown()[0].word);
+            try std.testing.expect(list.enter(0).runs);
+        }
+    }
+    const restored = overview.parse("/undo").command;
+    try std.testing.expectEqual(.undo, restored.name);
+    try std.testing.expect(conversation.parse("/undo") == .unknown);
 }

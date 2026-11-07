@@ -16,7 +16,12 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 58;
+pub const schema_version: u32 = 59;
+
+pub const IdentityMismatch = struct {
+    saved_selector: protocol.Bounded(protocol.max_store_bytes) = .{},
+};
+
 /// `digest()` of each schema_version, oldest first. Each format PR appends
 /// its own version and forward step (D226); main's digests and steps are
 /// immutable even before release. tests/ci/test_store_schema_version.py
@@ -36,6 +41,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 56, .digest = 0xbdf9ac7b6016b1da },
     .{ .schema_version = 57, .digest = 0x75359f28a14f23a9 },
     .{ .schema_version = 58, .digest = 0x4cd0a6b38d4904ed },
+    .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -266,6 +272,22 @@ pub const migrations = [_]Migration{
         },
         .mysql = &.{
             "UPDATE store_meta SET meta_value='10' WHERE meta_key='wire_version' AND meta_value='9'",
+        },
+    },
+    .{
+        // Schema 59: append-only skill catalogs on unreleased native wire 10.
+        .from = 58,
+        .sqlite = &.{
+            "CREATE TABLE session_skill_catalog(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n position INTEGER NOT NULL CHECK(position>=0),\n catalog_content_id INTEGER NOT NULL REFERENCES content(content_id),\n PRIMARY KEY(session_ref,position)\n) STRICT, WITHOUT ROWID",
+            "ALTER TABLE conversation_entry RENAME TO conversation_entry_58",
+            "CREATE TABLE conversation_entry(\n session_ref TEXT NOT NULL,\n entry_ordinal INTEGER NOT NULL CHECK(entry_ordinal>0),\n session_position INTEGER NOT NULL CHECK(session_position>0),\n entry_kind INTEGER NOT NULL CHECK(entry_kind BETWEEN 1 AND 3),\n turn_id INTEGER REFERENCES turn(turn_id),\n source_admission_id INTEGER UNIQUE REFERENCES message_admission(admission_id),\n source_revision INTEGER,\n source_catalog_position INTEGER,\n source_operation_id INTEGER REFERENCES model_operation(operation_id),\n source_item_ordinal INTEGER CHECK(source_item_ordinal IS NULL OR source_item_ordinal>=0),\n content_id INTEGER NOT NULL REFERENCES content(content_id),\n recorded_at INTEGER NOT NULL CHECK(recorded_at>0),\n PRIMARY KEY(session_ref,entry_ordinal),\n UNIQUE(session_ref,session_position),\n UNIQUE(session_ref,source_revision),\n UNIQUE(session_ref,source_catalog_position),\n FOREIGN KEY(session_ref,source_revision) REFERENCES session_revision(session_ref,revision),\n FOREIGN KEY(session_ref,source_catalog_position) REFERENCES session_skill_catalog(session_ref,position),\n FOREIGN KEY(source_operation_id,source_item_ordinal) REFERENCES model_output_item(operation_id,item_ordinal),\n CHECK((entry_kind=3)=(source_item_ordinal IS NOT NULL)),\n CHECK((turn_id IS NULL)=(source_catalog_position IS NOT NULL)),\n CHECK(source_catalog_position IS NULL OR source_catalog_position=session_position),\n CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR (entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR (entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL))\n) STRICT, WITHOUT ROWID",
+            "INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,source_item_ordinal,content_id,recorded_at) SELECT session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,source_item_ordinal,content_id,recorded_at FROM conversation_entry_58",
+            "DROP TABLE conversation_entry_58",
+            "CREATE INDEX conversation_entry_history ON conversation_entry(session_ref,session_position)",
+        },
+        .mysql = &.{
+            "CREATE TABLE session_skill_catalog(\n session_ref VARCHAR(6) NOT NULL,\n position BIGINT NOT NULL,\n catalog_content_id BIGINT NOT NULL,\n PRIMARY KEY(session_ref,position),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(catalog_content_id) REFERENCES content(content_id),\n CHECK(position>=0)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "ALTER TABLE conversation_entry MODIFY turn_id BIGINT NULL, ADD COLUMN source_catalog_position BIGINT AFTER source_revision, ADD UNIQUE(session_ref,source_catalog_position), ADD FOREIGN KEY(session_ref,source_catalog_position) REFERENCES session_skill_catalog(session_ref,position), DROP CHECK conversation_entry_chk_7, ADD CHECK((turn_id IS NULL)=(source_catalog_position IS NOT NULL)), ADD CHECK(source_catalog_position IS NULL OR source_catalog_position=session_position), ADD CHECK((entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR (entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR (entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL))",
         },
     },
 };
@@ -973,35 +995,53 @@ pub const tables = [_]Table{
         },
     },
     .{
+        .name = "session_skill_catalog",
+        .columns = &.{
+            .{ .name = "session_ref", .type = .{ .text = null } },
+            .{ .name = "position", .type = .int, .check = "position>=0" },
+            .{ .name = "catalog_content_id", .type = .int },
+        },
+        .primary_key = &.{ "session_ref", "position" },
+        .foreign_keys = &.{
+            references("session_ref", "session", &.{"session_ref"}),
+            references("catalog_content_id", "content", content_reference),
+        },
+        .without_rowid = true,
+    },
+    .{
         .name = "conversation_entry",
         .columns = &.{
             .{ .name = "session_ref", .type = .{ .text = null } },
             .{ .name = "entry_ordinal", .type = .int, .check = "entry_ordinal>0" },
             .{ .name = "session_position", .type = .int, .check = "session_position>0" },
             .{ .name = "entry_kind", .type = .int, .check = "entry_kind BETWEEN 1 AND 3" },
-            .{ .name = "turn_id", .type = .int },
+            .{ .name = "turn_id", .type = .int, .nullable = true },
             .{ .name = "source_admission_id", .type = .int, .nullable = true },
             .{ .name = "source_revision", .type = .int, .nullable = true },
+            .{ .name = "source_catalog_position", .type = .int, .nullable = true },
             .{ .name = "source_operation_id", .type = .int, .nullable = true },
             .{ .name = "source_item_ordinal", .type = .int, .nullable = true, .check = "source_item_ordinal IS NULL OR source_item_ordinal>=0" },
             .{ .name = "content_id", .type = .int },
             .{ .name = "recorded_at", .type = .int, .check = "recorded_at>0" },
         },
         .primary_key = &.{ "session_ref", "entry_ordinal" },
-        .uniques = &.{ &.{"source_admission_id"}, &.{ "session_ref", "session_position" }, &.{ "session_ref", "source_revision" } },
+        .uniques = &.{ &.{"source_admission_id"}, &.{ "session_ref", "session_position" }, &.{ "session_ref", "source_revision" }, &.{ "session_ref", "source_catalog_position" } },
         .foreign_keys = &.{
             references("turn_id", "turn", &.{"turn_id"}),
             references("source_admission_id", "message_admission", &.{"admission_id"}),
             references("source_operation_id", "model_operation", &.{"operation_id"}),
             references("content_id", "content", content_reference),
             .{ .columns = &.{ "session_ref", "source_revision" }, .references = "session_revision", .referenced = &.{ "session_ref", "revision" } },
+            .{ .columns = &.{ "session_ref", "source_catalog_position" }, .references = "session_skill_catalog", .referenced = &.{ "session_ref", "position" } },
             .{ .columns = &.{ "source_operation_id", "source_item_ordinal" }, .references = "model_output_item", .referenced = &.{ "operation_id", "item_ordinal" } },
         },
         .checks = &.{
             "(entry_kind=3)=(source_item_ordinal IS NOT NULL)",
-            "(entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_operation_id IS NULL) OR " ++
-                "(entry_kind=2 AND source_admission_id IS NULL AND source_revision IS NOT NULL AND source_operation_id IS NULL) OR " ++
-                "(entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_operation_id IS NOT NULL)",
+            "(turn_id IS NULL)=(source_catalog_position IS NOT NULL)",
+            "source_catalog_position IS NULL OR source_catalog_position=session_position",
+            "(entry_kind=1 AND source_admission_id IS NOT NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NULL) OR " ++
+                "(entry_kind=2 AND source_admission_id IS NULL AND ((source_revision IS NOT NULL AND source_catalog_position IS NULL) OR (source_revision IS NULL AND source_catalog_position IS NOT NULL)) AND source_operation_id IS NULL) OR " ++
+                "(entry_kind=3 AND source_admission_id IS NULL AND source_revision IS NULL AND source_catalog_position IS NULL AND source_operation_id IS NOT NULL)",
         },
         .without_rowid = true,
     },
@@ -1921,12 +1961,12 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
 
 /// Opens a Store of this application at schema_version, or moves one at a
 /// format from migration_baseline on to it first (`migrate`).
-pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8) !void {
+pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch) !void {
     if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
     const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
-    if (found == schema_version) return validateCurrent(database, selector);
+    if (found == schema_version) return validateCurrent(database, selector, identity_mismatch);
     if (found < migration_baseline or found > schema_version) return error.WrongStoreVersion;
-    return migrate(io, database, selector, found, migrations[found - migration_baseline ..]);
+    return migrate(io, database, selector, found, migrations[found - migration_baseline ..], identity_mismatch);
 }
 
 /// First writes `migrationBackup`; a Store whose backup fails is refused
@@ -1936,7 +1976,7 @@ pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8) !voi
 /// (`validateCurrent`) and every foreign key holds. A Store whose
 /// store_meta format is not `from` is a WrongStoreVersion, and any failure
 /// leaves the Store as it was.
-pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration) !void {
+pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, from: u32, steps: []const Migration, identity_mismatch: ?*IdentityMismatch) !void {
     try migrationBackup(io, database);
     // Both outside the transaction, where PRAGMA foreign_keys takes effect.
     try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
@@ -1957,7 +1997,7 @@ pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, 
     }
     try sqlite.exec(database, version_sql);
     try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format'");
-    try validateCurrent(database, selector);
+    try validateCurrent(database, selector, identity_mismatch);
     try sqlite.exec(database, "COMMIT");
 }
 
@@ -2027,7 +2067,7 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
 /// network engine keeps no such text: MySQL's open compares its catalog's
 /// structure instead (`catalogDigest`), which sees a CHECK only by count.
 /// Its caller has read user_version as schema_version, or set it.
-fn validateCurrent(database: *c.sqlite3, selector: []const u8) !void {
+fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch) !void {
     {
         const expected = comptime objects(.sqlite);
         const statement = try sqlite.prepare(database, "SELECT type,name,tbl_name,sql FROM sqlite_schema");
@@ -2069,18 +2109,21 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8) !void {
         if (!version.eql(protocol.wire_version)) return error.WrongStoreVersion;
     }
     {
+        const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
+        defer _ = c.sqlite3_finalize(statement);
+        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
+        if (!isStoreId(try columnText(statement, 0))) return error.WrongStoreIdentity;
+    }
+    {
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
         defer _ = c.sqlite3_finalize(statement);
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
         var stored_selector: protocol.Bounded(protocol.max_store_bytes) = .{};
         try sqlite.readText(statement, 0, &stored_selector);
-        if (!stored_selector.eql(selector)) return error.WrongStoreIdentity;
-    }
-    {
-        const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
-        defer _ = c.sqlite3_finalize(statement);
-        if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreIdentity;
-        if (!isStoreId(try columnText(statement, 0))) return error.WrongStoreIdentity;
+        if (!stored_selector.eql(selector)) {
+            if (identity_mismatch) |out| out.saved_selector = stored_selector;
+            return error.StoreIdentityMismatch;
+        }
     }
 }
 
@@ -2365,7 +2408,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try sqlite.exec(database, "INSERT INTO session_ending_owed(turn_id,delivered) VALUES(1,0),(2,1)");
     try sqlite.exec(database, "CREATE TEMP TABLE original_endings AS SELECT * FROM session_ending_owed");
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE core_command SET kind=6 WHERE command_key='fixture-stop'"));
-    try openExisting(std.testing.io, database, root);
+    try openExisting(std.testing.io, database, root, null);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expect(try metaEquals(database, "wire_version", protocol.wire_version));
@@ -2424,6 +2467,6 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive WHERE session_ref='rhvzwc' AND command_key IS NULL"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='archive-request'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='restore-request'"));
-    try openExisting(std.testing.io, database, root);
+    try openExisting(std.testing.io, database, root, null);
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_ending_owed WHERE turn_id=1"));
 }

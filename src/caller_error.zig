@@ -52,6 +52,10 @@ pub const Code = enum {
     environment_too_large,
     internal_unexpected,
     host_not_serving,
+    host_identity_unconfirmed,
+    upgrade_ineligible,
+    upgrade_release_invalid,
+    upgrade_preparation_failed,
     host_stopping,
     mysql_host_unavailable,
     store_path_malformed,
@@ -96,6 +100,11 @@ pub const Code = enum {
     provider_is_immutable,
     model_is_immutable,
     revision_exhausted,
+    skills_unavailable,
+    unknown_skill,
+    skill_file_unavailable,
+    skill_file_too_large,
+    skill_text_invalid,
     invalid_target,
     unknown_operation,
     target_mismatch,
@@ -110,6 +119,7 @@ pub const Code = enum {
     host_unreachable,
     sign_in_required,
     store_locked,
+    store_identity_mismatch,
     reply_unconfirmed,
     wait_timed_out,
     request_absent,
@@ -246,6 +256,10 @@ fn mapped(err: anyerror) ?Code {
     return switch (err) {
         error.OutOfMemory => .memory_exhausted,
         error.HostNotServing => .host_not_serving,
+        error.InvalidHostInfo, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
+        error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
+        error.InvalidReleaseVersion, error.InvalidReleaseChecksum, error.DuplicateReleaseChecksum, error.MissingReleaseChecksum, error.MissingOrDuplicateReleaseAsset, error.NotStableRelease, error.UnpinnedReleaseAsset, error.InvalidReleaseEndpoint, error.UnsupportedReleasePlatform => .upgrade_release_invalid,
+        error.InvalidManagedBuild, error.InvalidReleaseExecutable, error.ReleaseArchiveTooLarge, error.ReleaseChecksumMismatch, error.ReleaseExecutableVersionMismatch, error.UnsafeReleaseArchive, error.UpgradeChildFailed => .upgrade_preparation_failed,
         error.HostStopping => .host_stopping,
         error.MysqlHostUnavailable => .mysql_host_unavailable,
         error.InvalidStore => .store_path_malformed,
@@ -295,6 +309,7 @@ fn mapped(err: anyerror) ?Code {
         error.ApiKeyMissing => .sign_in_required,
         error.HostStopped => .host_stopped,
         error.StoreAlreadyOwned => .store_locked,
+        error.StoreIdentityMismatch => .store_identity_mismatch,
         error.HostBusy => .host_busy,
         error.ResultNotReady => .result_not_ready,
         error.EnvironmentTooLarge => .environment_too_large,
@@ -404,6 +419,10 @@ pub fn facts(code: Code) Facts {
         .message_empty => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "nonempty Message text on stdin" }, .says = "Standard input was empty; provide Message text.", .next = "Pipe or redirect a nonempty Message into this command." },
         .environment_too_large => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "an inherited environment within the Message byte limit" }, .says = "The inherited environment is too large for a Message.", .next = "Unset or shorten the largest variables, then recover the saved request with rui request recover HANDLE." },
         .internal_unexpected => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui could not complete this operation because of an internal fault.", .next = "Keep the saved request, if any, and report this code with the command to the Rui maintainer." },
+        .host_identity_unconfirmed => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host's exact process/build identity could not be verified.", .next = "Inspect this Store with its owning client. Do not pause a guessed or replacement Host." },
+        .upgrade_ineligible => .{ .act = .operate, .input = null, .accepted = .none, .says = "This installation is not eligible for automatic release upgrade.", .next = "Use the standalone release installer for a managed source build, or the application/package owner for an unmanaged binary." },
+        .upgrade_release_invalid => .{ .act = .operate, .input = null, .accepted = .none, .says = "Published stable release metadata or platform assets could not be validated.", .next = "Check the published release and supported platform; no installation or Host was changed." },
+        .upgrade_preparation_failed => .{ .act = .operate, .input = null, .accepted = .none, .says = "Release preparation or validation failed.", .next = "Check network access, disk space and the published archive. The selected build and Host were not changed before publication." },
         .host_not_serving => .{ .act = .operate, .input = null, .accepted = .none, .says = "No Host serves this Store.", .next = "Start its Host with the command below, then retry the same saved request unchanged." },
         .host_stopping => .{ .act = .wait, .input = null, .accepted = .none, .says = "The Host for this Store is shutting down and no longer accepts requests.", .next = "Wait for it to exit, then start it again with rui host start --store PATH and retry." },
         .mysql_host_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The launched MySQL Host for this Store is unavailable.", .next = "Check this Store's launch-frame Host and RUI_RUNTIME_DIR, then retry unchanged." },
@@ -483,6 +502,11 @@ pub fn facts(code: Code) Facts {
         .workspace_is_immutable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "the workspace already saved for this Session" }, .says = "An existing Session cannot change its workspace.", .next = "Omit --workspace, or create a new Session for the other directory." },
         .provider_is_immutable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "the provider already saved for this Session" }, .says = "An existing Session cannot change its provider.", .next = "Omit --provider, or create a new Session with the other provider." },
         .model_is_immutable => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "the model already saved for this Session" }, .says = "An existing Session cannot change its model.", .next = "Omit --model, or create a new Session with the other model." },
+        .unknown_skill => .{ .act = .fix, .input = .tools, .accepted = .{ .grammar = "a name in this Session's advertised skills catalog" }, .says = "No advertised skill has that name.", .next = "Reload skills to refresh the catalog, then use its exact name." },
+        .skill_file_unavailable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "a readable SKILL.md at its advertised absolute path" }, .says = "The selected skill file could not be read.", .next = "Restore the file and access to it, or reload skills before choosing another name." },
+        .skill_file_too_large => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "a complete SKILL.md of at most 1 MiB" }, .says = "The selected skill file exceeds the read limit.", .next = "Reduce SKILL.md to at most 1 MiB, then invoke it again." },
+        .skill_text_invalid => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "UTF-8 SKILL.md text" }, .says = "The selected skill file is not valid UTF-8 text.", .next = "Save the complete file as UTF-8, then invoke it again." },
+        .skills_unavailable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "readable repository and home .agents/skills roots" }, .says = "The skills catalog could not be read completely.", .next = "Restore access to the skill roots, then retry the original request." },
         .revision_exhausted => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "a Session whose configuration revision can still advance" }, .says = "This Session has exhausted its configuration revisions.", .next = "Create a new Session with the desired configuration." },
         .invalid_target => .{ .act = .fix, .input = .target, .accepted = .{ .grammar = "positive decimal IDs from 1 to 9223372036854775807 for the requested target" }, .says = "A target ID is invalid.", .next = "Copy --turn and --operation for interruption, or --action for a decision, from rui session inspect." },
         .unknown_operation => .{ .act = .fix, .input = .operation, .accepted = .{ .grammar = "an Operation ID belonging to this Session, from rui session inspect" }, .says = "That Operation does not exist in this Session.", .next = "Inspect this Session and use its current --turn and --operation." },
@@ -498,6 +522,7 @@ pub fn facts(code: Code) Facts {
         .host_stopped => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host is stopped.", .next = "Start this Store's Host with rui host start, then retry unchanged." },
         .host_unreachable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host cannot be reached.", .next = "Start or repair this Store's Host, then retry the same saved request unchanged." },
         .sign_in_required => .{ .act = .operate, .input = null, .accepted = .none, .says = "Provider sign-in is required.", .next = "Run rui auth login for the selected provider, then retry unchanged." },
+        .store_identity_mismatch => .{ .act = .operate, .input = null, .accepted = .none, .says = "This SQLite Store belongs to a different canonical folder.", .next = "Stop Hosts and preserve the complete Store; restore its saved original canonical folder, or back up this Store and choose a fresh --store." },
         .store_locked => .{ .act = .operate, .input = null, .accepted = .none, .says = "Another Host owns this Store.", .next = "Use that Host, or pause it with rui host pause before starting again." },
         .wait_timed_out => .{ .act = .wait, .input = null, .accepted = .none, .says = "The wait ended while the request was still pending.", .next = "Run rui request wait with the same HANDLE again; never resubmit with a new key." },
         .request_absent => .{ .act = .recover, .input = null, .accepted = .none, .says = "The Store has no such request; admission is not confirmed.", .next = "Run rui request recover with the original HANDLE or record; never resubmit with a new key." },
@@ -646,6 +671,16 @@ fn renderLine(out: *std.Io.Writer, code: Code, held: Held, saved: bool) error{Wr
     try out.writeAll(if (saved) " This rejection was saved and replays as saved; a resend needs a new key." else if (held.not_sent) " Nothing was captured or sent." else "");
     if (held.unchanged) |unchanged| try writeHeld(out, unchanged);
     try out.print(" [{s}]\n", .{@tagName(code)});
+}
+
+test "Store selector mismatch has a pathless operating remedy" {
+    try std.testing.expectEqual(Code.store_identity_mismatch, of(error.StoreIdentityMismatch));
+    try std.testing.expectEqual(Act.operate, facts(.store_identity_mismatch).act);
+    var bytes: [1024]u8 = undefined;
+    var output = std.Io.Writer.fixed(&bytes);
+    try writeLine(&output, .store_identity_mismatch, .{ .resource = "host", .operation = "serve" });
+    try std.testing.expect(std.mem.indexOf(u8, output.buffered(), "preserve the complete Store") != null);
+    try std.testing.expect(std.mem.endsWith(u8, output.buffered(), "[store_identity_mismatch]\n"));
 }
 
 test "caller error goldens describe choice handle conflict and malformed ID" {

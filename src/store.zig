@@ -18,6 +18,8 @@ const store_test_fixtures = @import("store/tests.zig");
 pub const ModelFact = @import("store/domain/model_facts.zig").Fact;
 pub const ModelCatalogSource = @import("store/domain/model_facts.zig").Source;
 pub const Store = store_core.Store;
+pub const CapturedSkill = @import("store/domain/skills.zig").Capture;
+pub const InitialSkills = @import("store/domain/skills.zig").Initial;
 pub const MysqlStartError = @import("store/engine/mysql_refusal.zig").StartError;
 
 /// The DB team applies this file; opening a MySQL Store never performs DDL.
@@ -66,11 +68,13 @@ pub const ModelFailureClass = model_settlement_domain.ModelFailureClass;
 pub const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 pub const ModelInterruptionTarget = command_domain.ModelInterruptionTarget;
 pub const OpenOptions = store_core.OpenOptions;
+pub const IdentityMismatch = store_schema.IdentityMismatch;
 pub const SavedCatalog = store_core.SavedCatalog;
 pub const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 pub const PrefixSeal = historical_domain.PrefixSeal;
 pub const PublicConversationPage = reads_domain.PublicConversationPage;
 pub const schema_version = store_schema.schema_version;
+pub const minimum_schema_version = store_schema.migration_baseline;
 pub const SessionReport = report_domain.SessionReport;
 pub const session_report_shapes = report_domain.json_shapes;
 pub const checkSessionReportsForTesting = @import("store/tests.zig").checkSessionReportsForTesting;

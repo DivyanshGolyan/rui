@@ -11,6 +11,7 @@ const Store = store_core.Store;
 const historical_domain = @This();
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
+const skills_domain = @import("skills.zig");
 const reads_domain = @import("reads.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
@@ -683,7 +684,7 @@ const historical_settings = rsql.Read(.{
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
         "o.reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
-        "(SELECT first.reasoning_effort FROM model_operation first WHERE first.session_ref=o.session_ref ORDER BY first.admission_position LIMIT 1) AS starting_effort " ++
+        "(SELECT first.reasoning_effort FROM model_operation first WHERE first.session_ref=o.session_ref ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent " ++
         "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
         "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
     .Args = struct { operation: u64 },
@@ -704,6 +705,7 @@ const historical_settings = rsql.Read(.{
         plain_codec: bool,
         purpose: u8,
         starting_effort: ?protocol.ReasoningEffort,
+        catalogs_consistent: bool,
     },
     .cardinality = .optional,
 });
@@ -719,7 +721,7 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     var found: store_access.Found = undefined;
     a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, &row, &found);
     try store_access.runAs(a, error.CorruptStore);
-    if (!found.get()) return error.CorruptStore;
+    if (!found.get() or !row.catalogs_consistent) return error.CorruptStore;
     if (row.member_count > tool_catalog.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
     view.tool_set_id = row.tool_set_id.get();
     view.tool_count = row.member_count;
@@ -1005,7 +1007,7 @@ fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*con
 /// admission, the first `HistoricalView.entry_batch` of them in position
 /// order.
 const historical_entries = rsql.Read(.{
-    .sql = "SELECT e.session_position,e.entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,NULL AS consistent," ++
+    .sql = "SELECT e.session_position,e.entry_kind,e.content_id," ++ historical_content_columns_sql ++ ",NULL AS model,NULL AS provider,NULL AS item_kind,NULL AS item_id_digest,(e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ") AS consistent," ++
         "(SELECT m.sender_session_ref FROM message_admission m WHERE e.entry_kind=1 AND m.admission_id=e.source_admission_id) AS sender,NULL AS effort," ++
         "NULL AS tool_set_id,NULL AS declares " ++
         "FROM model_operation current JOIN conversation_entry e ON e.session_ref=current.session_ref " ++
@@ -1099,6 +1101,14 @@ const EntryBatch = struct {
     }
 };
 
+const historical_catalog_sources = rsql.Read(.{
+    .sql = "SELECT " ++ skills_domain.sourcesConsistentSql("current.session_ref", "catalog_required.position<current.admission_position") ++
+        " AS consistent FROM model_operation current WHERE current.operation_id=?1",
+    .Args = struct { operation: u64 },
+    .Row = struct { consistent: bool },
+    .cardinality = .one,
+});
+
 /// The next host input or output item after `after_position`, served from
 /// the view's read-ahead and refilled by one ranged read in a round of its
 /// own. A failed step is `HistoricalEntryReadFailed`, main's name.
@@ -1110,6 +1120,8 @@ fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *HistoricalView, after_posi
     view.entries_end = 0;
     errdefer view.entries_end = 0;
     var batch: EntryBatch = .{ .view = view };
+    var sources: historical_catalog_sources.Row = undefined;
+    a.read(historical_catalog_sources, .{ .operation = view.binding.operation_id }, &sources);
     a.readEach(historical_entries, .{
         .operation = view.binding.operation_id,
         .after = after_position,
@@ -1119,6 +1131,7 @@ fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *HistoricalView, after_posi
         .anchor = declarationAnchor(view),
     }, HistoricalView.entry_batch, &batch);
     try store_access.runAs(a, error.HistoricalEntryReadFailed);
+    if (!sources.consistent) return error.CorruptStore;
     if (batch.failure) |err| return err;
     return if (view.entries_end == 0) null else &view.entries[0];
 }
@@ -1151,6 +1164,7 @@ fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) er
         _ = std.enums.fromInt(OutputItemKind, row.item_kind orelse return error.CorruptStore) orelse return error.CorruptStore;
         requested_model = model;
     } else {
+        if (row.consistent != true) return error.CorruptStore;
         const content_id = row.content_id orelse return error.CorruptStore;
         // A missing content row leaves its columns NULL.
         content = .{

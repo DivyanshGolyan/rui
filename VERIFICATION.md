@@ -56,6 +56,7 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | HTTP/2 client (`src/h2/`) | `test-h2`; `test-logic` for `src/h2/policy.zig` | Runs in `check` and the `check-full` execution part. Its peer tests run over loopback h2c and TLS in process. System trust against real servers is manual, on each platform (macOS SecTrust above all), and not a gate: `RUI_H2_LIVE_URL=https://api.openai.com/v1/models zig build test-h2` and `RUI_H2_LIVE_NEGATIVE=1 zig build test-h2` |
 | Postgres wire client (`src/store/wire/pg*.zig`, `scram.zig`, `tls.zig`) | `test-pg`, on drafts too, also for `src/h2/h2.zig` and `src/h2/tls.zig` (its OpenSSL and trust) | Runs in `check` and the `check-full` execution part. Decode tests use bytes captured from Postgres 16 and RFC 7677's SCRAM exchange. On Linux CI the live tests run against `postgres:15` over verified TLS with SCRAM-SHA-256-PLUS and fail if it is missing (`RUI_TEST_REQUIRE_ENGINES=postgres`); elsewhere they run only when `RUI_TEST_PG_PORT`, `RUI_TEST_PG_PASSWORD` and `RUI_TEST_PG_CA_FILE` name a server. A pipeline deeper than the socket buffers is the driver's concern and is not covered here |
 | MySQL wire client (`src/store/wire/mysql.zig`) and the Store's blocking connection (`mysql_connection.zig`) | `test-logic` and `mysql-wire-integration`, on drafts too; also `test` for those two files and `tests/integration/mysql_server.py` | `test-logic` runs `mysql.zig`'s own tests, and `test` replays its captures through the connection over a socket. `mysql-wire-integration` runs `mysql_wire_test.zig` through the connection against a MySQL 8.4 server in Docker, over its Unix socket, plaintext TCP and verified TLS, and fails, never skips, without Docker. `mysql_server.py` holds the one image pin; this harness and `check.yml`'s dialect-check server both start the image through it |
+| Skills discovery, capture and immutable catalog instructions | Focused `test -Dtest-filter='skills '` and `skills-integration` | Scanner/parser/delta/resource and Store/admission/history owners plus isolated real Host wire; native malformed filename case may skip on macOS/APFS, which rejects creating the fixture |
 | Model and transport | `test`, `dispatch-integration`, `transport-h2-integration`; `test-logic` for `src/transport_policy.zig` | Live provider remains opt-in |
 | Codex credentials | `test`, Codex, credential and Codex H2 targets; `test-logic` for `src/codex_credential_policy.zig` and `src/codex_token_wire.zig` | No real account login required |
 | Product defaults (`src/product_defaults.zig`, `tests/integration/product_defaults.py`) | `test-logic`, `check`, `admission-debug-integration` and the startup-capacity targets on both systems | Every omitted-value surface consumes the module. `host-launch-integration` reads the module instead of copying values. `test-logic` pins the approved values |
@@ -740,7 +741,10 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | Limit and schema refusal under 5 s | `host-launch-integration` | 256/256 and minimum-1 refuse; exact minimum serves ten clients. Linux and Apple Silicon macOS |
-| [Installed upgrade](ARCHITECTURE.md#store-format-and-upgrades) | `previous-release-upgrade.yml`, `previous_release_upgrade.py` | Refusal until migrations exist |
+| Moved SQLite Store refuses foreground, detached and interactive startup with both escaped canonical folders, `store_identity_mismatch` and exit 6; old-path symlink still refuses, identity stays unchanged, restoration serves | `host_launch_integration.py store-identity` in `host-launch-integration` | Private stopped fixture Store only |
+| [Installed upgrade](ARCHITECTURE.md#store-format-and-upgrades) | `previous-release-upgrade.yml`, `previous_release_upgrade.py` | Exercise supported startup migration and backup as well as unsupported formats; no reset policy |
+| Source and release installer publication | `installer-integration` | All 37 installer boundary cases use an explicitly supplied compiled production Rui for native publication and PATH facts; planning and template policy tests require no compiler |
+| [Standalone stable Upgrade](ARCHITECTURE.md#store-format-and-upgrades) | `upgrade-integration`, Installation, release, Host lifecycle, PATH and panel value tests | Offline metadata and a same-source synthetic release identity; real native Hosts and both PTY/tmux screens prove exact-instance activation and lease retirement, failure reporting and retained drafts without replay. Historical external installers are outside the guarantee |
 
 ### Canonical reads, retained output and SQLite
 
@@ -786,6 +790,15 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 | General bounded rotated-log export | none located | Unimplemented |
 ## Release demonstrations
 
+`upgrade-integration` builds `rui-upgrade-release-fixture` from the current production sources with a synthetic release version and the actual source revision.
+Only the fixture's build identity differs; installation eligibility, publication, Host lifecycle and terminal code are the production owners.
+Ordinary untagged builds still report `unreleased`.
+`zig build upgrade-fixture` exposes that same native actor for focused terminal evidence without a network download or a stale tagged binary.
+
+`installer-integration` runs source and release installer cases with the compiled production executable supplied by the build graph.
+Their staged test commands delegate publication and PATH facts to that executable, never to a second writer or an on-demand compiler.
+The compiler-free policy suite retains release planning and template checks; its boundary regression runs those checks with no Zig on PATH and confirms every native case receives an explicit publisher.
+
 Package under the Rui identity and verify executable and package names, state and credential identifiers, build and distribution references, and fixtures.
 Fixture recreation under the [Store format policy](ARCHITECTURE.md#store-format-and-upgrades) does not authorize changing user Stores; state packaging, state-path and credential-identifier obligations explicitly before release.
 
@@ -798,3 +811,32 @@ Keep evidence attached to the real owners and label remaining gaps before claimi
 For allocation, buffer, thread or resource-lifetime changes, record build and workload, allocation origin and owner, population multiplier, lifetime and attribution gaps.
 Distinguish live allocations, allocation volume, physical footprint and virtual reservation; overlapping counters are not additive.
 The [small Host memory trial](research/memory-trial/README.md) is a collection example, not a quota or a substitute for simultaneous-workload qualification.
+
+## Skills
+
+`skills-integration` uses an isolated Workspace and HOME and a deterministic loopback model endpoint which records incoming bytes before replying.
+It exercises Host-owned Configure and initial-Message creation, default and explicitly restricted tools, full raw invocation/path, idle no-op and metadata reload, keyed replay after file deletion and process restart, bound model invocation and child `start_agent` discovery.
+The fixture uses native public readers and actual provider inputs, not direct Store edits or terminal excerpts.
+An actual PTY `/skill` invocation announces a normal HOME-owned request handle; plain `request inspect`, `list` and `recover` retain that identity and frozen admitted bytes after the source file and terminal receipt disappear, without another provider request or Conversation input.
+
+`zig build yaml-linux-compile` compiles all pinned libyaml sources as strict C99 against Linux glibc headers for x86-64 and ARM64 without linking or executing a Host.
+It reuses `configureYaml`, whose POSIX feature exposure is scoped to the dependency's C sources; removing it must fail at libyaml's `strdup` declaration, not witness setup.
+The ordinary Linux CI builds retain the same dependency compile boundary; this focused target does not add work to an ordinary build.
+
+Focused `skills ` tests cover real YAML scalars/ignored nested metadata, repository-over-home precedence, worktree and non-git roots, symlinks, unreadability, explicit caps, malformed UTF-8 and metadata-only deltas.
+Catalog JSON requires actual string tokens for name, description and path, rejecting numeric/byte-array coercions while preserving escaped Unicode.
+A full 4096-entry ordering regression covers the constant-stack heap sorts used by discovery, encoding, decoding and deltas.
+The Linux `stack-frames` gate measures the real catalog decode and Configure/creating-Message import paths.
+Configure and creating Messages keep their temporary facts at one address in the Store's existing scratch; reload-only scratch stays in its own same-transaction branch.
+No skill stack exception or larger scratch allocation is permitted.
+A result-arena plus independently reclaiming scratch high-water regression exercises many near-limit project and shadowed home bodies; unsupported native invalid-byte filenames skip only on filesystems that reject their creation.
+The actual Ingress tests cover text-free skill custody transfer, fragmented input and invalid text-plus-skill cleanup alongside the existing ordinary text-capture tests.
+
+The Store tests exercise six distinct content imports in child creation, `content_import` and `before_commit` rollback with reopen/retry, same-position/public catalog provenance, empty initial position zero and authenticated peer refusal causality/replay.
+Reload fault tests preserve catalog, instruction, position and command-result atomicity through both failure points, then verify same-key replay and no-op behavior after reopen.
+Populated format-56/wire-9 and format-58/wire-10 SQLite fixtures upgrade through the production Store and preserve ordinary content; corresponding MySQL migrations run when a live test server is configured.
+Archive composition tests retain archive intent on skill refusal and idle reload, unarchive only a fresh admitted invocation, and preserve archive state on keyed replay.
+Creation refusal tests cover both Configure and initial Message: a missing Workspace remains `invalid_workspace`, a valid Workspace with inaccessible skills roots remains `skills_unavailable`, and each keyed refusal replays unchanged after repair without allocating a Session or model work.
+The adapter lifecycle test checks complete >10,000-byte CRLF/Unicode skill results in saved ordinary content and actual sealed provider input, metadata-only body edits, revision-one/authored-baseline preservation, idle nullable-Turn reports, frozen admitted Operations, serialized history prefixes, memo/cold reconstruction and real reopen after source deletion.
+Negative controls revert each boundary fix and must fail its owner assertion or actual Host custody boundary, not fixture setup.
+These are synthetic local evidence, not live provider, remote filesystem or power-loss qualification.

@@ -3298,6 +3298,78 @@
                 "type": "object",
                 "properties": {
                   "status": {
+                    "const": "accepted"
+                  },
+                  "replayed": {
+                    "type": "boolean"
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  },
+                  "revision": {
+                    "$ref": "#/components/schemas/Decimal"
+                  },
+                  "created": {
+                    "const": false
+                  },
+                  "skills": {
+                    "type": "string",
+                    "enum": [
+                      "reloaded",
+                      "unchanged"
+                    ]
+                  }
+                },
+                "required": [
+                  "status",
+                  "replayed",
+                  "session",
+                  "revision",
+                  "created",
+                  "skills"
+                ],
+                "additionalProperties": false
+              },
+              "execution": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "const": "unavailable"
+                  },
+                  "reason": {
+                    "const": "direct_reply_does_not_wait_for_model_processing"
+                  }
+                },
+                "required": [
+                  "status",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "version",
+              "type",
+              "answer",
+              "execution"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "10"
+              },
+              "type": {
+                "const": "configuration_reply"
+              },
+              "answer": {
+                "type": "object",
+                "properties": {
+                  "status": {
                     "const": "rejected"
                   },
                   "replayed": {
@@ -3334,7 +3406,12 @@
                       "workspace_is_immutable",
                       "provider_is_immutable",
                       "model_is_immutable",
-                      "revision_exhausted"
+                      "revision_exhausted",
+                      "skills_unavailable",
+                      "unknown_skill",
+                      "skill_file_unavailable",
+                      "skill_file_too_large",
+                      "skill_text_invalid"
                     ]
                   }
                 },
@@ -3410,6 +3487,94 @@
               "key",
               "session",
               "configuration"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "10"
+              },
+              "kind": {
+                "const": "configure"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "configuration": {
+                "$ref": "#/components/schemas/Configuration"
+              },
+              "reload_skills": {
+                "const": true
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "configuration",
+              "reload_skills"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "10"
+              },
+              "kind": {
+                "const": "configure"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "configuration": {
+                "$ref": "#/components/schemas/Configuration"
+              },
+              "reload_skills": {
+                "const": true
+              },
+              "require_model": {
+                "const": true
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "configuration",
+              "reload_skills",
+              "require_model"
             ],
             "additionalProperties": false
           },
@@ -6247,7 +6412,12 @@
                       "workspace_is_immutable",
                       "provider_is_immutable",
                       "model_is_immutable",
-                      "revision_exhausted"
+                      "revision_exhausted",
+                      "skills_unavailable",
+                      "unknown_skill",
+                      "skill_file_unavailable",
+                      "skill_file_too_large",
+                      "skill_text_invalid"
                     ]
                   }
                 },
@@ -6306,6 +6476,137 @@
       },
       "MessageRequest": {
         "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "10"
+              },
+              "kind": {
+                "const": "message"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "sender": {
+                "type": "null"
+              },
+              "sender_handle": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 32,
+                    "x-rui-max-bytes": 32
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "skill": {
+                "type": "string",
+                "maxLength": 64,
+                "x-rui-max-bytes": 64
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "sender",
+              "sender_handle",
+              "skill"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "version": {
+                "const": "10"
+              },
+              "kind": {
+                "const": "message"
+              },
+              "store": {
+                "type": "string",
+                "maxLength": 492,
+                "x-rui-max-bytes": 492
+              },
+              "key": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "session": {
+                "type": "string",
+                "maxLength": 128,
+                "x-rui-max-bytes": 128
+              },
+              "sender": {
+                "type": "object",
+                "properties": {
+                  "store": {
+                    "type": "string",
+                    "maxLength": 492,
+                    "x-rui-max-bytes": 492
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "x-rui-max-bytes": 128
+                  }
+                },
+                "required": [
+                  "store",
+                  "session"
+                ],
+                "additionalProperties": false
+              },
+              "sender_handle": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 32,
+                    "x-rui-max-bytes": 32
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "skill": {
+                "type": "string",
+                "maxLength": 64,
+                "x-rui-max-bytes": 64
+              }
+            },
+            "required": [
+              "version",
+              "kind",
+              "store",
+              "key",
+              "session",
+              "sender",
+              "sender_handle",
+              "skill"
+            ],
+            "additionalProperties": false
+          },
           {
             "type": "object",
             "properties": {
@@ -13192,6 +13493,7 @@
               "find_tools",
               "message_agent",
               "read_transcript",
+              "skill",
               "start_agent",
               "web_search"
             ]
@@ -13560,7 +13862,14 @@
             ]
           },
           "turn": {
-            "$ref": "#/components/schemas/Decimal"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "source_admission": {
             "anyOf": [
@@ -13573,6 +13882,16 @@
             ]
           },
           "source_revision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_catalog_position": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/Decimal"
@@ -13603,6 +13922,7 @@
           "turn",
           "source_admission",
           "source_revision",
+          "source_catalog_position",
           "source_operation",
           "content"
         ],

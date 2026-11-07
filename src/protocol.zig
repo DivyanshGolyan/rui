@@ -290,13 +290,19 @@ pub const ConfigureCommand = struct {
     /// Host-memory creation seed; its resolution or refusal is supplied to the Store.
     preset: ?Bounded(max_preset_name_bytes) = null,
     require_model: bool = false,
+    reload_skills: bool = false,
 
     pub fn removeTemporaryContent(self: *ConfigureCommand, io: std.Io) !void {
         return self.configuration.removeTemporaryContent(io);
     }
 
     pub fn semanticDigest(self: *const ConfigureCommand) [32]u8 {
-        return configureDigest(self.session.slice(), &self.configuration, self.require_model);
+        const base = configureDigest(self.session.slice(), &self.configuration, self.require_model);
+        if (!self.reload_skills) return base;
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update("rui/core/reload-skills/v1");
+        hash.update(&base);
+        return hash.finalResult();
     }
 
     /// A preset refusal binds the unresolved request, including its name;
@@ -338,6 +344,13 @@ fn configureDigest(session: []const u8, configuration: *const Configuration, req
     return hash.finalResult();
 }
 
+pub const SkillsReloadStatus = enum { reloaded, unchanged };
+
+pub const SkillRequest = struct {
+    operation: enum { invoke, reload } = .invoke,
+    name: ?Bounded(64) = null,
+};
+
 pub const MessageCommand = struct {
     store: Bounded(max_store_bytes) = .{},
     key: Bounded(max_key_bytes) = .{},
@@ -346,6 +359,8 @@ pub const MessageCommand = struct {
     sender: ?Address = null,
     sender_handle: ?Bounded(max_sender_handle_bytes) = null,
     text: ContentField = .{},
+    /// Explicit skill invocation, alternative to caller text.
+    skill: ?Bounded(64) = null,
     // Non-null means create a fresh Session and admit this first Message in
     // one transaction. The requested Session must then be empty. Initial
     // configuration cannot supply instruction or schema content values.
@@ -368,7 +383,10 @@ pub const MessageCommand = struct {
         }
         hash.update(&.{@intFromBool(self.sender_handle != null)});
         if (self.sender_handle) |handle| hashField(&hash, handle.slice());
-        hashContent(&hash, &self.text);
+        if (self.skill) |name| {
+            hashField(&hash, "skill-invocation/v1");
+            hashField(&hash, name.slice());
+        } else hashContent(&hash, &self.text);
         if (self.configuration) |*configuration| {
             // The creation's own digest covers its capability condition.
             hashField(&hash, "initial-configuration");
@@ -456,6 +474,11 @@ pub const ConfigurationRejection = enum {
     provider_is_immutable,
     model_is_immutable,
     revision_exhausted,
+    skills_unavailable,
+    unknown_skill,
+    skill_file_unavailable,
+    skill_file_too_large,
+    skill_text_invalid,
 };
 pub const MessageRejection = enum {
     session_archiving,
@@ -484,6 +507,11 @@ pub const MessageRejection = enum {
     provider_is_immutable,
     model_is_immutable,
     revision_exhausted,
+    skills_unavailable,
+    unknown_skill,
+    skill_file_unavailable,
+    skill_file_too_large,
+    skill_text_invalid,
 };
 pub const CommandKind = cli_value.CommandKind;
 pub const CommandObservationStatus = enum { absent, accepted, rejected };
@@ -1561,8 +1589,10 @@ pub const Ingress = struct {
                 }
             },
             .message => |*command| {
-                self.take(&command.text);
-                moved = 1;
+                if (command.text.state == .value) {
+                    self.take(&command.text);
+                    moved = 1;
+                }
             },
             else => {},
         }
@@ -1932,7 +1962,7 @@ const Parser = struct {
     /// Each parser fills its command `out`, whose Store is already set.
     fn parseConfigure(self: *Parser, out: *ConfigureCommand, members: *Members) !void {
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        const Field = enum { key, session, configuration, preset, require_model };
+        const Field = enum { key, session, configuration, preset, require_model, reload_skills };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
             .key => try self.readCommandKey(&out.key),
@@ -1943,6 +1973,7 @@ const Parser = struct {
                 try self.readSmallString(&out.preset.?);
             },
             .require_model => out.require_model = try self.readBoolean(),
+            .reload_skills => out.reload_skills = try self.readBoolean(),
         };
         try require(Field, seen, &.{ .key, .session, .configuration });
         if (out.session.len == 0 and out.preset == null) try validateCreatingConfiguration(&out.configuration);
@@ -1986,7 +2017,7 @@ const Parser = struct {
 
     fn parseMessage(self: *Parser, out: *MessageCommand, members: *Members) !void {
         errdefer out.removeTemporaryContent(self.options.io) catch unreachable;
-        const Field = enum { key, session, sender, sender_handle, configuration, text, require_model };
+        const Field = enum { key, session, sender, sender_handle, configuration, text, require_model, skill };
         var seen: std.EnumSet(Field) = .empty;
         while (try self.nextCommandField(Field, members, &seen)) |field| switch (field) {
             .key => try self.readCommandKey(&out.key),
@@ -2005,16 +2036,22 @@ const Parser = struct {
                 try self.parseConfiguration(false, &out.configuration.?);
             },
             .text => try self.readContent(&out.text, false, true),
+            .skill => {
+                out.skill = .{};
+                try self.readSmallString(&out.skill.?);
+            },
             .require_model => out.require_model = try self.readBoolean(),
         };
-        try require(Field, seen, &.{ .key, .session, .sender, .sender_handle, .text });
+        try require(Field, seen, &.{ .key, .session, .sender, .sender_handle });
+        if (seen.contains(.text) == seen.contains(.skill)) return error.InvalidMessage;
+        if (out.skill != null and (out.skill.?.len == 0 or out.configuration != null)) return error.InvalidMessage;
         // Only a creating Message, one with no Session yet, carries a
         // configuration and a capability condition, and it must carry the
         // configuration.
         if (out.session.len == 0 and out.configuration == null) return error.MissingField;
         if (out.session.len == 0) try validateCreatingConfiguration(&out.configuration.?);
         if (out.session.len != 0 and out.configuration != null) return error.UnexpectedField;
-        if (out.text.state != .value) return error.InvalidMessage;
+        if (out.skill == null and out.text.state != .value) return error.InvalidMessage;
         if (seen.contains(.require_model) and out.configuration == null) return error.InvalidMessage;
     }
 
@@ -2978,6 +3015,8 @@ pub const configure_request = struct {
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"configuration\":" };
     pub const tail = .{"}"};
     pub const require_model_tail = .{",\"require_model\":true}"};
+    pub const reload_skills_tail = .{",\"reload_skills\":true}"};
+    pub const reload_require_model_tail = .{",\"reload_skills\":true,\"require_model\":true}"};
     pub const preset_tail = .{ ",\"preset\":", Hole{ .string = max_preset_name_bytes }, "}" };
     pub const preset_require_model_tail = .{ ",\"preset\":", Hole{ .string = max_preset_name_bytes }, ",\"require_model\":true}" };
 };
@@ -2988,6 +3027,7 @@ pub const message_request = struct {
     pub const sender_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"sender\":{\"store\":", store_hole, ",\"session\":", session_hole, "},\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
     /// The configuration object of a creating Message follows.
     pub const configuration = .{",\"configuration\":"};
+    pub const skill = .{ ",\"skill\":", Hole{ .string = 64 }, "}" };
     /// The text, as a JSON string, follows.
     pub const text = .{",\"text\":{\"state\":\"value\",\"value\":"};
     pub const tail = .{"}}"};
@@ -3040,11 +3080,12 @@ pub const configuration_reply = struct {
     const execution = "},\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}}";
     /// Holes: replayed, Session, revision, created.
     pub const accepted = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":", Hole.boolean, execution };
+    pub const accepted_skills = .{ head ++ "\"accepted\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"revision\":\"", Hole.decimal, "\",\"created\":false,\"skills\":\"", Hole{ .tag = SkillsReloadStatus }, "\"" ++ execution };
     /// Holes: replayed, Session, code.
     pub const rejected = .{ head ++ "\"rejected\",\"replayed\":", Hole.boolean, ",\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"", Hole{ .tag = ConfigurationRejection }, "\"" ++ execution };
     /// Hole: Session.
     pub const conflict = .{ head ++ "\"conflict\",\"replayed\":false,\"session\":", Hole{ .string = max_session_bytes }, ",\"code\":\"idempotency_key_conflict\"" ++ execution };
-    pub const max_bytes = maxShapeBytes(.{ accepted, rejected, conflict });
+    pub const max_bytes = maxShapeBytes(.{ accepted, accepted_skills, rejected, conflict });
 };
 
 pub const message_reply = struct {
@@ -4723,4 +4764,90 @@ test "session archive digest binds the domain session and intent not transport i
     var stop: SessionStopCommand = .{};
     try stop.session.set("k7m2qx");
     try std.testing.expect(!std.mem.eql(u8, &digest, &stop.semanticDigest()));
+}
+
+test "skills native wire preserves explicit invoke and reload intent" {
+    const prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
+    const configure_prefix = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\",\"key\":\"k\",\"session\":\"k7m2qx\",";
+    for ([_][]const u8{
+        prefix ++ "\"skill\":\"demo\"}",
+        configure_prefix ++ "\"configuration\":{},\"reload_skills\":true}",
+    }, 0..) |json, index| {
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser: Parser = .{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        const request = try parseForTest(&parser);
+        if (index == 0) {
+            try std.testing.expectEqualStrings("demo", request.message.skill.?.slice());
+            const digest = request.message.semanticDigest();
+            var plain = request.message;
+            plain.skill = null;
+            try std.testing.expect(!std.mem.eql(u8, &digest, &plain.semanticDigest()));
+        } else {
+            try std.testing.expect(request.configure.reload_skills);
+            const digest = request.configure.semanticDigest();
+            var plain = request.configure;
+            plain.reload_skills = false;
+            try std.testing.expect(!std.mem.eql(u8, &digest, &plain.semanticDigest()));
+        }
+    }
+    for ([_][]const u8{
+        prefix ++ "\"skill\":\"\"}",
+        prefix ++ "\"skill\":\"demo\",\"text\":{\"state\":\"omitted\"}}",
+        prefix ++ "\"skill\":\"demo\",\"configuration\":{}}",
+    }) |json| {
+        var source: MetadataSource = .{ .input = json };
+        var retained: ?named_scratch.Owner = null;
+        var parser: Parser = .{ .source = &source, .options = .{ .io = std.testing.io, .content_length = json.len, .scratch_path = "unused", .request_number = 0, .retained_scratch = &retained } };
+        try std.testing.expectError(error.InvalidMessage, parseForTest(&parser));
+    }
+}
+
+test "skills ingress transfers explicit invocation intent without caller text custody" {
+    const bytes = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"skills-no-text\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,\"skill\":\"demo\"}";
+    for ([_]usize{ 1, 17, bytes.len }) |fragment| {
+        const ingress = try std.testing.allocator.create(Ingress);
+        defer std.testing.allocator.destroy(ingress);
+        var retained: ?named_scratch.Owner = null;
+        var used: std.atomic.Value(u64) = .init(0);
+        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.len, .scratch_path = "unused-no-capture", .request_number = 1, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 0 }, .expected_kind = .message });
+        defer ingress.deinit();
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const end = @min(offset + fragment, bytes.len);
+            try ingress.feed(bytes[offset..end]);
+            offset = end;
+        }
+        const request = try ingress.finish();
+        defer request.removeTemporaryContent(std.testing.io) catch unreachable;
+        try std.testing.expectEqualStrings("demo", request.message.skill.?.slice());
+        try std.testing.expectEqual(@as(usize, 0), ingress.content_count);
+        try std.testing.expectEqual(FieldState.omitted, request.message.text.state);
+        try std.testing.expect(request.message.text.file == null);
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+}
+
+test "skills ingress rejects both invocation and text without retaining capture custody" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.testing.allocator.alloc(u8, std.Io.Dir.max_path_bytes);
+    defer std.testing.allocator.free(root);
+    const path = root[0..try tmp.dir.realPath(std.testing.io, root)];
+    const head = "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":\"s\",\"key\":\"skills-both\",\"session\":\"k7m2qx\",\"sender\":null,\"sender_handle\":null,";
+    for ([_][]const u8{
+        head ++ "\"skill\":\"demo\",\"text\":{\"state\":\"value\",\"value\":\"text\"}}",
+        head ++ "\"text\":{\"state\":\"value\",\"value\":\"text\"},\"skill\":\"demo\"}",
+    }) |bytes| {
+        const ingress = try std.testing.allocator.create(Ingress);
+        defer std.testing.allocator.destroy(ingress);
+        var retained: ?named_scratch.Owner = null;
+        var used: std.atomic.Value(u64) = .init(0);
+        ingress.init(std.testing.allocator, .{ .io = std.testing.io, .content_length = bytes.len, .scratch_path = path, .request_number = 1, .retained_scratch = &retained, .scratch_budget = .{ .used = &used, .limit = 4 }, .expected_kind = .message });
+        try std.testing.expectError(error.InvalidMessage, ingress.feed(bytes));
+        ingress.deinit();
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
 }

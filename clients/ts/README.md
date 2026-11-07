@@ -22,6 +22,10 @@ The `rui` executable comes from the platform package beside it
 (`rui-linux-x64`, `rui-linux-arm64` or `rui-darwin-arm64`, installed as optional dependencies), else from `rui` on `PATH`.
 Pass `binary` to `Rui.connect` to name one yourself.
 
+Bundled and custom binaries and their child Host launch are application-owned.
+Standalone client Upgrade does not mutate npm packages or blindly stop an application-owned Host, and reports installation separately from activation.
+There is no HTTP installer endpoint or background update polling; update the application's dependencies and lifecycle explicitly.
+
 `Rui.connect` writes the Store, the provider settings, MCP bearer tokens and a private runtime directory to the child's stdin.
 The optional `provider.caFile` names a PEM file to trust exclusively for that provider instead of system CAs, on macOS as on Linux (for example `provider: { baseUrl: "https://localhost:8443/v1", key: "local-key", caFile: "/path/to/ca.pem" }`).
 It travels in the launch frame, not argv or the environment; do not add `--provider-ca-file` to a launched Host.
@@ -116,7 +120,8 @@ await rui.close();
 
 ## Archive and restore
 
-Archive metadata is independent of work state. `archiveState` is `active`, `archiving` or `archived` in Session summaries and status.
+Archive metadata is independent of work state.
+`archiveState` is `active`, `archiving` or `archived` in Session summaries and status.
 
 ```ts
 const result = await session.archive({ idempotencyKey: "archive:1" });

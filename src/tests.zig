@@ -1,4 +1,12 @@
 test {
+    _ = @import("Installation.zig");
+    _ = @import("release_candidate.zig");
+    _ = @import("upgrade_process.zig");
+    _ = @import("HostLifecycle.zig");
+    _ = @import("host_identity.zig");
+    _ = @import("upgrade.zig");
+    _ = @import("installation_path.zig");
+    _ = @import("UpgradePanel.zig");
     // These were previously discovered only while compiling another test's
     // body. Every filtered root must discover them before ownership filtering.
     _ = @import("BashLifecycle.zig");
@@ -62,6 +70,7 @@ test {
     _ = @import("core_tools.zig");
     _ = @import("read_transcript.zig");
     _ = @import("find_tools.zig");
+    _ = @import("skills.zig");
     _ = @import("client.zig");
     _ = @import("cli.zig");
     _ = @import("cli_args.zig");

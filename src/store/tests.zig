@@ -7,6 +7,18 @@ const protocol = @import("../protocol.zig");
 const protocol_reply = @import("../protocol_reply.zig");
 const tool_catalog = @import("../tools.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
+
+// A stored Host catalog must contain every native tool. Keep that inventory
+// canonical while each fixture independently states its MCP schema and offer.
+fn testingCatalogRecords(comptime extras: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extras.len]tool_catalog.Record {
+    var records = tool_catalog.built_in.records[0..tool_catalog.built_in.records.len].* ++ extras[0..extras.len].*;
+    std.sort.heap(tool_catalog.Record, &records, {}, struct {
+        fn lessThan(_: void, left: tool_catalog.Record, right: tool_catalog.Record) bool {
+            return std.mem.lessThan(u8, left.name, right.name);
+        }
+    }.lessThan);
+    return records;
+}
 const model_capability = @import("../model_capability.zig");
 const product_defaults = @import("../product_defaults.zig");
 const output_format = @import("../output_format.zig");
@@ -956,7 +968,7 @@ test "a Session creation that rolls back never reaches a since listing" {
                 reads.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
                 configuration_domain.prepareConfiguration(&a, "", &create.configuration, reads);
                 try a.run();
-                try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, .{}, reads) == .accepted);
+                try std.testing.expect(try configuration_domain.applyConfiguration(&a, storage.io, "", &create.configuration, null, .{}, reads) == .accepted);
                 try a.run();
                 try a.abandon(.{});
             }
@@ -2463,6 +2475,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
         @embedFile("domain/report_full_shape.zig"),
+        @embedFile("domain/skills.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
         @embedFile("find_tools_tests.zig"),
@@ -4352,16 +4365,10 @@ test "loaded tools select saved records even after the Host catalog changes or r
             var storage: Store = undefined;
             try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
             defer storage.close() catch unreachable;
-            var records = [_]tool_catalog.Record{
-                tool_catalog.bash_record,
+            var records = comptime testingCatalogRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "original", .description = "Original page", .input_schema = "{\"type\":\"object\"}" },
-                tool_catalog.find_tools_record,
-                tool_catalog.message_agent_record,
                 .{ .name = "other_page", .owner = .mcp, .server = "original", .description = "Other page", .input_schema = "{\"type\":\"object\"}" },
-                tool_catalog.read_transcript_record,
-                tool_catalog.start_agent_record,
-                tool_catalog.web_search_record,
-            };
+            });
             var digests: [records.len][32]u8 = undefined;
             for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
             const original: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
@@ -8880,7 +8887,7 @@ test "existing Store rejects a different canonical identity" {
             try storage.close();
             var refused: Store = undefined;
             try std.testing.expectError(
-                error.WrongStoreIdentity,
+                if (case.engine == .sqlite) error.StoreIdentityMismatch else error.WrongStoreIdentity,
                 store_testing.testingStoreWith(case, &refused, &tmp, std.testing.io, .{ .identity = "/different/canonical/store" }),
             );
         }
@@ -8931,6 +8938,9 @@ const EntryPoint = enum {
     readCatalogSet,
     readCatalogRecords,
     readCatalogText,
+    commandExists,
+    readSkills,
+    settleSkillTool,
     configure,
     submitMessageWithModel,
     stopSession,
@@ -8999,6 +9009,9 @@ const EntryPoint = enum {
 /// drives it. Content rounds (`readRaw` windows) differ by engine, so
 /// `content_round_budgets` holds them apart.
 const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
+    .commandExists = 1,
+    .readSkills = 2,
+    .settleSkillTool = 3,
     .configure = 3,
     .submitMessageWithModel = 2,
     .stopSession = 2,
@@ -9080,7 +9093,7 @@ fn contentRoundBudget(engine: store_testing.Engine, point: EntryPoint) u16 {
     return switch (engine) {
         // One window holds the driven content.
         .sqlite, .mysql => switch (point) {
-            .readOwnedContent, .readCatalogText, .searchActivity, .findTools => 1,
+            .readOwnedContent, .readCatalogText, .searchActivity, .findTools, .readSkills => 1,
             else => 0,
         },
     };
@@ -9117,6 +9130,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/reads.zig"),
         @embedFile("domain/report.zig"),
         @embedFile("domain/report_full_shape.zig"),
+        @embedFile("domain/skills.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
         @embedFile("find_tools_tests.zig"),
@@ -9314,6 +9328,7 @@ test "each Store entry point takes its round budget on its common path" {
             try coreTurn(&storage, &tmp, &meter);
             try mcpTurn(case, &meter);
             try findTurn(&storage, &tmp, &meter);
+            try skillTurn(case, &meter);
             var failed = false;
             for (std.enums.values(EntryPoint)) |point| {
                 const measured = meter.measured.get(point) orelse {
@@ -9452,15 +9467,9 @@ test "each Store entry point takes its round budget on its common path" {
         /// Drive MCP through an actual frozen catalog offer, without changing
         /// the built-in catalog used by the other entry points' fixtures.
         fn mcpTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
-            const records = [_]tool_catalog.Record{
-                tool_catalog.bash_record,
+            const records = comptime testingCatalogRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a docs page.", .input_schema = "{\"type\":\"object\"}" },
-                tool_catalog.find_tools_record,
-                tool_catalog.message_agent_record,
-                tool_catalog.read_transcript_record,
-                tool_catalog.start_agent_record,
-                tool_catalog.web_search_record,
-            };
+            });
             const digests = comptime blk: {
                 @setEvalBranchQuota(1_000_000);
                 var out: [records.len][32]u8 = undefined;
@@ -9508,6 +9517,52 @@ test "each Store entry point takes its round budget on its common path" {
             _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
             try std.testing.expect((try storage.nextMcpAction()) == null);
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
+        }
+
+        /// Replay preflight, captured catalog read and bound ordinary skill
+        /// settlement use their public entries, with real public metadata.
+        fn skillTurn(case: *store_testing.Case, meter: *RoundMeter) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const previous_storage = meter.storage;
+            meter.storage = &storage;
+            defer meter.storage = previous_storage;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const skills = @import("../skills.zig");
+            const catalog: skills.Catalog = .{ .entries = &.{.{ .name = "demo", .description = "Budget skill", .path = "/budget/demo/SKILL.md" }} };
+            const initial: skills_fixture_domain.Initial = .{ .ready = .{
+                .encoded = try skills.encodeCatalog(arena.allocator(), catalog),
+                .instruction = try skills.initialInstruction(arena.allocator(), catalog),
+            } };
+            var path: [protocol.max_workspace_bytes]u8 = undefined;
+            var create = try completeConfiguration("budget-skill", "", try canonicalCwd(std.testing.io, &path), "model-a");
+            create.configuration.tools = try .of(&.{"skill"});
+            const session = storage.configureWithInitialSkills(&create, null, &initial, .{}).accepted.session;
+            meter.start();
+            try std.testing.expect(try storage.commandExists("budget-skill"));
+            meter.stop(.commandExists);
+            try std.testing.expect(!try storage.commandExists("budget-skill-absent"));
+            meter.start();
+            const saved = try storage.readSkills(arena.allocator(), session.slice());
+            meter.stop(.readSkills);
+            try std.testing.expectEqual(@as(usize, 1), saved.catalog.entries.len);
+            try std.testing.expectEqualStrings("demo", saved.catalog.entries[0].name);
+            try std.testing.expectEqualStrings("/budget/demo/SKILL.md", saved.catalog.entries[0].path);
+            try submitTestMessage(&storage, &tmp, "budget-skill-input", "budget-skill-key", session.slice(), "use demo");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const calls = [_]TestingCall{.{ .item_id = "skill-item", .name = "skill", .encoded_call_id = "skill-call", .decoded_call_id = "skill-call", .encoded_arguments = "{\\\"operation\\\":\\\"invoke\\\",\\\"name\\\":\\\"demo\\\"}", .decoded_arguments = "{\"operation\":\"invoke\",\"name\":\"demo\"}" }};
+            try settleCallsForTesting(&storage, &tmp, model, "budget-skill-calls", &calls);
+            const input = (try storage.nextCoreWork()).?.action;
+            try std.testing.expectEqual(action_domain.CoreTool.skill, input.tool);
+            const captured: skills_fixture_domain.Capture = .{ .invocation = "Skill file: \"/budget/demo/SKILL.md\"\n\nbudget bytes" };
+            meter.start();
+            try std.testing.expect(try storage.settleSkillTool(input.binding, arena.allocator(), &captured, .{}));
+            meter.stop(.settleSkillTool);
+            try std.testing.expect(!storage.isFenced());
         }
 
         /// SQL narrows one unloaded tool; eight matchers share one description
@@ -11189,15 +11244,9 @@ test "launch presets resolve MCP tools through the same catalog as configure" {
             try launch_frame.parse(std.testing.allocator,
                 \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"pages","url":"http://127.0.0.1:3000/mcp","bearerToken":"t","callTimeoutMs":1000}],"presets":{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["fetch_page"],"permissionMode":"ask"}}}
             , &frame, &refusal);
-            var records = [_]tool_catalog.Record{
-                tool_catalog.bash_record,
+            var records = comptime testingCatalogRecords(&.{
                 .{ .name = "fetch_page", .owner = .mcp, .server = "pages", .description = "Fetch page", .input_schema = "{\"type\":\"object\"}" },
-                tool_catalog.find_tools_record,
-                tool_catalog.message_agent_record,
-                tool_catalog.read_transcript_record,
-                tool_catalog.start_agent_record,
-                tool_catalog.web_search_record,
-            };
+            });
             var digests: [records.len][32]u8 = undefined;
             for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
             const offered: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
@@ -11894,6 +11943,412 @@ test "Current remains full when execution changes without a Session commit" {
                 try std.testing.expectEqualStrings(if (occupied == 0) "0" else "4096", execution.get("scratch_used_bytes").?.string);
                 try std.testing.expectEqual(generation, storage.commit_generation.load(.acquire));
             }
+        }
+    }.run);
+}
+
+// Native filesystem capture belongs to the Host. These distinct, immutable
+// values exercise only the Store's composed transaction and provenance owners.
+const skills_fixture_domain = @import("domain/skills.zig");
+const skills_fixture_initial: skills_fixture_domain.Initial = .{ .ready = .{
+    .encoded = "{\"entries\":[{\"name\":\"child-catalog\",\"description\":\"Captured after the parent was created\",\"path\":\"/skills/child-catalog/SKILL.md\"}]}",
+    .instruction = "Available skills: child-catalog at /skills/child-catalog/SKILL.md",
+} };
+
+test "skills start_agent imports six distinct contents atomically and retries after reopen" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]bool{ false, true }) |before_commit| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                var opened = true;
+                defer if (opened) storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                // The parent predates capture: none of the child's new content
+                // can be deduplicated against an inherited catalog or reload.
+                var create = try completeConfiguration("skills-six-parent", "", workspace, "model-a");
+                create.configuration.tools = try .of(&.{"start_agent"});
+                const parent = storage.configure(&create, .{}).accepted.session;
+                try submitTestMessage(&storage, &tmp, "skills-six-input", "skills-six-input", parent.slice(), "Please start a fresh worker");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleCallsForTesting(&storage, &tmp, model, "skills-six-call", &.{.{
+                    .item_id = "skills-six-item",
+                    .name = "start_agent",
+                    .encoded_call_id = "skills-six-call",
+                    .decoded_call_id = "skills-six-call",
+                    .encoded_arguments = "{}",
+                    .decoded_arguments = "{}",
+                }});
+                const action = (try storage.nextCoreWork()).?.action;
+                const baseline = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+                const parent_position = (try store_core.readSessionForTesting(&storage, parent.slice())).?.next_position;
+                const task = "A distinct child task captured after its parent existed";
+                const authored = "Distinct child-authored instructions, not a catalog";
+                const schema = "{\"type\":\"object\",\"properties\":{\"six_imports\":{\"type\":\"boolean\"}}}";
+                var spec = try testingAgentSpec(&.{}, "ask");
+                spec.instructions = .{ .state = .value, .borrowed = authored.ptr, .length = authored.len, .digest = protocol.contentDigest(authored) };
+                spec.output_schema = .{ .state = .value, .borrowed = schema.ptr, .length = schema.len, .digest = protocol.contentDigest(schema) };
+                const Capture = struct {
+                    child: protocol.Bounded(protocol.session_id_bytes) = .{},
+                    calls: usize = 0,
+                    fn call(context: *anyopaque, admission: Store.MessageAdmission) void {
+                        const self: *@This() = @ptrCast(@alignCast(context));
+                        self.child.set(admission.session) catch unreachable;
+                        self.calls += 1;
+                    }
+                };
+                var capture: Capture = .{};
+                const callback: Store.MessageCommitted = .{ .context = &capture, .call = Capture.call };
+                try std.testing.expectError(if (before_commit) error.InjectedCommitFailure else error.InjectedContentImportFailure, storage.startAgentWithInitialSkills(action.binding, parent.slice(), task, true, &spec, callback, &skills_fixture_initial, .{
+                    .before_commit = before_commit,
+                    .content_import = !before_commit,
+                }));
+                try std.testing.expect(storage.isFenced());
+                try std.testing.expectEqual(@as(usize, 0), capture.calls);
+                try storage.close();
+                opened = false;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                opened = true;
+                try std.testing.expectEqual(baseline, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
+                try std.testing.expectEqual(parent_position, (try store_core.readSessionForTesting(&storage, parent.slice())).?.next_position);
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE resolution_code IS NOT NULL", .{}));
+                try std.testing.expect(try storage.startAgentWithInitialSkills(action.binding, parent.slice(), task, true, &spec, callback, &skills_fixture_initial, .{}) == .started);
+                try std.testing.expectEqual(@as(usize, 1), capture.calls);
+                try std.testing.expectEqual(baseline + 6, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                var result_buffer: [64]u8 = undefined;
+                const started = try std.fmt.bufPrint(&result_buffer, "Started {s}.", .{capture.child.slice()});
+                for ([_][]const u8{ authored, schema, skills_fixture_initial.ready.encoded, skills_fixture_initial.ready.instruction.?, task, started }) |bytes| {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1 AND byte_length=?2 AND private=0", .{ store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }, bytes.len }));
+                }
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry e JOIN session_skill_catalog c ON c.session_ref=e.session_ref AND c.position=e.source_catalog_position JOIN content text_content ON text_content.content_id=e.content_id JOIN content metadata ON metadata.content_id=c.catalog_content_id WHERE e.session_ref=?1 AND e.entry_kind=2 AND e.turn_id IS NULL AND e.source_revision IS NULL AND e.source_admission_id IS NULL AND e.source_operation_id IS NULL AND e.session_position=e.source_catalog_position AND text_content.private=0 AND metadata.private=0", .{capture.child.slice()}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog WHERE session_ref=?1", .{parent.slice()}));
+                const child = (try store_core.readSessionForTesting(&storage, capture.child.slice())).?;
+                try std.testing.expectEqualSlices(u8, &protocol.contentDigest(authored), &(try testingContentReference(&storage, @intCast(child.instructions_id.?))).digest);
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const state = try storage.readSkills(arena.allocator(), capture.child.slice());
+                try std.testing.expectEqual(@as(usize, 1), state.catalog.entries.len);
+                try std.testing.expectEqualStrings("/skills/child-catalog/SKILL.md", state.catalog.entries[0].path);
+            }
+        }
+    }.run);
+}
+
+test "skills catalog provenance fences readSkills history and full reports" {
+    try store_testing.forEachEngine(struct {
+        fn scan(storage: *Store, binding: AttemptBinding) !void {
+            var view: HistoricalView = undefined;
+            try storage.openHistoricalView(binding, &view);
+            defer view.close();
+            var position: u64 = 0;
+            while (try view.nextEntry(position)) |entry| position = entry.position;
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            const Corruption = enum { detached, private_metadata, private_instruction };
+            const Consumer = enum { skills, history, full_report };
+            for ([_]Corruption{ .detached, .private_metadata, .private_instruction }) |corruption| {
+                for ([_]Consumer{ .skills, .history, .full_report }) |consumer| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                    const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                    var create = try completeConfiguration("skills-certificate", "", workspace, "model-a");
+                    const session = storage.configureWithInitialSkills(&create, null, &skills_fixture_initial, .{}).accepted.session;
+                    try submitTestMessage(&storage, &tmp, "skills-certificate-input", "skills-certificate-input", session.slice(), "Read the catalog");
+                    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    switch (corruption) {
+                        .detached => try store_testing.exec(&storage, "DELETE FROM conversation_entry WHERE session_ref=?1 AND source_catalog_position IS NOT NULL", .{session.slice()}),
+                        .private_metadata => try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT catalog_content_id FROM session_skill_catalog WHERE session_ref=?1)", .{session.slice()}),
+                        .private_instruction => try store_testing.exec(&storage, "UPDATE content SET private=1 WHERE content_id=(SELECT content_id FROM conversation_entry WHERE session_ref=?1 AND source_catalog_position IS NOT NULL)", .{session.slice()}),
+                    }
+                    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                    defer arena.deinit();
+                    switch (consumer) {
+                        .skills => try std.testing.expectError(error.CorruptStore, storage.readSkills(arena.allocator(), session.slice())),
+                        .history => try std.testing.expectError(error.CorruptStore, scan(&storage, binding)),
+                        .full_report => try std.testing.expectError(error.CorruptStore, testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full)),
+                    }
+                    try std.testing.expect(storage.isFenced());
+                    try std.testing.expectError(error.StoreFenced, storage.readSkills(arena.allocator(), session.slice()));
+                }
+            }
+        }
+    }.run);
+}
+
+test "skills empty initial snapshot is valid and schema rejects mismatched catalog positions" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("skills-empty", "", workspace, "model-a");
+            const empty: skills_fixture_domain.Initial = .{ .ready = .{ .encoded = "{\"entries\":[]}", .instruction = null } };
+            const session = storage.configureWithInitialSkills(&create, null, &empty, .{}).accepted.session;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const state = try storage.readSkills(arena.allocator(), session.slice());
+            try std.testing.expectEqual(@as(usize, 0), state.catalog.entries.len);
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog WHERE session_ref=?1 AND position=0", .{session.slice()}));
+            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE session_ref=?1 AND source_catalog_position IS NOT NULL", .{session.slice()}));
+            var reload: protocol.ConfigureCommand = .{ .session = session, .reload_skills = true };
+            try reload.key.set("skills-empty-reload");
+            const candidate: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{.{ .name = "nonempty", .description = "now available", .path = "/skills/nonempty/SKILL.md" }} } };
+            try std.testing.expect(storage.configureWithCapturedSkills(&reload, null, null, &candidate, .{}) == .accepted);
+            // Position zero exists, so the FK alone cannot reject this: the
+            // catalog instruction must certify its own conversation position.
+            const constraint_error = if (case.engine == .mysql) error.MysqlFixtureFailed else error.StatementFailed;
+            try std.testing.expectError(constraint_error, store_testing.exec(&storage, "UPDATE conversation_entry SET source_catalog_position=0 WHERE session_ref=?1 AND source_catalog_position IS NOT NULL", .{session.slice()}));
+            try std.testing.expect(!storage.isFenced());
+            const reloaded = try storage.readSkills(arena.allocator(), session.slice());
+            try std.testing.expectEqual(@as(usize, 1), reloaded.catalog.entries.len);
+        }
+    }.run);
+}
+
+test "skills peer refusal persists authenticated activity diagnostic and keyed replay across reopen" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            var opened = true;
+            defer if (opened) storage.close() catch unreachable;
+            const sender = try configureTestSession(&storage, "skills-peer-sender");
+            const receiver = try configureTestSession(&storage, "skills-peer-receiver");
+            var update: protocol.ConfigureCommand = .{ .session = sender };
+            try update.key.set("skills-peer-bypass");
+            update.configuration.tools = try .of(&.{"bash"});
+            update.configuration.permission_mode.state = .value;
+            try update.configuration.permission_mode.value.set("bypass");
+            try std.testing.expect(storage.configure(&update, .{}) == .accepted);
+            try submitTestMessage(&storage, &tmp, "skills-peer-input", "skills-peer-input", sender.slice(), "Invoke a skill for my peer");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleTwoActionsForTesting(&storage, &tmp, model, "skills-peer-call");
+            const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+            var input: BashExecutionInput = undefined;
+            try storage.readBashExecutionInput(action, &input);
+            var command: protocol.MessageCommand = .{ .session = receiver, .skill = .{}, .sender = .{}, .sender_handle = input.sender_handle };
+            try command.key.set("skills-peer-refusal");
+            try command.skill.?.set("missing-peer-skill");
+            try command.sender.?.store.set(storage.selector.slice());
+            command.sender.?.session = sender;
+            command.text.digest = protocol.contentDigest("");
+            const diagnostic = "Skill missing-peer-skill is not in the receiver's saved catalog; nothing was sent.";
+            const captured: skills_fixture_domain.Capture = .{ .failed = .{ .code = .unknown_skill, .bytes = diagnostic } };
+            const sender_position = (try store_core.readSessionForTesting(&storage, sender.slice())).?.next_position;
+            const receiver_position = (try store_core.readSessionForTesting(&storage, receiver.slice())).?.next_position;
+            var activity_request: protocol.ActivityPage = .{ .session = sender };
+            activity_request.position = (try store_core.activityPageForTesting(&storage, activity_request)).end;
+            const rejected = storage.submitMessageCapturedSkills(&command, null, null, &captured, .{});
+            try std.testing.expect(rejected == .rejected and !rejected.rejected.replayed);
+            try std.testing.expectEqual(protocol.MessageRejection.unknown_skill, rejected.rejected.code);
+            try storage.revokeActionSender(action);
+            // Neither later capture text nor a revoked handle may rewrite the
+            // original keyed outcome, including after a genuine database reopen.
+            const later: skills_fixture_domain.Capture = .{ .failed = .{ .code = .skill_file_unavailable, .bytes = "A different later disk failure" } };
+            for (0..2) |pass| {
+                if (pass == 1) {
+                    try storage.close();
+                    opened = false;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    opened = true;
+                }
+                const replay = storage.submitMessageCapturedSkills(&command, null, null, &later, .{});
+                try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+                try std.testing.expectEqual(protocol.MessageRejection.unknown_skill, replay.rejected.code);
+                try std.testing.expectEqual(sender_position + 1, (try store_core.readSessionForTesting(&storage, sender.slice())).?.next_position);
+                try std.testing.expectEqual(receiver_position, (try store_core.readSessionForTesting(&storage, receiver.slice())).?.next_position);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM sent_rejection WHERE command_key=?1 AND sender_session_ref=?2 AND sender_position=?3", .{ command.key.slice(), sender.slice(), sender_position }));
+                const activity = try store_core.activityPageForTesting(&storage, activity_request);
+                try std.testing.expectEqual(@as(usize, 1), activity.count);
+                try std.testing.expectEqual(sender_position, activity.items[0].position);
+                try std.testing.expectEqualStrings("unknown_skill", activity.items[0].value.send_failed.code.slice());
+                try std.testing.expectEqualStrings(receiver.slice(), activity.items[0].value.send_failed.target.?.session.slice());
+                const diagnostic_id = try store_testing.queryU64(&storage, "SELECT primary_content_id FROM core_command WHERE command_key=?1 AND accepted=0 AND code='unknown_skill'", .{command.key.slice()});
+                const reference = try testingContentReference(&storage, diagnostic_id);
+                var reader: ContentReader = undefined;
+                reader.open(try storage.openContent(reference));
+                defer reader.close();
+                var bytes: [diagnostic.len]u8 = undefined;
+                try std.testing.expectEqual(bytes.len, try reader.read(0, &bytes));
+                try std.testing.expectEqualStrings(diagnostic, &bytes);
+            }
+        }
+    }.run);
+}
+
+test "skills reload settles catalog and result atomically across faults retry replay and no-op" {
+    try store_testing.forEachEngine(struct {
+        fn expectResult(storage: *Store, key: []const u8, expected: []const u8) !void {
+            const reference = try storage.commandResult(key);
+            try std.testing.expectEqual(@as(u64, expected.len), reference.length);
+            try std.testing.expectEqualSlices(u8, &protocol.contentDigest(expected), &reference.digest);
+            var reader: ContentReader = undefined;
+            reader.open(try storage.openContent(reference));
+            defer reader.close();
+            var bytes: [128]u8 = undefined;
+            try std.testing.expectEqual(expected.len, try reader.read(0, bytes[0..expected.len]));
+            try std.testing.expectEqualStrings(expected, bytes[0..expected.len]);
+        }
+
+        fn expectCatalog(storage: *Store, allocator: std.mem.Allocator, session: []const u8, encoded: []const u8) !void {
+            const state = try storage.readSkills(allocator, session);
+            const actual = try @import("../skills.zig").encodeCatalog(allocator, state.catalog);
+            try std.testing.expectEqualStrings(encoded, actual);
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            const skills = @import("../skills.zig");
+            for ([_]bool{ false, true }) |before_commit| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                var opened = true;
+                defer if (opened) storage.close() catch unreachable;
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("skills-reload-atomic-create", "", workspace, "model-a");
+                const authored = "Authored baseline instructions must survive every catalog reload";
+                create.configuration.instructions = .{ .state = .value, .borrowed = authored.ptr, .length = authored.len, .digest = protocol.contentDigest(authored) };
+                const session = storage.configureWithInitialSkills(&create, null, &skills_fixture_initial, .{}).accepted.session;
+                const baseline = (try store_core.readSessionForTesting(&storage, session.slice())).?;
+                try std.testing.expectEqual(@as(u64, 1), baseline.revision);
+                const original_content = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
+                const original_commands = try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{});
+                const original_snapshot = try store_testing.queryU64(&storage, "SELECT position FROM session_skill_catalog WHERE session_ref=?1", .{session.slice()});
+                var command: protocol.ConfigureCommand = .{ .session = session, .reload_skills = true };
+                try command.key.set("skills-reload-atomic");
+                const candidate: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{.{
+                    .name = "reloaded-only",
+                    .description = "A distinct catalog captured for this reload",
+                    .path = "/skills/reloaded-only/SKILL.md",
+                }} } };
+                const encoded = try skills.encodeCatalog(arena.allocator(), candidate.reload);
+                const old_catalog = try skills.decodeCatalog(arena.allocator(), skills_fixture_initial.ready.encoded);
+                const delta = try skills.diff(arena.allocator(), old_catalog, candidate.reload);
+                const delta_text = try skills.deltaInstruction(arena.allocator(), delta);
+                const refused = storage.configureWithCapturedSkills(&command, null, null, &candidate, .{
+                    .content_import = !before_commit,
+                    .before_commit = before_commit,
+                });
+                try std.testing.expect(refused == .infrastructure_failure);
+                try std.testing.expect(storage.isFenced());
+                try storage.close();
+                opened = false;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                opened = true;
+                // A failed settlement publishes neither half of the catalog
+                // change, its command acknowledgment, nor a replacement view.
+                try std.testing.expectEqual(original_content, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                try std.testing.expectEqual(original_commands, try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE command_key=?1", .{command.key.slice()}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog WHERE session_ref=?1", .{session.slice()}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE session_ref=?1 AND source_catalog_position IS NOT NULL", .{session.slice()}));
+                try std.testing.expectEqual(baseline.next_position, (try store_core.readSessionForTesting(&storage, session.slice())).?.next_position);
+                try std.testing.expectError(error.ResultNotFound, storage.commandResult(command.key.slice()));
+                try expectCatalog(&storage, arena.allocator(), session.slice(), skills_fixture_initial.ready.encoded);
+                const accepted = storage.configureWithCapturedSkills(&command, null, null, &candidate, .{});
+                try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed and !accepted.accepted.created);
+                try std.testing.expectEqual(@as(u64, 1), accepted.accepted.revision);
+                try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, accepted.accepted.skills.?);
+                try std.testing.expectEqual(original_content + 3, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                try std.testing.expectEqual(original_commands + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{}));
+                try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog WHERE session_ref=?1", .{session.slice()}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog s JOIN content c ON c.content_id=s.catalog_content_id WHERE s.session_ref=?1 AND s.position=?2 AND c.digest=?3 AND c.private=0", .{ session.slice(), baseline.next_position, store_testing.Blob{ .bytes = &protocol.contentDigest(encoded) } }));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id WHERE e.session_ref=?1 AND e.session_position=?2 AND e.source_catalog_position=e.session_position AND e.entry_kind=2 AND e.turn_id IS NULL AND c.digest=?3 AND c.private=0", .{ session.slice(), baseline.next_position, store_testing.Blob{ .bytes = &protocol.contentDigest(delta_text) } }));
+                try expectCatalog(&storage, arena.allocator(), session.slice(), encoded);
+                try expectResult(&storage, command.key.slice(), "Skills catalog reloaded.");
+                const other_captures = [_]skills_fixture_domain.Capture{
+                    .{ .reload = .{ .entries = &.{} } },
+                    .{ .failed = .{ .code = .skills_unavailable, .bytes = "A later scan failed, but cannot replace the saved acknowledgment" } },
+                };
+                for (&other_captures) |*captured| {
+                    const replay = storage.configureWithCapturedSkills(&command, null, null, captured, .{});
+                    try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+                    try std.testing.expectEqual(protocol.SkillsReloadStatus.reloaded, replay.accepted.skills.?);
+                    try std.testing.expectEqual(@as(u64, 1), replay.accepted.revision);
+                    try expectResult(&storage, command.key.slice(), "Skills catalog reloaded.");
+                    try expectCatalog(&storage, arena.allocator(), session.slice(), encoded);
+                    try std.testing.expectEqual(original_content + 3, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                    try std.testing.expectEqual(original_commands + 1, try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command", .{}));
+                    try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog WHERE session_ref=?1", .{session.slice()}));
+                    try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE session_ref=?1 AND source_catalog_position IS NOT NULL", .{session.slice()}));
+                }
+                var unchanged = command;
+                try unchanged.key.set("skills-reload-atomic-unchanged");
+                const noop = storage.configureWithCapturedSkills(&unchanged, null, null, &candidate, .{});
+                try std.testing.expect(noop == .accepted and !noop.accepted.replayed);
+                try std.testing.expectEqual(protocol.SkillsReloadStatus.unchanged, noop.accepted.skills.?);
+                try expectResult(&storage, unchanged.key.slice(), "Skills are unchanged.");
+                try std.testing.expectEqual(original_content + 4, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+                try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog WHERE session_ref=?1", .{session.slice()}));
+                try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE session_ref=?1 AND source_catalog_position IS NOT NULL", .{session.slice()}));
+                const after = (try store_core.readSessionForTesting(&storage, session.slice())).?;
+                try std.testing.expectEqual(@as(u64, 1), after.revision);
+                try std.testing.expectEqual(baseline.instructions_id, after.instructions_id);
+                try std.testing.expectEqual(baseline.next_position + 1, after.next_position);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1", .{session.slice()}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog s JOIN content c ON c.content_id=s.catalog_content_id WHERE s.session_ref=?1 AND s.position=?2 AND c.digest=?3 AND c.private=0", .{ session.slice(), original_snapshot, store_testing.Blob{ .bytes = &protocol.contentDigest(skills_fixture_initial.ready.encoded) } }));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id WHERE e.session_ref=?1 AND e.source_catalog_position=?2 AND c.digest=?3 AND c.private=0", .{ session.slice(), original_snapshot, store_testing.Blob{ .bytes = &protocol.contentDigest(skills_fixture_initial.ready.instruction.?) } }));
+            }
+        }
+    }.run);
+}
+
+test "skills preserve archive intent until a fresh invocation is admitted" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "skills-archive-session");
+            var archive: protocol.SessionArchiveCommand = .{ .session = session };
+            try archive.key.set("skills-archive");
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
+            var command: protocol.MessageCommand = .{ .session = session, .skill = .{} };
+            try command.key.set("skills-archive-refused");
+            try command.skill.?.set("demo");
+            const failed: skills_fixture_domain.Capture = .{ .failed = .{ .code = .unknown_skill, .bytes = "The advertised name was not found" } };
+            const refused = storage.submitMessageCapturedSkills(&command, null, null, &failed, .{});
+            try std.testing.expect(refused == .rejected and refused.rejected.code == .unknown_skill);
+            try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
+            var reload: protocol.ConfigureCommand = .{ .session = session, .reload_skills = true };
+            try reload.key.set("skills-archive-reload");
+            const empty: skills_fixture_domain.Capture = .{ .reload = .{ .entries = &.{} } };
+            try std.testing.expect(storage.configureWithCapturedSkills(&reload, null, null, &empty, .{}) == .accepted);
+            try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
+            try command.key.set("skills-archive-admitted");
+            const invocation: skills_fixture_domain.Capture = .{ .invocation = "Skill file: \"/skills/demo/SKILL.md\"\n\nComplete ordinary skill input" };
+            const accepted = storage.submitMessageCapturedSkills(&command, null, null, &invocation, .{});
+            try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+            try std.testing.expectEqual(protocol.SessionArchiveState.active, (try storage.inspectSessionForTesting(session.slice())).archive_state);
+            try archive.key.set("skills-archive-again");
+            try std.testing.expect(storage.archiveSession(&archive, .{}) == .accepted);
+            try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
+            const replay = storage.submitMessageCapturedSkills(&command, null, null, &failed, .{});
+            try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+            try std.testing.expectEqual(protocol.SessionArchiveState.archived, (try storage.inspectSessionForTesting(session.slice())).archive_state);
         }
     }.run);
 }

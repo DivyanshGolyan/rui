@@ -20,6 +20,7 @@ const command_domain = @import("command.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const model_admission_domain = @import("model_admission.zig");
+const skills_domain = @import("skills.zig");
 const reads_domain = @import("reads.zig");
 const store_schema = @import("../schema.zig");
 const turn_domain = @import("turn.zig");
@@ -779,6 +780,7 @@ pub fn renderSessionReport(
 /// Wire shapes for the report envelope written by `renderHead` and
 /// `renderSessionReport`. Full history is present only for the full profile.
 pub const json_shapes = struct {
+    pub const conversation = @import("report_full_shape.zig").Full.Conversation.json_shape;
     const H = protocol.Hole;
     const head = .{"{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"profile\":\""};
     const current_head = .{"{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\""};
@@ -2589,17 +2591,18 @@ const full_conversation = rsql.Page(.{
     .arms = &.{.{
         .on = .{ .primary_key = "conversation_entry" },
         .alias = "e",
-        .columns = "e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_operation_id," ++
-            "c.byte_length AS content_length,c.digest AS content_digest," ++ reads_domain.publicEntryColumns("e.entry_kind=2 OR "),
+        .columns = "e.session_position,e.entry_kind,e.turn_id,e.source_admission_id,e.source_revision,e.source_catalog_position,e.source_operation_id," ++
+            "c.byte_length AS content_length,c.digest AS content_digest," ++ reads_domain.publicEntryColumns("(e.entry_kind=2 AND (e.source_catalog_position IS NULL OR " ++ skills_domain.instructionConsistentSql("e") ++ ")) OR "),
         .joins = reads_domain.public_entry_joins,
     }},
     .Row = struct {
         entry_ordinal: rsql.Positive,
         session_position: rsql.Positive,
         entry_kind: u8,
-        turn_id: rsql.Positive,
+        turn_id: ?rsql.Positive,
         source_admission_id: ?rsql.Positive,
         source_revision: ?rsql.Positive,
+        source_catalog_position: ?rsql.Positive,
         source_operation_id: ?rsql.Positive,
         content_length: u64,
         content_digest: [32]u8,
@@ -2608,27 +2611,35 @@ const full_conversation = rsql.Page(.{
     .take = takes(Conversation.kept_rows),
 });
 
+const conversation_sources = rsql.Read(.{
+    .sql = "SELECT " ++ skills_domain.sourcesConsistentSql("?1", "1=1") ++ " AS catalogs_consistent,NOT EXISTS(" ++
+        reads_domain.missing_assistant_entry.sql ++ ") AS assistants_consistent",
+    .Args = struct { session: []const u8, lower: u64, upper: u64 },
+    .Row = struct { catalogs_consistent: bool, assistants_consistent: bool },
+    .cardinality = .one,
+});
+
 pub const Conversation = struct {
     pub const S = full_conversation;
     pub const failed = error.ConversationReadFailed;
     pub const header = "],\"conversation\":[";
     pub const kept_rows = 0;
-    pub const First = reads_domain.missing_assistant_entry.Result;
-    pub const FirstRead = reads_domain.missing_assistant_entry;
+    pub const First = conversation_sources.Row;
+    pub const FirstRead = conversation_sources;
 
     /// Every accepted assistant message has its entry, at any position,
     /// as main checked before the list; it implies main's check per row.
     pub fn queueFirst(a: *ReadAccess, session: []const u8, missing: *First) void {
-        a.read(reads_domain.missing_assistant_entry, .{ .session = session, .lower = 0, .upper = std.math.maxInt(i64) }, missing);
+        a.read(conversation_sources, .{ .session = session, .lower = 0, .upper = std.math.maxInt(i64) }, missing);
     }
 
     pub fn checkFirst(missing: *const First) error{CorruptStore}!void {
-        if (missing.* != null) return error.CorruptStore;
+        if (!missing.catalogs_consistent or !missing.assistants_consistent) return error.CorruptStore;
     }
 
     pub fn render(_: *ReadAccess, capture: *SessionReportCapture, row: *const S.Row) !void {
         if (row.entry_kind < 1 or row.entry_kind > 3 or !row.consistent) return error.CorruptStore;
-        try capture.appendFmt("{{\"ordinal\":\"{d}\",\"position\":\"{d}\",\"kind\":\"{s}\",\"turn\":\"{d}\",\"source_admission\":", .{
+        try capture.appendFmt("{{\"ordinal\":\"{d}\",\"position\":\"{d}\",\"kind\":\"{s}\",\"turn\":", .{
             row.entry_ordinal.get(),
             row.session_position.get(),
             switch (row.entry_kind) {
@@ -2637,11 +2648,14 @@ pub const Conversation = struct {
                 3 => "assistant",
                 else => unreachable,
             },
-            row.turn_id.get(),
         });
+        try appendOptionalPositive(row.turn_id, capture);
+        try capture.append(",\"source_admission\":");
         try appendOptionalPositive(row.source_admission_id, capture);
         try capture.append(",\"source_revision\":");
         try appendOptionalPositive(row.source_revision, capture);
+        try capture.append(",\"source_catalog_position\":");
+        try appendOptionalPositive(row.source_catalog_position, capture);
         try capture.append(",\"source_operation\":");
         try appendOptionalPositive(row.source_operation_id, capture);
         try capture.append(",\"content\":");

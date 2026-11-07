@@ -1814,7 +1814,8 @@ def command_entry_cases():
         assert fresh["admission"]["context"]["session"] == selected, fresh
         settings = fixture.command("session", "inspect", "--store", store, "--session", selected)["session"]
         assert (settings["workspace"], settings["provider"], settings["model"], settings["tools"],
-            settings["permission_mode"]) == (str(workspace), "codex", "gpt-6-luna", ["bash", "web_search"], "bypass"), settings
+            settings["permission_mode"]) == (str(workspace), "codex", "gpt-6-luna", ["bash", "skill", "web_search"], "bypass"), settings
+        assert settings["loaded_tools"] == ["bash", "skill", "web_search"], settings
         # Fresh Configure selects like a new Session: a saved model pin for the
         # selected provider wins over the recommendation; explicit --model wins
         # over the pin; a saved unsupported provider is refused before capture.
@@ -6185,7 +6186,10 @@ def main(selected="all"):
     import terminal_restoration_integration
     from terminal_process_test import prove_terminal_process
     split_callers = selected == "callers"
-    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "persistent-opening", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications"), selected
+    assert selected in ("all", "callers", "caller-core", "renderer", "compiled-models", "compaction-settings", "long-input", "terminal-waits", "persistent-permission", "persistent-opening", "incomplete-input", "session-ids", "empty-answers", "copy", "notifications", "command-entry"), selected
+    if selected == "command-entry":
+        command_entry_cases()
+        return
     if selected == "persistent-opening":
         persistent_opening_case()
         return

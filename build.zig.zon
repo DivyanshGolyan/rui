@@ -4,6 +4,10 @@
     .fingerprint = 0xce12316328c0bfb1,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
+        .yaml = .{
+            .url = "https://github.com/yaml/libyaml/archive/refs/tags/0.2.5.tar.gz",
+            .hash = "N-V-__8AAFisCAAMQCHLFuzfjTcHCY_2lOFAyfksvXa7HzDL",
+        },
         .translate_c = .{
             .url = "git+https://codeberg.org/ziglang/translate-c#f978dca0f2b2a782d06591989e80aae7c74d0183",
             .hash = "translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d",

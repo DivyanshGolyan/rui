@@ -40,13 +40,19 @@ curl -fsSL https://github.com/DivyanshGolyan/rui/releases/latest/download/instal
 The installer puts `rui` in `~/.local/bin` and checks the download's SHA-256 digest.
 If `~/.local/bin` is not on your `PATH`, it prints the line to add to your shell profile.
 
-To update, run the `curl` command again.
-Updates keep your saved work, sign-in and earlier builds.
-Release versions look like `0.35.2`.
-The middle number is the Store format: the format of the database where your saved work lives.
-An update that keeps it opens your existing saved work.
-When it changes, the installer names a build that still opens your work and the [fresh Store](docs/store-reset.md) steps.
-It also tells you when an older background Host is still running and how to stop it.
+Run `rui upgrade --check` to inspect the latest published stable release without installing it or starting a Host.
+Run `rui upgrade` to update an eligible released installation under `~/.local` and, only if the selected Store already has a running supported Host, restart that Host.
+A selected source build or managed build with unknown release identity is not upgraded automatically; run the standalone release installer above to deliberately switch it to a release.
+Package-provided and custom binaries remain their application's responsibility.
+The restart affects every Session in that Store and can interrupt work.
+For an eligible installation with no running Host, Upgrade only installs.
+The terminal's `/upgrade` panel offers Install and Cancel in both the overview and conversation.
+Installation and activation are separate: an unsupported or application-owned Host launch is not blindly stopped and is reported as installed but not activated.
+The manual release installer above and source installation remain install-only.
+
+Updates keep saved work and sign-in; retained earlier builds are not an unconditional rollback after a Store migration.
+The target build's schema determines compatibility, not version punctuation: supported SQLite formats are backed up and migrated at Host startup, while MySQL schema changes are operator-owned.
+If target compatibility facts are unavailable, compatibility is unknown until startup validates it.
 Run `rui --version` to see what you have.
 
 ## Start a conversation
@@ -96,6 +102,13 @@ Use `/sessions archived` to find archived Sessions, or `/sessions all` to show b
 Enter `/unarchive` to restore a Session without starting work.
 Sending a new Message to an archived Session also restores it.
 Archive keeps the conversation history and files.
+
+## Skills
+
+Rui discovers `SKILL.md` skills in your repository's `.agents/skills` and the Host user's `~/.agents/skills`; repository names win collisions.
+Use `/skill NAME` to read one into the conversation and `/reload-skills` to refresh the advertised catalog without starting a model turn.
+Skills are ordinary conversation content, grant no permissions and execute nothing on load.
+See [terminal commands](docs/using-rui.md#skills) or [scripted invocation](docs/scripting.md#invoke-and-reload-skills).
 
 ## Build from source
 

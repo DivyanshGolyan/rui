@@ -361,7 +361,7 @@ A deliberate second submission uses a new identity.
 ### Conversation entries and pending messages
 
 **Conversation** is the immutable ordered history of User text, assistant text, Tool Calls, Tool Results and System Instructions.
-Each entry records its exact causal source and applicable Turn.
+Each entry records its exact causal source and applicable Turn, except immediately appended catalog-origin System Instructions, which have no Turn.
 No edit, deletion or compaction rewrites history.
 An admitted User Message and its Conversation entry are distinct: **projection** means appending the admitted message to this history.
 Admission can precede projection, as the pending-message rules below specify.
@@ -483,6 +483,49 @@ For example, while a request is active, admit “review this code,” then confi
 A configuration committed after that boundary affects later requests; it cannot alter the admitted Operation or its replacement Attempts.
 Instruction updates remain ordered canonical Conversation facts under the rule below.
 This model-input boundary does not define when action permission policy changes take effect; authorization follows its own contract.
+
+### Skills
+
+A **Skill Catalog** is a Session's sorted list of skill names, descriptions and absolute `SKILL.md` paths.
+The shared Host capture owner discovers only `<repository>/.agents/skills` and the Host user's `~/.agents/skills` before creating a Session, including direct API, initial Message and `start_agent` creation.
+The repository is the nearest ancestor with a `.git` directory or worktree `.git` file; outside a repository, the Session Workspace is the repository root for discovery.
+Only direct child directories containing a valid `SKILL.md` are candidates, including symlinks; broken paths and missing roots are absent, while other root/file I/O failures fail the whole capture.
+A valid repository skill wins a same-name home skill.
+No `.claude` roots, marketplace discovery, installation or package machinery participates.
+
+Pinned LibYAML validates the complete frontmatter document, including quoted, literal and folded scalars.
+Required `name` and `description` follow the Agent Skills format, and the name must match its candidate directory.
+Unknown optional/vendor fields are ignored, including `disable-model-invocation` even when true and tool/permission metadata.
+Discovery reads no sibling resources and runs no script.
+The initial nonempty Catalog appends an immutable catalog-origin System Instruction before any model Operation; an empty Catalog is still captured durably but adds no instruction.
+It does not change authored instructions, their content identity, the revision-one baseline or the caller's explicit tool selection.
+Normal defaults offer/load `skill` even with no skills; an explicit restricted tool set remains authoritative, and routing hints are conditional on availability.
+
+The model `skill` tool accepts `invoke` with a name or `reload` without one.
+User `/skill NAME` and native `session send --skill NAME` use the same capture operation and admit its captured text as an ordinary User Message; the explicit native `skill` field is not hidden command text.
+Invocation reads the selected advertised absolute path anew, returning the complete raw UTF-8 `SKILL.md`, including frontmatter and trailing bytes, with its absolute path.
+The result is ordinary immutable conversation content, with no added authority, tools or permissions.
+Sibling resources remain accessible through the Session's existing tools and permission rules.
+An invocation result is not an active skill, retained body registry or protected instruction.
+
+User `/reload-skills` and native `session configure --reload-skills` rescan both roots without admitting a Message, changing the configuration revision or starting model work.
+The model tool's reload settles its ordinary Tool Result in the existing Turn.
+Both compare the captured candidate against the latest durable Session Catalog inside the settlement transaction, updating metadata and appending only added, removed and changed catalog entries as one new ordinary System Instruction.
+Name, description and winning absolute path determine a change; body-only edits are a no-op reload but a later fresh invocation reads their new bytes.
+No-change reload acknowledges without a catalog instruction.
+Failed scans preserve the previous Catalog, never fabricate removals, and typed native failures retain their diagnostic as an ordinary keyed command outcome.
+`request read-result` can read this captured refusal or reload acknowledgement without reopening files.
+
+File capture happens outside the Store writer; captured invocation/result bytes, catalog metadata and any delta instruction commit atomically with their originating command or bound tool settlement.
+Matching keyed replay returns its saved outcome before filesystem capture; already-admitted model Operations and replacement Attempts use their frozen history, never a rescan.
+Catalog instructions have the same immutable chronology, retry and compaction rules as other System Instructions.
+There is no active-skill state, body pinning, retention exception, reinjection or baseline rewriting.
+
+Bounds fail explicitly rather than truncating semantic input: `SKILL.md` is at most 1 MiB, YAML frontmatter 64 KiB, each root 4096 direct children, the winning Catalog 4096 entries and encoded metadata 64 MiB.
+Malformed metadata is not a valid candidate, but I/O, UTF-8 path and resource-limit failures abort discovery.
+Per-candidate raw/parser scratch is reclaimed independently of request/result metadata; shadowed home bodies do not accumulate in the capture arena.
+Canonical metadata must be public and each nonzero snapshot must have its exact same-position ordinary System Instruction; missing, mismatched or private required provenance fences rather than repairing history.
+Only the legitimate empty initial snapshot uses position zero without an instruction.
 
 ### Recording and rendering instruction updates
 
@@ -1198,9 +1241,9 @@ Call rejection, Action denial, failure, cancellation and uncertainty all produce
 ### Authorizing exact actions
 
 The model-visible **Tool Catalog** contains definitions/schema/result contracts, not execution authority.
-It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_transcript` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
-The CLI and TUI put `bash` and `web_search` in a fresh Session's spec; the Host never supplies a tools list (D104).
-CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_transcript`, `start_agent`, `web_search`).
+It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_transcript`, `skill` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
+The CLI and TUI put `bash`, `skill` and `web_search` in a fresh Session's spec; the Host never supplies a tools list (D104).
+CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_transcript`, `skill`, `start_agent`, `web_search`).
 A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools`, and is the set sent to the model and used to validate calls.
 Every loaded name must be in its resulting tools or configure refuses `loaded_tools_not_in_tools`; a strict subset must contain `find_tools` or configure refuses `loaded_tools_unreachable`.
 Changing tools without specifying loaded_tools keeps equality when the saved sets were equal; otherwise it intersects the saved loaded set with the new tools and applies the same checks.
@@ -1333,7 +1376,7 @@ A caller may still escalate an ordinary outcome, such as a stale settlement, to 
 
 The Store's format version is the `format` row of `store_meta`, and SQLite's `PRAGMA user_version` repeats it so an older binary refuses the file cheaply.
 Before any write, open compares the format and then each table's and index's stored CREATE text with the DDL this binary renders, so a Store missing an object, holding an extra one, or carrying a changed column, CHECK or index is refused as the wrong schema.
-The Host opens schema 51 (41 let a failed, overflowed or retry-exhausted Turn outcome reference its report content; 42 saves each Model Output Item's replay rule, judged once at import, and replaces raw items with the neutral form: `model_output_item` keeps kind, phase, part count and an item bag; `model_output_part` keeps each part's array, kind, text and part bag; no answer or string projection tables remain; and content payloads are non-null with their recorded length; 43 certifies a Tool Call by its name, call ID and arguments only, since the provider item ID lives in the item bag, stores usage as four neutral counts beside the provider's report, pins each Session's codec (`openai-responses/1` for `codex`) and optional codec options of at most 512 bytes at creation, checks a provider label's syntax instead of a provider list, so adding a provider is no format change, and keeps each Session's [prefix seal](#prefix-seal); 44 stores a message's text once, as the item's message text row, with each text part keeping only its length into it, while a reasoning part keeps its own private row; 45 orders the index of Messages without a Session sender by Admission position; 46 names each Tool Call's Session on its row, and indexes every Activity row source by Session and position, so an Activity page is a range seek whatever the history's length; 47 makes the schema's tables expressible on SQLite, Postgres and MySQL and holds every statement to the reserved-name and `rowid` rules: no name any engine reserves outside its keyword place, no `rowid` (Sessions carry `created_seq` and Commands `command_seq`, each allocated max+1 in its creating transaction), a stored Workspace digest and key, foreign keys checked when each row is written rather than at commit, non-null key columns, byte-length checks, and the format marker in `store_meta`, while statements keep SQLite-only forms such as `unixepoch`, `GLOB`, `||`, `IS`, `INDEXED BY`, `ON CONFLICT`, `INSERT OR IGNORE` and `printf` until the typed statements bring their dialect rules; 48 and 49 record OpenAI web search; 50 drops the per-Session read-through position that 46 added; 51 makes a Command's `command_seq` its primary key and `command_key` unique, and indexes Commands by target, kind and `command_seq` in place of `command_seq`'s own index, so a Session's decisions, stops and interruptions are a range seek, and indexes Tool Calls by Session, Operation and call ordinal, and rejected Tool Calls and resolved Actions by Session, Operation and acceptance position, in place of the rejected calls' index by Operation, so a Session's calls and Tool Results are a range seek on their own tables, indexes revisions by Session and content so a Full report finds each content's first revision in SQL, and limits `store_meta`'s key to its three names, because MySQL keys only bounded text): a Store at any earlier version is rejected as unsupported, and its users must reset it.
+The Host opens schema 51 (41 let a failed, overflowed or retry-exhausted Turn outcome reference its report content; 42 saves each Model Output Item's replay rule, judged once at import, and replaces raw items with the neutral form: `model_output_item` keeps kind, phase, part count and an item bag; `model_output_part` keeps each part's array, kind, text and part bag; no answer or string projection tables remain; and content payloads are non-null with their recorded length; 43 certifies a Tool Call by its name, call ID and arguments only, since the provider item ID lives in the item bag, stores usage as four neutral counts beside the provider's report, pins each Session's codec (`openai-responses/1` for `codex`) and optional codec options of at most 512 bytes at creation, checks a provider label's syntax instead of a provider list, so adding a provider is no format change, and keeps each Session's [prefix seal](#prefix-seal); 44 stores a message's text once, as the item's message text row, with each text part keeping only its length into it, while a reasoning part keeps its own private row; 45 orders the index of Messages without a Session sender by Admission position; 46 names each Tool Call's Session on its row, and indexes every Activity row source by Session and position, so an Activity page is a range seek whatever the history's length; 47 makes the schema's tables expressible on SQLite, Postgres and MySQL and holds every statement to the reserved-name and `rowid` rules: no name any engine reserves outside its keyword place, no `rowid` (Sessions carry `created_seq` and Commands `command_seq`, each allocated max+1 in its creating transaction), a stored Workspace digest and key, foreign keys checked when each row is written rather than at commit, non-null key columns, byte-length checks, and the format marker in `store_meta`, while statements keep SQLite-only forms such as `unixepoch`, `GLOB`, `||`, `IS`, `INDEXED BY`, `ON CONFLICT`, `INSERT OR IGNORE` and `printf` until the typed statements bring their dialect rules; 48 and 49 record OpenAI web search; 50 drops the per-Session read-through position that 46 added; 51 makes a Command's `command_seq` its primary key and `command_key` unique, and indexes Commands by target, kind and `command_seq` in place of `command_seq`'s own index, so a Session's decisions, stops and interruptions are a range seek, and indexes Tool Calls by Session, Operation and call ordinal, and rejected Tool Calls and resolved Actions by Session, Operation and acceptance position, in place of the rejected calls' index by Operation, so a Session's calls and Tool Results are a range seek on their own tables, indexes revisions by Session and content so a Full report finds each content's first revision in SQL, and limits `store_meta`'s key to its three names, because MySQL keys only bounded text): a Store at any earlier version is rejected as unsupported and requires a compatible build or a separate fresh Store.
 Schema 51 is the migration baseline (Divyansh, D204): every later format change ships one forward step in `schema.migrations`, for SQLite and MySQL, and the build fails when `schema_version` and the steps disagree, and `tests/ci/test_store_schema_version.py` fails when a step whose `from` is below the released schema_version differs from its text at the release.
 A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
 Rui runs no DDL on MySQL (D203).
@@ -1347,6 +1390,7 @@ The step to 55 adds the saved model facts and their catalog source.
 The step to 56 adds the bounded outcome-unknown Message recovery index and moves saved wire 8 metadata to wire 9.
 The step to 57 adds archive intents and requested archive values, extends the command kind set, while retaining the unreleased wire 9.
 The step to 58 moves saved wire 9 metadata to wire 10 for nullable failed-send peers; it changes no saved command or refusal rows.
+The step to 59 adds immutable skill catalog metadata and its ordinary turnless instruction provenance, retaining unreleased wire 10 without rewriting earlier Conversation content.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -1395,6 +1439,7 @@ Stores older than the migration baseline are rejected, not replayed through an o
 Recovery is an explicit choice: use a compatible build at the original Store path, or back up the stopped Store and select a separate fresh Store.
 Rui never automatically recreates an incompatible Store.
 Store identity binds the canonical original path; moving or copying its directory does not relocate that identity.
+A SQLite selector mismatch refuses startup with `store_identity_mismatch` (exit 6), naming the saved original and actual canonical folders without changing the identity.
 Restoring a backup requires exclusive access to the original path and preservation of any replacement Store before restoration.
 The [recovery instructions](docs/store-reset.md) leave the original Store untouched.
 
@@ -1402,28 +1447,49 @@ The Host runs a SQLite Store's pending migrations at startup under its Store own
 If the backup fails, nothing migrates and the Store is refused.
 The copy is as large as the Store and stays until the next migration replaces it or the user deletes it.
 On MySQL, backing the Store up before applying a migration's text is the DB team's job.
-At that stage, the installer will only check and report compatibility.
-Today both installers replace the command through one shell owner, `rui_publish` in [release/publish.sh](release/publish.sh), and then report only facts that need action.
-A first install reports the installed version, its location and the first command to run.
-An update or reinstall reports the replaced and new versions and that saved work and sign-in were kept.
-Any install also reports three conditions.
-If the selected Store's format is one the new build cannot open, it says nothing was changed and offers two choices: a build that still opens the Store, and the [reset guide](docs/store-reset.md).
-The format comes from the `user_version` bytes of the Store's database header, or from the replaced release's version while that header is unwritten.
-If a Host is running, it gives a command that can stop it, using the replaced build when only that build can reach the Host, or a status command when the Host does not answer.
-If `PATH` does not select the new `rui`, it says how to fix that, and it mentions `hash -r` and `rehash` only when another `rui` comes first on `PATH`.
-The report opens no SQLite connection, starts or stops nothing and prints no command output.
-It omits a fact it cannot read and says on stderr when it cannot check the Host.
-Nothing after the rename fails the installation.
-Compatibility is still enforced when a Host starts.
+Installation alone does not open the Store for writes, migrate it, reset it or change credentials.
+The schema owns `migration_baseline` and current format at Host startup; unequal formats are not necessarily incompatible, and version punctuation does not establish the supported range.
+The report distinguishes unchanged, supported through startup migration, unsupported and unknown compatibility.
+If candidate facts are absent, it reports unknown and leaves validation to Host startup without starting a candidate Host to probe it.
+The installer's read-only Store probe uses the defaults-selected Store, which is not necessarily the client's explicitly selected active Store.
+MySQL schema application and backup remain operator-owned.
+
+`rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
+`rui upgrade --check` is read-only and starts no Host.
+The shared local `UpgradePanel` offers explicit Install and Cancel from both overview and conversation, without sending `/upgrade` to the model or adding an updater service.
+It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
+Restart can interrupt work in every Session in that Store, not other Stores.
+No running Host means install only.
+
+The thin upgrade coordinator composes `InstallationOutcome` separately from HostLifecycle `ActivationOutcome`.
+After publication it pauses only the exact observed Host instance, waits for lease retirement, starts the pinned target identity with preserved settings and verifies readiness before claiming activation.
+A replacement race, failed stop or start, or unsupported or application-owned launch configuration must not blindly stop another process and is reported as installed but not activated or unconfirmed as appropriate.
+An already-installed target can still need activation of an older running Host.
+Manual source and release installation remain install-only.
+
+Lifecycle control observation is separate from ordinary client readiness.
+Upgrade can read the complete bounded Host-info envelope using only the current wire or the released wire `9`, with matching HTTP and body versions and peer PID from that same connection.
+Only an explicit wrong-wire response permits the historical read-only profile; malformed, unavailable or unknown profiles grant no authority.
+A historical managed Host is paused through its retained executable with the captured exact instance, then the same Store lease must retire.
+Target readiness still requires the current protocol and the pinned launch identity; historical control facts never grant Session access.
+Target configuration, exact-stop support, the current launch helper and private launch buffers are prepared before interruption.
+A terminal client that cannot speak the new Host's protocol retains its draft and unresolved handles in a local recovery hold rather than reattaching or resending work.
+
+`src/Installation.zig` is the sole final publication owner; source and release shell installers invoke the same staged native helper.
+A `release_candidate` pins validated immutable release identity, assets and digest before download.
+The native bootstrap can download pinned SHA256SUMS and archive assets for historical v0.56.4 using the current native publication owner, without executing its old uncooperative installer.
+A permanent prefix-scoped lock serializes participating writers, with final managed eligibility and numeric release-order checks under the lock.
+External historical installers do not participate and have no new serialization or no-downgrade guarantee.
+Intentional source installation retains its distinct replacement policy.
+Automatic upgrade refuses selected source and unknown-identity builds; the standalone release installer can intentionally convert those managed selections without overwriting application-owned commands.
+`installation_path` owns read-only PATH observations and sanitized advice shared by native clients and modern shell installers.
+Complete builds remain available for running processes, but retained executables do not guarantee rollback after Store migration.
 
 A release version has the form `0.S.N`.
-`S` is the `schema_version` of the released commit, and `N` counts earlier releases with the same schema.
-Without migrations, the Store format is the only compatibility question an update raises, so the version answers it and nobody chooses version numbers.
+`S` is the released commit's `schema_version`, and `N` counts earlier releases with the same schema.
 The release workflow publishes each promoted `stable` SHA at most once, and versions never decrease.
 A build reports `unreleased` unless its commit has a matching release tag.
-The release installer uses the source installer's layout: each complete build gets its own directory under `~/.local/lib/rui`, and a rename replaces the command links.
-Once migrations keep old Stores usable across format changes, Rui should switch to ordinary semantic versioning.
-[Issue #523](https://github.com/DivyanshGolyan/rui/issues/523) records the approved decision and unresolved conversion and relocation work; it does not authorize a migration or reset now.
+[Issue #523](https://github.com/DivyanshGolyan/rui/issues/523) records the approved decision and unresolved conversion and relocation work; it does not authorize a new migration or reset policy.
 
 Development test Stores and associated configure captures are recreated for changed formats, not migrated.
 This does not authorize recreating user Stores.
@@ -2584,7 +2650,7 @@ A request made during Admission may recover that same original if it becomes unc
 
 After restoration and joined Admission settlement, detachment reports any unresolved original with its exact recovery key, even when local cancellation itself succeeds.
 A later fatal observation or failed detach notice reports the last accepted intent through `rui request inspect KEY` for a Message, or `rui request recover KEY` for the same saved Permission Decision admission.
-Explicit `request read-result` reads the Message's saved answer after completion.
+Explicit `request read-result` reads the Message's saved answer after completion, or the ordinary saved skill-refusal/reload outcome without model work.
 Guidance preserves its exact handle and selectors.
 A current unresolved original takes precedence over that accepted fallback.
 Joined read borrowers transfer structured HTTP status, type and code into one bounded frontend owner, independent of worker reuse.
@@ -2637,6 +2703,8 @@ It is the first row dropped when rows run short, before any draft row, and the f
 A stop shows the Messages that waited just before it, searching the Activity rows from the oldest one's position the previous page reported, which is at most one model step back because waiting input joins the work at its next input boundary.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
+
+Wire version 10 adds explicit native skill invocation and idle catalog reload intent, typed capture refusals and reload acknowledgements; different versions refuse each other rather than silently discarding the new intent.
 Wire version 8 later gained the `activity_search` request; a Host built before it answers that request as unknown.
 Wire version 8 dropped the `proposal_page`, `proposal_field` and `person_message` requests, added the Activity page's `kinds`, `limit` and `received` rows, renamed its `outcome` rows to `turn_ended`, each naming its `ending`, and marked a done Turn's answer `final` on its assistant row, after version 7 dropped the page's `read_through` and `beyond_unseen` fields and the `mark_read` request (the "new since you looked" feature, removed 2026-11-03), version 6 added the `label` on the Session a Message row names as sender or target, version 5 added the pages' `hosted_call` items, version 4 added each Message's sender environment, and version 3 added `queued`, so a client and Host of different versions refuse each other at the version check, and a client that finds such a Host says so and how to stop it.
 Normal desktop widths are the design target; narrower terminals wrap the same interface, never omit an approval command or decision label.
@@ -2701,7 +2769,8 @@ One scalar row census per Pane is cached by text generation and the complete lay
 The conversation reserves a stable one-column library scrollbar rail from its first frame, showing position within the loaded retained canvas, never a percentage of all saved history.
 A transcript alone may keep bounded trailing blank canvas to pin short text through prepend or geometry changes; Down never grows it, Up shrinks it, and added text absorbs it.
 `TerminalFrame` budgets regions without moving the scroll owner and observes only real text rows after final layout; blank canvas cannot credit an Action.
-One invocation-owned `RenderBackend` owns libvaxis grids, page-charged allocations, URI retention and frozen encoded bytes; detail Sessions borrow it rather than reinitialize it.
+One invocation-owned `RenderBackend` owns libvaxis grids, page-charged allocations, URI retention and frozen encoded bytes; detail Sessions and upgrade panels borrow it rather than reinitialize it.
+A nested panel keeps the original screen's active and hidden transcript source coordinates on the stack and reflows them on return; live output still follows, Action reading restarts, and a poisoned backend cannot be revived.
 `SessionScreen` owns only its conversation projection, reflow coordinates and exact per-frame consent tickets/Delivered receipts; `SessionTerminal` alone owns terminal modes, output deadlines, waiting-report acknowledgment and the persistent byte decoder.
 Preparation captures the old source anchor before backend resize; waiting prefixes are staged before paint borrows cells, and generated helper labels live in charged frame scratch through encode.
 Encoding finishes before output can pump, then the screen issues its ticket and returns Delivered only after every byte and final flush succeed, including a zero-byte unchanged frame.
@@ -3470,7 +3539,7 @@ Ordinary observation/transport failures keep their existing handling; this adds 
 Fatal diagnosis never replaces the original captured identity or demotes an earlier confirmed admission to unconfirmed.
 
 `request inspect` presents the saved command's original rejection, queued/processing state, exclusion, failure, cancellation or completion as data.
-`request read-result` explicitly streams its original public answer when available.
+`request read-result` explicitly streams its original public answer, or captured skill-refusal/reload outcome, when available.
 Answer streams, including Action call ID and argument reads, withhold their final window until every advertised byte and EOF arrive, so a truncated read exits nonzero without complete-looking output.
 Neither infers work failure from an observation error or substitutes the Session's latest result.
 Before a Permission Decision in an ask-configured Session, normal interactive presentation shows the exact Workspace and complete decoded Bash command with the allow-once/deny choice, not numeric IDs.

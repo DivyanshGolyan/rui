@@ -137,9 +137,27 @@ const testingSessionReport = tests.testingSessionReport;
 const testingSessionReportWithProfile = tests.testingSessionReportWithProfile;
 const touchForTesting = tests.touchForTesting;
 
+/// Compose fixtures with the canonical required runners, retaining independent
+/// test records and sorting by the production catalog's name ordering.
+fn catalogRecordsWith(comptime extra: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record {
+    var records: [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record = undefined;
+    @memcpy(records[0..tool_catalog.built_in.records.len], tool_catalog.built_in.records);
+    @memcpy(records[tool_catalog.built_in.records.len..], extra);
+    sortCatalogRecords(&records);
+    return records;
+}
+
+fn sortCatalogRecords(records: []tool_catalog.Record) void {
+    std.mem.sort(tool_catalog.Record, records, {}, struct {
+        fn lessThan(_: void, left: tool_catalog.Record, right: tool_catalog.Record) bool {
+            return std.mem.lessThan(u8, left.name, right.name);
+        }
+    }.lessThan);
+}
+
 /// A catalog with one tool beyond the built-ins, between them by name.
 const testing_record: tool_catalog.Record = .{ .name = "test_tool", .owner = .rui, .description = "A tool only tests offer.", .input_schema = "{\"type\":\"object\"}" };
-const testing_records = [_]tool_catalog.Record{ tool_catalog.bash_record, tool_catalog.find_tools_record, tool_catalog.message_agent_record, tool_catalog.read_transcript_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
+const testing_records = catalogRecordsWith(&.{testing_record});
 const testing_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [testing_records.len][32]u8 = undefined;
@@ -586,25 +604,28 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStore(&storage, &tmp, std.testing.io);
-    defer storage.close() catch unreachable;
-    // Attached ask Sessions commit forward identities too.
-    const parent = try configureTestSession(&storage, "identity-parent");
-    // Entry points commit rows in every column.
-    const first_session = try configureTestSessionAsk(&storage, "identity-config");
-    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), first_session.slice() });
-    try submitTestMessage(&storage, &tmp, "identity-message", "identity-message", first_session.slice(), "propose");
-    try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-first");
+    const before = blk: {
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        // Attached ask Sessions commit forward identities too.
+        const parent = try configureTestSession(&storage, "identity-parent");
+        // Entry points commit rows in every column.
+        const first_session = try configureTestSessionAsk(&storage, "identity-config");
+        try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), first_session.slice() });
+        try submitTestMessage(&storage, &tmp, "identity-message", "identity-message", first_session.slice(), "propose");
+        try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-first");
 
-    const rolled_back = try takeEveryIdentityForTesting(&storage);
-    try std.testing.expectEqual(rolled_back, try takeEveryIdentityForTesting(&storage));
+        const rolled_back = try takeEveryIdentityForTesting(&storage);
+        try std.testing.expectEqual(rolled_back, try takeEveryIdentityForTesting(&storage));
+        break :blk .{ .parent = parent, .identities = rolled_back };
+    };
 
     // Committing the given-back values in every column: none is handed out
     // again. A Host offering one more tool saves its record at open.
-    try storage.close();
     try testingStoreCatalog(&storage, &tmp, std.testing.io, &testing_catalog);
+    defer storage.close() catch unreachable;
     const second_session = try configureTestSessionAsk(&storage, "identity-later");
-    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), second_session.slice() });
+    try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ before.parent.slice(), second_session.slice() });
     // New text, so content commits a new row too.
     try submitTestMessage(&storage, &tmp, "identity-later-message", "identity-later-message", second_session.slice(), "propose again");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "identity-second");
@@ -615,7 +636,7 @@ test "a rolled-back transaction's identities are handed out again, a committed o
     tools.configuration.tools = try .of(&.{ "bash", "test_tool" });
     try std.testing.expect(storage.configure(&tools, .{}) == .accepted);
     const after = try takeEveryIdentityForTesting(&storage);
-    for (rolled_back, after) |given_back, next| try std.testing.expect(next > given_back);
+    for (before.identities, after) |given_back, next| try std.testing.expect(next > given_back);
 }
 
 test "a round queues one statement any number of times, an engine pass before each rebinding" {
@@ -723,6 +744,7 @@ test "abandoning an Access that has ended runs nothing" {
 }
 
 test "the tables that carry Sessions are exactly the ones the touch oracle watches" {
+    @setEvalBranchQuota(10_000);
     inline for (store_schema.tables) |table| {
         const watched = comptime for (sqlite.touch_oracle_tables) |watched_table| {
             if (std.mem.eql(u8, watched_table, table.name)) break true;
@@ -1276,9 +1298,9 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    // At open, the catalog has two texts for each local tool and web
-    // search's shared empty text; configure has imported nothing yet.
-    try std.testing.expectEqual(@as(u64, 11), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+    // At open, six local tools each have two texts, plus web search's
+    // shared empty text; configure has imported nothing yet.
+    try std.testing.expectEqual(@as(u64, 13), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var command = try completeConfiguration("fresh-tool-texts", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
     command.configuration.instructions = try testingBytesContent(&tmp, "fresh-instructions", "Be brief.");
@@ -1286,7 +1308,7 @@ test "a fresh Store creates a Session with instructions, an output schema and th
     defer command.removeTemporaryContent(std.testing.io) catch unreachable;
     // The configure adds its two values.
     try std.testing.expect(storage.configure(&command, .{}) == .accepted);
-    try std.testing.expectEqual(@as(u64, 13), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
+    try std.testing.expectEqual(@as(u64, 15), try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
 }
 
 test "a Session's tools are saved once and read back as saved, not as today's built-ins" {
@@ -1311,19 +1333,19 @@ test "a Session's tools are saved once and read back as saved, not as today's bu
             };
         }
     };
-    // The Host's catalog: one set of the six built-ins, saved at open.
-    try std.testing.expectEqual([3]u64{ 1, 6, 6 }, try Tools.counts(&storage));
+    // The Host's catalog: one set of the seven built-ins, saved at open.
+    try std.testing.expectEqual([3]u64{ 1, 7, 7 }, try Tools.counts(&storage));
     // Two Sessions offering Bash share one set, of the catalog's record.
     const first = try configureTestSessionAsk(&storage, "saved-tools-first");
     const second = try configureTestSessionAsk(&storage, "saved-tools-second");
-    try std.testing.expectEqual([3]u64{ 2, 6, 7 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 2, 7, 8 }, try Tools.counts(&storage));
     // A set with the catalog's members is the catalog's set.
-    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "find_tools", "message_agent", "read_transcript", "start_agent", "web_search" });
-    try std.testing.expectEqual([3]u64{ 2, 6, 7 }, try Tools.counts(&storage));
+    try Tools.set(&storage, "saved-tools-all", first, &.{ "bash", "find_tools", "message_agent", "read_transcript", "skill", "start_agent", "web_search" });
+    try std.testing.expectEqual([3]u64{ 2, 7, 8 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-both", second, &.{ "bash", "web_search" });
-    try std.testing.expectEqual([3]u64{ 3, 6, 9 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 3, 7, 10 }, try Tools.counts(&storage));
     try Tools.set(&storage, "saved-tools-none", first, &.{});
-    try std.testing.expectEqual([3]u64{ 4, 6, 9 }, try Tools.counts(&storage));
+    try std.testing.expectEqual([3]u64{ 4, 7, 10 }, try Tools.counts(&storage));
     // Each revision keeps the set it was saved with.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(DISTINCT tool_set_id) FROM session_revision WHERE revision IN (1,2) AND " ++
         "session_ref=(SELECT session_ref FROM session_revision WHERE command_key='saved-tools-both')", .{}));
@@ -3698,7 +3720,7 @@ test "real SQLite full during import publishes no canonical prefix" {
             defer entry.release();
             var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
             defer a.deinit();
-            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, .{}));
+            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, null, null, .{}));
         },
     );
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
@@ -4306,6 +4328,91 @@ fn storeId(path: []const u8) ![2 * store_schema.store_id_bytes]u8 {
     const id = text[0..@intCast(c.sqlite3_column_bytes(statement, 0))];
     if (!store_schema.isStoreId(id)) return error.NoStoreId;
     return id[0 .. 2 * store_schema.store_id_bytes].*;
+}
+
+test "SQLite selector mismatch retains caller-owned evidence after failed open" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    const saved_selector = "/" ++ @as([protocol.max_store_bytes - 1]u8, @splat('s'));
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, saved_selector);
+    try storage.close();
+    var refused: Store = undefined;
+    try std.testing.expectError(error.StoreIdentityMismatch, refused.open(std.testing.io, database, root));
+    var evidence: store_schema.IdentityMismatch = .{};
+    try std.testing.expectError(error.StoreIdentityMismatch, refused.openWithOptions(std.testing.io, database, root, .{ .identity_mismatch = &evidence }));
+    try std.testing.expectEqualStrings(saved_selector, evidence.saved_selector.slice());
+    try refused.open(std.testing.io, database, saved_selector);
+    try refused.close();
+    try std.testing.expectEqualStrings(saved_selector, evidence.saved_selector.slice());
+}
+
+test "SQLite selector mismatch retains migration evidence and rolls back metadata" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.open(std.testing.io, database, root);
+    try storage.close();
+    const original_id = try storeId(database);
+    {
+        const raw = try openRaw(database);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, "UPDATE store_meta SET meta_value='56' WHERE meta_key='format';PRAGMA user_version=56");
+        var evidence: store_schema.IdentityMismatch = .{};
+        try std.testing.expectError(error.StoreIdentityMismatch, store_schema.migrate(std.testing.io, raw, "/different/canonical/store", 56, &.{}, &evidence));
+        try std.testing.expectEqualStrings(root, evidence.saved_selector.slice());
+        try std.testing.expectEqual(@as(u32, 56), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u32, 56), try sqlite.pragmaInt(raw, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
+        const selector = try sqlite.prepare(raw, "SELECT meta_value FROM store_meta WHERE meta_key='store_selector'");
+        defer _ = c.sqlite3_finalize(selector);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(selector));
+        var saved: protocol.Bounded(protocol.max_store_bytes) = .{};
+        try sqlite.readText(selector, 0, &saved);
+        try std.testing.expectEqualStrings(root, saved.slice());
+    }
+    try std.testing.expectEqualStrings(&original_id, &try storeId(database));
+}
+
+test "SQLite invalid identity metadata is not a selector mismatch" {
+    const cases = .{
+        .{ "PRAGMA application_id=0", error.WrongStoreIdentity },
+        .{ "DELETE FROM store_meta WHERE meta_key='store_selector'", error.WrongStoreIdentity },
+        .{ "DELETE FROM store_meta WHERE meta_key='store_id'", error.WrongStoreIdentity },
+        .{ "UPDATE store_meta SET meta_value='not-an-id' WHERE meta_key='store_id'", error.WrongStoreIdentity },
+        .{ "UPDATE store_meta SET meta_value=CAST(x'ff' AS TEXT) WHERE meta_key='store_selector'", error.InvalidUtf8 },
+        .{ "UPDATE store_meta SET meta_value=printf('%0493d',0) WHERE meta_key='store_selector'", error.ValueTooLong },
+    };
+    inline for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+        const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+        var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
+        const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
+        var storage: Store = undefined;
+        try storage.open(std.testing.io, database, root);
+        try storage.close();
+        {
+            const raw = try openRaw(database);
+            defer _ = c.sqlite3_close(raw);
+            try sqlite.exec(raw, case[0]);
+        }
+        for ([_][]const u8{ root, "/different/canonical/store" }) |selector| {
+            var evidence: store_schema.IdentityMismatch = .{};
+            try evidence.saved_selector.set("unchanged");
+            var refused: Store = undefined;
+            try std.testing.expectError(case[1], refused.openWithOptions(std.testing.io, database, selector, .{ .identity_mismatch = &evidence }));
+            try std.testing.expectEqualStrings("unchanged", evidence.saved_selector.slice());
+        }
+    }
 }
 
 test "a new Store draws its own Store id, keeps it, and is refused without it" {
@@ -8655,9 +8762,9 @@ test "schema 57 refusal rows migrate to wire 10 without changing command identit
         var storage: Store = undefined;
         try storage.open(std.testing.io, path, root);
         defer storage.close() catch unreachable;
-        try std.testing.expectEqual(@as(u32, 58), try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value='58'", .{}));
-        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='10'", .{}));
+        try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u64, store_schema.schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
         try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
         try Legacy.expectSaved(storage.sqliteDatabase(), commands);
         inline for (.{ .forward, .backward }) |direction| {
@@ -8767,7 +8874,7 @@ test "a migration whose step fails leaves its backup and the original Store read
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
-        try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}));
+        try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}, null));
     }
     for ([_][]const u8{ "store.sqlite3.kept", "store.backup.saved", "store.backup-old" }) |kept| {
         var kept_buffer: [8]u8 = undefined;
@@ -8790,7 +8897,7 @@ test "a migration whose step fails leaves its backup and the original Store read
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
-        try std.testing.expectError(error.MigrationBackupFailed, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session_revision"}, .mysql = &.{} }}));
+        try std.testing.expectError(error.MigrationBackupFailed, store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session_revision"}, .mysql = &.{} }}, null));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session_revision"));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "PRAGMA foreign_keys"));
     }
@@ -8815,7 +8922,7 @@ test "a Store at the maximum path backs itself up before a migration" {
     const raw = try openRaw(database);
     defer _ = c.sqlite3_close(raw);
     try sqlite.exec(raw, "UPDATE store_meta SET meta_value='7' WHERE meta_key='format';PRAGMA user_version=7");
-    try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(io, raw, paths.store.slice(), 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}));
+    try std.testing.expectError(error.MigrationBrokeForeignKey, store_schema.migrate(io, raw, paths.store.slice(), 7, &.{.{ .from = 7, .sqlite = &.{"DELETE FROM session"}, .mysql = &.{} }}, null));
     var backup_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const backup = try std.fmt.bufPrint(&backup_buffer, "{s}/rui.backup", .{paths.store.slice()});
     try std.testing.expect((try std.Io.Dir.cwd().statFile(io, backup, .{})).size > 0);
@@ -8862,7 +8969,7 @@ test "a migration that rebuilds a referenced table from the schema's text keeps 
     {
         const raw = try openRaw(store.path);
         defer _ = c.sqlite3_close(raw);
-        try store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = rebuild, .mysql = &.{} }});
+        try store_schema.migrate(std.testing.io, raw, store.root, 7, &.{.{ .from = 7, .sqlite = rebuild, .mysql = &.{} }}, null);
     }
     var storage: Store = undefined;
     try storage.open(std.testing.io, store.path, store.root);
@@ -8889,7 +8996,7 @@ test "a migration that leaves other text than bootstrap's, or a broken reference
     const raw = try openRaw(store.path);
     defer _ = c.sqlite3_close(raw);
     for (cases) |case| {
-        try std.testing.expectError(case.refusal, store_schema.migrate(std.testing.io, raw, store.root, case.from, &.{.{ .from = case.from, .sqlite = case.statements, .mysql = &.{} }}));
+        try std.testing.expectError(case.refusal, store_schema.migrate(std.testing.io, raw, store.root, case.from, &.{.{ .from = case.from, .sqlite = case.statements, .mysql = &.{} }}, null));
         try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
         try std.testing.expectEqual(@as(u32, 7), try sqlite.pragmaInt(raw, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'"));
         try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(raw, "SELECT count(*) FROM session"));
@@ -9890,20 +9997,18 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
 test "a catalog at its bound saves and opens again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const count = tool_catalog.max_catalog_records - 6;
+    // Reserve all required built-ins (including skill), then fill the rest
+    // with independent synthetic records up to the catalog's declared bound.
+    const count = tool_catalog.max_catalog_records - tool_catalog.built_in.records.len;
     var names: [count][9]u8 = undefined;
-    var records: [count + 6]tool_catalog.Record = undefined;
-    var digests: [count + 6][32]u8 = undefined;
-    records[0] = tool_catalog.bash_record;
-    records[1] = tool_catalog.find_tools_record;
-    records[2] = tool_catalog.message_agent_record;
-    records[3] = tool_catalog.read_transcript_record;
-    records[4] = tool_catalog.start_agent_record;
-    for (&names, records[5 .. count + 5], 0..) |*name, *record, index| {
+    var records: [tool_catalog.max_catalog_records]tool_catalog.Record = undefined;
+    var digests: [tool_catalog.max_catalog_records][32]u8 = undefined;
+    @memcpy(records[0..tool_catalog.built_in.records.len], tool_catalog.built_in.records);
+    for (&names, records[tool_catalog.built_in.records.len..], 0..) |*name, *record, index| {
         _ = try std.fmt.bufPrint(name, "tool_{d:0>4}", .{index});
         record.* = .{ .name = name, .owner = .rui, .description = "A tool among many.", .input_schema = "{\"type\":\"object\"}" };
     }
-    records[count + 5] = tool_catalog.web_search_record;
+    sortCatalogRecords(&records);
     for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
     const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
     var storage: Store = undefined;
@@ -9911,12 +10016,12 @@ test "a catalog at its bound saves and opens again" {
     try storage.close();
     try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(u64, count + 6), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
+    try std.testing.expectEqual(@as(u64, tool_catalog.max_catalog_records), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
 }
 
 /// The testing catalog with an MCP server's tool beside it.
 const mcp_record: tool_catalog.Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page from the docs server.", .input_schema = "{\"type\":\"object\",\"properties\":{\"url\":{\"type\":\"string\"}}}" };
-const mcp_records = [_]tool_catalog.Record{ tool_catalog.bash_record, mcp_record, tool_catalog.find_tools_record, tool_catalog.message_agent_record, tool_catalog.read_transcript_record, tool_catalog.start_agent_record, testing_record, tool_catalog.web_search_record };
+const mcp_records = catalogRecordsWith(&.{ mcp_record, testing_record });
 const mcp_digests = blk: {
     @setEvalBranchQuota(1_000_000);
     var out: [mcp_records.len][32]u8 = undefined;
@@ -10447,8 +10552,11 @@ test "MCP attempts serialize Sessions and recover without replay" {
         try settleCallsForTesting(&storage, &tmp, model, if (index == 0) "mcp-serial-calls-a" else "mcp-serial-calls-b", calls[0..(if (index == 0) @as(usize, 3) else 2)]);
     }
     var replacement_records = mcp_records;
-    replacement_records[1].server = "replacement";
-    replacement_records[1].input_schema = "{}";
+    for (&replacement_records) |*record| {
+        if (!std.mem.eql(u8, record.name, "fetch_page")) continue;
+        record.server = "replacement";
+        record.input_schema = "{}";
+    }
     var replacement_digests: [mcp_records.len][32]u8 = undefined;
     for (&replacement_records, &replacement_digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
     const replacement_catalog: tool_catalog.Catalog = .{ .records = &replacement_records, .digests = &replacement_digests };
@@ -10493,13 +10601,13 @@ test "MCP attempts serialize Sessions and recover without replay" {
 test "MCP ask approval uses the frozen server after its Session offer changes" {
     const View = @import("../session_view.zig");
     const tools = tool_catalog;
-    const records = comptime [_]tools.Record{ tools.record(.bash).*, .{
+    const records = comptime catalogRecordsWith(&.{.{
         .name = "fetch_page",
         .owner = .mcp,
         .server = "docs",
         .description = "Fetch a page.",
         .input_schema = "{\"type\":\"object\"}",
-    }, tools.record(.find_tools).*, tools.record(.message_agent).*, tools.record(.read_transcript).*, tools.record(.start_agent).*, tools.record(.web_search).* };
+    }});
     const digests = comptime blk: {
         @setEvalBranchQuota(1_000_000);
         var out: [records.len][32]u8 = undefined;
@@ -11285,4 +11393,205 @@ test "prepared cache eviction keeps colliding probe chains reachable" {
         buckets[bucket] = key;
     }
     unreachable; // 65 static keys in 64 initial buckets must collide.
+}
+
+test "skills schema 56 wire 9 upgrades populated rows to the current Store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var migrated_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const migrated = try std.fmt.bufPrint(&migrated_buffer, "{s}/skills-56.sqlite3", .{root});
+    var fresh_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const fresh = try std.fmt.bufPrint(&fresh_buffer, "{s}/skills-fresh.sqlite3", .{root});
+    {
+        const raw = try openRaw(migrated);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        for (store_schema.migrations) |step| {
+            if (step.from >= 56) break;
+            for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+        }
+        // Deliberately old metadata, not protocol.wire_version: omitting
+        // the new wire UPDATE must fail the production open below.
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=56", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','9'),('store_selector',?1),('format','56')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, root);
+        try sqlite.expectDone(meta);
+        try std.testing.expectEqual(@as(u32, 56), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='9'", .{}));
+        try std.testing.expectEqual(@as(u64, 3), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM conversation_entry", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM sqlite_schema WHERE name='session_skill_catalog'", .{}));
+    }
+    {
+        var storage: Store = undefined;
+        try storage.open(std.testing.io, migrated, root);
+        defer storage.close() catch unreachable;
+        try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u64, store_schema.schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
+        try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE source_catalog_position IS NULL AND turn_id IS NOT NULL", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+        // The old assistant answer is still ordinary public content, byte
+        // for byte, accessible through the same production content reader.
+        const reference = try testingContentReference(&storage, 5);
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(reference));
+        defer reader.close();
+        var answer: ["hello\nworld".len]u8 = undefined;
+        try std.testing.expectEqual(answer.len, try reader.read(0, &answer));
+        try std.testing.expectEqualStrings("hello\nworld", &answer);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const skills = try storage.readSkills(arena.allocator(), "d8mv7p");
+        try std.testing.expectEqual(@as(usize, 0), skills.catalog.entries.len);
+    }
+    // The pinned expected rows are independent of the forward migration.
+    // Compare every durable row (including new NULL provenance fields),
+    // not just the populated table counts or a schema assembled as current.
+    try freshStoreWithExpectedRows(fresh, root);
+    var migrated_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer migrated_rows.deinit();
+    var fresh_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer fresh_rows.deinit();
+    {
+        const raw = try openRaw(migrated);
+        defer _ = c.sqlite3_close(raw);
+        try writeRows(raw, &migrated_rows.writer);
+    }
+    {
+        const raw = try openRaw(fresh);
+        defer _ = c.sqlite3_close(raw);
+        try writeRows(raw, &fresh_rows.writer);
+    }
+    try std.testing.expect(migrated_rows.written().len > 1000);
+    try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
+}
+
+test "skills schema 58 wire 10 upgrades populated archive and refusal rows to the current Store" {
+    const Extra = struct {
+        fn seed(raw: *c.sqlite3, archive: *const protocol.SessionArchiveCommand, refused: *const protocol.MessageCommand) !void {
+            const archive_digest = archive.semanticDigest();
+            const refusal_digest = refused.semanticDigest();
+            try store_testing.sqliteExec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,6,'rhvzwc',?2,1,'',0,0,1000)", .{ archive.key.slice(), store_testing.Blob{ .bytes = &archive_digest } });
+            try store_testing.sqliteExec(raw, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admission_cutoff,stopped_at,parent_caused) VALUES(?1,'rhvzwc',NULL,2,0,1793781800,0)", .{archive.key.slice()});
+            try store_testing.sqliteExec(raw, "INSERT INTO session_archive(session_ref,command_key) VALUES('rhvzwc',?1)", .{archive.key.slice()});
+            try store_testing.sqliteExec(raw, "INSERT INTO session_archive_command(command_key,archived) VALUES(?1,1)", .{archive.key.slice()});
+            try sqlite.exec(raw, "UPDATE session SET next_position=3 WHERE session_ref='rhvzwc'");
+            try store_testing.sqliteExec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,'absent',?2,0,'unknown_session',0,0,1001)", .{ refused.key.slice(), store_testing.Blob{ .bytes = &refusal_digest } });
+            try store_testing.sqliteExec(raw, "INSERT INTO sent_rejection(command_key,sender_session_ref,sender_position,rejected_at) VALUES(?1,'brhkcj',6,1793781801)", .{refused.key.slice()});
+            try sqlite.exec(raw, "UPDATE session SET next_position=7 WHERE session_ref='brhkcj'");
+        }
+
+        fn expectSaved(raw: *c.sqlite3, archive: *const protocol.SessionArchiveCommand, refused: *const protocol.MessageCommand) !void {
+            const archive_digest = archive.semanticDigest();
+            const refusal_digest = refused.semanticDigest();
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM session_archive a JOIN session_stop s ON s.command_key=a.command_key JOIN session_archive_command requested ON requested.command_key=a.command_key JOIN core_command c ON c.command_key=a.command_key WHERE a.session_ref='rhvzwc' AND c.command_key=?1 AND c.kind=6 AND c.target='rhvzwc' AND c.input_digest=?2 AND c.accepted=1 AND c.command_seq=1000 AND requested.archived=1 AND s.session_ref='rhvzwc' AND s.position=2 AND s.admission_cutoff=0 AND s.stopped_at=1793781800 AND s.parent_caused=0", .{ archive.key.slice(), store_testing.Blob{ .bytes = &archive_digest } }));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM core_command c JOIN sent_rejection r ON r.command_key=c.command_key WHERE c.command_key=?1 AND c.kind=2 AND c.target='absent' AND c.input_digest=?2 AND c.accepted=0 AND c.code='unknown_session' AND c.command_seq=1001 AND c.primary_content_id IS NULL AND r.sender_session_ref='brhkcj' AND r.sender_position=6 AND r.rejected_at=1793781801", .{ refused.key.slice(), store_testing.Blob{ .bytes = &refusal_digest } }));
+            try std.testing.expectEqual(@as(u64, 3), try store_testing.sqliteQueryU64(raw, "SELECT next_position FROM session WHERE session_ref='rhvzwc'", .{}));
+            try std.testing.expectEqual(@as(u64, 7), try store_testing.sqliteQueryU64(raw, "SELECT next_position FROM session WHERE session_ref='brhkcj'", .{}));
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var migrated_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const migrated = try std.fmt.bufPrint(&migrated_buffer, "{s}/skills-58.sqlite3", .{root});
+    var fresh_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const fresh = try std.fmt.bufPrint(&fresh_buffer, "{s}/skills-58-fresh.sqlite3", .{root});
+    var archive: protocol.SessionArchiveCommand = .{};
+    try archive.key.set("skills-58-archive");
+    try archive.session.set("rhvzwc");
+    var refused: protocol.MessageCommand = .{ .text = try testingBytesContent(&tmp, "skills-58-refused-body", "old wire 10 refused peer message"), .sender = .{}, .sender_handle = .{} };
+    defer refused.removeTemporaryContent(std.testing.io) catch unreachable;
+    try refused.key.set("skills-58-refusal");
+    try refused.session.set("absent");
+    try refused.sender.?.store.set(root);
+    try refused.sender.?.session.set("brhkcj");
+    try refused.sender_handle.?.set("00112233445566778899aabbccddeeff");
+    {
+        const raw = try openRaw(migrated);
+        defer _ = c.sqlite3_close(raw);
+        try sqlite.exec(raw, store_testing.baseline_sqlite_ddl);
+        try sqlite.exec(raw, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+        try sqlite.exec(raw, store_testing.baseline_rows);
+        for (store_schema.migrations) |step| {
+            if (step.from >= 58) break;
+            for (step.sqlite) |statement| try sqlite.exec(raw, statement);
+        }
+        // Deliberately old metadata, not protocol.wire_version: omitting
+        // the new wire UPDATE must fail the production open below.
+        try sqlite.exec(raw, std.fmt.comptimePrint("PRAGMA application_id={d};PRAGMA user_version=58", .{store_schema.application_id}));
+        const meta = try sqlite.prepare(raw, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','10'),('store_selector',?1),('format','58')");
+        defer _ = c.sqlite3_finalize(meta);
+        try sqlite.bindText(meta, 1, root);
+        try sqlite.expectDone(meta);
+        try Extra.seed(raw, &archive, &refused);
+        try Extra.expectSaved(raw, &archive, &refused);
+        try std.testing.expectEqual(@as(u32, 58), try sqlite.pragmaInt(raw, "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value='10'", .{}));
+        try std.testing.expectEqual(@as(u64, 3), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM conversation_entry", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqliteQueryU64(raw, "SELECT count(*) FROM sqlite_schema WHERE name='session_skill_catalog'", .{}));
+    }
+    for (0..2) |_| {
+        var storage: Store = undefined;
+        try storage.open(std.testing.io, migrated, root);
+        defer storage.close() catch unreachable;
+        try Extra.expectSaved(storage.sqliteDatabase(), &archive, &refused);
+        const archive_replay = storage.archiveSession(&archive, .{});
+        try std.testing.expect(archive_replay == .accepted and archive_replay.accepted.replayed and archive_replay.accepted.archived);
+        const refusal_replay = storage.submitMessageWithModel(&refused, null, .{});
+        try std.testing.expect(refusal_replay == .rejected and refusal_replay.rejected.replayed);
+        try std.testing.expectEqual(protocol.MessageRejection.unknown_session, refusal_replay.rejected.code);
+        try Extra.expectSaved(storage.sqliteDatabase(), &archive, &refused);
+        try std.testing.expectEqual(store_schema.schema_version, try sqlite.pragmaInt(storage.sqliteDatabase(), "PRAGMA user_version"));
+        try std.testing.expectEqual(@as(u64, store_schema.schema_version), try store_testing.sqlite_only.queryU64(&storage, "SELECT CAST(meta_value AS INTEGER) FROM store_meta WHERE meta_key='format'", .{}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_skill_catalog", .{}));
+        try std.testing.expectEqual(@as(u64, 3), try store_testing.queryU64(&storage, "SELECT count(*) FROM conversation_entry WHERE source_catalog_position IS NULL AND turn_id IS NOT NULL", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM pragma_foreign_key_check", .{}));
+        // The old assistant answer is still ordinary public content, byte
+        // for byte, accessible through the same production content reader.
+        const reference = try testingContentReference(&storage, 5);
+        var reader: ContentReader = undefined;
+        reader.open(try storage.openContent(reference));
+        defer reader.close();
+        var answer: ["hello\nworld".len]u8 = undefined;
+        try std.testing.expectEqual(answer.len, try reader.read(0, &answer));
+        try std.testing.expectEqualStrings("hello\nworld", &answer);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const skills = try storage.readSkills(arena.allocator(), "d8mv7p");
+        try std.testing.expectEqual(@as(usize, 0), skills.catalog.entries.len);
+    }
+    // The pinned expected rows are independent of the forward migration.
+    // Compare every durable row (including new NULL provenance fields),
+    // not just the populated table counts or a schema assembled as current.
+    try freshStoreWithExpectedRows(fresh, root);
+    {
+        const raw = try openRaw(fresh);
+        defer _ = c.sqlite3_close(raw);
+        try Extra.seed(raw, &archive, &refused);
+    }
+    var migrated_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer migrated_rows.deinit();
+    var fresh_rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer fresh_rows.deinit();
+    {
+        const raw = try openRaw(migrated);
+        defer _ = c.sqlite3_close(raw);
+        try writeRows(raw, &migrated_rows.writer);
+    }
+    {
+        const raw = try openRaw(fresh);
+        defer _ = c.sqlite3_close(raw);
+        try writeRows(raw, &fresh_rows.writer);
+    }
+    try std.testing.expect(migrated_rows.written().len > 1000);
+    try std.testing.expectEqualStrings(fresh_rows.written(), migrated_rows.written());
 }

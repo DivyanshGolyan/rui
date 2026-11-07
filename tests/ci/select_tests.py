@@ -8,6 +8,7 @@ import re
 import subprocess
 
 from platform_boundary import mac_path
+from qualification import RESOURCES
 from strict_paths import strict
 
 
@@ -23,11 +24,32 @@ PTY_TARGETS = ("terminal-restoration-integration", "canonical-failure-integratio
 RENDERER_HARNESSES = ("tests/integration/session_sequence_model*", "tests/integration/input_equivalence.py",
                       "tests/integration/terminal_input_replay.py")
 
+# The upgrade fixture is standalone, including when a composed gate is selected.
+UPGRADE_PATHS = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
+                 "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
+                 "src/host_identity.c", "src/UpgradePanel.zig", "src/host_launch.c",
+                 "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/slash_commands.zig",
+                 "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
+                 "tests/integration/upgrade_integration.py", "tests/ci/test_upgrade_fixture.py", "release/*", "install.sh", "build.zig")
+
+# The source and release installers exercise real publication and PATH decisions.
+# Keep this standalone even beside check, which does not run the installer driver.
+INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
+                   "tests/ci/test_install.py", "tests/ci/test_installer_boundary.py", "tests/ci/test_release.py",
+                   "tests/ci/release.py", "tests/ci/release_numbers.py", "tests/ci/qualification.py",
+                   "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
+                   "src/cli.zig", "src/cli_args.zig", "src/store/schema.zig",
+                   "src/fetch_dependencies.sh", "release/*", "install.sh", "build.zig", "build.zig.zon")
+
 # Paths sharing an owner select its maintained boundary checks. Unknown code
 # selects check rather than silently declaring that no tests apply.
 RULES = (
     (("build.zig", "build.zig.zon", "src/vaxis-parser.patch", "src/prepare_vaxis.sh", "tests/vaxis/*"),
      ("test-vaxis",), ("test-vaxis",), "Patched dependency roots, not external-import discovery"),
+    (INSTALLER_PATHS, ("installer-integration",), ("installer-integration",),
+     "Installer: real publication and PATH boundary"),
+    (UPGRADE_PATHS, ("upgrade-integration",), ("upgrade-integration",),
+     "Stable upgrade: installed binary, lifecycle and installer boundary"),
     (("src/logic_tests.zig", "src/request_wait.zig", "src/core_boundary.zig", "src/word_search.zig", "src/execution_turn.zig", "src/request_encoding.zig",
       "src/AnswerRenderer.zig", "src/store/engine/mysql_refusal.zig"),
      ("test-logic",), (), "Portable owner transitions and encoding"),
@@ -94,6 +116,9 @@ RULES = (
     (("src/server*.zig", "tests/integration/admission_integration.sh"),
      ("check", "admission-debug-integration"), ("check", "admission-debug-integration"),
      "Admission/capture owner: complete Debug recovery matrix, not artifact smoke"),
+    (("src/skills.zig", "src/session_skills.zig", "tests/integration/skills_integration.py"),
+     ("test", "skills-integration"), ("test", "skills-integration"),
+     "Skill discovery and captured content: pure/native owners and isolated Host wire"),
     (("src/openapi*.zig", "openapi.json"), ("test",), ("test",),
      "The wire contract: openapi.json must equal what the wire types emit"),
     (("clients/ts/*",), ("ts-client",), ("ts-client",), "The TypeScript client and its launch of a real Host"),
@@ -284,7 +309,7 @@ CACHE_POLICY = {
 def setup_requirements(targets):
     # Every runner installs the same fixture packages (tests/integration/requirements.txt)
     # for any target, so no fixture's import depends on a hand-kept target list.
-    return {"go": "measurement-check" in targets, "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets)}
+    return {"go": bool(({"measurement-check"} | set(RESOURCES)).intersection(targets)), "node": bool({"ts-client", "launch-frame-integration", "check", "check-full"}.intersection(targets)), "python": bool(targets), "tmux": "upgrade-integration" in targets}
 
 
 def execution_batches(targets, check_part="all"):
@@ -394,7 +419,10 @@ def select(paths, phase, available):
         # keeps each matched live rule's own targets (`LIVE_RULES`).
         # The dependency regression roots are not discovered by test-logic.
         dependency_targets = targets & {"test-vaxis"}
-        targets = {"test-logic"} | live_targets | dependency_targets if targets else set()
+        targets = ({"test-logic"} | live_targets | dependency_targets |
+                   ({"upgrade-integration"} if any(matches(path, UPGRADE_PATHS) for path in paths) else set()) |
+                   ({"installer-integration"} if any(matches(path, INSTALLER_PATHS) for path in paths) else set())
+                   if targets else set())
         native_targets = set()
     for reason, served_by in live_reasons:
         if not targets & served_by:
