@@ -529,6 +529,9 @@ pub const Shown = struct {
     seen: enum { drawn, hidden, closed } = .hidden,
     /// What the rows came from, when not the draft alone (see `nextOf`).
     source: u64 = 0,
+    at: ?Cursor = null,
+
+    const Cursor = struct { position: usize, start: usize, end: usize, generation: u64 };
 
     /// The list, `list`, for the draft at `revision`, after `previous`:
     /// while the draft is the one `previous` was built for, it keeps its
@@ -548,7 +551,7 @@ pub const Shown = struct {
         if (built.count == 0) return null;
         const fresh: Shown = .{ .list = built, .revision = revision, .source = source };
         const kept = previous orelse return fresh;
-        if (kept.source != source) return fresh;
+        if (kept.source != source or kept.at != null) return fresh;
         if (kept.revision != revision) return .{ .list = built, .revision = revision, .source = source, .seen = if (kept.seen == .drawn) .drawn else .hidden };
         return .{ .list = built, .revision = revision, .source = source, .highlight = @min(kept.highlight, built.count - 1), .seen = kept.seen };
     }
@@ -556,9 +559,16 @@ pub const Shown = struct {
     /// Skill choices depend on the caret and metadata as well as the draft.
     /// Changed choices must be drawn before a selection key can use them.
     pub fn nextAt(previous: ?Shown, revision: u64, cursor: usize, start: usize, end: usize, generation: u64, list: ?List) ?Shown {
-        var source = std.hash.Wyhash.init(0);
-        inline for (.{ revision, cursor, start, end, generation }) |value| source.update(std.mem.asBytes(&value));
-        return nextOf(previous, revision, source.final(), list);
+        const built = list orelse return null;
+        if (built.count == 0) return null;
+        const at: Cursor = .{ .position = cursor, .start = start, .end = end, .generation = generation };
+        const fresh: Shown = .{ .list = built, .revision = revision, .at = at };
+        const kept = previous orelse return fresh;
+        if (kept.revision != revision or kept.at == null or !std.meta.eql(kept.at.?, at)) return fresh;
+        var current = fresh;
+        current.highlight = @min(kept.highlight, built.count - 1);
+        current.seen = kept.seen;
+        return current;
     }
 
     /// The list Enter, Esc and the arrows act on: `stored`, the latest
@@ -1123,6 +1133,10 @@ test "inline skills list gates every cursor and metadata identity change" {
     shown.drew(true);
     const unchanged = Shown.nextAt(shown, initial[0], initial[1], initial[2], initial[3], initial[4], list).?;
     try std.testing.expectEqual(.drawn, unchanged.seen);
+    const ordinary = Shown.next(shown, initial[0], list).?;
+    try std.testing.expectEqual(.hidden, ordinary.seen);
+    const replaced = Shown.nextAt(ordinary, initial[0], initial[1], initial[2], initial[3], initial[4], list).?;
+    try std.testing.expectEqual(.hidden, replaced.seen);
     for (0..initial.len) |index| {
         var changed = initial;
         changed[index] += 1;

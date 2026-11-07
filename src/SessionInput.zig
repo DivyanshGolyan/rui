@@ -97,7 +97,10 @@ pub fn attachments(self: *const Self) []const Editor.Attachment {
 pub fn skillNames(self: *const Self, ticket: Ticket, allocator: std.mem.Allocator) ![]const []const u8 {
     const submitted = try self.checked(ticket);
     const editor = &self.editors[submitted.bank];
-    return @import("skill_completion.zig").selectedNames(allocator, editor.buffer[0..editor.length], editor.attachments());
+    var names = try std.ArrayList([]const u8).initCapacity(allocator, editor.attachments().len);
+    errdefer names.deinit(allocator);
+    names.items.len = @import("skill_completion.zig").selectedNames(editor.buffer[0..editor.length], editor.attachments(), names.allocatedSlice()).len;
+    return names.toOwnedSlice(allocator);
 }
 
 /// Only after all borrowers of either bank have retired.

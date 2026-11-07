@@ -736,9 +736,11 @@ pub const StartRequest = struct {
         errdefer gpa.free(bytes);
         var writer = std.Io.Writer.fixed(bytes);
         inline for (.{ original, self.settings.bytes[0..self.settings.used], provider, model }) |part| writer.writeAll(part) catch unreachable;
-        const names = try skill_completion.selectedNames(gpa, bytes[0..original.len], self.attachments);
+        const names = try gpa.alloc([]const u8, self.attachments.len);
         errdefer gpa.free(names);
-        return .{ .bytes = bytes, .text_len = original.len, .text_offset = original.len - self.text.len, .names = names, .held = self.settings.held, .provider_len = if (self.binding.provider) |name| name.len else null, .model_len = if (self.binding.model) |name| name.len else null };
+        const selected = skill_completion.selectedNames(bytes[0..original.len], self.attachments, names);
+        const owned_names = try gpa.realloc(names, selected.len);
+        return .{ .bytes = bytes, .text_len = original.len, .text_offset = original.len - self.text.len, .names = owned_names, .held = self.settings.held, .provider_len = if (self.binding.provider) |name| name.len else null, .model_len = if (self.binding.model) |name| name.len else null };
     }
 };
 
