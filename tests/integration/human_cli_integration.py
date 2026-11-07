@@ -805,6 +805,17 @@ def keyed_frame(master, keys, accept, timeout=15):
     return found[0]
 
 
+def history_selected(frame, x, y):
+    """The original command selected a transcript; future prepends may be above it."""
+    return (x == 2 and looking_back(frame) and composer_ready(frame, x, y) and
+            frame.split("\n")[y] in ("›", ">"))
+
+
+def history_top(master, keys=b"/history\n"):
+    """Jump to the CURRENT transcript top, not a later page's Start label."""
+    return keyed_frame(master, keys, history_selected)
+
+
 def overview_title(frame):
     """The overview's title row: रुई rui, or rui alone without Unicode."""
     return "rui" in frame.split("\n", 1)[0].split()[:2]
@@ -1254,12 +1265,13 @@ USER_COLOUR = {"brightblue", "5c5cff"}
 ATTENTION_COLOUR = {"brown", "cdcd00"}
 
 
-def next_frame(master, timeout=3):
+def next_frame(master, timeout=3, *, capture=None):
     """Wait for the next committed frame; return it, or None if none came.
 
     An unchanged frame writes nothing, so a quiet wait is an answer here.
     """
-    capture = terminal_capture(master)
+    if capture is None:
+        capture = terminal_capture(master)
     generation = capture.generation
     deadline = time.monotonic() + timeout
     while capture.generation == generation or capture.synchronized:
@@ -1277,20 +1289,22 @@ def next_frame(master, timeout=3):
     return capture.completed
 
 
-def scroll_until(master, key, marker, *, presses=40):
+def scroll_until(master, key, marker, *, presses=40, capture=None):
     """Press `key` until the committed screen shows `marker`; return frames.
 
     A press that moves nothing at an edge draws nothing, and a page load can
     draw several frames, so each press drains frames until output is quiet.
     """
+    if capture is None:
+        capture = terminal_capture(master)
     seen = []
     for _ in range(presses):
-        if marker in current_screen(master):
+        if marker in capture.completed:
             return "\n".join(seen)
         os.write(master, key)
-        while (frame := next_frame(master, 1)) is not None:
+        while (frame := next_frame(master, 1, capture=capture)) is not None:
             seen.append(frame)
-    assert marker in current_screen(master), ("scroll did not reach marker", key, marker, current_screen(master))
+    assert marker in capture.completed, ("scroll did not reach marker", key, marker, capture.completed)
     return "\n".join(seen)
 
 
@@ -1435,6 +1449,37 @@ def conversation_protocol_cases():
         assert not looking_back(label + "\nnotice takes priority")
     assert not looking_back("body Looking back\nSession · Looking back")
     assert not live_conversation("Browsing · Esc returns\n Status · s\nmetadata")
+    # Command selection and a future canonical prepend are different events.
+    # A pinned source can remain identical while Start arrives ABOVE it;
+    # only a subsequent user navigation reveals that label.
+    source = ["› fresh start", "", "renderer answer fresh start"]
+    def history_frame(body, footer, draft="›"):
+        return body + [""] * (21 - len(body)) + ["─" * 80, draft, footer]
+    before = history_frame(source, "fresh start · model")
+    loading = history_frame(source, "Loading earlier messages…")
+    selected = history_frame(source, "Looking back · Ctrl-End: latest")
+    prepended = selected.copy()  # Arrival preserves the visible source anchor.
+    navigated = history_frame(["Start of conversation", *source], "Looking back · Ctrl-End: latest")
+    sequence = [before, loading, selected, prepended, navigated]
+    accepted = [history_selected("\n".join(rows), 2, 22) for rows in sequence]
+    assert accepted == [False, False, True, True, True], accepted
+    assert "Start of conversation" not in "\n".join(sequence[accepted.index(True)])
+    final = "\n".join(navigated)
+    assert final.index("Start of conversation") < final.index("› fresh start") < final.index("renderer answer fresh start")
+    assert final.count("› fresh start") == final.count("renderer answer fresh start") == 1
+    # A visible word in the body is not proof of transcript selection; nor
+    # can an Up injected into an inspection stand in for the queued intent.
+    for rejected in (
+            history_frame(["Start of conversation", *source], "fresh start · model"),
+            ["Browsing · Esc returns", *selected[1:-1], "Session · model"],
+            ["Browsing · Esc returns", "Message · 301 lines", *selected[2:-1], "Session · model"],
+            history_frame(source, "Looking back · Ctrl-End: latest", "› /history")):
+        assert not history_selected("\n".join(rejected), 2, 22), rejected
+    assert not history_selected("\n".join(selected), 0, 0)
+    assert not history_selected("\n".join(selected), 3, 22)
+    for label in LOOKBACK_LABELS:
+        for prompt in ("›", ">"):
+            assert history_selected("\n".join(history_frame(source, label, prompt)), 2, 22)
     queue = "› QUEUED-SOURCE".ljust(72) + "3 queued"
     for height in (24, 200):
         for boundary in (2, height - 5):
@@ -1540,7 +1585,7 @@ def conversation_protocol_cases():
         assert LIVE_LINE.search(prefix + "• Held call · 42s")
         assert LIVE_CLOCK.sub(r"\1", prefix + "• Held call · 42s") == prefix + "• Held call · "
     assert not LIVE_LINE.search(" • Held call · 42s")
-    print("conversation protocol: exact footer, 24/200-row body/chrome, six rejected corruptions and fitted every-frame equality passed", flush=True)
+    print("conversation protocol: exact footer, history selection before asynchronous Start, 24/200-row body/chrome, six rejected corruptions and fitted every-frame equality passed", flush=True)
 
 
 def cell_value_cases():
@@ -2463,7 +2508,8 @@ def scroll_return_case():
             # /history deliberately exposes the canonical Start; Esc remains
             # supported, but no return path REQUIRES it, including with draft.
             for back in (b"\x1b[B" * 40, b"\x1b", b"\x1b[1;5F", b"\x1b[6~" * 40):
-                keyed_frame(master, b"\x15/history\n", lambda frame, x, y: looking_back(frame) and "Start of conversation" in frame)
+                history_top(master, b"\x15/history\n")
+                scroll_until(master, b"\x1b[5~", "Start of conversation")
                 keyed_frame(master, b"keep", lambda frame, x, y: composer_ready(frame, x, y) and frame.split("\n")[y] == "› keep" and x == 6)
                 if back == b"\x1b":
                     return_to_live(master, key=back)
@@ -2631,9 +2677,10 @@ def persistent_opening_case():
                 session], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             startup = terminal_gate(caller, master, opening_held, ("queued opening", handoff, proxy.exchanges))
-            os.write(master, b"/history\n" + handoff)
-            # /history scrolls to the start once opening establishes it.
-            output = read_terminal(master, "Start of conversation")
+            # First prove the ORIGINAL queued intent survived the opening
+            # cancellation; a new Up must not hide a lost command.
+            history_top(master, b"/history\n" + handoff)
+            output = scroll_until(master, b"\x1b[5~", "Start of conversation")
             shown = current_screen(master)
             assert "Start of conversation" in shown, ("queued history lost its scroll", handoff, shown)
             assert shown.index("Start of conversation") < shown.index("literal **user** é") < shown.index("saved user 01"), \
@@ -3837,7 +3884,7 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 "--", reference], env={**os.environ, "HOME": str(home)},
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             read_terminal(master, "› ")
-            keyed_frame(master, b"/history\n", lambda frame, x, y: looking_back(frame))
+            history_top(master)
             scroll_until(master, b"\x1b[5~", "Start of conversation")
             history = current_screen(master)
             assert f"! {description} — Failed (exit {exit_code})\n" in history, history
@@ -4734,6 +4781,12 @@ def renderer_cases():
             if failure:
                 raise failure[0]
             return result
+
+        def history_top(self):
+            # Keep this owner's input writer and collection deadline; only
+            # the current-frame acceptance fact is shared with direct PTYs.
+            return self.send("/history\n", predicate=lambda: history_selected(
+                self.capture.completed, self.capture.screen.cursor.x, self.capture.screen.cursor.y))
 
         def ready(self, descriptor, until=lambda: True):
             """Return once an offered frame shows what `until` accepts. Rui
@@ -5642,7 +5695,7 @@ def renderer_cases():
         with terminal(session) as tty:
             tty.send("fresh start\n", marker)
             frames = tty.every_frame()
-            tty.send("/history\n", "Start of conversation")
+            tty.history_top()
             for _ in range(3):
                 os.write(tty.master, b"\x1b[5~")
                 time.sleep(0.3)
@@ -5814,7 +5867,8 @@ def renderer_cases():
         session = configure()
         hint = "In tmux, Shift-Enter sends · Alt-J adds a line"
         with terminal(session, tmux=True) as tty:
-            tty.send("/history\n", "Start of conversation")
+            tty.history_top()
+            scroll_until(tty.master, b"\x1b[5~", "Start of conversation", capture=tty.capture)
             assert "Earlier rows left this view." not in tty.capture.completed, tty.capture.completed
             tty.send("x", predicate=lambda: hint in tty.capture.completed and tty.capture.draft("x", 3))
             tty.send("\x7f", predicate=lambda: hint not in tty.capture.completed and tty.capture.draft("", 2))
@@ -5924,7 +5978,7 @@ def renderer_cases():
                 # Each /history jumps to the transcript's top, where the
                 # preceding page then loads.
                 for _ in range(10):
-                    tty.send("/history\n", predicate=lambda: tty.capture.draft("", 2) and looking_back(tty.capture.completed) and "Loading earlier messages…" not in tty.capture.completed)
+                    tty.history_top()
                     if "Start of conversation" in tty.capture.completed:
                         break
                 shown = tty.capture.completed
@@ -5961,7 +6015,8 @@ def renderer_cases():
                 assert tty.capture.completed == before, (return_key, before, tty.capture.completed)
             # In the transcript the same block opens and returns to its rows,
             # once the transcript has loaded what precedes it.
-            tty.send("/history\n", predicate=lambda: looking_back(tty.capture.completed) and "Start of conversation" in tty.capture.completed)
+            tty.history_top()
+            scroll_until(tty.master, b"\x1b[5~", "Start of conversation", capture=tty.capture)
             browsing = tty.capture.completed
             tty.send("\x0f", heading)
             tty.send("\x1b", predicate=lambda: "Message ·" not in tty.capture.completed)
@@ -6046,10 +6101,10 @@ def renderer_cases():
             return any(row.startswith("› " + text) and row.endswith(" " + label) for row in tty.capture.completed.split("\n"))
 
         def traverse(tty, steps=10, *, queued=None, call=None, work=None):
-            tty.send("/history\n", predicate=lambda: tty.capture.draft("", 2) and looking_back(tty.capture.completed))
+            tty.history_top()
             # Each step loads one older page or one listed Message.
             for _ in range(steps):
-                tty.send("/history\n", predicate=lambda: tty.capture.draft("", 2) and looking_back(tty.capture.completed) and "Loading earlier messages…" not in tty.capture.completed)
+                tty.history_top()
                 if "Start of conversation" in tty.capture.completed:
                     break
             # The last row is the Session line, which can name an unlabelled
@@ -6205,7 +6260,8 @@ def renderer_cases():
             release.set()
             tty.wait("OK-REPLY", timeout=30)
             tty.send("THIRD-QUESTION\n", answer("styled third"))
-            tty.send("/history\n", "Start of conversation")
+            tty.history_top()
+            scroll_until(tty.master, b"\x1b[5~", "Start of conversation", capture=tty.capture)
             shown = tty.capture.completed
             assert looking_back(shown) and "Earlier rows left this view." not in shown, shown
             for text in ("› DRIVER-QUESTION", "SHORT-STYLED-END", "› QUEUED-M", "OK-REPLY", "› THIRD-QUESTION", "renderer answer styled third"):
