@@ -411,8 +411,8 @@ test "run returns detached on Ctrl-D and leaves the lent terminal begun, with no
         defer environ.deinit();
         const screen = try std.testing.allocator.create(Screen);
         defer std.testing.allocator.destroy(screen);
-        try Screen.Test.init(screen, std.testing.io, &environ, false);
-        defer Screen.Test.deinit(screen);
+        try screen.init(std.testing.io, &environ, false);
+        defer screen.deinit();
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -517,7 +517,8 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
     };
     inline for (cases) |case| {
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
-        self.input.init();
+        var stream: TerminalInput = .{};
+        self.input.init(&stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .accepted = .{ .kind = case[0], .key = key.* } };
         self.submission.close(); // Releasing capture custody cannot erase acceptance.
         var bytes: [512]u8 = undefined;
@@ -656,7 +657,8 @@ fn unknownCommand(self: *Self, text: []const u8) void {
 
 test "frontend answers local and unknown commands in place and keeps Host commands for inspection" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
-    self.input.init();
+    var stream: TerminalInput = .{};
+    self.input.init(&stream);
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
     const cases = .{
         .{ "/foo bar", "! Unknown command /foo · /help" },
@@ -696,7 +698,8 @@ test "frontend answers local and unknown commands in place and keeps Host comman
 
 test "frontend /model shows the Session's model and sign-in within 60 columns and offers no pick" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
-    self.input.init();
+    var stream: TerminalInput = .{};
+    self.input.init(&stream);
     for ([_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" }) |id| for ([_]?protocol.Provider{ .codex, .openai, null }) |provider| {
         self.line = .{ .read = .{ .revision = 1, .end = 1 }, .provider = provider };
         try self.line.model.set(id);
@@ -719,7 +722,8 @@ test "frontend /model shows the Session's model and sign-in within 60 columns an
 
 test "frontend lists the efforts of the Session's model once it is read, the one in force marked" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
-    self.input.init();
+    var stream: TerminalInput = .{};
+    self.input.init(&stream);
     for ("/effort ") |byte| _ = self.input.feed(byte);
     try std.testing.expectEqualStrings("/effort ", self.input.composition().bytes);
     try std.testing.expect(self.nextCommands(null) == null);
@@ -750,7 +754,8 @@ test "frontend consumed canonical reader and admission failures survive external
     for ([_]bool{ false, true }) |admission| {
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
         self.init.io = std.testing.io;
-        self.input.init();
+        var stream: TerminalInput = .{};
+        self.input.init(&stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         const failure: anyerror = blk: {
             if (admission) {
@@ -780,7 +785,8 @@ test "Esc goes back to the overview only when the joined reader leaves nothing t
     for ([_]struct { Task.Run, ?anyerror }{ .{ Worker.read, null }, .{ Worker.fail, error.CanonicalStoreFailure } }) |case| {
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .leaving = .returned };
         self.init.io = std.testing.io;
-        self.input.init();
+        var stream: TerminalInput = .{};
+        self.input.init(&stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         // The reader is still running as Esc returns.
         try self.reader.start(std.testing.io, &self, case[0]);
@@ -803,7 +809,8 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
     for ([_]ReadPhase{ .activity, .permission, .history, .details }) |phase| {
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .reading = .{ .phase = phase } };
         self.init.io = std.testing.io;
-        self.input.init();
+        var stream: TerminalInput = .{};
+        self.input.init(&stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = self.input.submitText("current original B") } };
         try self.reader.start(std.testing.io, &self, Worker.read);
         try self.submission.task.start(std.testing.io, &self, Worker.admit);
@@ -846,7 +853,7 @@ fn quiesceUpgrade(self: *Self) !bool {
 }
 
 fn showUpgrade(self: *Self) !void {
-    const outcome = try UpgradePanel.run(self.init, self.store, self.terminal, &self.input.stream, self.interrupted);
+    const outcome = try UpgradePanel.run(self.init, self.store, self.terminal, self.interrupted);
     self.upgrade_requested = false;
     self.applyUpgrade(outcome);
     if (self.lender.upgrade) |handoff| {
@@ -1589,7 +1596,7 @@ fn step(self: *Self, wait: i32) !ConsentPolicy.Service {
     var decoded = stream.feed(read.byte, read.at);
     while (decoded != .none) : (decoded = stream.next()) switch (decoded) {
         .report => |report| switch (report) {
-            .width => |method| self.terminal.widthReported(method),
+            .width => |method| self.terminal.screen.setWidth(method),
             .alternate_scroll_reset => try self.terminal.enableAlternateScroll(),
             .focus => |focused| self.terminal.focused = focused,
             // The overview sends the records once a listing steps it.
@@ -2069,7 +2076,8 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
         for (1..6) |fail_at| {
             var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .reading = .{ .phase = phase } };
             self.init.io = std.testing.io;
-            self.input.init();
+            var stream: TerminalInput = .{};
+            self.input.init(&stream);
             try self.reader.start(std.testing.io, &self, Worker.fail);
             try self.settleReader(); // Preparation is recoverable, not fatal.
             try std.testing.expect(self.reading.pending_diagnostic != null);
@@ -2080,7 +2088,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             // Exercise the actual Task reset, also performed before spawn can fail.
             try self.reader.start(std.testing.io, &self, Worker.idle);
             try self.reader.join();
-            self.input.init();
+            self.input.init(&stream);
             self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
             self.stop();
             const settled = self.settle({});
@@ -2450,7 +2458,7 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
         var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page, .actions = .{ actions, actions } }, .command = undefined, .terminal = &terminal, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         self.init.io = std.testing.io;
-        self.input.init();
+        self.input.init(&self.terminal.stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         try screen.latest();
         screen.action_view = .{ .io = std.testing.io, .file = page };
@@ -3634,7 +3642,7 @@ test "a details page read before a Message was sent never covers it" {
             _ = self.submission.join();
             self.submission.close();
             self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .input = &self.input, .environment = .empty };
-            self.input.init();
+            self.input.init(&self.terminal.stream);
         }
         Worker.release.store(true, .release);
         while (!self.reader.completed()) std.Thread.yield() catch {};
@@ -4067,7 +4075,7 @@ test "upgrade command stays local and preserves the actual draft cursor and orig
     screen.* = .{ .colour = false };
     var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
     self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false };
-    self.input.init();
+    self.input.init(&self.terminal.stream);
     const original = self.input.submitText("original indeterminate model input");
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('K'), .retry = @splat('K') };
     _ = self.input.append("/upgrade");
@@ -4094,7 +4102,8 @@ test "upgrade outcomes retain Unicode draft cursor selection and unresolved orig
     inline for (std.enums.values(UpgradePanel.Outcome)) |outcome| {
         for ([_]bool{ false, true }) |blocked| {
             self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .upgrade_blocked = blocked };
-            self.input.init();
+            var stream: TerminalInput = .{};
+            self.input.init(&stream);
             const original = self.input.submitText("the original request");
             self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('H') };
             for ("next é!\x1b[D") |byte| _ = self.input.feed(byte);
@@ -4126,7 +4135,7 @@ test "upgrade quiescing reobservation and protocol holds refuse a fresh Message 
     var terminal: Terminal = .{ .original = undefined, .flags = undefined, .output = -1, .screen = screen };
     for (0..3) |hold| {
         self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false }, .upgrade_requested = hold == 0, .upgrade_reobserving = hold == 1, .upgrade_blocked = hold == 2 };
-        self.input.init();
+        self.input.init(&self.terminal.stream);
         self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
         _ = self.input.append("never send before safe reattachment");
         try self.draftEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }, null);
