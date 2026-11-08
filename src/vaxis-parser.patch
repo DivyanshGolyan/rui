@@ -2592,7 +2592,15 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
              }
          }
  
-@@ -181,14 +251,35 @@
+@@ -178,17 +248,44 @@
+                         try self.postEvent(.{ .winsize = winsize });
+                     }
+ 
++                    // A separate open file description leaves the writer blocking,
++                    // while ensuring read under input_lock can never wait for input.
++                    const input_fd = try std.posix.openat(std.posix.AT.FDCWD, "/dev/tty", .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .NOCTTY = true, .CLOEXEC = true }, 0);
++                    defer (std.Io.File{ .handle = input_fd, .flags = .{ .nonblocking = true } }).close(self.io);
++
                      // initialize the read buffer
                      var buf: [1024]u8 = undefined;
                      var read_start: usize = 0;
@@ -2606,7 +2614,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +                        // ordinary post-frame input can then be fresh on its
 +                        // first key, while parser-held bytes retain their age.
 +                        var ready = [1]std.posix.pollfd{.{
-+                            .fd = self.tty.fd.handle,
++                            .fd = input_fd,
 +                            .events = std.posix.POLL.IN,
 +                            .revents = 0,
 +                        }};
@@ -2619,8 +2627,9 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +                        if (self.stale_bytes != 0) batch.sequence = @min(batch.sequence, self.stale_sequence);
 +                        const available = buf.len - read_start;
 +                        const read_limit = if (self.stale_bytes == 0) available else @min(available, self.stale_bytes);
-+                        const bytes_read = self.tty.read(buf[read_start..][0..read_limit]) catch |err| {
++                        const bytes_read = std.posix.read(input_fd, buf[read_start..][0..read_limit]) catch |err| {
 +                            self.unlockInput();
++                            if (err == error.WouldBlock) continue;
                              try retry.wait(self.io, err);
                              continue;
                          };
@@ -2629,7 +2638,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                          if (bytes_read == 0) return error.EndOfStream;
                          retry = .{};
                          const n = read_start + bytes_read;
-@@ -205,6 +296,7 @@
+@@ -205,6 +302,7 @@
                                  if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
                                      buf[0] = buf[seq_start];
                                      read_start = 1;
@@ -2637,7 +2646,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                                      continue :read_loop;
                                  }
                              }
-@@ -214,6 +306,7 @@
+@@ -214,6 +312,7 @@
                                  // There is no consumed length on parse errors. Discard
                                  // this batch rather than retrying the same bad bytes.
                                  read_start = 0;
@@ -2645,7 +2654,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                                  continue :read_loop;
                              };
                              if (result.n == 0) {
-@@ -224,14 +317,16 @@
+@@ -224,14 +323,16 @@
                                      buf[seq_start - initial_start] = buf[seq_start];
                                  }
                                  read_start = seq_start - initial_start;
