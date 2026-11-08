@@ -1247,46 +1247,104 @@ index 2c6edb6..81acf55 100644
 +    defer std.testing.allocator.free(value);
 +    try std.testing.expectEqualStrings("ab\n界c", value);
 +}
+diff --git a/src/vxfw/ScrollBars.zig b/src/vxfw/ScrollBars.zig
+index eff49f1..fc8bce9 100644
+--- a/src/vxfw/ScrollBars.zig
++++ b/src/vxfw/ScrollBars.zig
+@@ -180,7 +180,7 @@ pub fn handleCapture(self: *ScrollBars, ctx: *vxfw.EventContext, event: vxfw.Eve
+                             .slice => |slice| break :count @floatFromInt(slice.len),
+                             .builder => |builder| {
+                                 var counter: usize = 0;
+-                                while (builder.itemAtIdx(counter, self.scroll_view.cursor)) |_|
++                                while (builder.hasItemAtIdx(counter, self.scroll_view.cursor))
+                                     counter += 1;
+ 
+                                 break :count @floatFromInt(counter);
+@@ -389,7 +389,7 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+                 .slice => |slice| break :count @floatFromInt(slice.len),
+                 .builder => |builder| {
+                     var counter: usize = 0;
+-                    while (builder.itemAtIdx(counter, self.scroll_view.cursor)) |_|
++                    while (builder.hasItemAtIdx(counter, self.scroll_view.cursor))
+                         counter += 1;
+ 
+                     break :count @floatFromInt(counter);
 diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
+index 1c569eb..10429b7 100644
 --- a/src/vxfw/ScrollView.zig
 +++ b/src/vxfw/ScrollView.zig
-@@ -12,10 +12,17 @@
+@@ -11,10 +11,22 @@ const ScrollView = @This();
+ 
  pub const Builder = struct {
      userdata: *const anyopaque,
-     buildFn: *const fn (*const anyopaque, idx: usize, cursor: usize) ?vxfw.Widget,
+-    buildFn: *const fn (*const anyopaque, idx: usize, cursor: usize) ?vxfw.Widget,
++    buildFn: ?*const fn (*const anyopaque, idx: usize, cursor: usize) ?vxfw.Widget = null,
++    hasFn: ?*const fn (*const anyopaque, idx: usize, cursor: usize) bool = null,
 +    /// Optional frame-owned widget construction for virtualized sources.
 +    buildFrameFn: ?*const fn (*const anyopaque, idx: usize, cursor: usize, Allocator) Allocator.Error!?vxfw.Widget = null,
- 
-     pub inline fn itemAtIdx(self: Builder, idx: usize, cursor: usize) ?vxfw.Widget {
-         return self.buildFn(self.userdata, idx, cursor);
-     }
 +
++    /// Probe without exposing a widget with a transient backing store.
++    pub fn hasItemAtIdx(self: Builder, idx: usize, cursor: usize) bool {
++        if (self.hasFn) |has| return has(self.userdata, idx, cursor);
++        return self.buildFn.?(self.userdata, idx, cursor) != null;
++    }
+ 
+-    pub inline fn itemAtIdx(self: Builder, idx: usize, cursor: usize) ?vxfw.Widget {
+-        return self.buildFn(self.userdata, idx, cursor);
++    /// The returned widget is valid until arena reset; its source must also
++    /// remain alive until then. Frame builders must not return window borrows.
 +    pub fn itemAtIdxForDraw(self: Builder, idx: usize, cursor: usize, arena: Allocator) Allocator.Error!?vxfw.Widget {
 +        if (self.buildFrameFn) |build| return build(self.userdata, idx, cursor, arena);
-+        return self.itemAtIdx(idx, cursor);
-+    }
++        return self.buildFn.?(self.userdata, idx, cursor);
+     }
  };
  
- pub const Source = union(enum) {
-@@ -265,6 +272,17 @@
-     } else {
-         self.scroll.wants_cursor = true;
+@@ -38,6 +50,7 @@ const Scroll = struct {
+     has_more_horizontal: bool = true,
+     /// The cursor must be in the viewport.
+     wants_cursor: bool = false,
++    anchor_end: bool = false,
+ 
+     pub fn linesDown(self: *Scroll, n: u8) bool {
+         if (!self.has_more_vertical) return false;
+@@ -206,7 +219,7 @@ pub fn nextItem(self: *ScrollView, ctx: *vxfw.EventContext) void {
+                 // Advance the cursor
+                 self.cursor += 1;
+                 // Check the bounds, reversing until we get the last item
+-                while (builder.itemAtIdx(self.cursor, self.cursor) == null) {
++                while (!builder.hasItemAtIdx(self.cursor, self.cursor)) {
+                     self.cursor -|= 1;
+                 }
+                 // If we didn't change state, we don't redraw
+@@ -241,7 +254,7 @@ pub fn prevItem(self: *ScrollView, ctx: *vxfw.EventContext) void {
+                 // Decrement the cursor
+                 self.cursor -= 1;
+                 // Check the bounds, reversing until we get the last item
+-                while (builder.itemAtIdx(self.cursor, self.cursor) == null) {
++                while (!builder.hasItemAtIdx(self.cursor, self.cursor)) {
+                     self.cursor -|= 1;
+                 }
+                 // If we didn't change state, we don't redraw
+@@ -267,6 +280,18 @@ pub fn ensureScroll(self: *ScrollView) void {
      }
-+}
-+
+ }
+ 
 +/// Anchor the last item at the bottom, including when it exceeds the viewport.
 +pub fn jumpToEnd(self: *ScrollView) void {
 +    const count = self.item_count orelse return;
 +    if (count == 0) return;
 +    self.cursor = count - 1;
-+    self.scroll.top = @min(self.scroll.top, self.cursor);
++    self.scroll.top = self.cursor;
 +    self.scroll.vertical_offset = 0;
 +    self.scroll.pending_lines = 0;
-+    self.scroll.wants_cursor = true;
- }
- 
++    self.scroll.wants_cursor = false;
++    self.scroll.anchor_end = true;
++}
++
  /// Inserts children until add_height is < 0
-@@ -280,7 +298,7 @@
+ fn insertChildren(
+     self: *ScrollView,
+@@ -280,7 +305,7 @@ fn insertChildren(
      var upheight = add_height;
      while (self.scroll.top >= 0) : (self.scroll.top -= 1) {
          // Get the child
@@ -1295,7 +1353,30 @@ diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
  
          const child_offset: u16 = if (self.draw_cursor) 2 else 0;
          const max_size = ctx.max.size();
-@@ -399,7 +417,7 @@
+@@ -375,6 +400,22 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+     //      will check for this at the end and only include visible children
+     var accumulated_height: i17 = -(self.scroll.vertical_offset + self.scroll.pending_lines);
+ 
++    // Seek directly to the last item instead of realizing every intervening
++    // item. Measure it to anchor even a multi-line item at the bottom.
++    if (self.scroll.anchor_end) {
++        self.scroll.anchor_end = false;
++        if (try builder.itemAtIdxForDraw(self.scroll.top, self.cursor, ctx.arena)) |last| {
++            const child_offset: u16 = if (self.draw_cursor) 2 else 0;
++            const child_ctx = ctx.withConstraints(
++                .{ .width = max_size.width - child_offset, .height = 0 },
++                .{ .width = null, .height = null },
++            );
++            const last_surface = try last.draw(child_ctx);
++            accumulated_height = @as(i17, max_size.height) - @as(i17, last_surface.size.height);
++            self.scroll.vertical_offset = -accumulated_height;
++        }
++    }
++
+     // We handled the pending scroll by assigning accumulated_height. Reset it's state
+     self.scroll.pending_lines = 0;
+ 
+@@ -399,7 +440,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
  
      const child_offset: u16 = if (self.draw_cursor) 2 else 0;
  
@@ -1304,10 +1385,20 @@ diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
          // Defer the increment
          defer i += 1;
  
+@@ -435,7 +476,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+     // see if we just drew the last item on the bottom of the screen. If we just drew the last item
+     // we can set `scroll.has_more` to false.
+     if (self.scroll.has_more_vertical and accumulated_height <= max_size.height) {
+-        if (builder.itemAtIdx(i, self.cursor) == null) self.scroll.has_more_vertical = false;
++        if (!builder.hasItemAtIdx(i, self.cursor)) self.scroll.has_more_vertical = false;
+     }
+ 
+     var total_height: usize = totalHeight(&child_list);
 diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
+index fe46d2b..b9b9a7f 100644
 --- a/src/vxfw/Text.zig
 +++ b/src/vxfw/Text.zig
-@@ -3,6 +3,123 @@
+@@ -3,6 +3,123 @@ const vaxis = @import("../main.zig");
  
  const Allocator = std.mem.Allocator;
  
@@ -1391,7 +1482,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
 +    }
 +
 +    /// Borrowed only until another row outside the current window is requested.
-+    pub fn line(self: *LineIndex, index: usize) ?*const Text {
++    fn line(self: *LineIndex, index: usize) ?*const Text {
 +        if (index >= self.len) return null;
 +        if (index < self.window_start or index - self.window_start >= self.window_count) {
 +            const first = (index / window_limit) * window_limit;
@@ -1411,12 +1502,12 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
 +    }
 +
 +    pub fn builder(self: *LineIndex) vxfw.ScrollView.Builder {
-+        return .{ .userdata = self, .buildFn = lineAt, .buildFrameFn = lineAtForDraw };
++        return .{ .userdata = self, .hasFn = hasLine, .buildFrameFn = lineAtForDraw };
 +    }
 +
-+    fn lineAt(raw: *const anyopaque, index: usize, _: usize) ?vxfw.Widget {
-+        const self: *LineIndex = @ptrCast(@alignCast(@constCast(raw)));
-+        return if (self.line(index)) |value| value.widget() else null;
++    fn hasLine(raw: *const anyopaque, index: usize, _: usize) bool {
++        const self: *const LineIndex = @ptrCast(@alignCast(raw));
++        return index < self.len;
 +    }
 +
 +    fn lineAtForDraw(raw: *const anyopaque, index: usize, _: usize, arena: Allocator) Allocator.Error!?vxfw.Widget {
@@ -1431,7 +1522,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
  const vxfw = @import("vxfw.zig");
  
  const Text = @This();
-@@ -76,6 +193,7 @@
+@@ -76,6 +193,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                      continue;
                  }
                  const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
@@ -1439,7 +1530,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
                  surface.writeCell(col, row, .{
                      .char = .{ .grapheme = grapheme, .width = grapheme_width },
                      .style = self.style,
-@@ -102,6 +220,7 @@
+@@ -102,6 +220,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                  const grapheme = char.bytes(line);
                  const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
  
@@ -1447,7 +1538,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
                  if (col + grapheme_width >= container_size.width and
                      line_width > container_size.width and
                      self.overflow == .ellipsis)
-@@ -204,6 +323,10 @@
+@@ -204,6 +323,10 @@ pub const SoftwrapIterator = struct {
      line: []const u8 = "",
      index: usize = 0,
      hard_iter: LineIterator,
@@ -1458,7 +1549,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
  
      pub const Line = struct {
          width: u16,
-@@ -225,14 +348,15 @@
+@@ -225,14 +348,15 @@ pub const SoftwrapIterator = struct {
              self.line = self.hard_iter.next() orelse return null;
              self.line = std.mem.trimEnd(u8, self.line, " \t");
              self.index = 0;
@@ -1476,7 +1567,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
  
              if (self.ctx.max.width) |max| {
                  if (cur_width + next_width > max) {
-@@ -244,17 +368,30 @@
+@@ -244,17 +368,30 @@ pub const SoftwrapIterator = struct {
                      if (trimmed_width > max) {
                          // Won't fit on line by itself, so fit as much on this line as we can
                          var iter = self.ctx.graphemeIterator(word);
@@ -1507,7 +1598,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
                      // We are softwrapping, advance index to the start of the next word
                      const end = self.index;
                      self.index = std.mem.indexOfNonePos(u8, self.line, self.index, soft_breaks) orelse self.line.len;
-@@ -263,11 +400,21 @@
+@@ -263,11 +400,21 @@ pub const SoftwrapIterator = struct {
              }
  
              self.index = idx;

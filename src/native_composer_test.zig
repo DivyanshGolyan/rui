@@ -84,15 +84,15 @@ test "native wrapping advances across a grapheme wider than its viewport" {
     defer index.deinit(std.testing.allocator);
     try index.reflow(std.testing.allocator, &input, narrow);
     try std.testing.expectEqual(@as(usize, 3), index.len);
-    try std.testing.expectEqualStrings("A", index.line(0).?.text);
-    try std.testing.expectEqualStrings("界", index.line(1).?.text);
-    try std.testing.expectEqualStrings("Z", index.line(2).?.text);
+    try std.testing.expectEqualStrings("A", (try frameText(&index, 0, narrow.arena)).text);
+    try std.testing.expectEqualStrings("界", (try frameText(&index, 1, narrow.arena)).text);
+    try std.testing.expectEqualStrings("Z", (try frameText(&index, 2, narrow.arena)).text);
     const clipped = try (try index.builder().itemAtIdxForDraw(1, 0, narrow.arena)).?.draw(narrow);
     try std.testing.expectEqual(@as(u16, 1), clipped.size.height);
     try std.testing.expect(!std.mem.eql(u8, "界", clipped.readCell(0, 0).char.grapheme));
     try index.reflow(std.testing.allocator, &input, wide);
     try std.testing.expectEqual(@as(usize, 1), index.len);
-    try std.testing.expectEqualStrings(original, index.line(0).?.text);
+    try std.testing.expectEqualStrings(original, (try frameText(&index, 0, wide.arena)).text);
     const restored = try (try index.builder().itemAtIdxForDraw(0, 0, wide.arena)).?.draw(wide);
     try std.testing.expectEqualStrings("界", restored.readCell(1, 0).char.grapheme);
     try std.testing.expectEqualStrings("Z", restored.readCell(3, 0).char.grapheme);
@@ -114,11 +114,64 @@ test "native text checkpoints preserve source boundaries and frame widgets" {
     try std.testing.expect(index.checkpoint_count <= 256);
     for ([_]usize{ 999, 0, 512, 127, 128, 255, 256, 998 }) |i| {
         const expected = try std.fmt.allocPrint(arena.allocator(), "row-{d:0>4}", .{i});
-        try std.testing.expectEqualStrings(expected, index.line(i).?.text);
+        try std.testing.expectEqualStrings(expected, (try frameText(&index, i, ctx.arena)).text);
     }
     const old = (try index.builder().itemAtIdxForDraw(0, 0, ctx.arena)).?;
-    _ = index.line(999).?;
+    _ = try frameText(&index, 999, ctx.arena);
+    const replacement = [_]fw.Text{.{ .text = "replacement" }};
+    try index.reflow(std.testing.allocator, &replacement, ctx);
     const restored = try old.draw(ctx);
     try std.testing.expectEqualStrings("r", restored.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("0", restored.readCell(7, 0).char.grapheme);
+}
+
+fn frameText(index: *fw.Text.LineIndex, row: usize, arena: std.mem.Allocator) !*const fw.Text {
+    const widget = (try index.builder().itemAtIdxForDraw(row, 0, arena)).?;
+    return @ptrCast(@alignCast(widget.userdata));
+}
+
+const SeekFixture = struct {
+    count: usize = 200_001,
+    builds: usize = 0,
+    tall_last: bool = false,
+
+    fn has(raw: *const anyopaque, row: usize, _: usize) bool {
+        const self: *const SeekFixture = @ptrCast(@alignCast(raw));
+        return row < self.count;
+    }
+
+    fn build(raw: *const anyopaque, row: usize, _: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!?fw.Widget {
+        const self: *SeekFixture = @ptrCast(@alignCast(@constCast(raw)));
+        if (row >= self.count) return null;
+        self.builds += 1;
+        const text = try arena.create(fw.Text);
+        text.* = .{ .text = if (self.tall_last and row == self.count - 1)
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nLAST"
+        else
+            try std.fmt.allocPrint(arena, "row-{d}", .{row}), .softwrap = false };
+        return text.widget();
+    }
+};
+
+test "native scroll end realizes only viewport across a far seek and tall last item" {
+    fw.DrawContext.init(.unicode);
+    for ([_]bool{ false, true }) |tall| {
+        var storage: [512 * 1024]u8 = undefined;
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        var fixture: SeekFixture = .{ .tall_last = tall };
+        var scroll: fw.ScrollView = .{
+            .children = .{ .builder = .{ .userdata = &fixture, .hasFn = SeekFixture.has, .buildFrameFn = SeekFixture.build } },
+            .item_count = @intCast(fixture.count),
+        };
+        const ctx: fw.DrawContext = .{ .arena = fixed.allocator(), .min = .{}, .max = .{ .width = 16, .height = 8 }, .cell_size = .{} };
+        scroll.jumpToEnd();
+        const surface = try scroll.draw(ctx);
+        std.debug.print("far-seek tall={} builds={d} frame_bytes={d}\n", .{ tall, fixture.builds, fixed.end_index });
+        try std.testing.expect(fixture.builds <= 10);
+        try std.testing.expect(fixed.end_index < storage.len);
+        const last = surface.children[surface.children.len - 1];
+        try std.testing.expectEqual(@as(i17, 7), last.origin.row + @as(i17, last.surface.size.height) - 1);
+        const end_row = last.surface.size.height - 1;
+        try std.testing.expectEqualStrings(if (tall) "L" else "r", last.surface.readCell(0, end_row).char.grapheme);
+    }
 }
