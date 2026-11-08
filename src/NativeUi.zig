@@ -560,6 +560,10 @@ fn openExport(self: *Self) !void {
 fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (value) {
+        .paste => |text| if (self.export_open) {
+            ctx.alloc.free(text);
+            ctx.consumeEvent();
+        },
         .paste_start => {
             self.pasting = true;
             if (self.export_open) ctx.consumeAndRedraw();
@@ -800,4 +804,13 @@ test "native exact export command uses source identity and shell-safe store byte
     try std.testing.expect(std.mem.indexOf(u8, command, "--store-hex 73746f726520776974682027201b --content-bytes 4 --content-digest abababab") != null);
     try std.testing.expect(std.mem.indexOf(u8, command, "Rui content digest v1: abababab") != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, command, 0x1b) == null);
+}
+
+test "native export overlay consumes and frees paste before it reaches draft" {
+    var self: Self = undefined;
+    self.export_open = true;
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    const text = try std.testing.allocator.dupe(u8, "must not reach the draft");
+    try capture(&self, &ctx, .{ .paste = text });
+    try std.testing.expect(ctx.consume_event);
 }
