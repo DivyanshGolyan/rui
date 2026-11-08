@@ -1,5 +1,5 @@
 //! One invocation's original intent and Admission borrower. Initialize in final
-//! storage; neither this owner nor its input may move until the borrower joins.
+//! storage; this owner must not move until its borrower joins.
 const std = @import("std");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -10,12 +10,12 @@ const Task = @import("ClientTask.zig");
 const Self = @This();
 
 pub const Intent = union(enum) {
-    message: Input.Ticket,
+    message: []const u8,
     /// A Message sent as the reason `action` is denied. The Message goes
     /// first and its acceptance names the denial to begin next: the Host
     /// holds the Message until the denial settles the call group, so the
     /// model reads both in one request.
-    message_then_deny: struct { ticket: Input.Ticket, action: u64 },
+    message_then_deny: struct { text: []const u8, action: u64 },
     decision: struct { action: u64, decision: protocol.PermissionDecision },
 
     pub fn kind(self: Intent) Kind {
@@ -26,10 +26,10 @@ pub const Intent = union(enum) {
     }
 
     /// The Message's sealed text; null for a decision.
-    pub fn ticket(self: Intent) ?Input.Ticket {
+    pub fn text(self: Intent) ?[]const u8 {
         return switch (self) {
             .message => |message| message,
-            .message_then_deny => |reason| reason.ticket,
+            .message_then_deny => |reason| reason.text,
             .decision => null,
         };
     }
@@ -63,10 +63,11 @@ io: std.Io,
 store: []const u8,
 session: []const u8,
 directory: []const u8,
-input: *Input,
 /// The terminal's environment, carried by each Message for its Bash.
 environment: client.Environment,
 intent: ?Intent = null,
+/// Original Message bytes, frozen before starting the worker.
+message_bytes: [65_536]u8 = undefined,
 state: State = .not_started,
 task: Task = .{},
 key: [36]u8 = @splat(0),
@@ -100,8 +101,13 @@ pub fn recovery(self: *const Self) Recovery {
 
 pub fn begin(self: *Self, intent: Intent) !void {
     std.debug.assert(self.intent == null and self.task.thread == null);
-    // Retain intent before randomness, path reservation or launch can fail.
-    self.intent = intent;
+    // Freeze the original before randomness, reservation or launch can fail.
+    // Neither retries nor a later draft borrow the caller's editor.
+    self.intent = switch (intent) {
+        .message => |text| .{ .message = try self.freezeMessage(text) },
+        .message_then_deny => |reason| .{ .message_then_deny = .{ .text = try self.freezeMessage(reason.text), .action = reason.action } },
+        .decision => intent,
+    };
     self.state = .not_started;
     self.reply = null;
     self.publication = .not_sent;
@@ -109,6 +115,12 @@ pub fn begin(self: *Self, intent: Intent) !void {
     self.target = .{ .reserved = try target.resolve(self.io, &self.path, &self.key) };
     try self.startWorker(submit);
     self.state = .submitting;
+}
+
+fn freezeMessage(self: *Self, text: []const u8) ![]const u8 {
+    if (text.len > self.message_bytes.len) return error.MessageTooLarge;
+    @memcpy(self.message_bytes[0..text.len], text);
+    return self.message_bytes[0..text.len];
 }
 
 /// A deferred gesture is bound to this original, never the next intent.
@@ -192,10 +204,10 @@ test "submission bounded gestures consume only the original and do not requeue f
             var stream: TerminalInput = .{};
             var input: Input = undefined;
             input.init(&stream);
-            var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty };
+            var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .environment = .empty };
             // An idle gesture has no authority over a future original.
             try self.requestRecovery(null);
-            self.intent = if (kind == 0) .{ .message = input.submitText("B") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
+            self.intent = if (kind == 0) .{ .message = "B" } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
             self.key = @splat('B');
             self.state = .unconfirmed;
             self.publication = .published;
@@ -246,8 +258,8 @@ test "submission bounded joined outcomes precede retry and retire original autho
                 var stream: TerminalInput = .{};
                 var input: Input = undefined;
                 input.init(&stream);
-                var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
-                self.intent = if (kind == 0) .{ .message = input.submitText("original B") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
+                var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .environment = .empty, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
+                self.intent = if (kind == 0) .{ .message = "original B" } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
                 self.reply = .{ .status = 200, .context = .{ .kind = if (kind == 0) .message else .permission_decision }, .target = if (kind == 0) .{ .message = .{ .bytes = 10, .digest = protocol.contentDigest("original B") } } else .{ .permission_decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } }, .answer = .{ .replayed = false, .result = switch (outcome) {
                     .accepted => .{ .accepted = if (kind == 0) .{ .message = .{ .admission = 37 } } else .permission_decision },
                     .rejected => .{ .rejected = .{} },
@@ -310,7 +322,7 @@ test "submission bounded joined outcomes precede retry and retire original autho
                 }
                 // Release then replacement C: neither history nor B's gesture
                 // can cause a launch; fresh C recovery is still available.
-                self.intent = if (kind == 0) .{ .message = input.submitText("replacement C") } else .{ .decision = .{ .action = 20, .decision = if (kind == 1) .allow_once else .deny } };
+                self.intent = if (kind == 0) .{ .message = "replacement C" } else .{ .decision = .{ .action = 20, .decision = if (kind == 1) .allow_once else .deny } };
                 self.key = @splat('C');
                 self.state = .unconfirmed;
                 self.publication = .published;
@@ -372,7 +384,6 @@ pub fn discardRejected(self: *Self) !void {
 
 fn release(self: *Self) void {
     std.debug.assert(self.task.thread == null);
-    if (self.intent.?.ticket()) |ticket| self.input.release(ticket) catch unreachable;
     self.close();
     self.intent = null;
     self.publication = .not_sent;
@@ -393,7 +404,7 @@ fn submit(raw: *anyopaque, task: *Task) !void {
     if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
     if (self.publication == .not_sent) self.publication = .unknown;
     self.captured = switch (self.intent.?) {
-        .message, .message_then_deny => try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = try self.input.message(self.intent.?.ticket().?) }, self.target).get(),
+        .message, .message_then_deny => try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = self.intent.?.text().? }, self.target).get(),
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.target),
     };
     self.publication = .published;
@@ -412,15 +423,15 @@ test "submission reservation failure retains unsent intent ahead of accepted his
         var stream: TerminalInput = .{};
         var input: Input = undefined;
         input.init(&stream);
-        var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .accepted = .{ .kind = .message, .key = @splat('A') } };
-        const intent: Intent = if (kind == 0) .{ .message = input.submitText("original café!") } else .{ .decision = .{ .action = 9, .decision = if (kind == 1) .allow_once else .deny } };
+        var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = "unused", .session = "k7m2qx", .directory = "unused", .environment = .empty, .accepted = .{ .kind = .message, .key = @splat('A') } };
+        const intent: Intent = if (kind == 0) .{ .message = "original café!" } else .{ .decision = .{ .action = 9, .decision = if (kind == 1) .allow_once else .deny } };
         for ("next té!\x1b[D") |byte| _ = input.feed(byte);
         try std.testing.expectError(error.EntropyUnavailable, self.begin(intent));
         try std.testing.expectEqual(.not_started, self.view().?.state);
         try std.testing.expectEqual(intent.kind(), self.recovery().not_sent);
         try std.testing.expect(self.join() == .absent);
         try std.testing.expectError(error.SubmissionUnresolved, self.discardRejected());
-        if (kind == 0) try std.testing.expectEqualStrings("original café!", try input.message(intent.message));
+        if (kind == 0) try std.testing.expectEqualStrings("original café!", self.intent.?.text().?);
         try std.testing.expectEqualStrings("next té!", input.composition().bytes);
         try std.testing.expectEqual("next té".len, input.composition().cursor);
     }
@@ -460,8 +471,8 @@ test "an accepted reason names its Action's denial; a rejected one denies nothin
         var stream: TerminalInput = .{};
         var input: Input = undefined;
         input.init(&stream);
-        var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = directory, .input = &input, .environment = .empty, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
-        self.intent = .{ .message_then_deny = .{ .ticket = input.submitText("skip"), .action = 19 } };
+        var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = directory, .environment = .empty, .key = @splat('B'), .state = .unconfirmed, .publication = .published };
+        self.intent = .{ .message_then_deny = .{ .text = "skip", .action = 19 } };
         self.reply = Worker.reply(outcome == .accepted);
         try self.task.start(self.io, &self, if (outcome == .lost) Worker.lost else Worker.done);
         defer {
@@ -522,8 +533,8 @@ test "submission cancelled and failed joins preserve independent publication fac
                 var stream: TerminalInput = .{};
                 var input: Input = undefined;
                 input.init(&stream);
-                var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .input = &input, .environment = .empty, .accepted = .{ .kind = .message, .key = @splat('A') }, .publication = publication, .key = @splat('B'), .state = .unconfirmed };
-                self.intent = if (kind == 0) .{ .message = input.submitText("original B café!") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
+                var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .environment = .empty, .accepted = .{ .kind = .message, .key = @splat('A') }, .publication = publication, .key = @splat('B'), .state = .unconfirmed };
+                self.intent = if (kind == 0) .{ .message = "original B café!" } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
                 for ("newer té!\x1b[D") |byte| _ = input.feed(byte);
                 try self.task.start(self.io, &self, run);
                 const end = self.join();
@@ -568,9 +579,9 @@ test "submission recovery validates reopened originals and pins the saved reader
             input.init(&stream);
             var vtable = io.vtable.*;
             vtable.fileSync = Failure.sync;
-            var self: Self = .{ .io = .{ .userdata = io.userdata, .vtable = &vtable }, .store = root, .session = "k7m2qx", .directory = root, .input = &input, .environment = .empty };
+            var self: Self = .{ .io = .{ .userdata = io.userdata, .vtable = &vtable }, .store = root, .session = "k7m2qx", .directory = root, .environment = .empty };
             defer self.close();
-            const intent: Intent = if (kind == 0) .{ .message = input.submitText("original café!") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
+            const intent: Intent = if (kind == 0) .{ .message = "original café!" } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
             try self.begin(intent);
             try std.testing.expectEqual(error.NoSpaceLeft, self.join().failed.err);
             const key = self.view().?.key;
@@ -634,7 +645,7 @@ fn resend(raw: *anyopaque, task: *Task) !void {
         }
         const original: protocol_reply.MutationTarget = switch (self.intent.?) {
             .message, .message_then_deny => blk: {
-                const bytes = try self.input.message(self.intent.?.ticket().?);
+                const bytes = self.intent.?.text().?;
                 break :blk .{ .message = .{ .bytes = bytes.len, .digest = protocol.contentDigest(bytes) } };
             },
             .decision => |decision| .{ .permission_decision = .{ .action = decision.action, .decision = decision.decision } },
@@ -687,13 +698,13 @@ test "submission settles wire Admission only after join and releases only accept
             var stream: TerminalInput = .{};
             var input: Input = undefined;
             input.init(&stream);
-            var self: Self = .{ .io = io, .store = root, .session = "k7m2qx", .directory = root, .input = &input, .environment = .empty };
+            var self: Self = .{ .io = io, .store = root, .session = "k7m2qx", .directory = root, .environment = .empty };
             defer {
                 self.cancel();
                 _ = self.join();
                 self.close();
             }
-            const intent: Intent = if (kind == 0) .{ .message = input.submitText("original café!") } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
+            const intent: Intent = if (kind == 0) .{ .message = "original café!" } else .{ .decision = .{ .action = 19, .decision = if (kind == 1) .allow_once else .deny } };
             try self.begin(intent);
             const peer = try listener.accept(io);
             defer peer.close(io);
@@ -724,10 +735,25 @@ test "submission settles wire Admission only after join and releases only accept
             try std.testing.expectEqualStrings("next té!", input.composition().bytes);
             try std.testing.expectEqual("next té".len, input.composition().cursor);
             if (!invalid) {
-                if (kind == 0) try std.testing.expectError(error.NoSubmission, input.message(intent.message));
                 try std.testing.expect(try self.advance() == .absent);
                 try std.testing.expect(self.join() == .absent);
             }
         }
     }
+}
+
+test "admission freezes original bytes before reservation failure" {
+    const Failing = struct {
+        fn random(_: ?*anyopaque, _: []u8) std.Io.RandomSecureError!void {
+            return error.EntropyUnavailable;
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.randomSecure = Failing.random;
+    var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = "unused", .session = "k7m2qx", .directory = "unused", .environment = .empty };
+    var draft = "first\nMessage é".*;
+    try std.testing.expectError(error.EntropyUnavailable, self.begin(.{ .message = &draft }));
+    @memset(&draft, 'x');
+    try std.testing.expectEqualStrings("first\nMessage é", self.intent.?.text().?);
+    try std.testing.expect(self.recovery() == .not_sent);
 }

@@ -321,7 +321,7 @@ pub fn run(self: *Self, init: std.process.Init, store: []const u8, session: []co
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .terminal = terminal, .interrupted = interrupted, .lender = lender, .colour = terminal.screen.colour, .tmux = if (terminal.notices) |notices| notices.tmux else false };
     terminal.screen.home = self.home;
     self.startInput();
-    self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
+    self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .environment = .{ .map = init.environ_map } };
     terminal.pump = .{ .context = self, .step = pump };
     defer terminal.pump = null;
     defer self.stop();
@@ -577,14 +577,14 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
         var stream: TerminalInput = .{};
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
         self.input.init(&stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .accepted = .{ .kind = case[0], .key = key.* } };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .environment = .empty, .accepted = .{ .kind = case[0], .key = key.* } };
         self.submission.close(); // Releasing capture custody cannot erase acceptance.
         var bytes: [512]u8 = undefined;
         var out = std.Io.Writer.fixed(&bytes);
         try self.writeRecoveryGuide(&out);
         try std.testing.expectEqualStrings(case[1], out.buffered());
         // A newer unsent original outranks an older accepted identity.
-        self.submission.intent = .{ .message = self.input.submitText("new original") };
+        self.submission.intent = .{ .message = try self.input.message(self.input.submitText("new original")) };
         out = .fixed(&bytes);
         try self.writeRecoveryGuide(&out);
         try std.testing.expectEqualStrings("rui: Message was not sent: capture did not begin. You may submit it again; no recovery record was published for this attempt.\n", out.buffered());
@@ -752,7 +752,7 @@ test "frontend answers local and unknown commands in place and keeps Host comman
     var terminal: Terminal = .{ .original = undefined, .flags = undefined, .screen = screen };
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false };
     self.input.init(&stream);
-    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .environment = .empty };
     const cases = .{
         .{ "/foo bar", "! Unknown command /foo · /help" },
         .{ "/\x1b[2J", "! Unknown command · /help" },
@@ -849,10 +849,10 @@ test "frontend consumed canonical reader and admission failures survive external
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false };
         self.init.io = std.testing.io;
         self.input.init(&stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .environment = .empty };
         const failure: anyerror = blk: {
             if (admission) {
-                self.submission.intent = .{ .message = self.input.submitText("original B") };
+                self.submission.intent = .{ .message = try self.input.message(self.input.submitText("original B")) };
                 try self.submission.task.start(std.testing.io, &self, Worker.fail);
                 if (self.joinAdmission().failure()) |err| break :blk err;
             } else {
@@ -880,7 +880,7 @@ test "Esc goes back to the overview only when the joined reader leaves nothing t
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .leaving = .returned };
         self.init.io = std.testing.io;
         self.input.init(&stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .environment = .empty };
         // The reader is still running as Esc returns.
         try self.reader.start(std.testing.io, &self, case[0]);
         self.stop();
@@ -904,7 +904,7 @@ test "frontend cleanup joins both borrowers before reporting restoration failure
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = undefined, .colour = false, .reading = .{ .phase = phase } };
         self.init.io = std.testing.io;
         self.input.init(&stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = self.input.submitText("current original B") } };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .environment = .empty, .intent = .{ .message = "current original B" } };
         try self.reader.start(std.testing.io, &self, Worker.read);
         try self.submission.task.start(std.testing.io, &self, Worker.admit);
         self.stop();
@@ -1562,15 +1562,16 @@ fn pump(raw: *anyopaque) !void {
 }
 
 /// Sends a Message, alone or as the reason an Action is denied.
-fn beginMessage(self: *Self, intent: Submission.Intent) !void {
+fn beginMessage(self: *Self, ticket: Input.Ticket, denial: ?u64) !void {
+    defer self.input.release(ticket) catch unreachable;
     // Input can arrive with Enter before any redraw, including inside output
     // pumping. Sealed bytes render in the escaped transcript, not the composer.
     const size = self.terminal.geometry();
     Frame.validateGeometry(size.col, size.row) catch |err| {
-        self.input.release(intent.ticket().?) catch unreachable;
         return err;
     };
-    try self.submission.begin(intent);
+    const text = try self.input.message(ticket);
+    try self.submission.begin(if (denial) |action| .{ .message_then_deny = .{ .text = text, .action = action } } else .{ .message = text });
     // A sent Message continues the conversation: show it and its reply
     // rather than the frozen transcript or page the reader was browsing,
     // or a page asked for before it.
@@ -2073,8 +2074,8 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
             // first, so the Action holds it until the denial that follows.
             screen.decide(denial);
             screen.releaseAction();
-            try self.beginMessage(.{ .message_then_deny = .{ .ticket = ticket, .action = denial.action } });
-        } else try self.beginMessage(.{ .message = ticket }),
+            try self.beginMessage(ticket, denial.action);
+        } else try self.beginMessage(ticket, null),
         .command => try self.commandLine(),
         .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (screen.consent != null and self.submissionOccupied()) "! Original pending. Draft retained; Ctrl-R retries the original." else if (screen.consent != null) self.reasonNotice(letter) else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |outcome| switch (outcome) {
@@ -2445,7 +2446,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             try self.reader.start(std.testing.io, &self, Worker.idle);
             try self.reader.join();
             self.input.init(&stream);
-            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .environment = .empty };
             self.stop();
             const settled = self.settle({});
             for ([_]anyerror{ error.WriteFailed, error.SystemResources }) |cause|
@@ -2836,7 +2837,7 @@ test "typing beside a ready Action moves to the draft, whose unoffered Enter dec
         var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = page, .actions = .{ actions, actions } }, .command = undefined, .terminal = &terminal, .lender = quiet_overview, .colour = false, .reading = .{ .opening = false } };
         self.init.io = std.testing.io;
         self.input.init(&self.terminal.stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .environment = .empty };
         try screen.latest();
         screen.action_view = .{ .io = std.testing.io, .file = page };
         self.live.work.first_action = 7;
@@ -2954,7 +2955,7 @@ const HeldFrontend = struct {
         held.self.live.work = .{};
         held.terminal = .{ .original = undefined, .flags = .{ 0, 0 }, .screen = screen, .input = pipes[0][0], .output = pipes[1][1], .pump = .{ .context = held, .step = pumpHeld } };
         held.self.startInput();
-        held.self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = held.self.directory, .input = &held.self.input, .environment = .empty };
+        held.self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = held.self.directory, .environment = .empty };
         return held;
     }
 
@@ -3547,7 +3548,7 @@ test "occupied original blocks stale and drawn Action decisions and retained rea
         try held.settle();
         try std.testing.expect(held.screen.offered() != null);
         const original = self.input.submitText("original message");
-        self.submission.intent = .{ .message = original };
+        self.submission.intent = .{ .message = try self.input.message(original) };
         self.submission.state = state;
         self.submission.key = @splat('K');
         // Capacity changes after the old prompt: the live check must stop
@@ -3556,7 +3557,7 @@ test "occupied original blocks stale and drawn Action decisions and retained rea
         try sendKeys(self, "\r");
         try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
         try std.testing.expect(held.screen.actionVisible());
-        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        try std.testing.expectEqualStrings("original message", self.submission.intent.?.message);
         try std.testing.expectEqual(@as([36]u8, @splat('K')), self.submission.key);
         try std.testing.expectEqualStrings(switch (state) {
             .not_started => "! Original not sent. Ctrl-R retries; nothing authorized.",
@@ -3575,7 +3576,7 @@ test "occupied original blocks stale and drawn Action decisions and retained rea
         try std.testing.expect(held.pumps != 0);
         try std.testing.expect(held.screen.offered() == null);
         try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
-        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        try std.testing.expectEqualStrings("original message", self.submission.intent.?.message);
         // The draft remains editable, but Enter cannot consume the Action as
         // a denial reason while this original still occupies the slot.
         try sendKeys(self, "keep draft");
@@ -3586,7 +3587,7 @@ test "occupied original blocks stale and drawn Action decisions and retained rea
         try sendKeys(self, "\r");
         try std.testing.expectEqualStrings("keep draft", self.input.composition().bytes);
         try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
-        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        try std.testing.expectEqualStrings("original message", self.submission.intent.?.message);
         try std.testing.expectEqual(@as([36]u8, @splat('K')), self.submission.key);
         if (state == .rejected) {
             try self.slashCommand("/discard");
@@ -3680,7 +3681,7 @@ test "real tiny frontend preserves archive and original recovery custody" {
         const self = &held.self;
         self.line.archive_state = archive;
         const original = self.input.submitText("original message");
-        self.submission.intent = .{ .message = original };
+        self.submission.intent = .{ .message = try self.input.message(original) };
         self.submission.state = state;
         self.submission.key = @splat('K');
         try self.drawFrame();
@@ -3689,7 +3690,7 @@ test "real tiny frontend preserves archive and original recovery custody" {
         try std.testing.expectEqualStrings(if (state == .rejected) "/discard" else "Ctrl-R", CapacityTestPty.row(held.screen, 1, &row));
         try std.testing.expect(held.screen.ticket.?.delivered and held.screen.offered() == null);
         try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
-        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        try std.testing.expectEqualStrings("original message", self.submission.intent.?.message);
         pty.drain();
         // An ordinary refused Enter is redundant with the visible held state;
         // its next frame must remain usable, not turn that notice into a fatal
@@ -3708,7 +3709,7 @@ test "real tiny frontend preserves archive and original recovery custody" {
                 try std.testing.expectEqualStrings(if (archive == .archived) "Arch Rej" else "Stop Rej", CapacityTestPty.row(held.screen, 0, &row));
                 try std.testing.expect(held.screen.ticket.?.delivered and held.screen.offered() == null);
                 try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
-                try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+                try std.testing.expectEqualStrings("original message", self.submission.intent.?.message);
                 pty.drain();
             }
             try std.testing.expectEqualStrings("/discard", self.input.composition().bytes);
@@ -3757,7 +3758,7 @@ test "tiny draft and paused Action return to the original recovery cue" {
         defer action.close(std.testing.io);
         const self = &held.self;
         self.line.archive_state = .archived;
-        self.submission.intent = .{ .message = self.input.submitText("original message") };
+        self.submission.intent = .{ .message = try self.input.message(self.input.submitText("original message")) };
         self.submission.state = .rejected;
         try self.drawFrame();
         pty.drain();
@@ -3772,7 +3773,7 @@ test "tiny draft and paused Action return to the original recovery cue" {
         try std.testing.expectEqualStrings(if (typed) "kept" else "", self.input.composition().bytes);
         try std.testing.expect(held.screen.offered() == null);
         try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
-        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        try std.testing.expectEqualStrings("original message", self.submission.intent.?.message);
         pty.drain();
         // Ctrl-G returns from inspection or the draft to the existing Action
         // selector. The draft remains owned even though its row is hidden.
@@ -3784,7 +3785,7 @@ test "tiny draft and paused Action return to the original recovery cue" {
         try std.testing.expectEqualStrings(if (typed) "kept" else "", self.input.composition().bytes);
         try std.testing.expect(held.screen.ticket.?.delivered and held.screen.offered() == null);
         try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
-        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        try std.testing.expectEqualStrings("original message", self.submission.intent.?.message);
         self.submission.intent = null;
         pty.drain();
     };
@@ -3807,7 +3808,7 @@ test "real tiny frontend fails closed rather than lose critical notice" {
     defer file.close(std.testing.io);
     const self = &held.self;
     self.line.archive_state = .archived;
-    self.submission.intent = .{ .message = self.input.submitText("original message") };
+    self.submission.intent = .{ .message = try self.input.message(self.input.submitText("original message")) };
     self.submission.state = .rejected;
     self.notice = "! Critical retained notice";
     try std.testing.expectError(error.TerminalTooSmall, self.drawFrame());
@@ -3815,7 +3816,7 @@ test "real tiny frontend fails closed rather than lose critical notice" {
     try std.testing.expect(std.c.read(pty.master, &bytes, bytes.len) < 0);
     try std.testing.expect(held.screen.offered() == null);
     try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
-    try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+    try std.testing.expectEqualStrings("original message", self.submission.intent.?.message);
     try std.testing.expectEqualStrings("! Critical retained notice", self.notice.?);
     try std.testing.expectError(error.RenderBackendPoisoned, held.screen.backend.encode());
     self.submission.intent = null;
@@ -3910,7 +3911,7 @@ test "a line typed beside one Action keeps the input row when the next Action ar
             try sendKeys(&held.self, "\r");
             try std.testing.expect(held.screen.consent == null);
             const reason = held.self.submission.intent.?.message_then_deny;
-            try std.testing.expectEqualStrings("xy", try held.self.input.message(reason.ticket));
+            try std.testing.expectEqualStrings("xy", reason.text);
             try std.testing.expectEqual(@as(u64, 0xb), reason.action);
             continue;
         }
@@ -3965,7 +3966,7 @@ test "the draft beside an offered Action sends its line first and denies only th
     try std.testing.expect(held.screen.consent == null);
     try std.testing.expect(!held.screen.actionVisible());
     const reason = held.self.submission.intent.?.message_then_deny;
-    try std.testing.expectEqualStrings("use the cached copy", try held.self.input.message(reason.ticket));
+    try std.testing.expectEqualStrings("use the cached copy", reason.text);
     try std.testing.expectEqual(@as(u64, 0xa), reason.action);
     try std.testing.expectEqual(@as(u64, 1), held.self.admission.sent);
     try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
@@ -4026,7 +4027,7 @@ test "a draft beside an Action denies only after a frame whose line under it say
     try sendKeys(&held.self, "\r");
     try std.testing.expectEqual(@as(?ConsentPolicy.Pending, null), held.screen.consent);
     const reason = held.self.submission.intent.?.message_then_deny;
-    try std.testing.expectEqualStrings("run the tests", try held.self.input.message(reason.ticket));
+    try std.testing.expectEqualStrings("run the tests", reason.text);
     try std.testing.expectEqual(@as(u64, 0xa), reason.action);
 }
 
@@ -4037,7 +4038,7 @@ fn acceptReason(held: *HeldFrontend) !void {
         fn done(_: *anyopaque, _: *Task) !void {}
     };
     const submission = &held.self.submission;
-    submission.intent = .{ .message_then_deny = .{ .ticket = held.self.input.submitText("skip"), .action = 0xa } };
+    submission.intent = .{ .message_then_deny = .{ .text = try held.self.input.message(held.self.input.submitText("skip")), .action = 0xa } };
     submission.key = @splat('B');
     submission.state = .submitting;
     submission.publication = .published;
@@ -4488,7 +4489,7 @@ test "the /requests page lists its rows over an empty draft, and Enter or Tab ta
     const original = "01234567-89ab-4cde-8012-0123456789ab";
     const older = "22222222-89ab-4cde-8012-0123456789ab";
     const newer = "33333333-89ab-4cde-8012-0123456789ab";
-    self.submission.intent = .{ .message = self.input.submitText("unconfirmed original") };
+    self.submission.intent = .{ .message = try self.input.message(self.input.submitText("unconfirmed original")) };
     self.submission.state = .unconfirmed;
     self.submission.key = original.*;
     self.saved_requests.offer(.{ .nanoseconds = 1 }, "09:00", older);
@@ -4566,8 +4567,8 @@ test "a pending decision, or a Message that carries one, has no /recover row, an
         const newer = "33333333-89ab-4cde-8012-0123456789ab";
         self.submission.intent = switch (case) {
             0 => .{ .decision = .{ .action = 0xa, .decision = .allow_once } },
-            1 => .{ .message_then_deny = .{ .ticket = self.input.submitText("reason"), .action = 0xa } },
-            else => .{ .message = self.input.submitText("in flight") },
+            1 => .{ .message_then_deny = .{ .text = try self.input.message(self.input.submitText("reason")), .action = 0xa } },
+            else => .{ .message = try self.input.message(self.input.submitText("in flight")) },
         };
         // The third is a Message whose reply has not come back yet.
         self.submission.state = if (case == 2) .submitting else .unconfirmed;
@@ -4596,7 +4597,7 @@ test "recovery beside a waiting Action binds the retained original only" {
     const self = &held.self;
     const original = "01234567-89ab-4cde-8012-0123456789ab";
     const wrong = "33333333-89ab-4cde-8012-0123456789ab";
-    self.submission.intent = .{ .message = self.input.submitText("unconfirmed original") };
+    self.submission.intent = .{ .message = try self.input.message(self.input.submitText("unconfirmed original")) };
     self.submission.state = .unconfirmed;
     self.submission.key = original.*;
     const file = try held.adopt(3);
@@ -4810,11 +4811,11 @@ test "a details page read before a Message was sent never covers it" {
         self.reading.phase = .details;
         try self.reader.start(std.testing.io, self, Worker.read);
         if (send) {
-            try self.beginMessage(.{ .message = self.input.submitText("sent while the page loaded") });
+            try self.beginMessage(self.input.submitText("sent while the page loaded"), null);
             self.submission.cancel();
             _ = self.submission.join();
             self.submission.close();
-            self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .input = &self.input, .environment = .empty };
+            self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = self.directory, .environment = .empty };
             self.input.init(&self.terminal.stream);
         }
         Worker.release.store(true, .release);
@@ -5360,7 +5361,7 @@ test "accepted upgrade consumes only its command and preserves the original subm
     var stream: TerminalInput = .{};
     self.input.init(&stream);
     const original = self.input.submitText("original indeterminate model input");
-    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('K'), .retry = @splat('K') };
+    self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .environment = .empty, .intent = .{ .message = try self.input.message(original) }, .state = .unconfirmed, .key = @splat('K'), .retry = @splat('K') };
     _ = self.input.append("/upgrade");
     const revision = self.input.revision;
     try self.draftEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }, null);
@@ -5393,7 +5394,7 @@ test "blocked local upgrade consumes its command while busy refusal retains it" 
         self.* = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .upgrade_blocked = true, .reading = .{ .opening = false } };
         var stream: TerminalInput = .{};
         self.input.init(&stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .environment = .empty };
         if (busy) self.input.queueCommand("/status");
         _ = self.input.append("/upgrade");
         try self.draftEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }, null);
@@ -5431,7 +5432,7 @@ test "upgrade outcomes retain Unicode draft cursor selection and unresolved orig
             var stream: TerminalInput = .{};
             self.input.init(&stream);
             const original = self.input.submitText("the original request");
-            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty, .intent = .{ .message = original }, .state = .unconfirmed, .key = @splat('H') };
+            self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .environment = .empty, .intent = .{ .message = try self.input.message(original) }, .state = .unconfirmed, .key = @splat('H') };
             for ("next é!\x1b[D") |byte| _ = self.input.feed(byte);
             const draft = self.input.composition();
             const revision = self.input.revision;
@@ -5466,7 +5467,7 @@ test "upgrade quiescing reobservation and protocol holds refuse a fresh Message 
         self.* = .{ .init = undefined, .store = "unused", .session = "k7m2qx", .directory = "unused", .files = undefined, .command = undefined, .terminal = &terminal, .colour = false, .reading = .{ .opening = false }, .upgrade_requested = hold == 0, .upgrade_reobserving = hold == 1, .upgrade_blocked = hold == 2 };
         var stream: TerminalInput = .{};
         self.input.init(&stream);
-        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
+        self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .environment = .empty };
         _ = self.input.append("never send before safe reattachment");
         try self.draftEvent(.{ .event = .{ .event = .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, .pasted = false } }, null);
         try std.testing.expect(self.submission.view() == null);
@@ -5869,7 +5870,7 @@ test "upgrade holds refuse archive shortcuts confirmations and slash commands wi
             else => unreachable,
         };
         const original = held.self.input.submitText("original request");
-        held.self.submission.intent = .{ .message = original };
+        held.self.submission.intent = .{ .message = try held.self.input.message(original) };
         held.self.submission.state = .unconfirmed;
         held.self.submission.key = @splat('H');
         try sendKeys(&held.self, switch (path) {
