@@ -31,12 +31,22 @@ pub fn main(init: std.process.Init) !void {
         try out.interface.flush();
     } else if (args.len == 6 and std.mem.eql(u8, args[1], "content")) {
         if (try requests.readActivityContent(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), null, std.Io.File.stdout()) != null) return error.ActivityUnavailable;
-    } else if (args.len == 9 and std.mem.eql(u8, args[1], "verified-window")) {
+    } else if ((args.len == 9 or args.len == 10) and std.mem.eql(u8, args[1], "verified-window")) {
         var digest: [32]u8 = undefined;
         if (args[7].len != digest.len * 2) return error.InvalidArguments;
         const parsed = try std.fmt.hexToBytes(&digest, args[7]);
         if (parsed.len != digest.len) return error.InvalidArguments;
-        const window = try requests.readVerifiedActivityWindow(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), .{ .bytes = try std.fmt.parseInt(u64, args[6], 10), .digest = digest }, try std.fmt.parseInt(u64, args[8], 10));
+        var token: client.Cancellation = .{};
+        const Stop = struct {
+            fn run(io: std.Io, cancellation: *client.Cancellation, milliseconds: u64) void {
+                std.Io.sleep(io, .fromMilliseconds(@intCast(milliseconds)), .awake) catch return;
+                cancellation.requestStop();
+            }
+        };
+        const stopper = if (args.len == 10) try std.Thread.spawn(.{}, Stop.run, .{ init.io, &token, try std.fmt.parseInt(u64, args[9], 10) }) else null;
+        defer if (stopper) |thread| thread.join();
+        const scoped: client.Requests = .{ .io = init.io, .cancellation = if (stopper != null) &token else null };
+        const window = try scoped.readVerifiedActivityWindow(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), .{ .bytes = try std.fmt.parseInt(u64, args[6], 10), .digest = digest }, try std.fmt.parseInt(u64, args[8], 10));
         try std.Io.File.stdout().writeStreamingAll(init.io, window.slice());
     } else if (args.len == 5 and std.mem.eql(u8, args[1], "prefix")) {
         var buffer: [4096]u8 = undefined;
