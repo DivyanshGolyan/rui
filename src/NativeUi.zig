@@ -895,6 +895,8 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             if (!self.pasting and (key.matches('a', .{ .alt = true }) or key.matches('d', .{ .alt = true }) or key.matches('y', .{ .alt = true }) or key.matches('i', .{ .alt = true }))) {
                 if (self.submission.view() != null or self.submission.task.thread != null) {
                     self.showOriginal();
+                } else if (ctx.frame_input_watermark == std.math.maxInt(u64)) {
+                    self.notice = "Action unavailable: input freshness could not be verified";
                 } else if (self.actionGesture(ctx)) |offer| {
                     if (key.matches('i', .{ .alt = true })) {
                         try self.openActionDetails(offer);
@@ -975,7 +977,7 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
                         self.notice = "Alt-Y confirms; draft retained";
                     } else if (self.actionGesture(ctx)) |offer| {
                         try self.submitDenialReason(offer);
-                    } else self.notice = "Action pending; draft retained";
+                    } else self.notice = if (ctx.frame_input_watermark == std.math.maxInt(u64)) "Action unavailable: input freshness could not be verified" else "Action pending; draft retained";
                 } else try self.submit();
                 ctx.consumeAndRedraw();
                 return;

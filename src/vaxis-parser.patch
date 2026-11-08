@@ -2458,7 +2458,15 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          return .{
 --- a/src/Loop.zig
 +++ b/src/Loop.zig
-@@ -20,7 +20,9 @@
+@@ -9,6 +9,7 @@
+ const Vaxis = @import("Vaxis.zig");
+ 
+ const log = std.log.scoped(.vaxis);
++extern "c" fn ioctl(c_int, c_ulong, ...) c_int;
+ 
+ pub fn Loop(comptime T: type) type {
+     return struct {
+@@ -20,7 +21,12 @@
          tty: *Tty,
          vaxis: *Vaxis,
  
@@ -2466,10 +2474,13 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +        pub const Stamped = struct { event: T, sequence: u64 };
 +        queue: Queue(Stamped, 512),
 +        issued_sequence: std.atomic.Value(u64) = .init(0),
++        input_lock: std.Io.Mutex = .init,
++        stale_bytes: usize = 0,
++        stale_sequence: u64 = 0,
          thread: ?std.Io.Future(void) = null,
          // Queued key text must outlive the input task, including on failure.
          cache: GraphemeCache = .{},
-@@ -98,7 +100,7 @@
+@@ -98,7 +104,7 @@
          /// Returns the next event, blocking until available. After buffered events
          /// are drained, returns Closed on stop or the input task's failure.
          pub fn nextEvent(self: *Self) !T {
@@ -2478,7 +2489,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          }
  
          /// blocks until an event is available. Useful when your application is
-@@ -109,17 +111,53 @@
+@@ -109,17 +115,80 @@
  
          /// returns an event if one is available, otherwise null. Non-blocking.
          pub fn tryEvent(self: *Self) !?T {
@@ -2490,10 +2501,37 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +        /// frame was presented. A failed push may leave a harmless serial gap.
 +        pub fn tryStampedEvent(self: *Self) !?Stamped {
              return try self.queue.tryPop();
-+        }
-+
+         }
+ 
 +        pub fn inputWatermark(self: *Self) u64 {
 +            return self.issued_sequence.load(.acquire);
++        }
++
++        pub fn lockInput(self: *Self) void {
++            self.input_lock.lockUncancelable(self.io);
++        }
++
++        pub fn unlockInput(self: *Self) void {
++            self.input_lock.unlock(self.io);
++        }
++
++        /// Called with input locked after the terminal flush. No bytes are
++        /// discarded; the next `bytes` FIFO bytes keep pre-frame authority.
++        pub fn fencePendingInput(self: *Self, bytes: usize) void {
++            self.stale_bytes = bytes;
++            if (bytes != 0) self.stale_sequence = self.issueSequence();
++        }
++
++        pub fn kernelPendingInput(self: *Self) !usize {
++            if (comptime builtin.is_test) return error.InputFreshnessUnavailable;
++            const request: c_ulong = switch (builtin.os.tag) {
++                .macos, .ios, .tvos, .watchos, .visionos => 0x4004667f,
++                .linux => std.os.linux.T.FIONREAD,
++                else => return error.InputFreshnessUnavailable,
++            };
++            var count: c_int = 0;
++            if (ioctl(self.tty.fd.handle, request, &count) != 0 or count < 0) return error.InputFreshnessUnavailable;
++            return @intCast(count);
 +        }
 +
 +        fn issueSequence(self: *Self) u64 {
@@ -2515,8 +2553,8 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +        /// sequences. Every event from that input batch has the same age.
 +        pub fn beginInputBatch(self: *Self) InputBatch {
 +            return .{ .owner = self, .sequence = self.issueSequence() };
-         }
- 
++        }
++
 +        fn stamp(self: *Self, event: T) Stamped {
 +            return .{ .event = event, .sequence = self.issueSequence() };
 +        }
@@ -2534,7 +2572,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          }
  
          pub fn winsizeCallback(ptr: *anyopaque) void {
-@@ -150,13 +188,14 @@
+@@ -150,13 +219,14 @@
              var retry: ReadRetry = .{};
              while (true) {
                  try self.io.checkCancel();
@@ -2550,7 +2588,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
              }
          }
  
-@@ -181,10 +220,21 @@
+@@ -181,14 +251,35 @@
                      // initialize the read buffer
                      var buf: [1024]u8 = undefined;
                      var read_start: usize = 0;
@@ -2559,6 +2597,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                      // read loop
                      read_loop: while (true) {
                          try self.io.checkCancel();
+-                        const bytes_read = self.tty.read(buf[read_start..]) catch |err| {
 +                        // Avoid reserving a batch across an idle blocking read:
 +                        // ordinary post-frame input can then be fresh on its
 +                        // first key, while parser-held bytes retain their age.
@@ -2568,11 +2607,25 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +                            .revents = 0,
 +                        }};
 +                        if (try std.posix.poll(&ready, 16) == 0) continue;
-+                        var batch = pending_batch orelse self.beginInputBatch();
-                         const bytes_read = self.tty.read(buf[read_start..]) catch |err| {
++                        self.lockInput();
++                        var batch = pending_batch orelse if (self.stale_bytes != 0)
++                            InputBatch{ .owner = self, .sequence = self.stale_sequence }
++                        else
++                            self.beginInputBatch();
++                        if (self.stale_bytes != 0) batch.sequence = @min(batch.sequence, self.stale_sequence);
++                        const available = buf.len - read_start;
++                        const read_limit = if (self.stale_bytes == 0) available else @min(available, self.stale_bytes);
++                        const bytes_read = self.tty.read(buf[read_start..][0..read_limit]) catch |err| {
++                            self.unlockInput();
                              try retry.wait(self.io, err);
                              continue;
-@@ -205,6 +255,7 @@
+                         };
++                        if (self.stale_bytes != 0) self.stale_bytes -= bytes_read;
++                        self.unlockInput();
+                         if (bytes_read == 0) return error.EndOfStream;
+                         retry = .{};
+                         const n = read_start + bytes_read;
+@@ -205,6 +296,7 @@
                                  if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
                                      buf[0] = buf[seq_start];
                                      read_start = 1;
@@ -2580,7 +2633,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                                      continue :read_loop;
                                  }
                              }
-@@ -214,6 +265,7 @@
+@@ -214,6 +306,7 @@
                                  // There is no consumed length on parse errors. Discard
                                  // this batch rather than retrying the same bad bytes.
                                  read_start = 0;
@@ -2588,7 +2641,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                                  continue :read_loop;
                              };
                              if (result.n == 0) {
-@@ -224,14 +276,16 @@
+@@ -224,14 +317,16 @@
                                      buf[seq_start - initial_start] = buf[seq_start];
                                  }
                                  read_start = seq_start - initial_start;
@@ -2608,24 +2661,34 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
              }
 --- a/src/vxfw/App.zig
 +++ b/src/vxfw/App.zig
-@@ -166,8 +166,15 @@
+@@ -166,10 +166,26 @@
          mouse_handler.last_frame = surface;
          // Update the focus handler list
          try focus_handler.update(self.allocator, surface);
--        try self.render(surface, focus_handler.focused_widget);
-+        try commitInputFrame(&ctx, &loop, self.render(surface, focus_handler.focused_widget));
++        loop.lockInput();
++        defer loop.unlockInput();
+         try self.render(surface, focus_handler.focused_widget);
++        try commitInputFrame(&ctx, &loop, {}, loop.kernelPendingInput());
      }
-+}
-+
-+/// Credit a frame only after its terminal output was successfully flushed.
-+/// The watermark includes input issued while the render was in progress.
-+pub fn commitInputFrame(ctx: *vxfw.EventContext, loop: *EventLoop, rendered: anyerror!void) !void {
-+    try rendered;
-+    ctx.frame_input_watermark = loop.inputWatermark();
  }
  
++/// Credit a frame only after its terminal output was successfully flushed.
++/// The watermark includes input issued while the render was in progress.
++pub fn commitInputFrame(ctx: *vxfw.EventContext, loop: *EventLoop, rendered: anyerror!void, pending: anyerror!usize) !void {
++    try rendered;
++    const bytes = pending catch {
++        // A failed kernel barrier cannot authorize an Action gesture.
++        ctx.frame_input_watermark = std.math.maxInt(u64);
++        return;
++    };
++    loop.fencePendingInput(bytes);
++    ctx.frame_input_watermark = loop.inputWatermark();
++}
++
  fn dispatchEvents(
-@@ -180,7 +187,9 @@
+     self: *App,
+     loop: *EventLoop,
+@@ -180,7 +196,9 @@
      // Bound the batch so continuously arriving input cannot starve frames
      // or timers. tryEvent releases the queue mutex before handlers run.
      for (0..loop.queue.buf.len) |_| {
@@ -2636,7 +2699,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          defer resetEventState(ctx);
          switch (event) {
              .key_press => {
-@@ -302,6 +311,7 @@
+@@ -302,6 +320,7 @@
  }
  
  fn resetEventState(ctx: *vxfw.EventContext) void {

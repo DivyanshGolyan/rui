@@ -376,9 +376,9 @@ test "native frame watermark excludes queued input until successful flush" {
     try std.testing.expectEqual(@as(u64, 1), before.sequence);
     // Issued after layout started, before flush finishes: still old input.
     try loop.postEvent(.{ .key_press = .{ .codepoint = 'y' } });
-    try std.testing.expectError(error.InjectedFlushFailure, fw.App.commitInputFrame(&ctx, &loop, error.InjectedFlushFailure));
+    try std.testing.expectError(error.InjectedFlushFailure, fw.App.commitInputFrame(&ctx, &loop, error.InjectedFlushFailure, @as(usize, 0)));
     try std.testing.expectEqual(@as(u64, 0), ctx.frame_input_watermark);
-    try fw.App.commitInputFrame(&ctx, &loop, {});
+    try fw.App.commitInputFrame(&ctx, &loop, {}, @as(usize, 0));
     try std.testing.expectEqual(@as(u64, 513), ctx.frame_input_watermark);
     for (0..512) |_| {
         const old = (try loop.tryStampedEvent()).?;
@@ -387,6 +387,21 @@ test "native frame watermark excludes queued input until successful flush" {
     try loop.postEvent(.{ .key_press = .{ .codepoint = 'z' } });
     const fresh = (try loop.tryStampedEvent()).?;
     try std.testing.expect(fresh.sequence > ctx.frame_input_watermark);
+}
+
+test "native frame fences kernel backlog and fails closed when unavailable" {
+    const io = std.testing.io;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    var loop: vaxis.Loop(fw.Event) = .init(io, &tty, &vx);
+    var ctx: fw.EventContext = .{ .io = io, .alloc = std.testing.allocator, .cmds = .empty };
+    try fw.App.commitInputFrame(&ctx, &loop, {}, @as(usize, 1300));
+    try std.testing.expectEqual(@as(usize, 1300), loop.stale_bytes);
+    try std.testing.expect(loop.stale_sequence <= ctx.frame_input_watermark);
+    try fw.App.commitInputFrame(&ctx, &loop, {}, error.InputFreshnessUnavailable);
+    try std.testing.expectEqual(std.math.maxInt(u64), ctx.frame_input_watermark);
+    try fw.App.commitInputFrame(&ctx, &loop, {}, @as(usize, 0));
+    try std.testing.expect(ctx.frame_input_watermark < std.math.maxInt(u64));
 }
 
 test "native input batch keeps split parser events older than a presented frame" {
@@ -403,7 +418,7 @@ test "native input batch keeps split parser events older than a presented frame"
     try batch.postEvent(.{ .key_press = first.event.?.key_press });
     _ = (try loop.tryStampedEvent()).?;
     // Parser is paused with the rest of this already-read buffer in custody.
-    try fw.App.commitInputFrame(&ctx, &loop, {});
+    try fw.App.commitInputFrame(&ctx, &loop, {}, @as(usize, 0));
     const second = try parser.parse(input[first.n..], null);
     try std.testing.expect(second.n != 0 and second.event != null);
     try batch.postEvent(.{ .key_press = second.event.?.key_press });
@@ -424,7 +439,7 @@ test "native partial terminal sequence keeps its pre-frame batch" {
     var batch = loop.beginInputBatch();
     const partial = try parser.parse("\x1b[", null);
     try std.testing.expectEqual(@as(usize, 0), partial.n);
-    try fw.App.commitInputFrame(&ctx, &loop, {});
+    try fw.App.commitInputFrame(&ctx, &loop, {}, @as(usize, 0));
     const complete = try parser.parse("\x1b[1;3A", null);
     try std.testing.expect(complete.n != 0 and complete.event != null);
     try batch.postEvent(.{ .key_press = complete.event.?.key_press });
