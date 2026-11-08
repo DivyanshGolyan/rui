@@ -1428,7 +1428,7 @@ test "the running call's row carries the clock, in its place, and other work end
     _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &pending, 7, 142_000) }, &calls);
     try expectTrackRow(screen, 2, "  • Run zig build", 52, &buffer);
     try expectTrackRow(screen, 3, "  • Run zig build", 52, &buffer);
-    try expectTrackRow(screen, 4, "• Queued · 12s", 52, &buffer);
+    try expectOverlayRow(screen, 4, "• Queued · 12s", 52, &buffer);
     for ([_]u64{ 1, 2 }, [_][2][]const u8{ .{ "  • Run zig build · 42s", "  • Run zig build" }, .{ "  • Run zig build", "  • Run zig build · 42s" } }) |ordinal, rows| {
         const state: protocol.WorkState = .{ .bash = .{ .since = 100, .call = ordinal, .description = calls.entries[ordinal].presentation.description, .running = 2, .approvals = 0 } };
         _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 7, 142_000) }, &calls);
@@ -1441,13 +1441,13 @@ test "the running call's row carries the clock, in its place, and other work end
         _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &state, 8, 142_000) }, &calls);
         try expectTrackRow(screen, 2, "  • Run zig build", 52, &buffer);
         try expectTrackRow(screen, 3, "  • Run zig build", 52, &buffer);
-        try expectTrackRow(screen, 4, "• Run zig build · 42s", 52, &buffer);
+        try expectOverlayRow(screen, 4, "• Run zig build · 42s", 52, &buffer);
     }
     // Other work under way is the conversation's last line, then goes.
     const waiting: protocol.WorkState = .{ .working = .{ .since = 130 } };
     _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
     try expectTrackRow(screen, 3, "  • Run zig build", 52, &buffer);
-    try expectTrackRow(screen, 4, "• Waiting · 12s", 52, &buffer);
+    try expectOverlayRow(screen, 4, "• Waiting · 12s", 52, &buffer);
     _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &calls);
     try expectTrackRow(screen, 4, "", 52, &buffer);
     // A narrow line cuts the words and keeps the clock, under the
@@ -1461,7 +1461,7 @@ test "the running call's row carries the clock, in its place, and other work end
     screen.colour = true;
     _ = screen.backend.setPolicy(.{ .depth = .indexed, .width = screen.backend.widthMethod() });
     _ = try Test.render(screen, &out.writer, size, "", 0, .{ .live = work_line.of(&test_words, &stopping, 7, 142_000) }, &calls);
-    try expectTrackRow(screen, 4, "Stopping…", 52, &buffer);
+    try expectOverlayRow(screen, 4, "Stopping…", 52, &buffer);
     try std.testing.expectEqual(screen.style(.quiet).fg, Test.window(screen).readCell(0, 4).?.style.fg);
     try std.testing.expect(!std.meta.eql(screen.style(.normal).fg, screen.style(.quiet).fg));
     // A failure colours only its glyph; pending permission keeps attention.
@@ -1500,8 +1500,11 @@ test "a browsed page keeps the live line above the status" {
     _ = try Test.render(screen, &out.writer, size, "", 0, footer, &calls);
     var buffer: [256]u8 = undefined;
     // The same call row carries the clock while looking back.
-    try std.testing.expectEqualStrings("  • Run zig build · 42s", rowText(screen, 7, &buffer));
-    try std.testing.expectEqualStrings("Opening…", rowText(screen, 8, &buffer));
+    try std.testing.expectEqualStrings("  • Run zig build · 42s", rowText(screen, 6, &buffer));
+    try std.testing.expectEqualStrings("Opening…", rowText(screen, 7, &buffer));
+    try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 8).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", Test.window(screen).readCell(0, 9).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 10).?.char.grapheme);
 }
 
 test "a queued Message keeps its row and status while looking back" {
@@ -1525,11 +1528,14 @@ test "a queued Message keeps its row and status while looking back" {
     var buffer: [256]u8 = undefined;
     // This is a source row, not the queued overlay below it; the
     // scrollbar thumb owns the separate final physical cell.
-    try std.testing.expectEqualStrings("row39", contentColumnsText(screen, 7, &buffer));
-    try std.testing.expectEqualStrings("▐", Test.window(screen).readCell(39, 7).?.char.grapheme);
-    try std.testing.expectEqualStrings("› also check the history scrat… 2 queued", rowText(screen, 8, &buffer));
+    try std.testing.expectEqualStrings("row39", contentColumnsText(screen, 6, &buffer));
+    try std.testing.expectEqualStrings("▐", Test.window(screen).readCell(39, 6).?.char.grapheme);
+    try std.testing.expectEqualStrings("› also check the history scrat… 2 queued", rowText(screen, 7, &buffer));
     try std.testing.expect(!screenHas(screen, "Sent", &buffer));
-    for ([_]u16{ 0, 32 }) |column| try std.testing.expectEqual(screen.style(.quiet).fg, Test.window(screen).readCell(column, 8).?.style.fg);
+    try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 8).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", Test.window(screen).readCell(0, 9).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 10).?.char.grapheme);
+    for ([_]u16{ 0, 32 }) |column| try std.testing.expectEqual(screen.style(.quiet).fg, Test.window(screen).readCell(column, 7).?.style.fg);
     // A short terminal with a call, the live line and a multiline draft has
     // no row for it: the status says Sent instead.
     var running: View.Live = .{ .count = 1, .total = 1 };
@@ -2051,6 +2057,12 @@ fn expectTrackRow(screen: *Self, row: u16, text: []const u8, width: u16, storage
     for (cells..width - 1) |_| try writer.writeByte(' ');
     try writer.writeAll("│");
     try std.testing.expectEqualStrings(writer.buffered(), rowText(screen, row, storage));
+}
+
+// Rows below the viewport are overlays, not part of its scrollbar rail.
+fn expectOverlayRow(screen: *Self, row: u16, text: []const u8, width: u16, storage: []u8) !void {
+    try std.testing.expectEqualStrings(text, rowText(screen, row, storage));
+    try std.testing.expectEqualStrings(" ", Test.window(screen).readCell(width - 1, row).?.char.grapheme);
 }
 
 // Physical full-width row, including any owner-painted final cell.
@@ -3242,13 +3254,13 @@ test "typed saved-file loading preserves raw provenance through prepend Message 
     const top = screen.browsing.scroll.scroll.y;
     const total = projection.total +| screen.browsing.blank_tail;
     try std.testing.expectEqual(@as(usize, 4), projection.total);
-    try std.testing.expectEqual(@as(usize, 12), screen.browsing.blank_tail);
-    try std.testing.expectEqual(@as(usize, 13), height);
+    try std.testing.expectEqual(@as(usize, 11), screen.browsing.blank_tail);
+    try std.testing.expectEqual(@as(usize, 12), height);
     try std.testing.expectEqual(@as(usize, 0), top);
-    try std.testing.expectEqual(@as(usize, 16), total);
+    try std.testing.expectEqual(@as(usize, 15), total);
     const thumb_height = @max(try std.math.divCeil(usize, height * height, total), 1);
     const thumb_top = top * height / total;
-    try std.testing.expectEqual(@as(usize, 11), thumb_height);
+    try std.testing.expectEqual(@as(usize, 10), thumb_height);
     try std.testing.expectEqual(@as(usize, 0), thumb_top);
     for (0..height) |row| {
         const expected = if (row >= thumb_top and row < thumb_top + thumb_height) rail.character.grapheme else rail.track_character.?.grapheme;
