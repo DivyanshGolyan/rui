@@ -75,7 +75,7 @@ const FeedWidget = struct {
     text: fw.Text,
 
     fn widget(self: *FeedWidget) fw.Widget {
-        return .{ .userdata = self, .drawFn = draw };
+        return .{ .userdata = self, .drawFn = FeedWidget.draw };
     }
 
     fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface {
