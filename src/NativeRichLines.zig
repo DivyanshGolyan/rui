@@ -478,7 +478,7 @@ test "native rich source windows cross both directions and preserve resize ancho
     var visited: usize = 0;
     var quote = false;
     var code_anchor: ?usize = null;
-    var table = false;
+    var table_seen = false;
     while (true) {
         var frame: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer frame.deinit();
@@ -494,13 +494,13 @@ test "native rich source windows cross both directions and preserve resize ancho
                 try std.testing.expect(row.style.horizontal);
                 code_anchor = row.start;
             }
-            if (row.line_number == 6) table = table or (row.style.horizontal and row.style.custom);
+            if (row.line_number == 6) table_seen = table_seen or (row.style.horizontal and row.style.custom);
             visited += 1;
         }
         if (!window.next()) break;
     }
     try std.testing.expectEqual(index.len, visited);
-    try std.testing.expect(quote and table and code_anchor != null);
+    try std.testing.expect(quote and table_seen and code_anchor != null);
     while (true) {
         var local = window.count();
         while (local != 0) {
