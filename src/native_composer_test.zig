@@ -272,3 +272,66 @@ test "native horizontal viewport clips wide grapheme only at the edge" {
     try std.testing.expectEqualStrings("界", restored.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("界X", original);
 }
+
+test "native horizontal drag keeps wrapped labels and prose alongside code" {
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+    try source.writer.writeAll("HEAD");
+    for (0..160) |_| try source.writer.writeByte('x');
+    try source.writer.writeAll("界END");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 7 }, .cell_size = .{} };
+    var index: fw.Text.LineIndex = .{};
+    defer index.deinit(std.testing.allocator);
+    const input = [_]fw.Text{
+        .{ .text = "Assistant\n" },
+        .{ .text = "PROSE BEFORE\n" },
+        .{ .text = source.written(), .softwrap = false },
+        .{ .text = "PROSE AFTER" },
+    };
+    try index.reflow(std.testing.allocator, &input, ctx.withConstraints(.{ .width = 19 }, .{ .width = 19, .height = null }));
+    var bars: fw.ScrollBars = .{ .scroll_view = .{ .children = .{ .builder = index.builder() }, .item_count = @intCast(index.len) } };
+    _ = try bars.draw(ctx);
+    var event_ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    defer event_ctx.cmds.deinit(std.testing.allocator);
+    try bars.handleEvent(&event_ctx, .{ .mouse = .{ .col = 0, .row = 6, .button = .left, .mods = .{}, .type = .press } });
+    try bars.handleCapture(&event_ctx, .{ .mouse = .{ .col = 19, .row = 6, .button = .left, .mods = .{}, .type = .drag } });
+    const frame = try bars.draw(ctx);
+    const children = frame.children[0].surface.children;
+    try std.testing.expectEqual(@as(usize, 4), children.len);
+    try std.testing.expectEqual(@as(i17, 0), children[0].origin.col);
+    try std.testing.expectEqualStrings("A", children[0].surface.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("P", children[1].surface.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("界", children[2].surface.readCell(14, 0).char.grapheme);
+    try std.testing.expectEqualStrings("D", children[2].surface.readCell(18, 0).char.grapheme);
+    try std.testing.expectEqual(@as(i17, 0), children[3].origin.col);
+    try std.testing.expectEqualStrings("P", children[3].surface.readCell(0, 0).char.grapheme);
+}
+
+test "native horizontal text uses tab stops across viewport cuts" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{ .width = 4 }, .max = .{ .width = 4, .height = null }, .cell_size = .{} };
+    const source = "ab\t界Z";
+    try std.testing.expectEqual(@as(usize, 11), ctx.hardLineWidth(source));
+    var index: fw.Text.LineIndex = .{};
+    defer index.deinit(std.testing.allocator);
+    const input = [_]fw.Text{.{ .text = source, .softwrap = false }};
+    try index.reflow(std.testing.allocator, &input, ctx);
+    const row = (try index.builder().itemAtIdxForDraw(0, 0, ctx.arena)).?;
+    const first = try row.drawHorizontalFn.?(row.userdata, ctx, 0, 4);
+    try std.testing.expectEqual(@as(?u64, 11), first.scroll_width);
+    try std.testing.expectEqualStrings("a", first.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("b", first.readCell(1, 0).char.grapheme);
+    try std.testing.expectEqualStrings(" ", first.readCell(2, 0).char.grapheme);
+    const cut = try row.drawHorizontalFn.?(row.userdata, ctx, 7, 4);
+    try std.testing.expectEqualStrings(" ", cut.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("界", cut.readCell(1, 0).char.grapheme);
+    try std.testing.expectEqualStrings("Z", cut.readCell(3, 0).char.grapheme);
+    const middle = try row.drawHorizontalFn.?(row.userdata, ctx, 9, 2);
+    try std.testing.expect(!std.mem.eql(u8, "界", middle.readCell(0, 0).char.grapheme));
+    try std.testing.expectEqualStrings("Z", middle.readCell(1, 0).char.grapheme);
+}

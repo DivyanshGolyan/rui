@@ -142,7 +142,7 @@ fn renderTable(arena: std.mem.Allocator, rows: []const TableLine, columns: table
                 .center => padding / 2,
             };
             for (0..leading) |_| try output.writer.writeByte(' ');
-            try output.writer.writeAll(text);
+            try writeTableCell(&output.writer, ctx, text);
             for (leading..padding) |_| try output.writer.writeByte(' ');
         }
         try output.writer.writeByte('\n');
@@ -152,8 +152,23 @@ fn renderTable(arena: std.mem.Allocator, rows: []const TableLine, columns: table
 }
 
 fn tableCellWidth(ctx: fw.DrawContext, text: []const u8) usize {
-    // Native hard-line text expands each tab to eight cells.
-    return ctx.stringWidth(text) + 7 * std.mem.count(u8, text, "\t");
+    return ctx.hardLineWidth(text);
+}
+
+fn writeTableCell(writer: *std.Io.Writer, ctx: fw.DrawContext, text: []const u8) !void {
+    var column: usize = 0;
+    var iter = ctx.graphemeIterator(text);
+    while (iter.next()) |char| {
+        const grapheme = char.bytes(text);
+        if (std.mem.eql(u8, grapheme, "\t")) {
+            const width = fw.DrawContext.tabWidth(column);
+            for (0..width) |_| try writer.writeByte(' ');
+            column += width;
+        } else {
+            try writer.writeAll(grapheme);
+            column += ctx.stringWidth(grapheme);
+        }
+    }
 }
 
 fn tableRule(writer: *std.Io.Writer, widths: []const usize) !void {
@@ -252,4 +267,23 @@ test "native feed does not interpret table syntax inside a fence" {
     }});
     try std.testing.expectEqualStrings(source, feed.widgets.items[1].text);
     try std.testing.expect(!feed.widgets.items[1].softwrap);
+}
+
+test "native measured table expands tabs from cell starts" {
+    fw.DrawContext.init(.unicode);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var feed: Self = .{};
+    defer feed.deinit(std.testing.allocator);
+    const source = "key | val\n--- | ---\na\tb | X\n";
+    try feed.append(std.testing.allocator, arena.allocator(), &.{.{
+        .kind = .assistant,
+        .position = 4,
+        .ordinal = 0,
+        .reference = .{ .length = source.len, .digest = @import("protocol.zig").contentDigest(source) },
+        .source = source,
+        .display = source,
+    }});
+    try std.testing.expectEqualStrings("key       │ val\n──────────┼────\na       b │ X  \n", feed.widgets.items[1].text);
+    try std.testing.expectEqualStrings(source, feed.sourceAt(4, 0).?.source);
 }

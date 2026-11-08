@@ -1330,7 +1330,7 @@ index eff49f1..2ab691e 100644
                  @floatFromInt(max_content_width);
  
 diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
-index 1c569eb..8b0a73f 100644
+index 1c569eb..5842e4f 100644
 --- a/src/vxfw/ScrollView.zig
 +++ b/src/vxfw/ScrollView.zig
 @@ -11,10 +11,22 @@ const ScrollView = @This();
@@ -1411,7 +1411,7 @@ index 1c569eb..8b0a73f 100644
 +
 +fn drawChild(self: *ScrollView, child: vxfw.Widget, ctx: vxfw.DrawContext, width: u16) Allocator.Error!DrawnChild {
 +    if (child.drawHorizontalFn) |draw_horizontal| return .{ .surface = try draw_horizontal(child.userdata, ctx, self.scroll.left, width), .shifted = true };
-+    return .{ .surface = try child.draw(ctx), .shifted = false };
++    return .{ .surface = try child.draw(ctx), .shifted = child.pinnedHorizontal };
 +}
 +
 +fn childColumn(self: *ScrollView, offset: u16, shifted: bool) i17 {
@@ -1510,7 +1510,7 @@ index 1c569eb..8b0a73f 100644
          const child = child_list.items[cursored_idx];
          sub[0] = .{
 -            .origin = .{ .col = child_offset - @as(i17, @intCast(self.scroll.left)), .row = 0 },
-+            .origin = .{ .col = self.childColumn(child_offset, child.surface.scroll_width != null), .row = 0 },
++            .origin = .{ .col = self.childColumn(child_offset, child.surface.scroll_width != null or child.surface.widget.pinnedHorizontal), .row = 0 },
              .surface = child.surface,
              .z_index = 0,
          };
@@ -1519,7 +1519,7 @@ index 1c569eb..8b0a73f 100644
              child_list.deinit(ctx.arena);
              try child_list.append(ctx.arena, .{
 -                .origin = .{ .col = 0 - @as(i17, @intCast(self.scroll.left)), .row = 0 },
-+                .origin = .{ .col = self.childColumn(0, sub.surface.scroll_width != null), .row = 0 },
++                .origin = .{ .col = self.childColumn(0, sub.surface.scroll_width != null or sub.surface.widget.pinnedHorizontal), .row = 0 },
                  .surface = sub.surface,
                  .z_index = 0,
              });
@@ -1548,7 +1548,7 @@ index 1c569eb..8b0a73f 100644
              break;
          }
 diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
-index fe46d2b..d17eea1 100644
+index fe46d2b..ea54675 100644
 --- a/src/vxfw/Text.zig
 +++ b/src/vxfw/Text.zig
 @@ -3,6 +3,123 @@ const vaxis = @import("../main.zig");
@@ -1583,7 +1583,7 @@ index fe46d2b..d17eea1 100644
 +                    .soft => |*iter| if (iter.next()) |wrapped| wrapped.bytes else null,
 +                    .hard => |*iter| iter.next(),
 +                };
-+                if (bytes) |row_bytes| return .{ .text = row_bytes, .style = source.style, .softwrap = false, .overflow = .clip, .virtual_horizontal = !source.softwrap };
++                if (bytes) |row_bytes| return .{ .text = row_bytes, .style = source.style, .softwrap = false, .overflow = .clip, .virtual_horizontal = !source.softwrap, .pinned_horizontal = source.softwrap };
 +                self.source_index += 1;
 +                self.iter = .fresh;
 +            }
@@ -1675,18 +1675,21 @@ index fe46d2b..d17eea1 100644
  const vxfw = @import("vxfw.zig");
  
  const Text = @This();
-@@ -13,14 +130,49 @@ text_align: enum { left, center, right } = .left,
+@@ -13,14 +130,52 @@ text_align: enum { left, center, right } = .left,
  softwrap: bool = true,
  overflow: enum { ellipsis, clip } = .ellipsis,
  width_basis: enum { parent, longest_line } = .longest_line,
 +/// Only for a single hard line produced by LineIndex.
 +virtual_horizontal: bool = false,
++/// LineIndex-wrapped prose stays fixed when a sibling scrolls horizontally.
++pinned_horizontal: bool = false,
  
  pub fn widget(self: *const Text) vxfw.Widget {
      return .{
          .userdata = @constCast(self),
          .drawFn = typeErasedDrawFn,
 +        .drawHorizontalFn = if (self.virtual_horizontal) drawHorizontal else null,
++        .pinnedHorizontal = self.pinned_horizontal,
      };
  }
  
@@ -1702,7 +1705,7 @@ index fe46d2b..d17eea1 100644
 +    while (chars.next()) |char| {
 +        const grapheme = char.bytes(self.text);
 +        const tab = std.mem.eql(u8, grapheme, "\t");
-+        const cell_width = if (tab) 8 else ctx.stringWidth(grapheme);
++        const cell_width = if (tab) vxfw.DrawContext.tabWidth(column) else ctx.stringWidth(grapheme);
 +        const next = column + cell_width;
 +        if (tab) {
 +            const first = @max(column, left);
@@ -1725,7 +1728,7 @@ index fe46d2b..d17eea1 100644
  fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
      const self: *const Text = @ptrCast(@alignCast(ptr));
      return self.draw(ctx);
-@@ -76,6 +228,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+@@ -76,6 +231,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                      continue;
                  }
                  const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
@@ -1733,7 +1736,7 @@ index fe46d2b..d17eea1 100644
                  surface.writeCell(col, row, .{
                      .char = .{ .grapheme = grapheme, .width = grapheme_width },
                      .style = self.style,
-@@ -102,6 +255,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+@@ -102,6 +258,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                  const grapheme = char.bytes(line);
                  const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
  
@@ -1741,7 +1744,7 @@ index fe46d2b..d17eea1 100644
                  if (col + grapheme_width >= container_size.width and
                      line_width > container_size.width and
                      self.overflow == .ellipsis)
-@@ -204,6 +358,10 @@ pub const SoftwrapIterator = struct {
+@@ -204,6 +361,10 @@ pub const SoftwrapIterator = struct {
      line: []const u8 = "",
      index: usize = 0,
      hard_iter: LineIterator,
@@ -1752,7 +1755,7 @@ index fe46d2b..d17eea1 100644
  
      pub const Line = struct {
          width: u16,
-@@ -225,14 +383,15 @@ pub const SoftwrapIterator = struct {
+@@ -225,14 +386,15 @@ pub const SoftwrapIterator = struct {
              self.line = self.hard_iter.next() orelse return null;
              self.line = std.mem.trimEnd(u8, self.line, " \t");
              self.index = 0;
@@ -1770,7 +1773,7 @@ index fe46d2b..d17eea1 100644
  
              if (self.ctx.max.width) |max| {
                  if (cur_width + next_width > max) {
-@@ -244,17 +403,30 @@ pub const SoftwrapIterator = struct {
+@@ -244,17 +406,30 @@ pub const SoftwrapIterator = struct {
                      if (trimmed_width > max) {
                          // Won't fit on line by itself, so fit as much on this line as we can
                          var iter = self.ctx.graphemeIterator(word);
@@ -1801,7 +1804,7 @@ index fe46d2b..d17eea1 100644
                      // We are softwrapping, advance index to the start of the next word
                      const end = self.index;
                      self.index = std.mem.indexOfNonePos(u8, self.line, self.index, soft_breaks) orelse self.line.len;
-@@ -263,11 +435,21 @@ pub const SoftwrapIterator = struct {
+@@ -263,11 +438,21 @@ pub const SoftwrapIterator = struct {
              }
  
              self.index = idx;
@@ -1824,20 +1827,44 @@ index fe46d2b..d17eea1 100644
      fn nextWrap(self: *SoftwrapIterator) usize {
          // Find the first linear whitespace char
 diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
-index 587667d..9766bfd 100644
+index 587667d..fee1e82 100644
 --- a/src/vxfw/vxfw.zig
 +++ b/src/vxfw/vxfw.zig
-@@ -275,6 +275,9 @@ pub const Widget = struct {
+@@ -214,6 +214,21 @@ pub const DrawContext = struct {
+         );
+     }
+ 
++    /// Fixed eight-column tab stops, relative to the start of a hard line.
++    pub fn tabWidth(column: usize) usize {
++        return 8 - column % 8;
++    }
++
++    pub fn hardLineWidth(self: DrawContext, text: []const u8) usize {
++        var column: usize = 0;
++        var iter = self.graphemeIterator(text);
++        while (iter.next()) |char| {
++            const grapheme = char.bytes(text);
++            column += if (std.mem.eql(u8, grapheme, "\t")) tabWidth(column) else self.stringWidth(grapheme);
++        }
++        return column;
++    }
++
+     pub fn graphemeIterator(_: DrawContext, str: []const u8) vaxis.unicode.GraphemeIterator {
+         return vaxis.unicode.graphemeIterator(str);
+     }
+@@ -275,6 +290,11 @@ pub const Widget = struct {
      captureHandler: ?*const fn (userdata: *anyopaque, ctx: *EventContext, event: Event) anyerror!void = null,
      eventHandler: ?*const fn (userdata: *anyopaque, ctx: *EventContext, event: Event) anyerror!void = null,
      drawFn: *const fn (userdata: *anyopaque, ctx: DrawContext) Allocator.Error!Surface,
 +    /// Optional horizontally virtualized drawing. The returned surface is
 +    /// already shifted by `left` and reports its unshifted extent.
 +    drawHorizontalFn: ?*const fn (userdata: *anyopaque, ctx: DrawContext, left: u64, width: u16) Allocator.Error!Surface = null,
++    /// A wrapped child remains at the viewport origin when siblings scroll.
++    pinnedHorizontal: bool = false,
  
      pub fn captureEvent(self: Widget, ctx: *EventContext, event: Event) anyerror!void {
          if (self.captureHandler) |handle| {
-@@ -348,6 +351,8 @@ pub const Surface = struct {
+@@ -348,6 +368,8 @@ pub const Surface = struct {
      buffer: []vaxis.Cell,
  
      children: []SubSurface,
