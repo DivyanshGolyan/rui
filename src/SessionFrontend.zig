@@ -3625,7 +3625,14 @@ const CapacityTestPty = struct {
     }
     fn resize(self: @This(), rows: u16, col: u16) !void {
         var size: std.posix.winsize = .{ .row = rows, .col = col, .xpixel = 0, .ypixel = 0 };
-        if (std.c.ioctl(self.slave, @intCast(std.c.T.IOCSWINSZ), &size) != 0) return error.TestUnexpectedResult;
+        // Darwin's std.c.T omits IOCSWINSZ. Its sys/ttycom.h defines
+        // TIOCSWINSZ as _IOW('t', 103, struct winsize); sys/ioccom.h
+        // encodes IOC_IN and the size, group, and command in that order.
+        const set_window_size: usize = switch (@import("builtin").os.tag) {
+            .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => 0x80000000 | ((@sizeOf(std.posix.winsize) & 0x1fff) << 16) | (@as(usize, 't') << 8) | 103,
+            else => std.c.T.IOCSWINSZ,
+        };
+        if (std.c.ioctl(self.slave, @intCast(set_window_size), &size) != 0) return error.TestUnexpectedResult;
     }
     fn drain(self: @This()) void {
         var bytes: [8192]u8 = undefined;
