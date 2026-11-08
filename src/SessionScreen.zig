@@ -1563,6 +1563,8 @@ test "a queued Message keeps its row and status while looking back" {
     try std.testing.expectEqualStrings("Sent", rowText(screen, 2, &buffer));
     try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 3).?.char.grapheme);
     try std.testing.expectEqualStrings("› one", rowText(screen, 4, &buffer));
+    try std.testing.expectEqualStrings("", rowText(screen, 5, &buffer));
+    try std.testing.expectEqualStrings(" ", Test.window(screen).readCell(39, 5).?.char.grapheme);
     // A transcript keeps the same queued row and confirming status.
     try screen.beginTranscript(0);
     _ = screen.browse(false, true);
