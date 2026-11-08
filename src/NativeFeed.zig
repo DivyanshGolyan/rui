@@ -522,7 +522,20 @@ test "native terminal cell currently requires the entire large grapheme" {
     var screen = try vaxis.AllocatingScreen.init(fixed.allocator(), 1, 1);
     defer screen.deinit(fixed.allocator());
     try std.testing.expectError(error.OutOfMemory, screen.writeCell(0, 0, .{ .char = .{ .grapheme = source, .width = 1 } }));
-    std.debug.print("native terminal single_grapheme_bytes={d} screen_allocator_capacity={d} result=OutOfMemory\n", .{ source.len, storage.len });
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "source", .{ .read = true });
+    defer file.close(std.testing.io);
+    try file.writeStreamingAll(std.testing.io, source);
+    const backing: GraphemeFile = .{ .io = std.testing.io, .file = file, .max_read = 4096 };
+    var reader: vaxis.unicode.PagedReader = .{ .source = .{ .userdata = &backing, .length = source.len, .readFn = GraphemeFile.read } };
+    var paged = try vaxis.unicode.PagedGraphemeIterator.init(&reader, 0);
+    const span = (try paged.next()).?;
+    try std.testing.expectEqual(@as(usize, 0), span.start);
+    try std.testing.expectEqual(source.len, span.len);
+    try std.testing.expect((try paged.next()) == null);
+    try std.testing.expect(@sizeOf(@TypeOf(reader)) < 8192);
+    std.debug.print("native terminal single_grapheme_bytes={d} screen_allocator_capacity={d} result=OutOfMemory paged_reader_bytes={d}\n", .{ source.len, storage.len, @sizeOf(@TypeOf(reader)) });
 }
 
 test "native last-frame cache redraws an oversized grapheme without copying it" {
@@ -565,4 +578,50 @@ test "native last-frame cache redraws an oversized grapheme without copying it" 
     try vx.render(&output.writer);
     try std.testing.expect(std.mem.indexOf(u8, output.written()[start..], source) != null);
     std.debug.print("native last-frame cache source_bytes={d} fixed_bytes={d} redraws=2 exact_source=true\n", .{ source.len, fixed.end_index });
+}
+
+const GraphemeFile = struct {
+    io: std.Io,
+    file: std.Io.File,
+    max_read: usize,
+    fail_at: ?usize = null,
+
+    fn read(raw: *const anyopaque, offset: u64, buffer: []u8) !usize {
+        const self: *const GraphemeFile = @ptrCast(@alignCast(raw));
+        if (self.fail_at) |boundary| if (offset >= boundary) return error.WitnessSourceFailure;
+        return self.file.readPositionalAll(self.io, buffer[0..@min(buffer.len, self.max_read)], offset);
+    }
+};
+
+test "native paged Unicode yields exact grapheme offsets across file windows" {
+    const vaxis = @import("vaxis");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "source", .{ .read = true });
+    defer file.close(io);
+    const source = "Aé中👩🏽‍🚀🇨🇭e\u{301}\nZ";
+    try file.writeStreamingAll(io, source);
+    for (1..8) |max_read| {
+        const backing: GraphemeFile = .{ .io = io, .file = file, .max_read = max_read };
+        var reader: vaxis.unicode.PagedReader = .{ .source = .{ .userdata = &backing, .length = source.len, .readFn = GraphemeFile.read } };
+        var actual = try vaxis.unicode.PagedGraphemeIterator.init(&reader, 0);
+        var expected = vaxis.unicode.graphemeIterator(source);
+        while (expected.next()) |want| {
+            const got = (try actual.next()).?;
+            try std.testing.expectEqual(want.start, got.start);
+            try std.testing.expectEqual(want.len, got.len);
+        }
+        try std.testing.expect((try actual.next()) == null);
+        try std.testing.expect(@sizeOf(@TypeOf(reader)) < 8192);
+    }
+    const failing: GraphemeFile = .{ .io = io, .file = file, .max_read = 1, .fail_at = 5 };
+    var reader: vaxis.unicode.PagedReader = .{ .source = .{ .userdata = &failing, .length = source.len, .readFn = GraphemeFile.read } };
+    var actual = try vaxis.unicode.PagedGraphemeIterator.init(&reader, 0);
+    const Walk = struct {
+        fn all(iter: *vaxis.unicode.PagedGraphemeIterator) !void {
+            while (try iter.next()) |_| {}
+        }
+    };
+    try std.testing.expectError(error.WitnessSourceFailure, Walk.all(&actual));
 }

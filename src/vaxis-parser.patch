@@ -1284,6 +1284,103 @@ index 2c6edb6..81acf55 100644
 +    defer std.testing.allocator.free(value);
 +    try std.testing.expectEqualStrings("ab\n界c", value);
 +}
+diff --git a/src/unicode.zig b/src/unicode.zig
+--- a/src/unicode.zig
++++ b/src/unicode.zig
+@@ -50,3 +50,93 @@
+     try std.testing.expectEqual(Grapheme{ .start = 0, .len = 3 }, it.next().?);
+     try std.testing.expectEqual(null, it.next());
+ }
++
++/// A reloadable UTF-8 source. The callback may return a short nonzero read;
++/// it must never return more than the supplied buffer. Source and callback
++/// remain alive while a PagedReader or its iterators borrow them.
++pub const PagedSource = struct {
++    userdata: *const anyopaque,
++    length: usize,
++    readFn: *const fn (*const anyopaque, u64, []u8) anyerror!usize,
++};
++
++/// Fixed-size source cache used by the native grapheme state machine. An
++/// iterator reports source errors, rather than treating a short read as EOF.
++pub const PagedReader = struct {
++    source: PagedSource,
++    buffer: [4096]u8 = undefined,
++    start: usize = 0,
++    count: usize = 0,
++    failure: ?anyerror = null,
++
++    fn byteAt(self: *PagedReader, at: usize) ?u8 {
++        if (self.failure != null or at >= self.source.length) return null;
++        if (at < self.start or at - self.start >= self.count) {
++            self.start = at;
++            const wanted = @min(self.buffer.len, self.source.length - at);
++            self.count = self.source.readFn(self.source.userdata, at, self.buffer[0..wanted]) catch |err| {
++                self.failure = err;
++                return null;
++            };
++            if (self.count == 0 or self.count > wanted) {
++                self.failure = error.InvalidSourceRead;
++                return null;
++            }
++        }
++        return self.buffer[at - self.start];
++    }
++};
++
++const PagedCodepoints = struct {
++    i: usize,
++    reader: *PagedReader,
++
++    pub fn next(self: *@This()) ?u21 {
++        const first = self.reader.byteAt(self.i) orelse return null;
++        const count = std.unicode.utf8ByteSequenceLength(first) catch {
++            self.reader.failure = error.InvalidUtf8;
++            return null;
++        };
++        if (count > self.reader.source.length - self.i) {
++            self.reader.failure = error.InvalidUtf8;
++            return null;
++        }
++        var bytes: [4]u8 = undefined;
++        bytes[0] = first;
++        for (1..count) |i| {
++            bytes[i] = self.reader.byteAt(self.i + i) orelse {
++                if (self.reader.failure == null) self.reader.failure = error.InvalidUtf8;
++                return null;
++            };
++        }
++        const scalar = std.unicode.utf8Decode(bytes[0..count]) catch {
++            self.reader.failure = error.InvalidUtf8;
++            return null;
++        };
++        self.i += count;
++        return scalar;
++    }
++};
++
++/// Native Unicode grapheme segmentation over a reloadable source, yielding
++/// exact byte ranges without materializing even a very large grapheme. Start
++/// must be zero or a previously returned grapheme boundary.
++pub const PagedGraphemeIterator = struct {
++    reader: *PagedReader,
++    inner: uucode.grapheme.Iterator(PagedCodepoints),
++
++    pub fn init(reader: *PagedReader, start: usize) !PagedGraphemeIterator {
++        if (start > reader.source.length) return error.InvalidSourceOffset;
++        reader.failure = null;
++        const inner = uucode.grapheme.Iterator(PagedCodepoints).init(.{ .i = start, .reader = reader });
++        if (reader.failure) |err| return err;
++        return .{ .reader = reader, .inner = inner };
++    }
++
++    pub fn next(self: *PagedGraphemeIterator) !?Grapheme {
++        const value = self.inner.nextGrapheme();
++        if (self.reader.failure) |err| return err;
++        if (value) |g| return .{ .start = g.start, .len = g.end - g.start };
++        return null;
++    }
++};
 diff --git a/src/vxfw/ScrollBars.zig b/src/vxfw/ScrollBars.zig
 index eff49f1..2ab691e 100644
 --- a/src/vxfw/ScrollBars.zig
