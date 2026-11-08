@@ -76,6 +76,7 @@ task: Task = .{},
 key: [36]u8 = @splat(0),
 path: [std.Io.Dir.max_path_bytes]u8 = undefined,
 target: client.CaptureTarget = undefined,
+target_reserved: bool = false,
 captured: ?client.CapturedRecord = null,
 reply_buffer: client.ReplyBuffer = .{},
 reply: ?protocol_reply.MutationReply = null,
@@ -114,10 +115,16 @@ pub fn begin(self: *Self, intent: Intent) !void {
     self.state = .not_started;
     self.reply = null;
     self.publication = .not_sent;
-    const target: client.CaptureTarget = .{ .generated = self.directory };
-    self.target = .{ .reserved = try target.resolve(self.io, &self.path, &self.key) };
+    self.target_reserved = false;
+    try self.reserveTarget();
     try self.startWorker(submit);
     self.state = .submitting;
+}
+
+fn reserveTarget(self: *Self) !void {
+    const target: client.CaptureTarget = .{ .generated = self.directory };
+    self.target = .{ .reserved = try target.resolve(self.io, &self.path, &self.key) };
+    self.target_reserved = true;
 }
 
 fn freezeMessage(self: *Self, text: []const u8) ![]const u8 {
@@ -170,7 +177,13 @@ pub fn unconfirmedMessage(self: *const Self) ?*const [36]u8 {
 }
 
 fn launchRetry(self: *Self) !void {
-    try self.startWorker(resend);
+    if (!self.target_reserved) {
+        try self.reserveTarget();
+        try self.startWorker(submit);
+    } else {
+        try self.startWorker(resend);
+    }
+    self.state = .submitting;
 }
 
 // ClientTask's pthread entry is shared with frontend readers. Let the native
@@ -381,6 +394,15 @@ fn apply(self: *Self, result: anyerror!void) !End {
     return .{ .rejected = .{ .kind = kind, .code = code } };
 }
 
+/// Only a joined, definitely unsent or authoritatively rejected original may
+/// be released without confirmation of its admission.
+pub fn discardUnsentOrRejected(self: *Self) !void {
+    if (self.intent == null) return;
+    if (self.task.thread != null) return error.SubmissionUnresolved;
+    if (self.state != .rejected and !(self.state == .not_started and self.publication == .not_sent)) return error.SubmissionUnresolved;
+    self.release();
+}
+
 pub fn discardRejected(self: *Self) !void {
     if (self.intent == null) return;
     if (self.task.thread != null or self.state != .rejected) return error.SubmissionUnresolved;
@@ -441,6 +463,44 @@ test "submission reservation failure retains unsent intent ahead of accepted his
         try std.testing.expectEqualStrings("next té!", input.composition().bytes);
         try std.testing.expectEqual("next té".len, input.composition().cursor);
     }
+}
+
+test "a failed reservation retries frozen bytes and only unsent originals can be discarded" {
+    const Failing = struct {
+        fn random(_: ?*anyopaque, _: []u8) std.Io.RandomSecureError!void {
+            return error.EntropyUnavailable;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const directory = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+    var vtable = std.testing.io.vtable.*;
+    vtable.randomSecure = Failing.random;
+    var original = [_]u8{ 'o', 'l', 'd' };
+    var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable }, .store = directory, .session = "k7m2qx", .directory = directory, .environment = .empty };
+    defer {
+        self.cancel();
+        _ = self.join();
+        self.close();
+    }
+    try std.testing.expectError(error.EntropyUnavailable, self.begin(.{ .message = &original }));
+    original[0] = 'n';
+    try std.testing.expectEqualStrings("old", self.intent.?.text().?);
+    try std.testing.expect(!self.target_reserved);
+    vtable.randomSecure = std.testing.io.vtable.randomSecure;
+    try self.requestRecovery(null);
+    try std.testing.expect(try self.advance() == .absent);
+    try std.testing.expect(self.target_reserved);
+    try std.testing.expect(client.validRequestHandle(&self.key));
+    _ = self.join();
+    try std.testing.expectEqualStrings("old", self.intent.?.text().?);
+    self.state = .unconfirmed;
+    try std.testing.expectError(error.SubmissionUnresolved, self.discardUnsentOrRejected());
+    self.state = .not_started;
+    self.publication = .not_sent;
+    try self.discardUnsentOrRejected();
+    try std.testing.expect(self.view() == null);
 }
 
 test "an accepted reason names its Action's denial; a rejected one denies nothing; an unconfirmed one keeps the denial for Ctrl-R" {

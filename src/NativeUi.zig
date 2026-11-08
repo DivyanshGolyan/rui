@@ -10,6 +10,7 @@ const observations = @import("NativeObservations.zig");
 const Task = @import("ClientTask.zig");
 const Submission = @import("SessionSubmission.zig");
 const defaults = @import("product_defaults.zig");
+const stderr = @import("stderr.zig");
 const Self = @This();
 const Id = [protocol.session_id_bytes]u8;
 
@@ -103,6 +104,7 @@ header: fw.Text = .{ .text = "" },
 status: fw.Text = .{ .text = "" },
 border: fw.Border = undefined,
 notice: []const u8 = "",
+notice_buffer: [256]u8 = undefined,
 pasting: bool = false,
 worker: Task = .{},
 read_kind: ReadKind = .list,
@@ -150,8 +152,10 @@ pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Ho
 fn deinit(self: *Self) void {
     self.worker.cancel();
     self.worker.join() catch {};
+    const was_pending = self.submission.view() != null;
     self.submission.cancel();
     _ = self.submission.join();
+    if (was_pending) self.recoveryGuide();
     self.submission.close();
     self.freeArena(self.read_arena);
     self.freeArena(self.list_arena);
@@ -163,6 +167,20 @@ fn deinit(self: *Self) void {
     self.drafts.deinit();
     self.overview_draft.destroy(self.init.gpa);
     self.scratch.close(self.init.io);
+}
+
+fn recoveryGuide(self: *Self) void {
+    switch (self.submission.recovery()) {
+        .none => {},
+        .not_sent => stderr.diagnostic("rui: Message was not sent; no recovery record was published.\n", .{}),
+        .uncertain => |key| stderr.diagnostic("rui: Capture not confirmed. Inspect rui request list for reserved key {s}; recover only that original, never replacement input.\n", .{key}),
+        .saved => |saved| if (saved.rejected) {
+            stderr.diagnostic("rui: Original request rejected. Use rui request inspect {s}.\n", .{saved.original.key});
+        } else {
+            stderr.diagnostic("rui: Message not confirmed. Use rui request recover {s}; do not resubmit it.\n", .{saved.original.key});
+        },
+        .accepted => |accepted| stderr.diagnostic("rui: Message accepted; do not resubmit it. Use rui request read-result {s}.\n", .{accepted.key}),
+    }
 }
 
 fn freeArena(self: *Self, arena: ?*std.heap.ArenaAllocator) void {
@@ -300,9 +318,24 @@ fn back(self: *Self, ctx: *fw.EventContext) !void {
     ctx.redraw = true;
 }
 
+fn showOriginal(self: *Self) void {
+    const original = self.submission.view() orelse return;
+    if (!self.submission.target_reserved) {
+        self.notice = "Original not sent · Ctrl-R retry · Ctrl-D discard";
+        return;
+    }
+    const action = switch (original.state) {
+        .rejected => "refused · Ctrl-D discard",
+        .not_started => "not sent · Ctrl-R retry · Ctrl-D discard",
+        .submitting => "sending · draft retained",
+        .unconfirmed => "unconfirmed · Ctrl-R retry",
+    };
+    self.notice = std.fmt.bufPrint(&self.notice_buffer, "{s} {s}", .{ original.key, action }) catch unreachable;
+}
+
 fn submit(self: *Self) !void {
     if (self.submission.view() != null) {
-        self.notice = "Original pending; draft retained";
+        self.showOriginal();
         return;
     }
     const current = self.activeDraft();
@@ -326,14 +359,18 @@ fn submit(self: *Self) !void {
         self.submission.captured_hook = self.hooks.captured;
     }
     self.submission.begin(.{ .message = text }) catch |err| {
-        self.notice = @errorName(err);
+        if (self.submission.view() != null) self.showOriginal() else self.notice = @errorName(err);
         return;
     };
     self.notice = "Sending…";
 }
 
 fn finishSubmission(self: *Self, ctx: *fw.EventContext) !void {
-    const end = try self.submission.advance();
+    const end = self.submission.advance() catch {
+        self.showOriginal();
+        ctx.redraw = true;
+        return;
+    };
     switch (end) {
         .absent => {},
         .accepted => |accepted| {
@@ -347,11 +384,11 @@ fn finishSubmission(self: *Self, ctx: *fw.EventContext) !void {
             ctx.redraw = true;
         },
         .rejected => {
-            self.notice = "Message refused; draft retained";
+            self.showOriginal();
             ctx.redraw = true;
         },
-        .failed => |failure| {
-            self.notice = @errorName(failure.err);
+        .failed => {
+            self.showOriginal();
             ctx.redraw = true;
         },
     }
@@ -366,6 +403,27 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             self.following = false;
         },
         .key_press => |key| {
+            if (!self.pasting and key.matches('r', .{ .ctrl = true })) {
+                if (self.submission.view()) |original| {
+                    if (original.state != .rejected) {
+                        try self.submission.requestRecovery(null);
+                        self.notice = "Retrying original; draft retained";
+                    } else self.showOriginal();
+                }
+                ctx.consumeAndRedraw();
+                return;
+            }
+            if (!self.pasting and key.matches('d', .{ .ctrl = true })) {
+                if (self.submission.view()) |original| {
+                    if (original.state == .rejected or original.state == .not_started) {
+                        try self.submission.discardUnsentOrRejected();
+                        self.submitted_draft = null;
+                        self.notice = "Original released; draft retained";
+                        ctx.consumeAndRedraw();
+                        return;
+                    }
+                }
+            }
             if (key.matches('q', .{ .ctrl = true })) {
                 ctx.quit = true;
                 ctx.consumeEvent();
