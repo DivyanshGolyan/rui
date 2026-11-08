@@ -2505,8 +2505,8 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +        /// frame was presented. A failed push may leave a harmless serial gap.
 +        pub fn tryStampedEvent(self: *Self) !?Stamped {
              return try self.queue.tryPop();
-         }
- 
++        }
++
 +        pub fn inputWatermark(self: *Self) u64 {
 +            return self.issued_sequence.load(.acquire);
 +        }
@@ -2557,8 +2557,8 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +        /// sequences. Every event from that input batch has the same age.
 +        pub fn beginInputBatch(self: *Self) InputBatch {
 +            return .{ .owner = self, .sequence = self.issueSequence() };
-+        }
-+
+         }
+ 
 +        fn stamp(self: *Self, event: T) Stamped {
 +            return .{ .event = event, .sequence = self.issueSequence() };
 +        }
@@ -2592,7 +2592,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
              }
          }
  
-@@ -178,17 +248,44 @@
+@@ -178,17 +248,49 @@
                          try self.postEvent(.{ .winsize = winsize });
                      }
  
@@ -2629,7 +2629,12 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +                        const read_limit = if (self.stale_bytes == 0) available else @min(available, self.stale_bytes);
 +                        const bytes_read = std.posix.read(input_fd, buf[read_start..][0..read_limit]) catch |err| {
 +                            self.unlockInput();
-+                            if (err == error.WouldBlock) continue;
++                            if (err == error.WouldBlock) {
++                                // Some TTYs repeatedly report readiness without
++                                // readable bytes. Yield outside the frame lock.
++                                try self.io.sleep(.fromMilliseconds(16), .awake);
++                                continue;
++                            }
                              try retry.wait(self.io, err);
                              continue;
                          };
@@ -2638,7 +2643,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                          if (bytes_read == 0) return error.EndOfStream;
                          retry = .{};
                          const n = read_start + bytes_read;
-@@ -205,6 +302,7 @@
+@@ -205,6 +307,7 @@
                                  if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
                                      buf[0] = buf[seq_start];
                                      read_start = 1;
@@ -2646,7 +2651,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                                      continue :read_loop;
                                  }
                              }
-@@ -214,6 +312,7 @@
+@@ -214,6 +317,7 @@
                                  // There is no consumed length on parse errors. Discard
                                  // this batch rather than retrying the same bad bytes.
                                  read_start = 0;
@@ -2654,7 +2659,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                                  continue :read_loop;
                              };
                              if (result.n == 0) {
-@@ -224,14 +323,16 @@
+@@ -224,14 +328,16 @@
                                      buf[seq_start - initial_start] = buf[seq_start];
                                  }
                                  read_start = seq_start - initial_start;
