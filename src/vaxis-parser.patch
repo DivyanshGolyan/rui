@@ -1047,3 +1047,203 @@ index 2c6edb6..81acf55 100644
          const cursored_idx: u32 = self.cursor - self.scroll.top;
          const sub = child_list.items[cursored_idx];
          // The bottom row of the cursored widget
+--- a/src/vxfw/TextField.zig
++++ b/src/vxfw/TextField.zig
+@@ -19,6 +19,11 @@
+ // Index of our cursor
+ buf: Buffer,
+ 
++/// Multiline mode uses the same gap buffer and cursor as the single-line field.
++multiline: bool = false,
++max_lines: u16 = 5,
++pasting: bool = false,
++
+ /// Style to draw the TextField with
+ style: vaxis.Style = .{},
+ 
+@@ -66,7 +71,22 @@
+ pub fn handleEvent(self: *TextField, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
+     switch (event) {
+         .focus_out, .focus_in => ctx.redraw = true,
++        .paste_start => self.pasting = true,
++        .paste_end => self.pasting = false,
++        .paste => |text| {
++            defer ctx.alloc.free(text);
++            try self.insertSliceAtCursor(text);
++            return self.checkChanged(ctx);
++        },
+         .key_press => |key| {
++            if (self.multiline and (key.matches('j', .{ .ctrl = true }) or key.matches(Key.enter, .{ .shift = true }) or (self.pasting and key.matches(Key.enter, .{})))) {
++                try self.insertSliceAtCursor("\n");
++                return self.checkChanged(ctx);
++            }
++            if (self.multiline and (key.matches(Key.up, .{}) or key.matches(Key.down, .{}))) {
++                try self.moveVisualLine(key.matches(Key.down, .{}));
++                return ctx.consumeAndRedraw();
++            }
+             if (key.matches(Key.backspace, .{})) {
+                 self.deleteBeforeCursor();
+                 return self.checkChanged(ctx);
+@@ -108,7 +128,7 @@
+                 return self.checkChanged(ctx);
+             } else if (key.matches(vaxis.Key.enter, .{}) or key.matches('j', .{ .ctrl = true })) {
+                 if (self.onSubmit) |onSubmit| {
+-                    const value = try self.toOwnedSlice();
++                    const value = if (self.multiline) try self.snapshot() else try self.toOwnedSlice();
+                     // Get a ref to the allocator in case onSubmit deinits the TextField
+                     const allocator = self.buf.allocator;
+                     defer allocator.free(value);
+@@ -199,6 +219,7 @@
+ }
+ 
+ pub fn draw(self: *TextField, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
++    if (self.multiline) return self.drawMultiline(ctx);
+     std.debug.assert(ctx.max.width != null);
+     const max_width = ctx.max.width.?;
+     if (max_width != self.prev_width) {
+@@ -297,6 +318,106 @@
+     // win.showCursor(self.prev_cursor_col, 0);
+ }
+ 
++const VisualPosition = struct { row: usize = 0, col: usize = 0 };
++
++fn displayText(grapheme: []const u8) []const u8 {
++    if (grapheme.len != 0 and (grapheme[0] < 0x20 or grapheme[0] == 0x7f)) return "�";
++    return grapheme;
++}
++
++fn nextVisual(position: *VisualPosition, grapheme: []const u8, width: usize, context: vxfw.DrawContext) void {
++    if (std.mem.eql(u8, grapheme, "\n") or std.mem.eql(u8, grapheme, "\r\n")) {
++        position.row += 1;
++        position.col = 0;
++        return;
++    }
++    const cells = @min(width, context.stringWidth(displayText(grapheme)));
++    if (position.col + cells > width) {
++        position.row += 1;
++        position.col = 0;
++    }
++    position.col += cells;
++}
++
++fn positionAt(text: []const u8, offset: usize, width: usize, context: vxfw.DrawContext) VisualPosition {
++    var position: VisualPosition = .{};
++    var iter = unicode.graphemeIterator(text);
++    while (iter.next()) |g| {
++        if (g.start >= offset) break;
++        nextVisual(&position, g.bytes(text), width, context);
++    }
++    if (position.col >= width) {
++        position.row += 1;
++        position.col = 0;
++    }
++    return position;
++}
++
++/// Move within the native buffer to the nearest column on the visual line.
++fn moveVisualLine(self: *TextField, down: bool) Allocator.Error!void {
++    if (self.prev_width == 0) return;
++    const text = try self.buf.dupe();
++    defer self.buf.allocator.free(text);
++    const context: vxfw.DrawContext = undefined;
++    const width: usize = self.prev_width;
++    const current = positionAt(text, self.buf.cursor, width, context);
++    if (!down and current.row == 0) return;
++    const target = if (down) current.row + 1 else current.row - 1;
++    var iter = unicode.graphemeIterator(text);
++    var offset: usize = 0;
++    var position: VisualPosition = .{};
++    var best: ?usize = null;
++    var distance: usize = std.math.maxInt(usize);
++    while (true) {
++        var boundary = position;
++        if (boundary.col >= width) { boundary.row += 1; boundary.col = 0; }
++        if (boundary.row == target) {
++            const d = if (boundary.col > current.col) boundary.col - current.col else current.col - boundary.col;
++            if (d < distance) { best = offset; distance = d; }
++        } else if (boundary.row > target) break;
++        const g = iter.next() orelse break;
++        nextVisual(&position, g.bytes(text), width, context);
++        offset = g.start + g.len;
++    }
++    const destination = best orelse return;
++    if (destination < self.buf.cursor) self.buf.moveGapLeft(self.buf.cursor - destination)
++    else self.buf.moveGapRight(destination - self.buf.cursor);
++}
++
++fn drawMultiline(self: *TextField, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
++    const width = ctx.max.width orelse ctx.min.width;
++    self.prev_width = width;
++    const text = try ctx.arena.alloc(u8, self.buf.firstHalf().len + self.buf.secondHalf().len);
++    @memcpy(text[0..self.buf.firstHalf().len], self.buf.firstHalf());
++    @memcpy(text[self.buf.firstHalf().len..], self.buf.secondHalf());
++    const usable: usize = @max(width, 1);
++    const cursor = positionAt(text, self.buf.cursor, usable, ctx);
++    const end = positionAt(text, text.len, usable, ctx);
++    const wanted: u16 = @intCast(@min(@as(usize, self.max_lines), end.row + 1));
++    const height = @min(ctx.max.height orelse wanted, @max(ctx.min.height, wanted));
++    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = height });
++    @memset(surface.buffer, .{ .style = self.style });
++    if (width == 0 or height == 0) return surface;
++    const top = cursor.row -| (height - 1);
++    var position: VisualPosition = .{};
++    var iter = unicode.graphemeIterator(text);
++    while (iter.next()) |g| {
++        const bytes = g.bytes(text);
++        if (std.mem.eql(u8, bytes, "\n") or std.mem.eql(u8, bytes, "\r\n")) {
++            nextVisual(&position, bytes, usable, ctx);
++            continue;
++        }
++        const cells: u8 = @intCast(@min(usable, ctx.stringWidth(displayText(bytes))));
++        if (position.col + cells > usable) { position.row += 1; position.col = 0; }
++        if (position.row >= top and position.row - top < height and position.col < width and cells != 0) {
++            surface.writeCell(@intCast(position.col), @intCast(position.row - top), .{ .char = .{ .grapheme = displayText(bytes), .width = cells }, .style = self.style });
++        }
++        position.col += cells;
++    }
++    surface.cursor = .{ .col = @intCast(cursor.col), .row = @intCast(cursor.row - top) };
++    return surface;
++}
++
+ pub fn clearAndFree(self: *TextField) void {
+     self.buf.clearAndFree();
+     self.reset();
+@@ -307,6 +428,11 @@
+     self.reset();
+ }
+ 
++/// Copy the current value without transferring its buffer or cursor.
++pub fn snapshot(self: *TextField) ![]const u8 {
++    return self.buf.dupe();
++}
++
+ pub fn toOwnedSlice(self: *TextField) ![]const u8 {
+     defer self.reset();
+     return self.buf.toOwnedSlice();
+@@ -878,3 +1004,26 @@
+ test "refAllDecls" {
+     std.testing.refAllDecls(@This());
+ }
++
++
++test "multiline TextField keeps exact text and moves the native cursor" {
++    var field = TextField.init(std.testing.allocator);
++    defer field.deinit();
++    field.multiline = true;
++    try field.insertSliceAtCursor("ab\n界c");
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    vxfw.DrawContext.init(.unicode);
++    const context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 10, .height = 5 }, .cell_size = .{} };
++    const surface = try field.draw(context);
++    try std.testing.expectEqual(@as(u16, 2), surface.size.height);
++    try std.testing.expectEqualStrings("界", surface.readCell(0, 1).char.grapheme);
++    try std.testing.expectEqual(@as(u16, 1), surface.cursor.?.row);
++    try field.moveVisualLine(false);
++    try std.testing.expectEqual(@as(usize, 2), field.byteOffsetToCursor());
++    try field.moveVisualLine(true);
++    try std.testing.expectEqual(@as(usize, "ab\n界".len), field.byteOffsetToCursor());
++    const value = try field.snapshot();
++    defer std.testing.allocator.free(value);
++    try std.testing.expectEqualStrings("ab\n界c", value);
++}
