@@ -64,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
             }
         };
         const cancel = std.mem.eql(u8, args[8], "cancel");
+        const hold = cancel or std.mem.eql(u8, args[8], "hold");
         const stopper = if (cancel) try std.Thread.spawn(.{}, StopScratch.run, .{ init.io, &cancellation }) else null;
         defer if (stopper) |thread| thread.join();
         const scoped: client.Requests = .{ .io = init.io, .host_instance = &before, .cancellation = if (cancel) &cancellation else null };
@@ -71,18 +72,27 @@ pub fn main(init: std.process.Init) !void {
         var dir = try std.Io.Dir.cwd().openDir(init.io, path, .{});
         defer dir.close(init.io);
         const content = scoped.readVerifiedActivityScratch(std.heap.c_allocator, dir, args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), .{ .bytes = try std.fmt.parseInt(u64, args[6], 10), .digest = digest }) catch |err| {
-            if (cancel) {
+            if (hold) {
                 try std.Io.File.stderr().writeStreamingAll(init.io, "SCRATCH_READ_RETURNED\n");
                 try std.Io.sleep(init.io, .fromSeconds(3), .awake);
             }
             return err;
         };
-        defer content.close();
+        var content_open = true;
+        defer if (content_open) content.close();
         const after = switch (client.hostStatus(init.io, args[2])) {
             .ready => |ready| ready.instance,
             else => return error.HostUnavailable,
         };
-        if (!std.mem.eql(u8, &before, &after)) return error.HostInstanceChanged;
+        if (!std.mem.eql(u8, &before, &after)) {
+            content.close();
+            content_open = false;
+            if (hold) {
+                try std.Io.File.stderr().writeStreamingAll(init.io, "SCRATCH_READ_RETURNED\n");
+                try std.Io.sleep(init.io, .fromSeconds(3), .awake);
+            }
+            return error.HostInstanceChanged;
+        }
         var buffer: [4096]u8 = undefined;
         for (args[8..]) |offset| {
             const count = try content.readAt(try std.fmt.parseInt(u64, offset, 10), &buffer);
