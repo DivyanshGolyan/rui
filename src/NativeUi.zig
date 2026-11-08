@@ -426,7 +426,8 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             }
             if (!self.pasting and key.matches('q', .{ .ctrl = true })) {
                 if (self.submission.task.thread != null) {
-                    self.notice = "Original still in flight; wait before quitting";
+                    self.submission.cancel();
+                    self.notice = "Cancelling local wait; original may already be admitted";
                 } else switch (self.submission.recovery()) {
                     .not_sent => self.notice = "Original not saved; Ctrl-R retry or Ctrl-D discard before quit",
                     .uncertain => self.notice = "Capture uncertain; Ctrl-R retry before quit",
