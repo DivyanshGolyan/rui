@@ -3623,8 +3623,8 @@ const CapacityTestPty = struct {
         const slave = try std.posix.openat(std.posix.AT.FDCWD, std.mem.span(name), .{ .ACCMODE = .RDWR, .NOCTTY = true, .NONBLOCK = true, .CLOEXEC = true }, 0);
         return .{ .master = master, .slave = slave };
     }
-    fn resize(self: @This(), row: u16, col: u16) !void {
-        var size: std.posix.winsize = .{ .row = row, .col = col, .xpixel = 0, .ypixel = 0 };
+    fn resize(self: @This(), rows: u16, col: u16) !void {
+        var size: std.posix.winsize = .{ .row = rows, .col = col, .xpixel = 0, .ypixel = 0 };
         if (std.c.ioctl(self.slave, @intCast(std.c.T.IOCSWINSZ), &size) != 0) return error.TestUnexpectedResult;
     }
     fn drain(self: @This()) void {
