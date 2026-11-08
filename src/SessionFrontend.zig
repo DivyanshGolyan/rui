@@ -6257,11 +6257,25 @@ test "queued Message joins before deliberate Action 10 confirmation" {
     try std.testing.expectEqual(@as(?u64, 10), self.job.result.action);
     try std.testing.expect(self.submission.view() == null and held.screen.consent == null);
 
+    // After this peer accepts the decision, its next authoritative snapshot
+    // advances revision and no longer advertises the resolved Action.
+    var idle_facts = facts;
+    idle_facts.work.revision = 2;
+    idle_facts.work.work = .{ .state = .{ .idle = .{ .since = 2 } } };
+    var idle_bytes: [4096]u8 = undefined;
+    var idle_page = std.Io.Writer.fixed(&idle_bytes);
+    try idle_facts.writeJson(&idle_page);
+    const idle_current =
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_report\",\"delta\":\"full\",\"since\":null,\"profile\":\"current\",\"session\":{\"reference\":\"k7m2qx\",\"parent\":null,\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"gpt-5.5\",\"revision\":\"2\",\"tools\":[],\"loaded_tools\":[],\"permission_mode\":\"ask\",\"instructions\":{\"bytes\":\"0\",\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"output_schema\":null,\"reasoning_effort\":null,\"reasoning_effort_override\":null,\"compaction_trigger\":null,\"context_estimate\":null,\"output_reservation\":\"0\",\"compaction_trigger_override\":null,\"output_reservation_override\":null,\"label\":null,\"created_at\":\"1\"},\"archive_state\":\"active\",\"pending_messages\":\"0\",\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"latest_outcome\":null},\"peers\":{\"from_person_at\":null},\"first_message\":null,\"selected_message\":null,\"recent_messages\":[],\"actions\":{\"count\":\"0\",\"unresolved\":[],\"resolved\":[]},\"rejected_calls\":{\"count\":\"0\",\"items\":[]},\"actionable_permissions\":[],\"execution\":{\"status\":\"partial\",\"dispatch_fenced\":false,\"custody_occupied\":\"0\",\"scratch_used_bytes\":\"0\",\"unavailable\":[\"structured_output\"]}}";
+
     const Gate = struct {
         held: *HeldFrontend,
         listener: *std.Io.net.Server,
         store: []const u8,
         page: []const u8,
+        idle_page: []const u8,
+        idle_current: []const u8,
+        message_key: ?[36]u8 = null,
         deadline: i96,
         scans: usize = 0,
         stage: enum { inspection, message, joined, decision, settled } = .inspection,
@@ -6290,11 +6304,25 @@ test "queued Message joins before deliberate Action 10 confirmation" {
                 if (frontend.reader.thread != null and frontend.reading.phase == .activity and !frontend.reader.completed()) {
                     var pending = [_]std.posix.pollfd{.{ .fd = gate.listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
                     if (try std.posix.poll(&pending, 0) != 0) {
-                        const peer = try Host.accept(gate.listener, "/v1/activity-page", null);
+                        const deadline = test_poll.after(std.testing.io, .fromSeconds(5));
+                        const peer = try gate.listener.accept(std.testing.io);
                         defer peer.close(std.testing.io);
-                        try Host.reply(peer, gate.page, "application/json");
-                        gate.scans += 1;
-                        try std.testing.expect(gate.scans <= 2);
+                        try Host.nonblocking(peer.socket.handle);
+                        var request_bytes: [16384]u8 = undefined;
+                        const request = try Host.readRequest(peer.socket.handle, deadline, &request_bytes);
+                        if (std.mem.startsWith(u8, request, "POST /v1/activity-page HTTP/1.1\r\n")) {
+                            try Host.reply(peer, if (gate.stage == .settled) gate.idle_page else gate.page, "application/json");
+                            gate.scans += 1;
+                            try std.testing.expect(gate.scans <= 2);
+                        } else {
+                            try std.testing.expect(gate.stage == .settled);
+                            try std.testing.expectStringStartsWith(request, "POST /v1/inspect-session HTTP/1.1\r\n");
+                            const body_at = (std.mem.indexOf(u8, request, "\r\n\r\n") orelse return error.InvalidRequest) + 4;
+                            var expected: protocol.RequestBuffer = .{};
+                            try expected.appendShape(protocol.inspect_session_request.current, .{ gate.store, "k7m2qx" });
+                            try std.testing.expectEqualStrings(expected.slice(), request[body_at..]);
+                            try Host.reply(peer, gate.idle_current, "application/json");
+                        }
                     }
                 }
             }
@@ -6314,8 +6342,14 @@ test "queued Message joins before deliberate Action 10 confirmation" {
                     var bytes: [16384]u8 = undefined;
                     const received = try gate.receive("/v1/message", &bytes);
                     defer received.peer.close(std.testing.io);
-                    try std.testing.expect(std.mem.indexOf(u8, received.request, "\"session\":\"k7m2qx\"") != null);
-                    try std.testing.expect(std.mem.endsWith(u8, received.request, ",\"text\":{\"state\":\"value\",\"value\":\"independent message\"}}"));
+                    gate.message_key = frontend.submission.key;
+                    const body_at = (std.mem.indexOf(u8, received.request, "\r\n\r\n") orelse return error.InvalidRequest) + 4;
+                    var expected: protocol.RequestBuffer = .{};
+                    try expected.appendShape(protocol.message_request.head, .{ gate.store, &frontend.submission.key, "k7m2qx", @as(?[]const u8, null) });
+                    try expected.appendShape(protocol.message_request.text, .{});
+                    try expected.appendJsonString("independent message");
+                    try expected.appendShape(protocol.message_request.tail, .{});
+                    try std.testing.expectEqualStrings(expected.slice(), received.request[body_at..]);
                     var reply: protocol.ResponseBuffer = .{};
                     const digest = protocol.contentDigest("independent message");
                     try reply.appendShape(protocol.message_reply.accepted, .{ false, "k7m2qx", @as(u64, 1), @as(u64, "independent message".len), digest, @as(u64, 1) });
@@ -6340,6 +6374,7 @@ test "queued Message joins before deliberate Action 10 confirmation" {
                     try std.testing.expectEqual(Submission.Kind.decision, submitted.kind);
                     const intent = frontend.submission.intent.?;
                     try std.testing.expect(intent == .decision);
+                    try std.testing.expect(!std.mem.eql(u8, &gate.message_key.?, &frontend.submission.key));
                     try std.testing.expectEqual(@as(u64, 10), intent.decision.action);
                     try std.testing.expectEqual(protocol.PermissionDecision.allow_once, intent.decision.decision);
                     var bytes: [16384]u8 = undefined;
@@ -6371,7 +6406,7 @@ test "queued Message joins before deliberate Action 10 confirmation" {
             return false;
         }
     };
-    var gate: Gate = .{ .held = held, .listener = &listener, .store = paths.store.slice(), .page = page.buffered(), .deadline = std.Io.Clock.awake.now(io).nanoseconds + 20 * std.time.ns_per_s };
+    var gate: Gate = .{ .held = held, .listener = &listener, .store = paths.store.slice(), .page = page.buffered(), .idle_page = idle_page.buffered(), .idle_current = idle_current, .deadline = std.Io.Clock.awake.now(io).nanoseconds + 20 * std.time.ns_per_s };
     self.lender = quiet_overview;
     self.lender.context = &gate;
     self.lender.service = Gate.service;
