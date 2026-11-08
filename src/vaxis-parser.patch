@@ -1269,3 +1269,66 @@ index 1c569eb..e7c757b 100644
  /// Inserts children until add_height is < 0
  fn insertChildren(
      self: *ScrollView,
+diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
+index fe46d2b..2787c54 100644
+--- a/src/vxfw/Text.zig
++++ b/src/vxfw/Text.zig
+@@ -204,6 +204,10 @@ pub const SoftwrapIterator = struct {
+     line: []const u8 = "",
+     index: usize = 0,
+     hard_iter: LineIterator,
++    // The remaining suffix of a word spanning multiple visual lines. The
++    // Unicode width is additive across grapheme boundaries; retain it so an
++    // unbroken line is not rescanned from its start on every visual row.
++    long_word: ?struct { end: usize, remaining_width: usize } = null,
+ 
+     pub const Line = struct {
+         width: u16,
+@@ -225,14 +229,15 @@ pub const SoftwrapIterator = struct {
+             self.line = self.hard_iter.next() orelse return null;
+             self.line = std.mem.trimEnd(u8, self.line, " \t");
+             self.index = 0;
++            self.long_word = null;
+         }
+ 
+         const start = self.index;
+         var cur_width: u16 = 0;
+         while (self.index < self.line.len) {
+-            const idx = self.nextWrap();
++            const idx = if (self.long_word) |cached| cached.end else self.nextWrap();
+             const word = self.line[self.index..idx];
+-            const next_width = self.ctx.stringWidth(word);
++            const next_width = if (self.long_word) |cached| cached.remaining_width else self.ctx.stringWidth(word);
+ 
+             if (self.ctx.max.width) |max| {
+                 if (cur_width + next_width > max) {
+@@ -244,17 +249,21 @@ pub const SoftwrapIterator = struct {
+                     if (trimmed_width > max) {
+                         // Won't fit on line by itself, so fit as much on this line as we can
+                         var iter = self.ctx.graphemeIterator(word);
++                        var remaining_width = next_width;
+                         while (iter.next()) |item| {
+                             const grapheme = item.bytes(word);
+                             const w = self.ctx.stringWidth(grapheme);
+                             if (cur_width + w > max) {
++                                self.long_word = .{ .end = idx, .remaining_width = remaining_width };
+                                 const end = self.index;
+                                 return .{ .width = cur_width, .bytes = self.line[start..end] };
+                             }
+                             cur_width += @intCast(w);
+                             self.index += grapheme.len;
++                            remaining_width -= w;
+                         }
+                     }
++                    self.long_word = null;
+                     // We are softwrapping, advance index to the start of the next word
+                     const end = self.index;
+                     self.index = std.mem.indexOfNonePos(u8, self.line, self.index, soft_breaks) orelse self.line.len;
+@@ -263,6 +272,7 @@ pub const SoftwrapIterator = struct {
+             }
+ 
+             self.index = idx;
++            self.long_word = null;
+             cur_width += @intCast(next_width);
+         }
+         return .{ .width = cur_width, .bytes = self.line[start..] };
