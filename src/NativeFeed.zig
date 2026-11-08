@@ -85,10 +85,15 @@ fn appendPart(widgets: *std.ArrayList(fw.Text), arena: std.mem.Allocator, part: 
     while (lineAt(part, at)) |head| {
         if (head.ending != .line_feed) break;
         const delimiter = lineAt(part, head.next) orelse break;
-        // Quoted blocks have their own presentation owner; don't silently
-        // reinterpret their raw quote markers as table cells.
-        if (markdown.recognize(head.raw[0..@min(head.raw.len, markdown.head_limit)], true) == .quote) {
+        // Recognition decides only source ranges; the native Text line
+        // index owns wrapping and the rail geometry.
+        const quote = markdown.recognize(head.raw[0..@min(head.raw.len, markdown.head_limit)], true);
+        if (quote == .quote) {
+            if (at > prose_start) try widgets.append(arena, .{ .text = part[prose_start..at] });
+            const body = head.raw[quote.quote.bytes..];
+            try widgets.append(arena, .{ .text = if (body.len == 0) " " else body, .quote_rail = true });
             at = head.next;
+            prose_start = at;
             continue;
         }
         const columns = switch (table.header(head.raw, delimiter.raw, delimiter.ending)) {
@@ -286,4 +291,44 @@ test "native measured table expands tabs from cell starts" {
     }});
     try std.testing.expectEqualStrings("key       │ val\n──────────┼────\na       b │ X  \n", feed.widgets.items[1].text);
     try std.testing.expectEqualStrings(source, feed.sourceAt(4, 0).?.source);
+}
+
+test "native quote rail wraps on every row without changing source" {
+    fw.DrawContext.init(.unicode);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var feed: Self = .{};
+    defer feed.deinit(std.testing.allocator);
+    const source = "before\n> alphabet beta gamma delta\n> second\nafter";
+    try feed.append(std.testing.allocator, arena.allocator(), &.{.{
+        .kind = .assistant,
+        .position = 5,
+        .ordinal = 0,
+        .reference = .{ .length = source.len, .digest = @import("protocol.zig").contentDigest(source) },
+        .source = source,
+        .display = source,
+    }});
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{ .width = 10 }, .max = .{ .width = 10, .height = null }, .cell_size = .{} };
+    var index: fw.Text.LineIndex = .{};
+    defer index.deinit(std.testing.allocator);
+    try index.reflow(std.testing.allocator, feed.widgets.items, ctx);
+    var quoted: usize = 0;
+    for (0..index.len) |i| {
+        const widget = (try index.builder().itemAtIdxForDraw(i, 0, ctx.arena)).?;
+        const text: *const fw.Text = @ptrCast(@alignCast(widget.userdata));
+        if (!text.quote_rail) continue;
+        const row = try widget.draw(ctx);
+        try std.testing.expectEqualStrings("│", row.readCell(0, 0).char.grapheme);
+        try std.testing.expect(row.readCell(0, 0).style.dim);
+        quoted += 1;
+    }
+    try std.testing.expect(quoted >= 4);
+    const narrow = ctx.withConstraints(.{ .width = 2 }, .{ .width = 2, .height = null });
+    try index.reflow(std.testing.allocator, feed.widgets.items, narrow);
+    for (0..index.len) |i| {
+        const row = (try index.builder().itemAtIdxForDraw(i, 0, ctx.arena)).?;
+        _ = try row.draw(narrow);
+    }
+    try index.reflow(std.testing.allocator, feed.widgets.items, ctx);
+    try std.testing.expectEqualStrings(source, feed.sourceAt(5, 0).?.source);
 }
