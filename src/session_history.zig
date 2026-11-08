@@ -135,11 +135,12 @@ pub fn writeExport(sink: anytype, store: []const u8, session: []const u8, positi
     try sink.feed(try std.fmt.bufPrint(&buffer, " --position {d} --ordinal {d}", .{ position, ordinal }));
 }
 
-pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8, cursor: protocol_reply.ConversationCursor, scratch: std.Io.File) !Prepared {
-    const page = switch (try requests.conversationPage(store, session, cursor)) {
+pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8, cursor: protocol_reply.ConversationCursor, scratch: std.Io.File, single_row: bool) !Prepared {
+    var page = switch (try requests.conversationPage(store, session, cursor)) {
         .page => |value| value,
         .failure => |failure| return requests.failRead(failure),
     };
+    if (single_row) keepNewestRow(&page);
     const Source = struct {
         requests: client.Requests,
         store: []const u8,
@@ -149,6 +150,24 @@ pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8
         }
     };
     return stagePage(requests.io, page, scratch, Source{ .requests = requests, .store = store, .session = session });
+}
+
+// A transcript load owns one canonical row at a time, so an expanded page
+// never advances its cursor past rows the bounded viewport did not retain.
+fn keepNewestRow(page: *protocol_reply.ConversationPage) void {
+    if (page.count > 1) {
+        page.count = 1;
+        page.more = true;
+    }
+}
+
+test "single-row transcript continuation retains every canonical row" {
+    var page: protocol_reply.ConversationPage = .{ .end = 30, .count = 2, .more = false };
+    page.items[0] = .{ .position = 20, .ordinal = 0, .kind = .user, .content = .{ .bytes = 0, .digest = protocol.contentDigest("") }, .admitted_at = 1 };
+    page.items[1] = .{ .position = 10, .ordinal = 0, .kind = .user, .content = .{ .bytes = 0, .digest = protocol.contentDigest("") }, .admitted_at = 1 };
+    keepNewestRow(&page);
+    try std.testing.expectEqual(@as(usize, 1), page.count);
+    try std.testing.expectEqual(@as(u64, 20), page.continuation().?.before_position);
 }
 
 // The source authenticates the complete result, including discarded prefixes.
@@ -183,11 +202,12 @@ fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.
     for (page.items[0..page.count], 0..) |item, index| {
         if (item.kind == .hosted_call or item.sender != null) continue;
         const tool = item.kind == .tool_result;
-        if (!tool and item.content.bytes > item_bytes) {
+        const budget = if (item.kind == .user and page.count == 1) max_scratch_bytes else item_bytes;
+        if (!tool and item.content.bytes > budget) {
             prepared.bodies[index] = .omitted;
             continue;
         }
-        const length = @min(item.content.bytes, item_bytes);
+        const length = if (item.kind == .user and page.count == 1) item.content.bytes else @min(item.content.bytes, item_bytes);
         var staging: Staging = .{ .io = io, .file = scratch, .start = end, .total = item.content.bytes, .skip = item.content.bytes - length };
         try source.read(item, index, &staging);
         if (staging.received != item.content.bytes) return error.ContentBindingMismatch;
@@ -270,6 +290,39 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n› \x1b[8m{s}\x1b[0m\x1b[2;8m┄\x1b[0m\n  \x1b[2;8mRaw export: rui session read-conversation{s} --position 2 --ordinal 0\x1b[0m\n" ++
         "\nRui: Historical item omitted: position 3, ordinal 0, 8193 raw bytes.\nRaw export: rui session read-conversation{s} --position 3 --ordinal 0\n" ++
         "\n  \x1b[2;8m← Received message from k7m2qx\x1b[8m{s}\x1b[0m\n", .{ clock, identity, identity, clock }), sink.bytes[0..sink.length]);
+}
+
+test "a single composer-sized user body is authenticated and staged whole" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(io, "large-user", .{ .read = true });
+    defer scratch.close(io);
+    const bytes = try std.testing.allocator.alloc(u8, 65536);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'x');
+    @memcpy(bytes[0..6], "> test");
+    @memcpy(bytes[bytes.len - 4 ..], " end");
+    const Source = struct {
+        bytes: []const u8,
+        fn read(self: @This(), _: protocol_reply.ConversationPage.Item, _: usize, sink: anytype) !void {
+            var offset: usize = 0;
+            while (offset < self.bytes.len) {
+                const end = @min(offset + protocol.content_window_bytes, self.bytes.len);
+                try sink.feed(self.bytes[offset..end]);
+                offset = end;
+            }
+        }
+    };
+    var page: protocol_reply.ConversationPage = .{ .end = 1, .count = 1, .more = false };
+    page.items[0] = .{ .position = 1, .ordinal = 0, .kind = .user, .admitted_at = 1, .content = .{ .bytes = bytes.len, .digest = protocol.contentDigest(bytes) } };
+    const prepared = try stagePage(io, page, scratch, Source{ .bytes = bytes });
+    try std.testing.expect(prepared.bodies[0] == .whole);
+    try std.testing.expectEqual(@as(u64, bytes.len), prepared.bodies[0].whole.length);
+    const readback = try std.testing.allocator.alloc(u8, bytes.len);
+    defer std.testing.allocator.free(readback);
+    try std.testing.expectEqual(bytes.len, try scratch.readPositionalAll(io, readback, 0));
+    try std.testing.expectEqualSlices(u8, bytes, readback);
 }
 
 test "history tool tails are exact bounded suffixes and transcript headers only" {
@@ -568,7 +621,7 @@ test "history preparation binds wire and staged bytes before exposure" {
                 (if (case.large) "c4507c75ffffb20c21aad1b5eecab12e273533475e6d3204a866471d86c5a3cb" else "2e37afae3fe85c8c30175c6f0a1b578b3cbe5f4482248f77cb55656781d2790b")
             else if (case.empty_second) "11fba2ec1cfcbd2a4453bc49eb07258f9742a754a795c7c3dba4fd05416f4528" else "743b6084710002f2040770ad1e35947dce27acfb1b5c6d3a1ddc28f74b462972");
         }
-        const result = if (supplied) stagePage(requests.io, page, scratch, bytes) else prepare(requests, root, "09azvw", .{ .end = 2 }, scratch);
+        const result = if (supplied) stagePage(requests.io, page, scratch, bytes) else prepare(requests, root, "09azvw", .{ .end = 2 }, scratch, false);
         // Release any request never reached after an earlier protocol failure.
         for (Peer.clients[Peer.connected..exchanges]) |fd| {
             const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };

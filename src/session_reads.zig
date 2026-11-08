@@ -601,7 +601,7 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
         .listing => |step| return list(job, task, step),
         .message => unreachable,
     };
-    const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.files.scratch);
+    const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.files.scratch, !latest);
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
     try job.files.inspection.setLength(task.io, 0);
