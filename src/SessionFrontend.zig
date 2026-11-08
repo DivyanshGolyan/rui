@@ -1379,7 +1379,7 @@ fn drawFrame(self: *Self) !void {
     self.dirty = false;
     const notice_revision = self.upgrade_note_revision;
     const rendered_upgrade = said.text == null and self.notice == null and !screen.actionVisible() and self.upgrade_note_len != 0;
-    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .original = self.originalDisplay(), .compact_archive = compact_archive, .status = status, .status_essential = (compact_original and self.originalDisplay().? != .sending) or self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .notice_essential = waiting and self.submissionOccupied() and notice != null and std.mem.startsWith(u8, notice.?, "!") and !(said.text == null and self.notice != null and originalGuidance(self.notice.?)), .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
+    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .original = self.originalDisplay(), .compact_archive = compact_archive, .status = status, .status_essential = (compact_original and self.originalDisplay().? != .sending) or self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .notice_essential = waiting and self.submissionOccupied() and notice != null and std.mem.startsWith(u8, notice.?, "!") and !(compact_original and screen.actionVisible() and screen.consent.?.row == .selector and said.text == null and self.notice != null and originalGuidance(self.notice.?)), .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
     _ = screen.presented(delivered);
     if (delivered.notice and rendered_upgrade and notice_revision == self.upgrade_note_revision) self.upgrade_note_shown = true;
 }
@@ -3606,18 +3606,21 @@ test "occupied original blocks stale and drawn Action decisions and retained rea
 const CapacityTestPty = struct {
     master: c_int,
     slave: c_int,
-    extern "c" fn openpty(*c_int, *c_int, ?[*]u8, ?*anyopaque, ?*const std.posix.winsize) c_int;
+    // POSIX PTY calls are supplied by libc on both macOS and Linux; unlike
+    // openpty they do not require a separate libutil on older glibc systems.
+    extern "c" fn posix_openpt(c_int) c_int;
+    extern "c" fn grantpt(c_int) c_int;
+    extern "c" fn unlockpt(c_int) c_int;
+    extern "c" fn ptsname(c_int) ?[*:0]const u8;
 
     fn init() !@This() {
-        var master: c_int = -1;
-        var slave: c_int = -1;
-        if (openpty(&master, &slave, null, null, null) != 0) return error.TestUnexpectedResult;
-        errdefer {
-            _ = std.c.close(master);
-            _ = std.c.close(slave);
-        }
-        const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
-        if (std.c.fcntl(master, std.c.F.SETFL, std.c.fcntl(master, std.c.F.GETFL) | nonblock) < 0) return error.TestUnexpectedResult;
+        const flags: c_int = @bitCast(std.c.O{ .ACCMODE = .RDWR, .NOCTTY = true, .NONBLOCK = true, .CLOEXEC = true });
+        const master = posix_openpt(flags);
+        if (master < 0) return error.TestUnexpectedResult;
+        errdefer _ = std.c.close(master);
+        if (grantpt(master) != 0 or unlockpt(master) != 0) return error.TestUnexpectedResult;
+        const name = ptsname(master) orelse return error.TestUnexpectedResult;
+        const slave = try std.posix.openat(std.posix.AT.FDCWD, std.mem.span(name), .{ .ACCMODE = .RDWR, .NOCTTY = true, .NONBLOCK = true, .CLOEXEC = true }, 0);
         return .{ .master = master, .slave = slave };
     }
     fn resize(self: @This(), row: u16, col: u16) !void {
@@ -3722,36 +3725,55 @@ test "real tiny frontend preserves archive and original recovery custody" {
     };
 }
 
-test "tiny paused Action fails closed rather than hide archived original recovery" {
-    const held = try HeldFrontend.create();
-    defer held.destroy();
-    const pty = try CapacityTestPty.init();
-    const previous_output = held.terminal.output;
-    held.terminal.output = pty.slave;
-    defer {
-        held.terminal.output = previous_output;
-        pty.close();
-    }
-    try pty.resize(2, 8);
-    try std.testing.expectEqual(@as(u16, 8), held.terminal.geometry().col);
-    try std.testing.expectEqual(@as(u16, 2), held.terminal.geometry().row);
-    const action = try held.adopt(3);
-    defer action.close(std.testing.io);
-    const page = try held.tmp.dir.createFile(std.testing.io, "paused-page", .{ .read = true });
-    defer page.close(std.testing.io);
-    try page.writePositionalAll(std.testing.io, "Inspection\n", 0);
-    try held.screen.showFile(std.testing.io, page, false);
-    const self = &held.self;
-    self.line.archive_state = .archived;
-    self.submission.intent = .{ .message = self.input.submitText("original message") };
-    self.submission.state = .rejected;
-    try std.testing.expectError(error.TerminalTooSmall, self.drawFrame());
-    var bytes: [64]u8 = undefined;
-    try std.testing.expect(std.c.read(pty.master, &bytes, bytes.len) < 0);
-    try std.testing.expect(held.screen.offered() == null);
-    try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
-    try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
-    self.submission.intent = null;
+test "tiny draft and paused Action return to the original recovery cue" {
+    for ([_]bool{ false, true }) |hidden| for ([_]bool{ false, true }) |typed| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const pty = try CapacityTestPty.init();
+        const previous_output = held.terminal.output;
+        held.terminal.output = pty.slave;
+        defer {
+            held.terminal.output = previous_output;
+            pty.close();
+        }
+        try pty.resize(2, 8);
+        try std.testing.expectEqual(@as(u16, 8), held.terminal.geometry().col);
+        try std.testing.expectEqual(@as(u16, 2), held.terminal.geometry().row);
+        const action = try held.adopt(3);
+        defer action.close(std.testing.io);
+        const self = &held.self;
+        self.line.archive_state = .archived;
+        self.submission.intent = .{ .message = self.input.submitText("original message") };
+        self.submission.state = .rejected;
+        try self.drawFrame();
+        pty.drain();
+        if (typed) try stepKeys(held, "kept");
+        const page = try held.tmp.dir.createFile(std.testing.io, "paused-page", .{ .read = true });
+        defer page.close(std.testing.io);
+        try page.writePositionalAll(std.testing.io, "Inspection\n", 0);
+        if (hidden) try held.screen.showFile(std.testing.io, page, false);
+        try self.drawFrame();
+        var row: [64]u8 = undefined;
+        try std.testing.expectEqualStrings("Arch Rej", CapacityTestPty.row(held.screen, 0, &row));
+        try std.testing.expectEqualStrings(if (typed) "kept" else "", self.input.composition().bytes);
+        try std.testing.expect(held.screen.offered() == null);
+        try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        pty.drain();
+        // Ctrl-G returns from inspection or the draft to the existing Action
+        // selector. The draft remains owned even though its row is hidden.
+        try stepKeys(held, "\x07");
+        try self.drawFrame();
+        try std.testing.expect(held.screen.actionVisible());
+        try std.testing.expectEqualStrings("Arch Rej", CapacityTestPty.row(held.screen, 0, &row));
+        try std.testing.expectEqualStrings("/discard", CapacityTestPty.row(held.screen, 1, &row));
+        try std.testing.expectEqualStrings(if (typed) "kept" else "", self.input.composition().bytes);
+        try std.testing.expect(held.screen.ticket.?.delivered and held.screen.offered() == null);
+        try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        self.submission.intent = null;
+        pty.drain();
+    };
 }
 
 test "real tiny frontend fails closed rather than lose critical notice" {
