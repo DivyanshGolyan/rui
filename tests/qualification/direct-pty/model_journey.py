@@ -4,19 +4,38 @@ import fcntl
 import json
 import os
 import pathlib
+import signal
 import sys
 import subprocess
 import termios
+import tempfile
 from types import SimpleNamespace
 
-# The native backend opens /dev/tty. Acquire the PTY as controlling terminal
-# in a separate child before exec, not via preexec_fn in the threaded parent.
-if sys.argv[1:2] == ["--tty-exec"]:
+# Keep the controlling-session leader alive until the parent has inspected
+# termios. Rui is its child; no preexec_fn runs in the threaded fixture parent.
+if sys.argv[1:2] == ["--tty-supervisor"]:
     os.setsid()
     fcntl.ioctl(0, termios.TIOCSCTTY, 0)
     fd = os.open("/dev/tty", os.O_RDWR)
     os.close(fd)
-    os.execv(sys.argv[2], sys.argv[2:])
+    child = None
+    def stop_supervisor(_number, _frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop_supervisor)
+    try:
+        child = subprocess.Popen(sys.argv[2:])
+        code = child.wait()
+        print(f"UI_EXIT={code}", file=sys.stderr, flush=True)
+        while True:
+            signal.pause()
+    finally:
+        if child is not None and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
 
 # Fixture subprocesses inherit only a small non-secret environment. Fixture.start
 # installs its own HOME and a synthetic local provider endpoint.
@@ -24,8 +43,46 @@ path = os.environ.get("PATH", "/usr/bin:/bin")
 os.environ.clear()
 os.environ.update(PATH=path, TERM="xterm-256color")
 
-from driver import DirectPty, defer_signals
+from driver import DirectPty, assert_file_flags, defer_signals
 from scenarios import Fixture
+
+
+class SupervisedPty(DirectPty):
+    def close(self):
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=7)
+            except subprocess.TimeoutExpired:
+                # This supervisor owns its session and group; never signal the
+                # parent process group if startup failed before setsid.
+                if os.getpgid(self.process.pid) == self.process.pid:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                else:
+                    self.process.kill()
+                self.process.wait(timeout=5)
+        super().close()
+
+
+def finish_supervised(tty):
+    tty.wait(lambda: b"UI_EXIT=" in (tty.output / "stderr.bin").read_bytes(),
+             label="supervised UI exit", timeout=15)
+    while tty.pump():
+        pass
+    errors = (tty.output / "stderr.bin").read_bytes()
+    assert errors.endswith(b"UI_EXIT=0\n"), ("UI exit status", errors)
+    assert tty.process.poll() is None, "terminal owner exited before restoration check"
+    actual, wanted = termios.tcgetattr(tty.slave), list(tty.original)
+    if sys.platform == "darwin":
+        mask = getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)
+        actual[3] &= ~mask
+        wanted[3] &= ~mask
+    assert actual == wanted, ("termios restoration", wanted, actual)
+    assert_file_flags(fcntl.fcntl(tty.slave, fcntl.F_GETFL), tty.flags)
+    output = (tty.output / "output.bin").read_bytes()
+    for reset in (b"\x1b[?1049l", b"\x1b[?2004l", b"\x1b[?25h"):
+        assert reset in output, ("missing terminal cleanup", reset)
+    tty.event("retired", returncode=0, restored=True, supervisor_alive=True)
 
 
 def selected(tty):
@@ -65,10 +122,40 @@ def check_oracle():
     assert not framed_draft(wrong_row, "draft", 5)
 
 
+def check_supervisor():
+    for mutate in (False, True):
+        with tempfile.TemporaryDirectory() as directory:
+            script = ("import os,termios; "
+                      + ("t=termios.tcgetattr(0); t[3] ^= termios.ICANON; "
+                         "termios.tcsetattr(0,termios.TCSANOW,t); " if mutate else "")
+                      + "os.write(1,b'\\x1b[?1049l\\x1b[?2004l\\x1b[?25h')")
+            tty = SupervisedPty([sys.executable, str(pathlib.Path(__file__).resolve()),
+                                 "--tty-supervisor", sys.executable, "-c", script],
+                                env=os.environ, cwd=directory,
+                                output=pathlib.Path(directory) / "evidence")
+            try:
+                if mutate:
+                    try:
+                        finish_supervised(tty)
+                    except AssertionError as error:
+                        assert "termios restoration" in str(error), error
+                    else:
+                        raise AssertionError("bad termios falsely passed")
+                else:
+                    finish_supervised(tty)
+            finally:
+                tty.close()
+            assert tty.process.poll() is not None, "supervisor not reaped"
+
+
 def main():
     check_oracle()
     if sys.argv[1:] == ["--oracle-self-test"]:
         print("native framed draft oracle checks passed")
+        return
+    if sys.argv[1:] == ["--supervisor-self-test"]:
+        check_supervisor()
+        print("supervisor restoration and negative control passed")
         return
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
     output = pathlib.Path(sys.argv[2]).resolve()
@@ -92,7 +179,7 @@ def main():
         assert seeded.returncode == 0, f"seed command failed with exit {seeded.returncode}; see seed-stderr.txt"
         assert json.loads(seeded.stdout)["answer"]["status"] == "accepted", "seed was not admitted"
         with defer_signals():
-            fixture.tty = DirectPty([sys.executable, str(pathlib.Path(__file__).resolve()), "--tty-exec",
+            fixture.tty = SupervisedPty([sys.executable, str(pathlib.Path(__file__).resolve()), "--tty-supervisor",
                                     str(binary), "--store", str(fixture.store)],
                                     env=fixture.env, cwd=fixture.root, output=output)
         tty = fixture.tty
@@ -134,7 +221,7 @@ def main():
         assert "gpt-6-luna" in tty.screen.completed, "Session fixed model not reported"
         assert (fixture.home / ".config/rui/preferences").read_text() == preferences, "Session /model changed defaults"
         tty.send(b"\x11")
-        tty.finish()
+        finish_supervised(tty)
     finally:
         fixture.close()
     (output / "result.txt").write_text("picker journey and owned cleanup passed; local stub only\n")
