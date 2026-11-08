@@ -720,13 +720,13 @@ const ModelRows = struct {
         if (index >= self.state.menu.entries.len) return null;
         self.index = index;
         self.selected = index == cursor;
-        return .{ .userdata = self, .drawFn = draw };
+        return .{ .userdata = self, .drawFn = ModelRows.draw };
     }
 
     fn draw(raw: *anyopaque, context: vaxis.vxfw.DrawContext) Allocator.Error!vaxis.vxfw.Surface {
         const self: *ModelRows = @ptrCast(@alignCast(raw));
         const width = context.max.width.?;
-        const widget: vaxis.vxfw.Widget = .{ .userdata = self, .drawFn = draw };
+        const widget: vaxis.vxfw.Widget = .{ .userdata = self, .drawFn = ModelRows.draw };
         const surface = try vaxis.vxfw.Surface.init(context.arena, widget, .{ .width = width, .height = 1 });
         var screen: vaxis.Screen = .{ .width = width, .height = 1, .width_method = self.painter.caps.width, .buf = surface.buffer };
         const window: vaxis.Window = .{ .screen = &screen, .width = width, .height = 1, .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0 };
@@ -986,7 +986,7 @@ fn ageText(buffer: *[8]u8, seconds: u64) []const u8 {
 const Backend = @import("RenderBackend.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
-const model_list = @import("model_list.zig");
+const model_list_data = @import("model_list.zig");
 const ReasoningEffort = model_capability.ReasoningEffort;
 const max_late_save_bytes = view.max_late_save_bytes;
 const session_work = @import("session_work.zig");
@@ -3203,10 +3203,10 @@ fn modelChoose(owner: *OverviewModelPicker, state: *State, side: enum { left, ri
     std.debug.assert(state.inputMode() == .choice);
     return owner.step(state, .{ .composed = .{ .input = .{ .choice = if (side == .left) .left else .right }, .draft = .{} } });
 }
-fn modelAnswer(owner: *OverviewModelPicker, state: *State, lists: []const model_list.Entry) !void {
+fn modelAnswer(owner: *OverviewModelPicker, state: *State, lists: []const model_list_data.Entry) !void {
     try expectEffects(&.{}, try owner.step(state, .{ .models = .{ .menu = try model_picker.testMenu(lists) } }));
 }
-fn modelOpen(owner: *OverviewModelPicker, state: *State, lists: []const model_list.Entry) !void {
+fn modelOpen(owner: *OverviewModelPicker, state: *State, lists: []const model_list_data.Entry) !void {
     const draft = try typeText(state, "/model");
     try expectEffects(&.{ .clear_draft, .list_models }, try modelSubmit(owner, state, draft));
     try modelAnswer(owner, state, lists);
@@ -3910,7 +3910,7 @@ test "an optional default tag cannot truncate a model ID that physically fits" {
 
 test "provider navigation refuses an ID clipped after choosing a shared model" {
     const id = "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm";
-    const lists = [_]model_list.Entry{
+    const lists = [_]model_list_data.Entry{
         .{ .provider = .codex, .list = .{ .live = .{ .bytes = id ++ "\n" } } },
         .{ .provider = .openai, .list = .{ .live = .{ .bytes = id ++ "\n" } } },
     };
