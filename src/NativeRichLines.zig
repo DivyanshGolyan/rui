@@ -125,7 +125,7 @@ fn indexTables(self: *Self, source: vaxis.unicode.PagedSource, cancellation: ?*c
             i += 1;
             continue;
         };
-        const columns = switch (table.header(header, rule, ending(delimiter))) {
+        const columns = switch (table.header(header, rule, lineEnding(delimiter))) {
             .columns => |value| value,
             else => {
                 i += 1;
@@ -151,7 +151,7 @@ fn indexTables(self: *Self, source: vaxis.unicode.PagedSource, cancellation: ?*c
             var line = (try self.lineAt(next)).?;
             if (!eligible(line)) break;
             const raw = (try readLine(source, line, &first_buf)) orelse break;
-            const parsed = switch (table.parse(raw, ending(line), columns.count)) {
+            const parsed = switch (table.parse(raw, lineEnding(line), columns.count)) {
                 .row => |value| value,
                 else => break,
             };
@@ -171,7 +171,7 @@ fn eligible(line: Line) bool {
     return line.mode == .prose and line.quote_depth == 0;
 }
 
-fn ending(line: Line) table.Ending {
+fn lineEnding(line: Line) table.Ending {
     return if (line.next > line.end) .line_feed else .canonical_eof;
 }
 
