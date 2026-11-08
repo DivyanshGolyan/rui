@@ -84,6 +84,7 @@ test {
     _ = @import("NativeRowWindow.zig");
     _ = @import("NativeRichLines.zig");
     _ = @import("NativeUi.zig");
+    _ = @import("NativeAction.zig");
     _ = @import("NativeObservations.zig");
     _ = @import("SessionFrontend.zig");
     _ = @import("Overview.zig");

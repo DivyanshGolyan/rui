@@ -11,6 +11,8 @@ const NativePagedFeed = @import("NativePagedFeed.zig");
 const replies = @import("protocol_reply.zig");
 const Task = @import("ClientTask.zig");
 const Submission = @import("SessionSubmission.zig");
+const NativeAction = @import("NativeAction.zig");
+const TerminalText = @import("TerminalText.zig");
 const defaults = @import("product_defaults.zig");
 const stderr = @import("stderr.zig");
 const Self = @This();
@@ -91,16 +93,43 @@ const PageJob = union(enum) {
 const ReadKind = union(enum) {
     list: u64,
     conversation: struct { id: Id, epoch: u64, job: PageJob },
+    action: struct { ticket: NativeAction.Ticket, epoch: u64 },
 
     fn isCurrent(self: ReadKind, destination: ?Id, epoch: u64) bool {
         return switch (self) {
             .list => |started| destination == null and started == epoch,
             .conversation => |started| destination != null and started.epoch == epoch and std.mem.eql(u8, &destination.?, &started.id),
+            .action => |started| destination != null and started.epoch == epoch and std.mem.eql(u8, &destination.?, &started.ticket.session),
         };
     }
 };
 const PageResult = struct { page: *NativePagedFeed, row: ?u32, arrival: Arrival };
-const ReadResult = union(enum) { list: []observations.Row, page: PageResult, poll: observations.SourceChange };
+const ActionPreview = struct {
+    bytes: [4096]u8 = undefined,
+    len: usize = 0,
+    truncated: bool = false,
+
+    pub fn feed(self: *ActionPreview, bytes: []const u8) !void {
+        const n = @min(bytes.len, self.bytes.len - self.len);
+        @memcpy(self.bytes[self.len..][0..n], bytes[0..n]);
+        self.len += n;
+        self.truncated = self.truncated or n != bytes.len;
+    }
+
+    fn finish(self: *ActionPreview) void {
+        while (self.len != 0 and !std.unicode.utf8ValidateSlice(self.bytes[0..self.len])) {
+            self.len -= 1;
+            self.truncated = true;
+        }
+    }
+
+    fn slice(self: *const ActionPreview) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+const ActionRead = struct { observation: NativeAction.Observation, preview: ActionPreview };
+const ActionFrame = struct { ticket: NativeAction.Ticket, action: u64, choice: ?protocol.PermissionDecision };
+const ReadResult = union(enum) { list: []observations.Row, page: PageResult, poll: observations.SourceChange, action: ActionRead };
 
 init: std.process.Init,
 options: Overview.Options,
@@ -120,6 +149,11 @@ no_older: bool = false,
 no_newer: bool = false,
 feed_stale: bool = false,
 export_open: bool = false,
+action_details_open: bool = false,
+action: NativeAction = .{},
+action_preview: ActionPreview = .{},
+action_frame: ?ActionFrame = null,
+action_next: bool = true,
 export_session: Id = undefined,
 export_sources: [protocol.ActivityPage.items]observations.SourcePage.Item = undefined,
 export_count: usize = 0,
@@ -172,6 +206,7 @@ pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Ho
     defer self.deinit();
     if (options.open) |id| {
         self.destination = id;
+        self.action.navigate(id);
         _ = try self.getDraft(id);
     }
     var tty_buffer: [65536]u8 = undefined;
@@ -274,7 +309,8 @@ fn startReadUsing(self: *Self, start_worker: anytype) !void {
                 null;
             break :kind .{ .conversation = .{ .id = id, .epoch = self.navigation_epoch, .job = .{ .load = .{ .request = value, .width = width, .anchor = anchor } } } };
         }
-        if (self.new_activity and !self.following) return;
+        if (self.action_next or (self.new_activity and !self.following))
+            break :kind .{ .action = .{ .ticket = self.action.ticket() orelse return, .epoch = self.navigation_epoch } };
         break :kind .{ .conversation = .{ .id = id, .epoch = self.navigation_epoch, .job = .{ .poll = self.page.? } } };
     } else .{ .list = self.navigation_epoch };
     const arena = try self.init.gpa.create(std.heap.ArenaAllocator);
@@ -283,11 +319,17 @@ fn startReadUsing(self: *Self, start_worker: anytype) !void {
     self.read_result = null;
     self.read_kind = kind;
     start_worker(&self.worker, self.init.io, self, readWork) catch |err| {
+        if (kind == .action) {
+            self.action.readFailed(kind.action.ticket);
+            self.action_frame = null;
+            self.action_details_open = false;
+        }
         self.freeArena(self.read_arena);
         self.read_arena = null;
         return err;
     };
     if (kind == .conversation and kind.conversation.job == .load) self.pending_page = null;
+    if (kind == .action) self.action_next = false else if (kind == .conversation) self.action_next = true;
 }
 
 fn readWork(raw: *anyopaque, task: *Task) !void {
@@ -295,6 +337,12 @@ fn readWork(raw: *anyopaque, task: *Task) !void {
     const alloc = self.read_arena.?.allocator();
     self.read_result = switch (self.read_kind) {
         .list => .{ .list = try observations.list(alloc, task.requests(), self.options.store, self.scratch) },
+        .action => |job| action: {
+            var preview: ActionPreview = .{};
+            const observation = try NativeAction.read(task.requests(), self.options.store, job.ticket, self.scratch, &preview, false);
+            preview.finish();
+            break :action .{ .action = .{ .observation = observation, .preview = preview } };
+        },
         .conversation => |conversation| switch (conversation.job) {
             .poll => |page| .{ .poll = try observations.sourceChanged(task.requests(), self.options.store, &page.page) },
             .load => |job| load: {
@@ -333,7 +381,15 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
     const relevant = self.read_kind.isCurrent(self.destination, self.navigation_epoch);
     self.worker.join() catch |err| {
         if (relevant and !(err == error.Cancelled and self.pending_page != null)) {
-            if (self.read_kind == .conversation) {
+            if (self.read_kind == .action) {
+                const ticket = self.read_kind.action.ticket;
+                if (self.action.ticket()) |current| if (sameActionTicket(ticket, current)) {
+                    self.action.readFailed(ticket);
+                    self.action_frame = null;
+                    self.action_details_open = false;
+                    self.notice = @errorName(err);
+                };
+            } else if (self.read_kind == .conversation) {
                 self.feed_stale = true;
                 self.notice = @errorName(err);
                 if (err == error.HostInstanceChanged) self.pending_page = tailRequest();
@@ -354,6 +410,19 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
     }
     errdefer self.freeArena(arena);
     switch (self.read_result.?) {
+        .action => |result| {
+            const previous = self.action.ticket();
+            if (self.action.install(result.observation)) {
+                self.action_preview = result.preview;
+                const current = self.action.ticket();
+                if (previous == null or current == null or previous.?.generation != current.?.generation) {
+                    self.action_frame = null;
+                    self.action_details_open = false;
+                }
+                ctx.redraw = true;
+            }
+            self.freeArena(arena);
+        },
         .list => |rows| {
             const selected: ?Id = if (self.list.cursor < self.rows.len) self.rows[self.list.cursor].row.id else null;
             const widgets = try arena.allocator().alloc(*RowWidget, rows.len);
@@ -432,6 +501,10 @@ fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
     self.worker.cancel();
     self.retirePage();
     self.destination = id;
+    self.action.navigate(id);
+    self.action_frame = null;
+    self.action_details_open = false;
+    self.action_next = true;
     self.navigation_epoch +%= 1;
     self.following = true;
     self.pending_page = tailRequest();
@@ -448,6 +521,9 @@ fn back(self: *Self, ctx: *fw.EventContext) !void {
     self.retirePage();
     self.pending_page = null;
     self.destination = null;
+    self.action.navigate(null);
+    self.action_frame = null;
+    self.action_details_open = false;
     self.navigation_epoch +%= 1;
     try ctx.requestFocus(self.overview_draft.field.widget());
     ctx.redraw = true;
@@ -513,8 +589,9 @@ fn finishSubmission(self: *Self, ctx: *fw.EventContext) !void {
                 draft_.field.clearRetainingCapacity();
                 draft_.revision +%= 1;
             };
-            self.notice = "Message accepted";
-            if (self.submitted_destination == null and self.destination == null) if (accepted.session) |id| try self.open(id, ctx);
+            self.notice = if (accepted.kind == .decision) "Action decision accepted" else "Message accepted";
+            if (accepted.kind == .decision) self.action_next = true;
+            if (self.submitted_destination == null and accepted.kind == .message and self.destination == null) if (accepted.session) |id| try self.open(id, ctx);
             self.submitted_draft = null;
             ctx.redraw = true;
         },
@@ -623,22 +700,81 @@ fn navigateEdge(self: *Self, backward: bool, ctx: *fw.EventContext) !bool {
     return false;
 }
 
+fn sameActionTicket(a: NativeAction.Ticket, b: NativeAction.Ticket) bool {
+    return a.generation == b.generation and std.mem.eql(u8, &a.session, &b.session);
+}
+
+fn actionGesture(self: *Self, ctx: *const fw.EventContext) ?NativeAction.Offer {
+    if (self.pasting or self.export_open or self.action_details_open or ctx.input_sequence == 0 or ctx.input_sequence <= ctx.frame_input_watermark) return null;
+    const offer = self.action.offer orelse return null;
+    const frame = self.action_frame orelse return null;
+    const destination = self.destination orelse return null;
+    if (!std.mem.eql(u8, &destination, &offer.ticket.session) or !sameActionTicket(frame.ticket, offer.ticket) or frame.action != offer.action or frame.choice != self.action.choice) return null;
+    return offer;
+}
+
+fn confirmAction(self: *Self, offer: NativeAction.Offer) void {
+    if (self.submission.view() != null or self.submission.task.thread != null) {
+        self.showOriginal();
+        return;
+    }
+    const destination = self.destination orelse return;
+    if (!std.mem.eql(u8, &destination, &offer.ticket.session)) return;
+    // Bind the stable Session and original custody before consuming the offer.
+    self.submitted_session = destination;
+    self.submission.session = &self.submitted_session;
+    self.submitted_destination = destination;
+    self.submitted_draft = null;
+    self.submission.configuration = null;
+    self.submission.captured_hook = null;
+    const decision = self.action.confirm(offer.ticket, offer.action, false) orelse return;
+    self.submission.beginObservedDecision(.{ .action = decision.action, .decision = decision.decision, .observed_instance = decision.observed_instance }) catch |err| {
+        if (self.submission.view() != null) self.showOriginal() else self.notice = @errorName(err);
+        return;
+    };
+    self.action_frame = null;
+    self.action_next = true;
+    self.notice = "Sending Action decision…";
+}
+
+fn openActionDetails(self: *Self, offer: NativeAction.Offer) !void {
+    var output: std.Io.Writer.Allocating = .init(self.init.gpa);
+    defer output.deinit();
+    const out = &output.writer;
+    try out.print("Action {d} · bounded preview; full details are optional\n", .{offer.action});
+    try out.writeAll(self.action_preview.slice());
+    if (self.action_preview.truncated) try out.writeAll("\n[Preview truncated]\n");
+    try out.writeAll("\nInspect current Action: rui action inspect --store ");
+    try TerminalText.writeShellWord(out, self.options.store);
+    try TerminalText.writeShellSession(out, &offer.ticket.session, false);
+    try out.print(" --action {d}\n", .{offer.action});
+    const text = try self.init.gpa.dupe(u8, output.written());
+    if (self.export_old_command) |old| self.init.gpa.free(old);
+    self.export_old_command = self.export_command;
+    self.export_command = text;
+    self.export_text[0] = .{ .text = text };
+    self.export_index.width = null;
+    self.export_view.scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 };
+    self.action_details_open = true;
+    self.action_frame = null;
+}
+
 fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (value) {
-        .paste => |text| if (self.export_open) {
+        .paste => |text| if (self.export_open or self.action_details_open) {
             ctx.alloc.free(text);
             ctx.consumeEvent();
         },
         .paste_start => {
             self.pasting = true;
-            if (self.export_open) ctx.consumeAndRedraw();
+            if (self.export_open or self.action_details_open) ctx.consumeAndRedraw();
         },
         .paste_end => {
             self.pasting = false;
-            if (self.export_open) ctx.consumeAndRedraw();
+            if (self.export_open or self.action_details_open) ctx.consumeAndRedraw();
         },
-        .mouse => |mouse| if (self.export_open) {
+        .mouse => |mouse| if (self.export_open or self.action_details_open) {
             if (mouse.row == 0 or mouse.row >= self.body_bottom) ctx.consumeAndRedraw();
         } else if (self.destination != null) {
             const wheel = mouse.button == .wheel_up or mouse.button == .wheel_down;
@@ -658,6 +794,15 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
                     .not_sent => self.notice = "Original not sent; Ctrl-R retry or Ctrl-D discard before quit",
                     .uncertain => self.notice = "Capture uncertain; Ctrl-R retry before quit",
                     else => ctx.quit = true,
+                }
+                ctx.consumeAndRedraw();
+                return;
+            }
+            if (self.action_details_open) {
+                if (!self.pasting and (key.matches(vaxis.Key.escape, .{}) or key.matches('i', .{ .alt = true }))) {
+                    self.action_details_open = false;
+                } else if (!self.pasting and (key.matches(vaxis.Key.page_up, .{}) or key.matches(vaxis.Key.page_down, .{}))) {
+                    try self.export_view.scroll_view.handleEvent(ctx, .{ .key_press = .{ .codepoint = if (key.matches(vaxis.Key.page_up, .{})) 'u' else 'd', .mods = .{ .ctrl = true } } });
                 }
                 ctx.consumeAndRedraw();
                 return;
@@ -687,6 +832,20 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
                     try self.export_view.scroll_view.handleEvent(ctx, .{ .key_press = .{ .codepoint = if (key.matches(vaxis.Key.page_up, .{})) 'u' else 'd', .mods = .{ .ctrl = true } } });
                     ctx.consumeAndRedraw();
                     return;
+                }
+                ctx.consumeAndRedraw();
+                return;
+            }
+            if (!self.pasting and (key.matches('a', .{ .alt = true }) or key.matches('d', .{ .alt = true }) or key.matches('y', .{ .alt = true }) or key.matches('i', .{ .alt = true }))) {
+                if (self.actionGesture(ctx)) |offer| {
+                    if (key.matches('i', .{ .alt = true })) {
+                        try self.openActionDetails(offer);
+                    } else if (key.matches('y', .{ .alt = true })) {
+                        if (self.action_frame.?.choice != null) self.confirmAction(offer);
+                    } else {
+                        const choice: protocol.PermissionDecision = if (key.matches('a', .{ .alt = true })) .allow_once else .deny;
+                        _ = self.action.choose(offer.ticket, offer.action, choice, false);
+                    }
                 }
                 ctx.consumeAndRedraw();
                 return;
@@ -785,7 +944,7 @@ fn event(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             };
             try ctx.tick(500, self.widget());
         },
-        .mouse => |mouse| if (self.destination != null and !self.export_open and (mouse.button == .wheel_up or mouse.button == .wheel_down)) {
+        .mouse => |mouse| if (self.destination != null and !self.export_open and !self.action_details_open and (mouse.button == .wheel_up or mouse.button == .wheel_down)) {
             self.following = false;
         },
         else => {},
@@ -796,6 +955,7 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
     const self: *Self = @ptrCast(@alignCast(raw));
     const width = ctx.max.width orelse 0;
     const height = ctx.max.height orelse 0;
+    self.action_frame = null;
     if (width == 0 or height == 0) return fw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = height });
     self.header.text = if (self.destination) |id| (if (self.feed_stale)
         try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  History may be stale · Esc returns", .{&id})
@@ -803,9 +963,7 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
         try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  New activity · Esc follows", .{&id})
     else
         try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  Esc returns", .{&id})) else "Sessions  ·  Alt-↑/↓ select · Alt-Enter open";
-    self.status.text = if (self.export_open) "Alt-↑/↓ select from page at opening · Wheel/Page scroll · Esc close" else if (self.notice.len == 0) "Enter send · Alt-E export · Shift-Enter/Ctrl-J newline · Ctrl-Q quit" else self.notice;
     const header = try self.header.draw(ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 }));
-    const status = try self.status.draw(ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 }));
     self.border = .{ .child = self.activeDraft().field.widget() };
     const composer_max = height -| 2;
     const composer = if (width >= 2 and composer_max >= 3)
@@ -813,13 +971,15 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
     else
         try self.activeDraft().field.draw(ctx.withConstraints(.{}, .{ .width = width, .height = composer_max }));
     const body_height = height -| 2 -| composer.size.height;
+    self.status.text = if (self.action_details_open) "Action preview · Page scroll · Esc close" else if (self.export_open) "Alt-↑/↓ select from page at opening · Wheel/Page scroll · Esc close" else if (self.notice.len != 0) self.notice else if (self.action.offer != null and self.destination != null) (if (width < 28 or body_height < 4) "Action pending · enlarge window" else "Preview may be clipped · Alt-I details · Ctrl-Q quit") else "Enter send · Alt-E export · Shift-Enter/Ctrl-J newline · Ctrl-Q quit";
+    const status = try self.status.draw(ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 }));
     self.body_width = width;
     self.body_bottom = 1 + body_height;
     const body_ctx = ctx.withConstraints(.{ .width = width, .height = body_height }, .{ .width = width, .height = body_height });
     if (self.destination != null and body_height != 0) {
         if (self.following) self.feed.scroll_view.jumpToEnd();
     }
-    const body = if (self.destination == null) try self.list.draw(body_ctx) else if (self.export_open) body: {
+    const body = if (self.destination == null) try self.list.draw(body_ctx) else if (self.export_open or self.action_details_open) body: {
         const export_width = width -| @intFromBool(self.export_view.draw_vertical_scrollbar);
         if (self.export_index.width == null or self.export_index.width.? != export_width) {
             try self.export_index.reflow(self.init.gpa, &self.export_text, body_ctx.withConstraints(.{ .width = export_width }, .{ .width = export_width, .height = null }));
@@ -828,6 +988,33 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
             self.export_view.estimated_content_height = @intCast(self.export_index.len);
         }
         break :body try self.export_view.draw(body_ctx);
+    } else if (self.action.offer != null and width >= 28 and body_height >= 4) body: {
+        const offer = self.action.offer.?;
+        const title = try std.fmt.allocPrint(ctx.arena, "Action {d}", .{offer.action});
+        const controls = if (self.action.choice) |choice|
+            (if (choice == .allow_once) "ALLOW: Alt-Y confirm" else "DENY: Alt-Y confirm")
+        else
+            "Alt-A allow  Alt-D deny";
+        var title_widget: fw.Text = .{ .text = title, .softwrap = false };
+        var controls_widget: fw.Text = .{ .text = controls, .softwrap = false };
+        const preview = try std.fmt.allocPrint(ctx.arena, "Preview: {s}", .{std.mem.trimStart(u8, self.action_preview.slice(), "\n")});
+        var preview_widget: fw.Text = .{ .text = preview, .softwrap = false };
+        const row_ctx = body_ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 });
+        var title_surface = try title_widget.draw(row_ctx);
+        var controls_surface = try controls_widget.draw(row_ctx);
+        var preview_surface = try preview_widget.draw(row_ctx);
+        title_surface.widget = self.widget();
+        controls_surface.widget = self.widget();
+        preview_surface.widget = self.widget();
+        const feed_height = body_height - 3;
+        const feed_surface = try self.feed.draw(body_ctx.withConstraints(.{ .width = width, .height = feed_height }, .{ .width = width, .height = feed_height }));
+        const content = try ctx.arena.alloc(fw.SubSurface, 4);
+        content[0] = .{ .origin = .{ .col = 0, .row = 0 }, .surface = title_surface, .z_index = 0 };
+        content[1] = .{ .origin = .{ .col = 0, .row = 1 }, .surface = controls_surface, .z_index = 0 };
+        content[2] = .{ .origin = .{ .col = 0, .row = 2 }, .surface = preview_surface, .z_index = 0 };
+        content[3] = .{ .origin = .{ .col = 0, .row = 3 }, .surface = feed_surface, .z_index = 0 };
+        self.action_frame = .{ .ticket = offer.ticket, .action = offer.action, .choice = self.action.choice };
+        break :body try fw.Surface.initWithChildren(ctx.arena, self.widget(), .{ .width = width, .height = body_height }, content);
     } else try self.feed.draw(body_ctx);
     if (self.page) |page| if (page.fault()) |err| {
         self.feed_stale = true;
@@ -897,4 +1084,80 @@ test "native pending navigation survives worker start failure" {
     try std.testing.expectError(error.WitnessSpawnFailure, self.startReadUsing(Failure.start));
     try std.testing.expect(self.pending_page != null and std.meta.eql(original, self.pending_page.?));
     try std.testing.expect(self.read_arena == null and self.worker.thread == null);
+}
+
+test "native Action gesture requires matching shown choice and newer input" {
+    var self: Self = undefined;
+    self.destination = "abc123".*;
+    self.action = .{};
+    self.action.navigate(self.destination);
+    const ticket = self.action.ticket().?;
+    const instance: protocol.InstanceId = @splat(2);
+    try std.testing.expect(self.action.install(.{ .ticket = ticket, .instance = instance, .offer = .{ .ticket = ticket, .instance = instance, .action = 19, .summary = .{} } }));
+    const offer = self.action.offer.?;
+    self.export_open = false;
+    self.action_details_open = false;
+    self.pasting = false;
+    self.action_frame = .{ .ticket = offer.ticket, .action = offer.action, .choice = null };
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty, .input_sequence = 8, .frame_input_watermark = 8 };
+    try std.testing.expect(self.actionGesture(&ctx) == null);
+    ctx.input_sequence = 9;
+    try std.testing.expect(self.actionGesture(&ctx) != null);
+    try std.testing.expect(self.action.choose(offer.ticket, offer.action, .allow_once, false));
+    // The choice needs its own delivered frame, even for input from the same batch.
+    try std.testing.expect(self.actionGesture(&ctx) == null);
+    self.action_frame.?.choice = .allow_once;
+    ctx.frame_input_watermark = 12;
+    ctx.input_sequence = 12;
+    try std.testing.expect(self.actionGesture(&ctx) == null);
+    ctx.input_sequence = 13;
+    try std.testing.expect(self.actionGesture(&ctx) != null);
+    self.pasting = true;
+    try std.testing.expect(self.actionGesture(&ctx) == null);
+    self.pasting = false;
+    self.destination = "abc124".*;
+    try std.testing.expect(self.actionGesture(&ctx) == null);
+    self.destination = "abc123".*;
+    self.action.readFailed(offer.ticket);
+    try std.testing.expect(self.actionGesture(&ctx) == null);
+}
+
+test "native Action preview remains bounded and ends at UTF-8 boundary" {
+    var preview: ActionPreview = .{};
+    try preview.feed(&@as([4095]u8, @splat('x')));
+    try preview.feed("🌍!");
+    preview.finish();
+    try std.testing.expect(preview.truncated);
+    try std.testing.expectEqual(@as(usize, 4095), preview.len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(preview.slice()));
+}
+
+test "native Action capture rejects pasted and pre-frame choices" {
+    var self: Self = undefined;
+    self.destination = "abc123".*;
+    self.action = .{};
+    self.action.navigate(self.destination);
+    const ticket = self.action.ticket().?;
+    const instance: protocol.InstanceId = @splat(3);
+    try std.testing.expect(self.action.install(.{ .ticket = ticket, .instance = instance, .offer = .{ .ticket = ticket, .instance = instance, .action = 19, .summary = .{} } }));
+    const offer = self.action.offer.?;
+    self.export_open = false;
+    self.action_details_open = false;
+    self.pasting = false;
+    self.action_frame = .{ .ticket = offer.ticket, .action = offer.action, .choice = null };
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty, .input_sequence = 4, .frame_input_watermark = 4 };
+    const allow: fw.Event = .{ .key_press = .{ .codepoint = 'a', .mods = .{ .alt = true } } };
+    try capture(&self, &ctx, allow);
+    try std.testing.expect(self.action.choice == null);
+    try capture(&self, &ctx, .paste_start);
+    ctx.input_sequence = 5;
+    try capture(&self, &ctx, allow);
+    try std.testing.expect(self.action.choice == null);
+    try capture(&self, &ctx, .paste_end);
+    try capture(&self, &ctx, allow);
+    try std.testing.expectEqual(protocol.PermissionDecision.allow_once, self.action.choice.?);
+    // A confirmation queued with the choice cannot use its old frame.
+    ctx.input_sequence = 6;
+    try capture(&self, &ctx, .{ .key_press = .{ .codepoint = 'y', .mods = .{ .alt = true } } });
+    try std.testing.expect(self.action.offer != null);
 }

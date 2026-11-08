@@ -2456,3 +2456,114 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
  
      pub fn empty(widget: Widget) Surface {
          return .{
+--- a/src/Loop.zig
++++ b/src/Loop.zig
+@@ -20,7 +20,9 @@
+         tty: *Tty,
+         vaxis: *Vaxis,
+ 
+-        queue: Queue(T, 512),
++        pub const Stamped = struct { event: T, sequence: u64 };
++        queue: Queue(Stamped, 512),
++        issued_sequence: std.atomic.Value(u64) = .init(0),
+         thread: ?std.Io.Future(void) = null,
+         // Queued key text must outlive the input task, including on failure.
+         cache: GraphemeCache = .{},
+@@ -98,7 +100,7 @@
+         /// Returns the next event, blocking until available. After buffered events
+         /// are drained, returns Closed on stop or the input task's failure.
+         pub fn nextEvent(self: *Self) !T {
+-            return try self.queue.pop();
++            return (try self.queue.pop()).event;
+         }
+ 
+         /// blocks until an event is available. Useful when your application is
+@@ -109,17 +111,34 @@
+ 
+         /// returns an event if one is available, otherwise null. Non-blocking.
+         pub fn tryEvent(self: *Self) !?T {
++            const stamped = try self.queue.tryPop() orelse return null;
++            return stamped.event;
++        }
++
++        /// The framework uses enqueue order to reject input queued before a
++        /// frame was presented. A failed push may leave a harmless serial gap.
++        pub fn tryStampedEvent(self: *Self) !?Stamped {
+             return try self.queue.tryPop();
+         }
+ 
++        pub fn inputWatermark(self: *Self) u64 {
++            return self.issued_sequence.load(.acquire);
++        }
++
++        fn stamp(self: *Self, event: T) Stamped {
++            const previous = self.issued_sequence.fetchAdd(1, .acq_rel);
++            if (previous == std.math.maxInt(u64)) @panic("input sequence exhausted");
++            return .{ .event = event, .sequence = previous + 1 };
++        }
++
+         /// posts an event into the event queue. Will block if there is not
+         /// capacity for the event
+         pub fn postEvent(self: *Self, event: T) !void {
+-            try self.queue.push(event);
++            try self.queue.push(self.stamp(event));
+         }
+ 
+         pub fn tryPostEvent(self: *Self, event: T) !bool {
+-            return try self.queue.tryPush(event);
++            return try self.queue.tryPush(self.stamp(event));
+         }
+ 
+         pub fn winsizeCallback(ptr: *anyopaque) void {
+--- a/src/vxfw/App.zig
++++ b/src/vxfw/App.zig
+@@ -166,8 +166,15 @@
+         mouse_handler.last_frame = surface;
+         // Update the focus handler list
+         try focus_handler.update(self.allocator, surface);
+-        try self.render(surface, focus_handler.focused_widget);
++        try commitInputFrame(&ctx, &loop, self.render(surface, focus_handler.focused_widget));
+     }
++}
++
++/// Credit a frame only after its terminal output was successfully flushed.
++/// The watermark includes input issued while the render was in progress.
++pub fn commitInputFrame(ctx: *vxfw.EventContext, loop: *EventLoop, rendered: anyerror!void) !void {
++    try rendered;
++    ctx.frame_input_watermark = loop.inputWatermark();
+ }
+ 
+ fn dispatchEvents(
+@@ -180,7 +187,9 @@
+     // Bound the batch so continuously arriving input cannot starve frames
+     // or timers. tryEvent releases the queue mutex before handlers run.
+     for (0..loop.queue.buf.len) |_| {
+-        const event = try loop.tryEvent() orelse break;
++        const stamped = try loop.tryStampedEvent() orelse break;
++        const event = stamped.event;
++        ctx.input_sequence = stamped.sequence;
+         defer resetEventState(ctx);
+         switch (event) {
+             .key_press => {
+@@ -302,6 +311,7 @@
+ }
+ 
+ fn resetEventState(ctx: *vxfw.EventContext) void {
++    ctx.input_sequence = 0;
+     ctx.consume_event = false;
+     ctx.phase = .capturing;
+ }
+--- a/src/vxfw/vxfw.zig
++++ b/src/vxfw/vxfw.zig
+@@ -107,6 +107,11 @@
+     alloc: Allocator,
+     cmds: CommandList,
+ 
++    /// Enqueue serial for this input, or zero for non-input callbacks.
++    input_sequence: u64 = 0,
++    /// Inputs issued through this serial predate the last successful render.
++    frame_input_watermark: u64 = 0,
++
+     /// The event was handled, do not pass it on
+     consume_event: bool = false,
+     /// Tells the event loop to redraw the UI

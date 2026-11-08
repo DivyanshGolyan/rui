@@ -364,3 +364,27 @@ test "native scroll extent reaches u32 ceiling with bounded viewport work" {
     try std.testing.expectEqualStrings("4", last.surface.readCell(13, 0).char.grapheme);
     std.debug.print("native ceiling count={d} beyond_u32={d} builds={d} frame_bytes={d}\n", .{ fixture.count, two_max_expanded, fixture.builds, fixed.end_index });
 }
+
+test "native frame watermark excludes queued input until successful flush" {
+    const io = std.testing.io;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    var loop: vaxis.Loop(fw.Event) = .init(io, &tty, &vx);
+    var ctx: fw.EventContext = .{ .io = io, .alloc = std.testing.allocator, .cmds = .empty };
+    for (0..512) |_| try loop.postEvent(.{ .key_press = .{ .codepoint = 'x' } });
+    const before = (try loop.tryStampedEvent()).?;
+    try std.testing.expectEqual(@as(u64, 1), before.sequence);
+    // Issued after layout started, before flush finishes: still old input.
+    try loop.postEvent(.{ .key_press = .{ .codepoint = 'y' } });
+    try std.testing.expectError(error.InjectedFlushFailure, fw.App.commitInputFrame(&ctx, &loop, error.InjectedFlushFailure));
+    try std.testing.expectEqual(@as(u64, 0), ctx.frame_input_watermark);
+    try fw.App.commitInputFrame(&ctx, &loop, {});
+    try std.testing.expectEqual(@as(u64, 513), ctx.frame_input_watermark);
+    for (0..512) |_| {
+        const old = (try loop.tryStampedEvent()).?;
+        try std.testing.expect(old.sequence <= ctx.frame_input_watermark);
+    }
+    try loop.postEvent(.{ .key_press = .{ .codepoint = 'z' } });
+    const fresh = (try loop.tryStampedEvent()).?;
+    try std.testing.expect(fresh.sequence > ctx.frame_input_watermark);
+}
