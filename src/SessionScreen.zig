@@ -1453,7 +1453,6 @@ test "the running call's row carries the clock, in its place, and other work end
     // A narrow line cuts the words and keeps the clock, under the
     // conversation and calls that now wrap.
     _ = try Test.render(screen, &out.writer, .{ .row = 12, .col = 14, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
-    dumpCompactRows(screen, "narrow calls");
     try std.testing.expectEqualStrings("    build", rowText(screen, 7, &buffer));
     try std.testing.expectEqualStrings("• Waiti… · 12s", rowText(screen, 8, &buffer));
     try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 9).?.char.grapheme);
@@ -1548,13 +1547,11 @@ test "a queued Message keeps its row and status while looking back" {
     const short: std.posix.winsize = .{ .row = 6, .col = 40, .xpixel = 0, .ypixel = 0 };
     const draft = "one\ntwo\nthree";
     _ = try Test.render(screen, &out.writer, short, draft, draft.len, working, &running);
-    dumpCompactRows(screen, "multiline queue");
     try std.testing.expect(!screenHas(screen, "queued", &buffer));
     try std.testing.expect(screenHas(screen, "Sent", &buffer));
     try std.testing.expect(screenHas(screen, "Run zig build", &buffer));
     // With a one-line draft it has the row, and Sent goes.
     _ = try Test.render(screen, &out.writer, short, "one", 3, working, &running);
-    dumpCompactRows(screen, "single-line queue");
     try std.testing.expect(screenHas(screen, "queued", &buffer));
     try std.testing.expect(!screenHas(screen, "Sent", &buffer));
     // A transcript keeps the same queued row and confirming status.
@@ -2073,7 +2070,46 @@ fn dumpCompactRows(screen: *Self, label: []const u8) void {
     const grid = &screen.backend.storage.?.vx.screen_last;
     std.debug.print("compact {s}: viewport={d} grid={d}x{d}\n", .{ label, screen.height, grid.width, grid.height });
     var storage: [256]u8 = undefined;
-    for (0..@min(grid.height, 12)) |row| std.debug.print("row {d}: {s}\n", .{ row, rowText(screen, @intCast(row), &storage) });
+    for (0..@min(grid.height, 12)) |row| std.debug.print("row {d}: {s} [last={s}]\n", .{ row, rowText(screen, @intCast(row), &storage), grid.readCell(grid.width - 1, @intCast(row)).?.char.grapheme });
+}
+
+test "compact call and queue frame diagnostics" {
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, std.testing.io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try screen.append("› run the store tests\n");
+    var calls: View.Live = .{ .count = 3, .total = 3 };
+    for ([_][]const u8{ "Read the failing test output", "Run zig build", "Run zig build" }, [_]protocol.ToolPresentation.Code{ .succeeded, .unresolved, .unresolved }, 0..) |label, code, index| {
+        calls.entries[index] = .{ .operation = 7, .ordinal = index, .presentation = .{ .description = .{}, .code = code, .publication_position = null } };
+        try calls.entries[index].presentation.description.?.set(label);
+    }
+    const waiting: protocol.WorkState = .{ .working = .{ .since = 130 } };
+    _ = try Test.render(screen, &out.writer, .{ .row = 12, .col = 14, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
+    dumpCompactRows(screen, "narrow calls");
+    screen.live.text.clear();
+    for (0..40) |index| {
+        var bytes: [16]u8 = undefined;
+        try screen.append(try std.fmt.bufPrint(&bytes, "row{d:0>2}\n", .{index}));
+    }
+    const footer: Footer = .{ .status = "Sent", .queued = .{ .waiting = .{ .line = "also check the history scratch cache", .count = 2 }, .status = "" } };
+    _ = try Test.render(screen, &out.writer, .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 }, "", 0, footer, &.{});
+    var running: View.Live = .{ .count = 1, .total = 1 };
+    running.entries[0] = .{ .operation = 7, .ordinal = 0, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
+    try running.entries[0].presentation.description.?.set("Run zig build");
+    const working_state: protocol.WorkState = .{ .working = .{ .since = 100 } };
+    var working = footer;
+    working.live = work_line.of(&test_words, &working_state, null, 142_000);
+    const short: std.posix.winsize = .{ .row = 6, .col = 40, .xpixel = 0, .ypixel = 0 };
+    const draft = "one\ntwo\nthree";
+    _ = try Test.render(screen, &out.writer, short, draft, draft.len, working, &running);
+    dumpCompactRows(screen, "multiline queue");
+    _ = try Test.render(screen, &out.writer, short, "one", 3, working, &running);
+    dumpCompactRows(screen, "single-line queue");
 }
 
 // Physical full-width row, including any owner-painted final cell.
