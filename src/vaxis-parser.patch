@@ -1336,10 +1336,10 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
 +                }
 +                const bytes: ?[]const u8 = switch (self.iter) {
 +                    .fresh => unreachable,
-+                    .soft => |*iter| if (iter.next()) |line| line.bytes else null,
++                    .soft => |*iter| if (iter.next()) |wrapped| wrapped.bytes else null,
 +                    .hard => |*iter| iter.next(),
 +                };
-+                if (bytes) |line| return .{ .text = line, .style = source.style, .softwrap = false, .overflow = .clip };
++                if (bytes) |row_bytes| return .{ .text = row_bytes, .style = source.style, .softwrap = false, .overflow = .clip };
 +                self.source_index += 1;
 +                self.iter = .fresh;
 +            }
