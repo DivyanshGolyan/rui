@@ -27,7 +27,6 @@ const Host = view.Host;
 const Line = view.Line;
 const ListLines = view.ListLines;
 const Panel = view.Panel;
-const Picker = view.Picker;
 const Provider = view.Provider;
 const Row = view.Row;
 const Rule = view.Rule;
@@ -47,7 +46,6 @@ const max_label_bytes = view.max_label_bytes;
 const nextCommands = view.nextCommands;
 const palettes = view.palettes;
 const pickerFit = view.pickerFit;
-const pickerItems = view.pickerItems;
 const pickerNote = view.pickerNote;
 const position = view.position;
 const rules = view.rules;
@@ -76,7 +74,7 @@ pub const Drawn = struct {
 
 /// Paint directly into the invocation backend's current grid. No I/O, output
 /// receipts, selection offset, second screen, or diff cache lives here.
-pub fn draw(window: vaxis.Window, scratch: Allocator, state: *const State, draft: Draft, caps: Caps, frame: u64) error{OutOfMemory}!Drawn {
+pub fn draw(window: vaxis.Window, scratch: Allocator, state: *State, draft: Draft, caps: Caps, frame: u64) error{OutOfMemory}!Drawn {
     const width = state.size.width;
     const height = state.size.height;
     std.debug.assert(width <= window.width and height <= window.height);
@@ -150,7 +148,7 @@ pub fn draw(window: vaxis.Window, scratch: Allocator, state: *const State, draft
         result.draft_anchor = input.lines[0].start;
         if (state.inputMode() == .compose) window.showCursor(@intCast(@min(width - 1, 3 + input.shape.caret_column)), @intCast(at.commands.end + input.shape.caret_line - input.view.first));
     }
-    if (at.picker.len() != 0) try pickerLines(&painter, state, &state.picker.?, at.picker);
+    if (at.picker.len() != 0) try pickerLines(&painter, state, at.picker);
     if (at.list.len() != 0) {
         if (state.panel) |*panel| try panelLines(&painter, panel, at.list) else try list(&painter, state, at.list);
     }
@@ -643,14 +641,14 @@ fn hints(painter: *RowPaint, state: *const State, draft: Draft, listed: bool) er
 }
 
 /// Fills `lines`, the rows `layout` gave the picker, as `pickerFit` says.
-fn pickerLines(painter: *RowPaint, state: *const State, picker: *const Picker, lines: view.Layout.Rows) error{OutOfMemory}!void {
+fn pickerLines(painter: *RowPaint, state: *State, lines: view.Layout.Rows) error{OutOfMemory}!void {
     const menu = &state.menu;
     const fit = pickerFit(state, lines.len());
     std.debug.assert(fit.used() == lines.len());
-    if (picker.step == .sign_in) {
+    if (state.picker.?.step == .sign_in) {
         painter.at(lines.start);
         painter.begin(false);
-        _ = try painter.put(4, picker.highlight.slice(), painter.width -| 5, .{ .colour = .strong });
+        _ = try painter.put(4, state.menu.entries[state.highlighted().?].id, painter.width -| 5, .{ .colour = .strong });
         try painter.finish();
         return;
     }
@@ -668,27 +666,24 @@ fn pickerLines(painter: *RowPaint, state: *const State, picker: *const Picker, l
         });
         line += 1;
     }
-    const shown_menu = state.shownMenu();
-    const others = shown_menu.others();
-    const items = pickerItems(state);
-    const row = if (state.highlighted()) |at| shown_menu.row(at) else 0;
-    const highlighted = row + @intFromBool(row >= others);
-    const first = @min((highlighted + 1) -| fit.shown, items - fit.shown);
-    const tag_column = 8 + @as(usize, @min(menu.widest, 24));
-    var listed: usize = 0;
-    for (first..first + fit.shown) |item| {
-        if (item == others) {
-            painter.at(@intCast(lines.start + line));
-            painter.begin(false);
-            _ = try painter.put(2, "Other models", painter.width -| 3, .{ .colour = .ink, .bold = true });
-            try painter.finish();
-        } else {
-            painter.at(@intCast(lines.start + line));
-            try modelLine(painter, state, shown_menu.entry(item - @intFromBool(item > others)), tag_column);
-            listed += 1;
-        }
-        line += 1;
+    if (fit.shown != 0) {
+        var builder: ModelRows = .{ .state = state, .painter = painter };
+        const list = &state.picker.?.list;
+        list.children = .{ .builder = .{ .userdata = &builder, .buildFn = ModelRows.build } };
+        defer list.children = .{ .slice = &.{} };
+        const width = painter.width;
+        const height: u16 = @intCast(fit.shown);
+        const surface = try list.draw(.{
+            .arena = painter.arena,
+            .min = .{},
+            .max = .{ .width = width, .height = height },
+            .cell_size = .{},
+        });
+        const window = painter.window.child(.{ .y_off = @intCast(lines.start + line), .width = width, .height = height });
+        surface.render(window, list.widget());
+        line += fit.shown;
     }
+    const listed = fit.shown;
     if (fit.more) {
         painter.at(@intCast(lines.start + line));
         try quietLine(painter, try std.fmt.allocPrint(painter.arena, "{d} more", .{menu.entries.len - listed}));
@@ -711,6 +706,40 @@ fn pickerLines(painter: *RowPaint, state: *const State, picker: *const Picker, l
     std.debug.assert(line == lines.len());
 }
 
+/// Fixed-height rows are borrowed only while ListView builds this frame.
+/// The widget's surface and text use the backend's charged frame arena.
+const ModelRows = struct {
+    state: *const State,
+    painter: *RowPaint,
+    index: usize = 0,
+    selected: bool = false,
+
+    fn build(raw: *const anyopaque, index: usize, cursor: usize) ?vaxis.vxfw.Widget {
+        const self: *ModelRows = @ptrCast(@alignCast(@constCast(raw)));
+        if (index >= self.state.menu.entries.len) return null;
+        self.index = index;
+        self.selected = index == cursor;
+        return .{ .userdata = self, .drawFn = draw };
+    }
+
+    fn draw(raw: *anyopaque, context: vaxis.vxfw.DrawContext) Allocator.Error!vaxis.vxfw.Surface {
+        const self: *ModelRows = @ptrCast(@alignCast(raw));
+        const width = context.max.width.?;
+        const widget: vaxis.vxfw.Widget = .{ .userdata = self, .drawFn = draw };
+        const surface = try vaxis.vxfw.Surface.init(context.arena, widget, .{ .width = width, .height = 1 });
+        var screen: vaxis.Screen = .{ .width = width, .height = 1, .width_method = self.painter.caps.width, .buf = surface.buffer };
+        const window: vaxis.Window = .{ .screen = &screen, .width = width, .height = 1, .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0 };
+        window.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = cellStyle(self.painter.caps, .{}) });
+        var row = self.painter.*;
+        row.window = window;
+        row.width = width;
+        row.row = 0;
+        const entry = self.state.shownMenu().entry(self.index);
+        try modelLine(&row, self.state, entry, 8 + @as(usize, @min(self.state.menu.widest, 24)), self.selected);
+        return surface;
+    }
+};
+
 /// One of the picker's dim lines, under its models.
 fn quietLine(painter: *RowPaint, text: []const u8) error{OutOfMemory}!void {
     painter.begin(false);
@@ -718,8 +747,7 @@ fn quietLine(painter: *RowPaint, text: []const u8) error{OutOfMemory}!void {
     return painter.finish();
 }
 
-fn modelLine(painter: *RowPaint, state: *const State, entry: model_picker.Entry, tag_column: usize) error{OutOfMemory}!void {
-    const highlighted = state.picker.?.highlight.eql(entry.id);
+fn modelLine(painter: *RowPaint, state: *const State, entry: model_picker.Entry, tag_column: usize, highlighted: bool) error{OutOfMemory}!void {
     painter.begin(highlighted);
     if (highlighted) _ = try painter.put(2, painter.glyphs.prompt, 1, .{ .colour = .strong });
     const is_default = if (state.nextBinding().model) |model| std.mem.eql(u8, model, entry.id) else false;
@@ -3228,7 +3256,7 @@ test "with both sign-ins, Enter turns the input row into the sign-in choice at t
     // gpt-6.1-sol only ChatGPT offers: Enter saves it without a choice.
     try openPicker(&state, &both);
     try highlightModel(&state, draft, "gpt-6.1-sol");
-    try std.testing.expectEqualStrings("gpt-6.1-sol", state.picker.?.highlight.slice());
+    try std.testing.expectEqualStrings("gpt-6.1-sol", state.menu.entries[state.highlighted().?].id);
     try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6.1-sol").? }}, try submit(&state, draft));
     // Typing leaves the picker for the draft.
     try openPicker(&state, &both);
@@ -3236,20 +3264,20 @@ test "with both sign-ins, Enter turns the input row into the sign-in choice at t
     try std.testing.expect(state.picker == null and state.menu.entries.len == 0);
 }
 
-test "a model Rui does not list shows under Other models and is picked like any other" {
+test "a model Rui does not list shows its default limits and is picked like any other" {
     var state = try pickerState(Default.of("openai", "gpt-6-luna"));
     defer state.deinit();
     try openPicker(&state, &both);
     const draft = try typeText(&state, "");
     try expectEffects(&.{}, try press(&state, draft, .last));
-    try std.testing.expect(try onScreen(&state, "Other models"));
-    try std.testing.expectEqualStrings("unlisted-z", state.picker.?.highlight.slice());
+    try std.testing.expect(try onScreen(&state, "default limits"));
+    try std.testing.expectEqualStrings("unlisted-z", state.menu.entries[state.highlighted().?].id);
     try expectEffects(&.{.{ .save_default = Default.of("openai", "unlisted-z").? }}, try submit(&state, draft));
     try expectEffects(&.{}, try step(&state, saveEnded("openai", "unlisted-z", .done)));
-    // Saved, it leads the next menu, highlighted, and "Other models" holds the rest.
+    // Saved, it leads the next menu; the remaining models keep their order.
     try openPicker(&state, &both);
     try std.testing.expectEqualStrings("unlisted-z", shownRow(&state, 0));
-    try std.testing.expectEqualStrings("unlisted-a", shownRow(&state, state.shownMenu().others()));
+    try std.testing.expectEqualStrings("unlisted-a", shownRow(&state, state.menu.entries.len - 1));
     try std.testing.expect(try onScreen(&state, "› unlisted-z"));
 }
 
@@ -3267,7 +3295,7 @@ test "a pick leads the next menu before its save ends, and a re-read that reorde
     // Select gpt-6.1-sol; its save ending moves nothing.
     try highlightModel(&state, draft, "gpt-6.1-sol");
     try expectEffects(&.{}, try step(&state, saveEnded("codex", "gpt-5.5", .done)));
-    try std.testing.expectEqualStrings("gpt-6.1-sol", state.picker.?.highlight.slice());
+    try std.testing.expectEqualStrings("gpt-6.1-sol", state.menu.entries[state.highlighted().?].id);
     try std.testing.expect(try onScreen(&state, "› gpt-6.1-sol"));
     // A re-read without gpt-5.5 or gpt-6-luna reorders the rows; the
     // highlight goes with it.
@@ -3278,7 +3306,7 @@ test "a pick leads the next menu before its save ends, and a re-read that reorde
     try std.testing.expect(try onScreen(&state, "› gpt-6-sol"));
     // A re-read without the highlighted model highlights the first row.
     try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6.1-sol\n" } } }});
-    try std.testing.expectEqualStrings("gpt-5.5", state.picker.?.highlight.slice());
+    try std.testing.expectEqualStrings("gpt-5.5", state.menu.entries[state.highlighted().?].id);
     try std.testing.expect(try onScreen(&state, "› gpt-5.5"));
 }
 
@@ -3334,7 +3362,7 @@ test "picker tag columns admit ids at and beyond the 24-column cap" {
         try openPicker(&state, &.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = bytes[0 .. length + 1] } } }});
         try std.testing.expectEqual(length, state.menu.widest);
         try std.testing.expect(try onScreen(&state, "› mmmm"));
-        try std.testing.expectEqualStrings(id[0..length], state.picker.?.highlight.slice());
+        try std.testing.expectEqualStrings(id[0..length], state.menu.entries[state.highlighted().?].id);
     }
 }
 
@@ -3363,7 +3391,7 @@ test "on a short screen the highlighted model always shows, and \"N more\" takes
         defer std.testing.allocator.free(screen);
         var rows: usize = 0;
         var lines = std.mem.splitScalar(u8, screen, '\n');
-        while (lines.next()) |line| rows += @intFromBool(std.mem.indexOf(u8, line, "gpt-") != null or std.mem.indexOf(u8, line, "unlisted-a") != null or std.mem.indexOf(u8, line, "unlisted-z") != null or std.mem.indexOf(u8, line, "Other models") != null);
+        while (lines.next()) |line| rows += @intFromBool(std.mem.indexOf(u8, line, "gpt-") != null or std.mem.indexOf(u8, line, "unlisted-a") != null or std.mem.indexOf(u8, line, "unlisted-z") != null);
         if (rows == 0) continue;
         try std.testing.expect(std.mem.indexOf(u8, screen, "› unlisted-z") != null);
         // "N more" shows only once the rows hold all the models they may.
@@ -3732,4 +3760,55 @@ test "archive state and confirmation paint through the actual shared backend" {
     try std.testing.expect(std.mem.indexOf(u8, pending, "[Archiving] second") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "Stopping and archiving") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "Stop and archive bbbbbb?") != null);
+}
+
+test "native model list keeps identity and physical selection through queued input and resize" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer state.deinit();
+    try openPicker(&state, &both);
+    const draft = try typeText(&state, "");
+    // One frame followed by many keys without an intervening paint exercises
+    // the ListView's pending seek, not a second overview-owned cursor.
+    {
+        var frame = try sizedRender(&state, .{}, 60, 24, .{ .unicode = true, .depth = .none }, 0);
+        defer frame.deinit();
+    }
+    for (0..40) |_| try expectEffects(&.{}, try press(&state, draft, .next));
+    try std.testing.expectEqualStrings("unlisted-z", state.menu.entries[state.highlighted().?].id);
+    for ([_]u16{ 24, 10, 20 }) |height| {
+        var frame = try sizedRender(&state, .{}, 60, height, .{ .unicode = true, .depth = .none }, 0);
+        defer frame.deinit();
+        const region = layout(&state, 1, 0).picker;
+        var selected: usize = 0;
+        for (region.start..region.end) |row| {
+            const mark = frame.cell(2, row);
+            if (std.mem.eql(u8, mark.char.grapheme, "›")) {
+                selected += 1;
+                try std.testing.expect(mark.style.reverse);
+                try std.testing.expectEqualStrings("u", frame.cell(4, row).char.grapheme);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), selected);
+    }
+    // A single-column or zero-height frame cannot show the input or offer a
+    // picker choice; restoring the frame keeps the selected model.
+    for ([_]view.Size{ .{ .width = 1, .height = 24 }, .{ .width = 60, .height = 0 } }) |size| {
+        try expectEffects(&.{}, try step(&state, .{ .resized = size }));
+        try std.testing.expect(state.shownPicker() == null);
+        const selected = state.picker.?.list.cursor;
+        try expectEffects(&.{}, try press(&state, draft, .next));
+        try std.testing.expectEqual(selected, state.picker.?.list.cursor);
+    }
+    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
+    try std.testing.expectEqualStrings("unlisted-z", state.menu.entries[state.highlighted().?].id);
+    // Reordering keeps the same ID; removing it resets to the first row.
+    try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "unlisted-z\na-other\n" } } }});
+    try std.testing.expectEqualStrings("unlisted-z", state.menu.entries[state.highlighted().?].id);
+    try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "a-other\n" } } }});
+    try std.testing.expectEqualStrings("a-other", state.menu.entries[state.highlighted().?].id);
+    try answerModels(&state, &.{});
+    try std.testing.expect(state.highlighted() == null);
+    try expectEffects(&.{}, try press(&state, draft, .next));
+    try expectEffects(&.{}, try submit(&state, draft));
+    try std.testing.expectEqualStrings("gpt-6-luna", state.default.?.model.slice());
 }

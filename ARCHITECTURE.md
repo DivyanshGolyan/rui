@@ -2299,11 +2299,11 @@ Bare `rui` accepts no initial Message operand.
 Terminal input goes through the overview composer, which is a conversation's line editor: it edits, rejects and ends lines as a draft does.
 The overview keeps Esc, Ctrl-C and Ctrl-X, and the arrows, Home and End select rows while the composer is empty; Up and Down past a draft's lines select rows too.
 Before Enter, its `/configure` edits only the start settings of the Session that Enter will start.
-Its `/model` opens the model picker right above the input: every model the Host's [`/v1/model-list`](#public-session-activity) offers for a served sign-in, the next Session's model first (the saved default, unless `/configure` holds a model), then the models Rui's catalog knows in catalog order, then the others by name under "Other models", tagged "default limits".
+Its `/model` opens the model picker right above the input: every model the Host's [`/v1/model-list`](#public-session-activity) offers for a served sign-in, the next Session's model first (the saved default, unless `/configure` holds a model), then the models Rui's catalog knows in catalog order, then the others by name, tagged "default limits".
 The overview's worker reads the list and builds the menu, so the screen never waits, and the menu is freed when the picker closes.
 A list still loading says so and is read again with the next listing, a fallback list says the live one is unavailable, and each sign-in the Host does not serve shows one line naming its login command.
 A later read that gets no answer, or an answer Rui cannot read, keeps the list under a note that says which.
-On a short screen the highlighted model always shows, and the notes and `N more` take only the rows the models leave.
+The native ListView owns model cursor and scrolling over fixed-height selectable rows. On a short screen the highlighted model always shows, and the notes and `N more` take only the rows the models leave.
 When the screen leaves the picker no row, `/model` says the screen is too small instead of opening it, and a picker a resize hides takes no key until it shows again: the keys act as they would without it.
 The sign-ins are named "ChatGPT" (`codex`) and "API key" (`openai`).
 Up, Down, Home and End move the highlight; Enter on a model one sign-in offers is the whole pick, and on one both offer it turns the input row into the `Use ChatGPT / API key` choice, the shape of an Action's Allow once / Deny, at the next Session's sign-in, where Left and Right move and Enter picks.

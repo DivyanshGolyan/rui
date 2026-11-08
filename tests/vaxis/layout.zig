@@ -723,3 +723,72 @@ test "ScrollView paints an independent track and library-sized thumb" {
         }
     }
 }
+
+test "ListView bounds queued model movement and handles empty and tiny viewports" {
+    const ModelRows = struct {
+        count: usize,
+        builds: usize = 0,
+        index: usize = 0,
+        fn build(raw: *const anyopaque, index: usize, _: usize) ?vaxis.vxfw.Widget {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(raw)));
+            self.builds += 1;
+            if (index >= self.count) return null;
+            self.index = index;
+            return .{ .userdata = self, .drawFn = draw };
+        }
+        fn draw(raw: *anyopaque, ctx: vaxis.vxfw.DrawContext) std.mem.Allocator.Error!vaxis.vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const widget: vaxis.vxfw.Widget = .{ .userdata = self, .drawFn = draw };
+            const surface = try vaxis.vxfw.Surface.init(ctx.arena, widget, .{ .width = ctx.max.width.?, .height = 1 });
+            if (surface.size.width != 0) surface.writeCell(0, 0, .{ .char = .{ .grapheme = if (self.index % 2 == 0) "a" else "b", .width = 1 } });
+            return surface;
+        }
+    };
+    var storage: [32768]u8 = undefined;
+    var arena = std.heap.FixedBufferAllocator.init(&storage);
+    var rows: ModelRows = .{ .count = 100_000 };
+    var list: vaxis.vxfw.ListView = .{ .children = .{ .builder = .{ .userdata = &rows, .buildFn = ModelRows.build } }, .item_count = 100_000, .draw_cursor = false };
+    var ctx: vaxis.vxfw.EventContext = .{ .io = undefined, .alloc = arena.allocator(), .cmds = .empty };
+    var draw_ctx: vaxis.vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 10, .height = 3 }, .cell_size = .{} };
+    _ = try list.draw(draw_ctx);
+    for (0..10_000) |_| list.nextItem(&ctx);
+    try testing.expectEqual(@as(u32, 10_000), list.cursor);
+    rows.builds = 0;
+    arena.reset();
+    const visible = try list.draw(draw_ctx);
+    try testing.expect(rows.builds <= 5);
+    try testing.expect(visible.children.len <= 3);
+    try testing.expect(list.scroll.top <= list.cursor and list.cursor < list.scroll.top + 3);
+    // A hidden frame must not consume a pending cursor seek.
+    list.nextItem(&ctx);
+    draw_ctx.max.height = 0;
+    arena.reset();
+    _ = try list.draw(draw_ctx);
+    draw_ctx.max.height = 3;
+    arena.reset();
+    _ = try list.draw(draw_ctx);
+    try testing.expect(list.scroll.top <= list.cursor and list.cursor < list.scroll.top + 3);
+    // A list replacement may remove the selected model or every model.
+    rows.count = 1;
+    list.item_count = 1;
+    arena.reset();
+    _ = try list.draw(draw_ctx);
+    try testing.expectEqual(@as(u32, 0), list.cursor);
+    try testing.expectEqual(@as(u32, 0), list.scroll.top);
+    rows.count = 0;
+    list.item_count = 0;
+    list.nextItem(&ctx);
+    list.prevItem(&ctx);
+    arena.reset();
+    const empty = try list.draw(draw_ctx);
+    try testing.expectEqual(@as(usize, 0), empty.children.len);
+    try testing.expectEqual(@as(u32, 0), list.cursor);
+    // The library's cursor gutter must fit even a one-column viewport.
+    rows.count = 1;
+    list.item_count = 1;
+    list.draw_cursor = true;
+    draw_ctx.max.width = 1;
+    arena.reset();
+    const narrow = try list.draw(draw_ctx);
+    try testing.expectEqual(@as(u16, 1), narrow.size.width);
+}

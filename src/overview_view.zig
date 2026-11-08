@@ -10,6 +10,7 @@
 //! The rows are a client view over `session list`; the Host keeps no
 //! overview state.
 const std = @import("std");
+const vaxis = @import("vaxis");
 const session_archive = @import("session_archive.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const session_line = @import("session_line.zig");
@@ -608,9 +609,8 @@ pub const Size = struct { width: u16 = 0, height: u16 = 0 };
 /// The model picker /model opens: the models, then, for a model more than
 /// one sign-in offers, the sign-in choice on the input row.
 pub const Picker = struct {
-    /// The highlighted model's ID, which a new list keeps highlighted while
-    /// it holds the model; empty until a list holds any.
-    highlight: Bounded(model_capability.max_model_bytes) = .{ .len = 0 },
+    /// The library owns the selected row and the visible window.
+    list: vaxis.vxfw.ListView = .{ .children = .{ .slice = &.{} }, .item_count = 0, .draw_cursor = false },
     step: union(enum) {
         models,
         /// Enter took the highlighted model, which more than one sign-in
@@ -1000,7 +1000,9 @@ pub const State = struct {
     /// The open picker's highlighted entry of `menu`.
     pub fn highlighted(self: *const State) ?usize {
         const picker = self.picker orelse return null;
-        return self.menu.find(picker.highlight.slice());
+        const row = picker.list.cursor;
+        if (row >= self.menu.entries.len) return null;
+        return self.menu.find(self.shownMenu().entry(row).id);
     }
 
     fn closePicker(self: *State) void {
@@ -1586,19 +1588,24 @@ fn readModels(state: *State, read: ModelsRead) void {
             var owned = menu;
             // The answer came after the picker closed.
             const picker = if (state.picker) |*open| open else return owned.deinit(state.gpa);
+            // Preserve identity across replacement, without retaining a second cursor.
+            var previous: Bounded(model_capability.max_model_bytes) = .{ .len = 0 };
+            const old_id = if (state.highlighted()) |at| state.menu.entries[at].id else null;
+            if (old_id) |id| previous.set(id) catch unreachable;
             state.menu.deinit(state.gpa);
             state.menu = owned;
             state.menu_read = .read;
-            // The highlight stays on its model while the list holds it, and
-            // a sign-in choice while the model's sign-ins hold it.
-            const at = state.highlighted() orelse {
+            picker.list.item_count = @intCast(owned.entries.len);
+            const at = if (old_id != null) owned.find(previous.slice()) else null;
+            const row = if (at) |index| state.shownMenu().row(index) else 0;
+            picker.list.jumpToItem(@intCast(row));
+            if (at == null) {
                 picker.step = .models;
-                if (owned.entries.len != 0) picker.highlight.set(state.shownMenu().entry(0).id) catch unreachable;
                 return;
-            };
+            }
             switch (picker.step) {
                 .models => {},
-                .sign_in => |provider| if (!owned.entries[at].providers.contains(provider)) {
+                .sign_in => |provider| if (!owned.entries[at.?].providers.contains(provider)) {
                     picker.step = .models;
                 },
             }
@@ -2418,7 +2425,13 @@ fn ranCommand(state: *State, ran: Ran) error{OutOfMemory}!void {
     state.gpa.free(command.text);
     state.command = null;
     // What /configure holds still leads, as `nextBinding` says.
-    if (ran.default) |binding| state.default = binding;
+    if (ran.default) |binding| {
+        const selected = state.highlighted();
+        state.default = binding;
+        if (selected) |at| if (state.picker) |*picker| {
+            picker.list.jumpToItem(@intCast(state.shownMenu().row(at)));
+        };
+    }
     // The next listing shows the new label.
     if (name == .rename) state.next_list_ms = 0;
     switch (ran.outcome) {
@@ -2443,16 +2456,15 @@ fn keptOutput(gpa: Allocator, text: []const u8, cut: bool) error{OutOfMemory}![]
 
 fn pickerMove(state: *const State, picker: *Picker, action: Action) void {
     const count = state.menu.entries.len;
-    const shown = state.shownMenu();
-    const row = shown.row(state.highlighted() orelse return);
-    const next = switch (action) {
-        .first => 0,
-        .last => count - 1,
-        .next => @min(row + 1, count - 1),
-        .previous => row -| 1,
+    if (count == 0) return;
+    var context: vaxis.vxfw.EventContext = .{ .io = undefined, .alloc = state.gpa, .cmds = .empty };
+    switch (action) {
+        .first => picker.list.jumpToItem(0),
+        .last => picker.list.jumpToItem(@intCast(count - 1)),
+        .next => picker.list.nextItem(&context),
+        .previous => picker.list.prevItem(&context),
         else => unreachable,
-    };
-    picker.highlight.set(shown.entry(next).id) catch unreachable;
+    }
 }
 
 /// Enter in the picker. A model one sign-in offers is the whole pick; one
@@ -2852,7 +2864,7 @@ pub fn layout(state: *const State, draft_rows: u16, command_rows: usize) Layout 
     const listed: u16 = if (fits) @intCast(@min(command_rows, draft_layout.cap(height) -| draft_rows, below -| (top + 1 + kept))) else 0;
     const input = below - listed;
     var picker: Layout.Rows = .{ .start = input, .end = input };
-    if (state.picker != null and top + 1 + kept < input) {
+    if (fits and state.picker != null and top + 1 + kept < input) {
         picker.start = input - @as(u16, @intCast(pickerFit(state, input - (top + 1 + kept)).used()));
     }
     return .{ .top = top, .list = if (top + 1 < picker.start) .{ .start = top + 1, .end = picker.start } else .{}, .picker = picker, .input = input, .commands = .{ .start = input + 1, .end = below + 1 } };
@@ -2920,14 +2932,13 @@ pub fn writeSettings(settings: *const StartSettings, writer: *std.Io.Writer) std
 
 /// What the picker shows in `room` rows: at the sign-in choice only the
 /// chosen model. Otherwise a note while the list loads or after a read
-/// failed, the models from the highlighted one's window with those Rui does
-/// not list under "Other models", then a line for each sign-in the Host
+/// failed, the library-scrolled model rows, then a line for each sign-in the Host
 /// does not serve and each list that is loading or unavailable. The
 /// highlighted model always shows; the notes and "N more" take only the
 /// rows the models leave.
 const PickerFit = struct {
     above: bool = false,
-    /// Model rows, the "Other models" heading among them.
+    /// Fixed-height selectable model rows.
     shown: usize = 0,
     more: bool = false,
     notes: usize = 0,
@@ -2954,10 +2965,9 @@ pub fn pickerFit(state: *const State, room: usize) PickerFit {
     return .{ .above = show_above, .shown = shown, .more = shown < items and spare != 0, .notes = show_notes };
 }
 
-/// The picker's model rows: each entry, and the "Other models" heading
-/// before the first one the Host does not know.
+/// The picker has one selectable row for each model.
 pub fn pickerItems(state: *const State) usize {
-    return state.menu.entries.len + @intFromBool(state.shownMenu().others() < state.menu.entries.len);
+    return state.menu.entries.len;
 }
 
 /// Why the picker has a line for `provider`'s sign-in: its list loads or
@@ -3877,7 +3887,7 @@ fn shownRow(state: *const State, row: usize) []const u8 {
 fn highlightModel(state: *State, draft: Draft, model: []const u8) !void {
     try expectEffects(&.{}, try press(state, draft, .first));
     for (0..state.menu.entries.len) |_| {
-        if (state.picker.?.highlight.eql(model)) return;
+        if (state.highlighted()) |at| if (std.mem.eql(u8, state.menu.entries[at].id, model)) return;
         try expectEffects(&.{}, try press(state, draft, .next));
     }
     return error.TestModelNotOffered;
@@ -3923,7 +3933,7 @@ test "picks made during one save are saved after it, only the newest" {
     // Two more picks while it runs: neither is refused, and neither saves yet.
     for ([_][]const u8{ "gpt-6-luna", "gpt-6.1-sol" }) |model| {
         try openPicker(&state, &.{chatgpt});
-        while (!state.picker.?.highlight.eql(model)) try expectEffects(&.{}, try press(&state, draft, .next));
+        while (!std.mem.eql(u8, state.menu.entries[state.highlighted().?].id, model)) try expectEffects(&.{}, try press(&state, draft, .next));
         try expectEffects(&.{}, try submit(&state, draft));
         try std.testing.expectEqualStrings(model, state.default.?.model.slice());
         try std.testing.expect(state.notice == null);
@@ -4010,13 +4020,13 @@ test "Shift-Up and Shift-Down choose a Session in both picker steps, and leave t
     try openPicker(&state, &both);
     for (0..2) |_| {
         const chosen = state.selected.?;
-        const highlight = state.picker.?.highlight;
+        const highlight = state.picker.?.list.cursor;
         const picker_step = state.picker.?.step;
         try expectEffects(&.{}, try press(&state, draft, .select_next));
         try std.testing.expect(!std.mem.eql(u8, &chosen, &state.selected.?));
         try expectEffects(&.{}, try press(&state, draft, .select_previous));
         try std.testing.expectEqualSlices(u8, &chosen, &state.selected.?);
-        try std.testing.expect(state.picker.?.highlight.eql(highlight.slice()));
+        try std.testing.expectEqual(highlight, state.picker.?.list.cursor);
         try std.testing.expectEqual(std.meta.activeTag(picker_step), std.meta.activeTag(state.picker.?.step));
         // gpt-6-luna is offered by both sign-ins: Enter asks which.
         if (state.picker.?.step == .models) try expectEffects(&.{}, try submit(&state, draft));

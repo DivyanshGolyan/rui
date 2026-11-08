@@ -927,3 +927,123 @@ index 2c6edb6..81acf55 100644
          vbar.draw(bg);
      }
  }
+--- a/src/vxfw/ListView.zig
++++ b/src/vxfw/ListView.zig
+@@ -61,6 +61,8 @@
+ 
+ /// scroll position
+ scroll: Scroll = .{},
++/// Height of the last nonempty viewport, so a resize keeps the cursor visible.
++last_height: ?u16 = null,
+ 
+ pub fn widget(self: *const ListView) vxfw.Widget {
+     return .{
+@@ -128,6 +130,17 @@
+ }
+ 
+ pub fn nextItem(self: *ListView, ctx: *vxfw.EventContext) void {
++    if (self.knownItemCount()) |count| {
++        if (count == 0) {
++            self.cursor = 0;
++            self.scroll = .{};
++            return ctx.consumeEvent();
++        }
++        if (self.cursor >= count) {
++            self.jumpToItem(count - 1);
++            return ctx.consumeAndRedraw();
++        }
++    }
+     // If we have a count, we can handle this directly
+     if (self.item_count) |count| {
+         if (self.cursor >= count -| 1) {
+@@ -167,6 +180,17 @@
+ }
+ 
+ pub fn prevItem(self: *ListView, ctx: *vxfw.EventContext) void {
++    if (self.knownItemCount()) |count| {
++        if (count == 0) {
++            self.cursor = 0;
++            self.scroll = .{};
++            return ctx.consumeEvent();
++        }
++        if (self.cursor >= count) {
++            self.jumpToItem(count - 1);
++            return ctx.consumeAndRedraw();
++        }
++    }
+     if (self.cursor == 0) {
+         return ctx.consumeEvent();
+     }
+@@ -204,6 +228,12 @@
+ 
+ // Only call when cursor state has changed, or we want to ensure the cursored item is in view
+ pub fn ensureScroll(self: *ListView) void {
++    // More input arrived before the pending seek was drawn. Jump instead of
++    // building every intervening child just to reach the newest cursor.
++    if (self.scroll.wants_cursor) {
++        self.jumpToItem(self.cursor);
++        return;
++    }
+     if (self.cursor <= self.scroll.top) {
+         self.scroll.top = @intCast(self.cursor);
+         self.scroll.offset = 0;
+@@ -262,8 +292,8 @@
+         // Get the child
+         const child = builder.itemAtIdx(self.scroll.top, self.cursor) orelse break;
+ 
+-        const child_offset: u16 = if (self.draw_cursor) 2 else 0;
+         const max_size = ctx.max.size();
++        const child_offset: u16 = if (self.draw_cursor) @min(2, max_size.width) else 0;
+ 
+         // Set up constraints. We let the child be the entire height if it wants
+         const child_ctx = ctx.withConstraints(
+@@ -313,10 +343,16 @@
+ }
+ 
+ fn drawBuilder(self: *ListView, ctx: vxfw.DrawContext, builder: Builder) Allocator.Error!vxfw.Surface {
+-    defer self.scroll.wants_cursor = false;
+-
+     // Get the size. asserts neither constraint is null
+     const max_size = ctx.max.size();
++    if (self.knownItemCount()) |count| {
++        if (count == 0) {
++            self.cursor = 0;
++            self.scroll = .{};
++        } else if (self.cursor >= count or self.scroll.top >= count) {
++            self.jumpToItem(@min(self.cursor, count - 1));
++        }
++    }
+     // Set up surface.
+     var surface: vxfw.Surface = .{
+         .size = max_size,
+@@ -324,6 +360,12 @@
+         .buffer = &.{},
+         .children = &.{},
+     };
++    if (max_size.width == 0 or max_size.height == 0) return surface;
++    if (self.last_height) |old| if (max_size.height < old) {
++        self.scroll.wants_cursor = true;
++    };
++    self.last_height = max_size.height;
++    defer self.scroll.wants_cursor = false;
+     if (self.draw_cursor) {
+         // If we are drawing the cursor, we need to allocate a buffer so that we obscure anything
+         // underneath us
+@@ -381,7 +423,7 @@
+         accumulated_height = last_child.origin.row + last_child.surface.size.height;
+     }
+ 
+-    const child_offset: u16 = if (self.draw_cursor) 2 else 0;
++    const child_offset: u16 = if (self.draw_cursor) @min(2, max_size.width) else 0;
+ 
+     while (builder.itemAtIdx(i, self.cursor)) |child| {
+         // Defer the increment
+@@ -457,7 +499,7 @@
+ 
+     // If we want the cursor, we check that the cursored widget is fully in view. If it is too
+     // large, we position it so that it is the top item with a 0 offset
+-    if (self.scroll.wants_cursor) {
++    if (self.scroll.wants_cursor and child_list.items.len != 0) {
+         const cursored_idx: u32 = self.cursor - self.scroll.top;
+         const sub = child_list.items[cursored_idx];
+         // The bottom row of the cursored widget

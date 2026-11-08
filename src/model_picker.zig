@@ -42,8 +42,6 @@ pub const Menu = struct {
     /// Every entry's ID, back to back.
     ids: []u8 = &.{},
     sources: Sources = .initFill(null),
-    /// The first entry the Host does not know.
-    others: usize = 0,
     /// The longest ID's bytes, which are its cells: IDs are printable ASCII.
     widest: usize = 0,
 
@@ -86,12 +84,6 @@ pub const Shown = struct {
     pub fn row(self: Shown, at: usize) usize {
         const lead = self.lead orelse return at;
         return if (at == lead) 0 else if (at < lead) at + 1 else at;
-    }
-
-    /// The row "Other models" starts at.
-    pub fn others(self: Shown) usize {
-        const lead = self.lead orelse return self.menu.others;
-        return self.menu.others + @intFromBool(lead >= self.menu.others);
     }
 };
 
@@ -180,14 +172,12 @@ pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, I
     errdefer gpa.free(entries);
     menu.ids = try gpa.alloc(u8, id_bytes);
     var at: usize = 0;
-    menu.others = len;
-    for (offered[0..len], entries, 0..) |entry, *kept, place| {
+    for (offered[0..len], entries) |entry, *kept| {
         @memcpy(menu.ids[at..][0..entry.id.len], entry.id);
         kept.* = entry;
         kept.id = menu.ids[at..][0..entry.id.len];
         at += entry.id.len;
         menu.widest = @max(menu.widest, entry.id.len);
-        if (!entry.known and menu.others == len) menu.others = place;
     }
     menu.entries = entries;
     return menu;
@@ -255,7 +245,7 @@ test "the default leads, known models follow in catalog order, then the others b
         try std.testing.expectEqual(both or live_only, entry.providers.contains(.openai));
         try std.testing.expectEqual(!live_only, entry.known);
     }
-    try std.testing.expectEqual(catalog.openai_ids.len, menu.shown("gpt-6-sol").others());
+    try std.testing.expect(!menu.shown("gpt-6-sol").entry(catalog.openai_ids.len).known);
     var widest: usize = "zz-unlisted".len;
     for (catalog.openai_ids) |id| widest = @max(widest, id.len);
     try std.testing.expectEqual(widest, menu.widest);
@@ -269,11 +259,10 @@ test "the default leads, known models follow in catalog order, then the others b
         at += 1;
     };
     try expectOrder(menu.shown("gpt-5.5"), &expected);
-    // An unlisted default leads, and "Other models" starts at the rest.
+    // An unlisted default leads, while known models still precede the rest.
     const unlisted_first = menu.shown("zz-unlisted");
     try std.testing.expectEqualStrings("zz-unlisted", unlisted_first.entry(0).id);
-    try std.testing.expectEqual(catalog.openai_ids.len + 1, unlisted_first.others());
-    try std.testing.expectEqualStrings("aa-unlisted", unlisted_first.entry(unlisted_first.others()).id);
+    try std.testing.expectEqualStrings("aa-unlisted", unlisted_first.entry(catalog.openai_ids.len + 1).id);
     for ([_]?[]const u8{ null, "o9" }) |absent| {
         const plain = menu.shown(absent);
         try std.testing.expectEqualStrings(catalog.openai_ids[0], plain.entry(0).id);
@@ -286,7 +275,6 @@ test "the Host's word decides which models are known; Rui's catalog only orders 
         "{\"id\":\"o9\",\"known\":false},{\"id\":\"gpt-6-luna\",\"known\":false},{\"id\":\"zz-next\",\"known\":true},{\"id\":\"gpt-5.5\",\"known\":true}]}]");
     defer menu.deinit(std.testing.allocator);
     try expectOrder(menu.shown(null), &.{ "gpt-5.5", "zz-next", "gpt-6-luna", "o9" });
-    try std.testing.expectEqual(@as(usize, 2), menu.others);
     try std.testing.expect(menu.entries[1].known and !menu.entries[2].known);
 }
 
@@ -297,7 +285,7 @@ test "a sign-in the Host does not serve has no source, and a pending list asks a
     try std.testing.expect(menu.loading());
     try std.testing.expectEqualStrings(catalog.openai_ids[0], menu.entries[0].id);
     try std.testing.expect(menu.find("gpt-6.1-sol") != null);
-    try std.testing.expectEqual(menu.entries.len, menu.others);
+    for (menu.entries) |entry| try std.testing.expect(entry.known);
     var nothing = try testMenu(&.{});
     defer nothing.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), nothing.entries.len);
