@@ -5851,7 +5851,9 @@ test "confirmed original clears custody before requests inspection while retaini
         const second_body = (std.mem.indexOf(u8, request, "\r\n\r\n") orelse return error.InvalidRequest) + 4;
         try std.testing.expectEqualStrings(first[first_body..first_len], request[second_body..]);
         try std.testing.expect(std.mem.indexOf(u8, request, &key) != null);
-        const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"37\"},\"execution\":{\"status\":\"queued\"},\"input\":{\"type\":\"text\",\"bytes\":\"15\",\"sha256\":\"d02342cf8f590cb32eff9b3d74fffa781a3caa7ea94c4145612c09244fd25d00\"},\"queue\":{\"status\":\"queued\",\"admission\":\"37\"}}";
+        const original_text = try self.input.message(original);
+        var body_buffer: [1024]u8 = undefined;
+        const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"37\"}},\"execution\":{{\"status\":\"queued\"}},\"input\":{{\"type\":\"text\",\"bytes\":\"{d}\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"37\"}}}}", .{ original_text.len, std.fmt.bytesToHex(protocol.contentDigest(original_text), .lower) });
         var header: [256]u8 = undefined;
         const headers = try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len});
         try Host.writeAll(peer.socket.handle, headers, deadline);
