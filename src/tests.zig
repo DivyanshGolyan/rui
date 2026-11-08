@@ -81,6 +81,7 @@ test {
     _ = @import("NativeFeed.zig");
     _ = @import("NativeSourceExport.zig");
     _ = @import("NativePagedFeed.zig");
+    _ = @import("NativeRowWindow.zig");
     _ = @import("NativeRichLines.zig");
     _ = @import("NativeUi.zig");
     _ = @import("NativeObservations.zig");

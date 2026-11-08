@@ -389,8 +389,9 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
                 if (self.old_page) |old| old.destroy();
                 self.old_page = self.page;
                 self.page = result.page;
-                self.feed.scroll_view = .{ .children = .{ .builder = result.page.builder() }, .item_count = result.page.row_count };
-                self.feed.estimated_content_height = result.page.row_count;
+                if (result.arrival == .tail or result.arrival == .older) result.page.window.end();
+                self.feed.scroll_view = .{ .children = .{ .builder = result.page.builder() }, .item_count = result.page.window.count() };
+                self.feed.estimated_content_height = result.page.window.count();
                 self.no_older = result.page.page.before == null or (result.page.request.direction == .backward and result.page.page.next == null);
                 self.no_newer = result.page.page.after == null or (result.page.request.direction == .forward and result.page.page.next == null) or result.arrival == .tail;
                 switch (result.arrival) {
@@ -557,6 +558,46 @@ fn openExport(self: *Self) !void {
     self.export_open = true;
 }
 
+/// Move within the authenticated source before fetching another Activity page.
+/// A running page load retains authority over its old-frame anchor until join.
+fn navigateEdge(self: *Self, backward: bool, ctx: *fw.EventContext) !bool {
+    const page = self.page orelse return false;
+    if (if (backward) !self.feed.scroll_view.atStart() else !self.feed.scroll_view.atEnd()) return false;
+    if (self.pending_page != null) {
+        ctx.consumeEvent();
+        return true;
+    }
+    if (self.worker.thread != null and self.read_kind == .conversation and self.read_kind.conversation.job == .load) {
+        self.notice = "History loading; scroll again when ready";
+        ctx.consumeAndRedraw();
+        return true;
+    }
+    if (if (backward) page.window.previous() else page.window.next()) {
+        self.feed.scroll_view = .{ .children = .{ .builder = page.builder() }, .item_count = page.window.count() };
+        self.feed.estimated_content_height = page.window.count();
+        if (backward) self.feed.scroll_view.jumpToEnd() else self.feed.scroll_view.jumpToItem(0);
+        ctx.consumeAndRedraw();
+        return true;
+    }
+    if (backward and !self.no_older) {
+        if (page.page.before) |cursor| {
+            self.queuePage(.{ .cursor = cursor, .instance = page.page.instance, .arrival = .older });
+            ctx.consumeAndRedraw();
+            return true;
+        }
+    }
+    if (!backward and (!self.no_newer or self.new_activity)) {
+        if (page.page.after) |boundary| {
+            var cursor = boundary;
+            if (self.new_activity) cursor.end = null;
+            self.queuePage(.{ .cursor = cursor, .instance = page.page.instance, .arrival = .newer });
+            ctx.consumeAndRedraw();
+            return true;
+        }
+    }
+    return false;
+}
+
 fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (value) {
@@ -578,23 +619,7 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             const wheel = mouse.button == .wheel_up or mouse.button == .wheel_down;
             const scrollbar = self.body_width != 0 and mouse.col == self.body_width - 1 and mouse.row > 0 and mouse.row < self.body_bottom and (mouse.type == .press or mouse.type == .drag);
             if (wheel or scrollbar) self.following = false;
-            if (wheel and self.page != null and self.pending_page == null) {
-                const page = self.page.?;
-                if (mouse.button == .wheel_up and self.feed.scroll_view.atStart() and !self.no_older) {
-                    if (page.page.before) |cursor| self.queuePage(.{ .cursor = cursor, .instance = page.page.instance, .arrival = .older });
-                    ctx.consumeAndRedraw();
-                    return;
-                }
-                if (mouse.button == .wheel_down and self.feed.scroll_view.atEnd() and (!self.no_newer or self.new_activity)) {
-                    if (page.page.after) |boundary| {
-                        var cursor = boundary;
-                        if (self.new_activity) cursor.end = null;
-                        self.queuePage(.{ .cursor = cursor, .instance = page.page.instance, .arrival = .newer });
-                    }
-                    ctx.consumeAndRedraw();
-                    return;
-                }
-            }
+            if (wheel and try self.navigateEdge(mouse.button == .wheel_up, ctx)) return;
         },
         .key_press => |key| {
             if (!self.pasting and key.matches('q', .{ .ctrl = true })) {
@@ -688,6 +713,7 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             }
             if (self.destination != null and (key.matches(vaxis.Key.page_up, .{}) or key.matches(vaxis.Key.page_down, .{}))) {
                 self.following = false;
+                if (try self.navigateEdge(key.matches(vaxis.Key.page_up, .{}), ctx)) return;
                 try self.feed.scroll_view.handleEvent(ctx, .{ .key_press = .{ .codepoint = if (key.matches(vaxis.Key.page_up, .{})) 'u' else 'd', .mods = .{ .ctrl = true } } });
                 ctx.consumeAndRedraw();
                 return;

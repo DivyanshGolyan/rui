@@ -1400,7 +1400,7 @@ diff --git a/src/vxfw/PagedText.zig b/src/vxfw/PagedText.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/vxfw/PagedText.zig
-@@ -0,0 +1,363 @@
+@@ -0,0 +1,362 @@
 +//! Reader-backed native text geometry. Source bytes remain owned by the
 +//! caller; this iterator retains only offsets and a bounded grapheme buffer.
 +const std = @import("std");
@@ -1617,7 +1617,6 @@ new file mode 100644
 +        while (true) {
 +            const before = cursor;
 +            const row = (try cursor.next()) orelse break;
-+            if (self.len == std.math.maxInt(u32)) return error.TooManyRows;
 +            if (self.len % self.stride == 0) {
 +                if (self.checkpoint_count == checkpoint_limit) {
 +                    for (0..checkpoint_limit / 2) |i| self.checkpoints[i] = self.checkpoints[i * 2];

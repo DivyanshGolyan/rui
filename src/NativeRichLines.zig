@@ -151,9 +151,9 @@ fn drawTable(raw: *const anyopaque, index: usize, ctx: fw.DrawContext, left: u64
             const content_width = ctx.hardLineWidth(value);
             const padding = group.widths[col] - content_width;
             const leading: u64 = switch (group.alignment[col]) {
-                @intFromEnum(table.Alignment.left) => 0,
-                @intFromEnum(table.Alignment.right) => padding,
-                @intFromEnum(table.Alignment.center) => padding / 2,
+                @backingInt(table.Alignment.left) => 0,
+                @backingInt(table.Alignment.right) => padding,
+                @backingInt(table.Alignment.center) => padding / 2,
                 else => return error.InvalidSourceRead,
             };
             painter.repeated(" ", leading);
@@ -242,7 +242,7 @@ fn indexTables(self: *Self, source: vaxis.unicode.PagedSource, cancellation: ?*c
             else => return error.InvalidSourceRead,
         };
         var group: Table = .{ .count = columns.count };
-        for (columns.alignment[0..columns.count], 0..) |alignment, col| group.alignment[col] = @intFromEnum(alignment);
+        for (columns.alignment[0..columns.count], 0..) |alignment, col| group.alignment[col] = @backingInt(alignment);
         measure(&group, header, first_row);
         first.table_group = self.table_count;
         first.table_role = .header;
@@ -383,7 +383,7 @@ test "native rich table index retains column facts without padded rows" {
     try std.testing.expectEqual(@as(u8, 2), group.count);
     try std.testing.expectEqual(@as(u64, 4000), group.widths[0]);
     try std.testing.expectEqual(@as(u64, 2), group.widths[1]);
-    try std.testing.expectEqual(@intFromEnum(table.Alignment.center), group.alignment[1]);
+    try std.testing.expectEqual(@backingInt(table.Alignment.center), group.alignment[1]);
     try std.testing.expect((try index.tableAt(1)) == null);
     try std.testing.expectEqual(Mode.@"opaque", (try index.lineAt(5005)).?.mode);
     try std.testing.expectEqual(TableRole.none, (try index.lineAt(5006)).?.table_role);
@@ -432,6 +432,93 @@ test "native paged rich rows retain quote rails and horizontal code and table" {
     try std.testing.expectEqualStrings("│", rendered.readCell(2, 0).char.grapheme);
     try std.testing.expectEqualStrings("b", rendered.readCell(4, 0).char.grapheme);
     try std.testing.expect(index.fault == null);
+    var original: [bytes.len]u8 = undefined;
+    try std.testing.expectEqual(bytes.len, try file.readPositionalAll(io, &original, 0));
+    try std.testing.expectEqualSlices(u8, bytes, &original);
+}
+
+const WindowTestSource = struct {
+    window: *@import("NativeRowWindow.zig"),
+    index: *fw.PagedText.Index,
+
+    fn has(raw: *const anyopaque, row: usize, _: usize) bool {
+        const self: *const @This() = @ptrCast(@alignCast(raw));
+        return row < self.window.count();
+    }
+
+    fn build(raw: *const anyopaque, row: usize, cursor: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!?fw.Widget {
+        const self: *const @This() = @ptrCast(@alignCast(raw));
+        const global = self.window.global(row) orelse return null;
+        return self.index.builder().itemAtIdxForDraw(global, cursor, arena);
+    }
+};
+
+test "native rich source windows cross both directions and preserve resize anchor" {
+    const RowWindow = @import("NativeRowWindow.zig");
+    fw.DrawContext.init(.unicode);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "source", .{ .read = true });
+    defer file.close(io);
+    const bytes = "first paragraph words\n> quote one\n> quote two\n```zig\ncode_0123456789界END\n```\na | b\n--- | ---\nx | 界\nlast paragraph words\n";
+    try file.writeStreamingAll(io, bytes);
+    const backing: TestSource = .{ .io = io, .file = file };
+    const source: vaxis.unicode.PagedSource = .{ .userdata = &backing, .length = bytes.len, .readFn = TestSource.read };
+    var rich = try Self.build(io, tmp.dir, source, null);
+    defer rich.close();
+    var reader: vaxis.unicode.PagedReader = .{ .source = source };
+    var layout: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer layout.deinit();
+    const ctx: fw.DrawContext = .{ .arena = layout.allocator(), .min = .{ .width = 12 }, .max = .{ .width = 12, .height = 3 }, .cell_size = .{} };
+    var index = try fw.PagedText.Index.initStyled(&reader, ctx, 12, rich.provider());
+    var window = RowWindow.init(index.len, 3);
+    var adapter: WindowTestSource = .{ .window = &window, .index = &index };
+    const builder: fw.ScrollView.Builder = .{ .userdata = &adapter, .hasFn = WindowTestSource.has, .buildFrameFn = WindowTestSource.build };
+    var visited: usize = 0;
+    var quote = false;
+    var code_anchor: ?usize = null;
+    var table = false;
+    while (true) {
+        var frame: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer frame.deinit();
+        var scroll: fw.ScrollView = .{ .children = .{ .builder = builder }, .item_count = window.count() };
+        const drawn = try scroll.draw(.{ .arena = frame.allocator(), .min = .{}, .max = .{ .width = 12, .height = 3 }, .cell_size = .{} });
+        try std.testing.expectEqual(@as(usize, window.count()), drawn.children.len);
+        for (0..window.count()) |local| {
+            const global = window.global(local).?;
+            try std.testing.expectEqual(visited, global);
+            const row = (try index.rowAt(global)).?;
+            if (row.line_number == 1 or row.line_number == 2) quote = quote or row.style.quote_depth != 0;
+            if (row.line_number == 4) {
+                try std.testing.expect(row.style.horizontal);
+                code_anchor = row.start;
+            }
+            if (row.line_number == 6) table = table or (row.style.horizontal and row.style.custom);
+            visited += 1;
+        }
+        if (!window.next()) break;
+    }
+    try std.testing.expectEqual(index.len, visited);
+    try std.testing.expect(quote and table and code_anchor != null);
+    while (true) {
+        var local = window.count();
+        while (local != 0) {
+            local -= 1;
+            visited -= 1;
+            try std.testing.expectEqual(visited, window.global(local).?);
+        }
+        if (!window.previous()) break;
+    }
+    try std.testing.expectEqual(@as(usize, 0), visited);
+    var resized = try fw.PagedText.Index.initStyled(&reader, ctx, 6, rich.provider());
+    const restored = (try resized.rowForOffset(code_anchor.?)).?;
+    var resized_window = RowWindow.init(resized.len, 3);
+    const local = resized_window.select(restored).?;
+    try std.testing.expectEqual(restored, resized_window.global(local).?);
+    const row = (try resized.rowAt(restored)).?;
+    try std.testing.expectEqual(@as(usize, 4), row.line_number);
+    try std.testing.expect(row.style.horizontal);
     var original: [bytes.len]u8 = undefined;
     try std.testing.expectEqual(bytes.len, try file.readPositionalAll(io, &original, 0));
     try std.testing.expectEqualSlices(u8, bytes, &original);

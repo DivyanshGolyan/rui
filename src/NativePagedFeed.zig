@@ -10,6 +10,8 @@ const protocol = @import("protocol.zig");
 const replies = @import("protocol_reply.zig");
 const feed = @import("NativeFeed.zig");
 const RichLines = @import("NativeRichLines.zig");
+const RowWindow = @import("NativeRowWindow.zig");
+pub const window_rows: u32 = 512;
 const Self = @This();
 
 const Item = struct {
@@ -48,7 +50,8 @@ page: observations.SourcePage,
 request: replies.ActivityCursor,
 items: [protocol.ActivityPage.items]*Item = undefined,
 count: usize = 0,
-row_count: u32 = 0,
+row_count: usize = 0,
+window: RowWindow = RowWindow.init(0, window_rows),
 width: u16,
 
 /// Load at most one authoritative Activity page. Each selected Message is
@@ -72,13 +75,13 @@ pub fn load(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io
         errdefer item.rich.close();
         item.index = try fw.PagedText.Index.initStyled(&item.reader, ctx, width, item.rich.provider());
         const added = try std.math.add(usize, item.index.len, 1);
-        const total = try std.math.add(usize, self.row_count, added);
-        self.row_count = std.math.cast(u32, total) orelse return error.TooManyRows;
+        self.row_count = try std.math.add(usize, self.row_count, added);
         // No reference to the worker's cancellation token crosses publication.
         item.source.cancellation = null;
         self.items[self.count] = item;
         self.count += 1;
     }
+    self.window = RowWindow.init(self.row_count, window_rows);
     try observations.ensureServing(requests.io, store, self.page.instance);
     return self;
 }
@@ -104,7 +107,7 @@ pub fn builder(self: *Self) fw.ScrollView.Builder {
 
 fn hasRow(raw: *const anyopaque, row: usize, _: usize) bool {
     const self: *const Self = @ptrCast(@alignCast(raw));
-    return row < self.row_count;
+    return row < self.window.count();
 }
 
 /// Snapshot only public Activity identities; exact content remains in its
@@ -115,7 +118,7 @@ pub fn sources(self: *const Self, out: *[protocol.ActivityPage.items]observation
 }
 
 pub fn sourceIndexAt(self: *const Self, row: usize) ?usize {
-    var remaining = row;
+    var remaining = self.window.global(row) orelse return null;
     for (self.items[0..self.count], 0..) |item, i| {
         const rows = 1 + item.index.len;
         if (remaining < rows) return i;
@@ -139,7 +142,8 @@ fn locate(self: *const Self, row: usize) ?Location {
 
 fn drawRow(raw: *const anyopaque, row: usize, cursor: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!?fw.Widget {
     const self: *Self = @ptrCast(@alignCast(@constCast(raw)));
-    const location = self.locate(row) orelse return null;
+    const global_row = self.window.global(row) orelse return null;
+    const location = self.locate(global_row) orelse return null;
     if (location.row) |line| return location.item.index.builder().itemAtIdxForDraw(line, cursor, arena);
     const label = try arena.create(fw.Text);
     label.* = .{ .text = if (location.item.source.item.kind == .user) "You" else "Assistant", .softwrap = false, .pinned_horizontal = true };
@@ -149,7 +153,8 @@ fn drawRow(raw: *const anyopaque, row: usize, cursor: usize, arena: std.mem.Allo
 /// Prepare a source-bound visual anchor without scanning the full source.
 /// The caller keeps this page alive until the worker resolves the anchor.
 pub fn prepareAnchor(self: *const Self, row: usize) !?AnchorInput {
-    const location = self.locate(row) orelse return null;
+    const global_row = self.window.global(row) orelse return null;
+    const location = self.locate(global_row) orelse return null;
     const item = location.item;
     const span = if (location.row) |line| (try item.index.rowAt(line)) orelse return error.InvalidTarget else null;
     return .{
@@ -160,7 +165,7 @@ pub fn prepareAnchor(self: *const Self, row: usize) !?AnchorInput {
 }
 
 /// Resolve only against the same Activity identity and content binding.
-pub fn rowForAnchor(self: *const Self, anchor: Anchor, cancellation: ?*const client.Cancellation) !?u32 {
+pub fn rowForAnchor(self: *Self, anchor: Anchor, cancellation: ?*const client.Cancellation) !?u32 {
     if (!std.mem.eql(u8, &self.page.instance, &anchor.instance) or !std.mem.eql(u8, &self.page.session, &anchor.session)) return null;
     var base: usize = 0;
     for (self.items[0..self.count]) |item| {
@@ -174,13 +179,12 @@ pub fn rowForAnchor(self: *const Self, anchor: Anchor, cancellation: ?*const cli
                 const line = (try item.index.rowForOffset(offset)) orelse return error.InvalidTarget;
                 break :blk base + 1 + line;
             } else base;
-            return std.math.cast(u32, row) orelse error.TooManyRows;
+            return self.window.select(row) orelse error.HistoryAnchorUnavailable;
         }
         base += 1 + item.index.len;
     }
     return null;
 }
-
 
 test "native paged feed declarations retain one bounded page owner" {
     std.testing.refAllDecls(@This());
