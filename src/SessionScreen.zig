@@ -1453,6 +1453,7 @@ test "the running call's row carries the clock, in its place, and other work end
     // A narrow line cuts the words and keeps the clock, under the
     // conversation and calls that now wrap.
     _ = try Test.render(screen, &out.writer, .{ .row = 12, .col = 14, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
+    dumpCompactRows(screen, "narrow calls");
     try std.testing.expectEqualStrings("    build", rowText(screen, 7, &buffer));
     try std.testing.expectEqualStrings("• Waiti… · 12s", rowText(screen, 8, &buffer));
     try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 9).?.char.grapheme);
@@ -1547,11 +1548,13 @@ test "a queued Message keeps its row and status while looking back" {
     const short: std.posix.winsize = .{ .row = 6, .col = 40, .xpixel = 0, .ypixel = 0 };
     const draft = "one\ntwo\nthree";
     _ = try Test.render(screen, &out.writer, short, draft, draft.len, working, &running);
+    dumpCompactRows(screen, "multiline queue");
     try std.testing.expect(!screenHas(screen, "queued", &buffer));
     try std.testing.expect(screenHas(screen, "Sent", &buffer));
     try std.testing.expect(screenHas(screen, "Run zig build", &buffer));
     // With a one-line draft it has the row, and Sent goes.
     _ = try Test.render(screen, &out.writer, short, "one", 3, working, &running);
+    dumpCompactRows(screen, "single-line queue");
     try std.testing.expect(screenHas(screen, "queued", &buffer));
     try std.testing.expect(!screenHas(screen, "Sent", &buffer));
     // A transcript keeps the same queued row and confirming status.
@@ -2063,6 +2066,14 @@ fn expectTrackRow(screen: *Self, row: u16, text: []const u8, width: u16, storage
 fn expectOverlayRow(screen: *Self, row: u16, text: []const u8, width: u16, storage: []u8) !void {
     try std.testing.expectEqualStrings(text, rowText(screen, row, storage));
     try std.testing.expectEqualStrings(" ", Test.window(screen).readCell(width - 1, row).?.char.grapheme);
+}
+
+// Keep the physical rows when a compact owner test fails before later checks.
+fn dumpCompactRows(screen: *Self, label: []const u8) void {
+    const grid = &screen.backend.storage.?.vx.screen_last;
+    std.debug.print("compact {s}: viewport={d} grid={d}x{d}\n", .{ label, screen.height, grid.width, grid.height });
+    var storage: [256]u8 = undefined;
+    for (0..@min(grid.height, 12)) |row| std.debug.print("row {d}: {s}\n", .{ row, rowText(screen, @intCast(row), &storage) });
 }
 
 // Physical full-width row, including any owner-painted final cell.
