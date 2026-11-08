@@ -56,7 +56,17 @@ pub fn main(init: std.process.Init) !void {
             .ready => |ready| ready.instance,
             else => return error.HostUnavailable,
         };
-        const scoped: client.Requests = .{ .io = init.io, .host_instance = &before };
+        var cancellation: client.Cancellation = .{};
+        const StopScratch = struct {
+            fn run(io: std.Io, token: *client.Cancellation) void {
+                std.Io.sleep(io, .fromMilliseconds(700), .awake) catch return;
+                token.requestStop();
+            }
+        };
+        const cancel = std.mem.eql(u8, args[8], "cancel");
+        const stopper = if (cancel) try std.Thread.spawn(.{}, StopScratch.run, .{ init.io, &cancellation }) else null;
+        defer if (stopper) |thread| thread.join();
+        const scoped: client.Requests = .{ .io = init.io, .host_instance = &before, .cancellation = if (cancel) &cancellation else null };
         const path = init.environ_map.get("TMPDIR") orelse return error.InvalidTemporaryDirectory;
         var dir = try std.Io.Dir.cwd().openDir(init.io, path, .{});
         defer dir.close(init.io);
@@ -69,7 +79,13 @@ pub fn main(init: std.process.Init) !void {
             scratch.close(init.io);
             return err;
         };
-        var content = try scoped.readVerifiedActivityScratch(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), .{ .bytes = try std.fmt.parseInt(u64, args[6], 10), .digest = digest }, scratch);
+        var content = scoped.readVerifiedActivityScratch(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), .{ .bytes = try std.fmt.parseInt(u64, args[6], 10), .digest = digest }, scratch) catch |err| {
+            if (cancel) {
+                try std.Io.File.stderr().writeStreamingAll(init.io, "SCRATCH_READ_RETURNED\n");
+                try std.Io.sleep(init.io, .fromSeconds(3), .awake);
+            }
+            return err;
+        };
         defer content.close();
         const after = switch (client.hostStatus(init.io, args[2])) {
             .ready => |ready| ready.instance,
