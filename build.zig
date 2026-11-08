@@ -384,6 +384,25 @@ pub fn build(b: *std.Build) void {
     activity_client.root_module.link_libc = true;
     activity_client.root_module.addImport("rui_client", read_client);
     b.step("activity-window-actor", "Build the scoped activity window integration actor").dependOn(&b.addInstallArtifact(activity_client, .{}).step);
+    const action_admission_probe = b.addExecutable(.{
+        .name = "rui-action-admission-probe",
+        .use_llvm = test_actor_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/action_admission_probe.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    configureTerminalEditor(b, action_admission_probe);
+    const action_submission = b.createModule(.{
+        .root_source_file = b.path("src/SessionSubmission.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+    });
+    var action_imports = action_admission_probe.root_module.import_table.iterator();
+    while (action_imports.next()) |entry| action_submission.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    action_admission_probe.root_module.addImport("rui_submission", action_submission);
+    b.step("action-admission-probe", "Build the real Action submission integration probe").dependOn(&b.addInstallArtifact(action_admission_probe, .{}).step);
     const activity_integration = b.addSystemCommand(&.{"python3"});
     activity_integration.addFileArg(b.path("tests/integration/activity_integration.py"));
     activity_integration.addFileArg(ci.path(release_safe));
