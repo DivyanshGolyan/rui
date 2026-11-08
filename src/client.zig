@@ -249,12 +249,21 @@ pub const Requests = struct {
     }
 
     pub fn activityPage(self: Requests, store_path: []const u8, session: []const u8, cursor: protocol_reply.ActivityCursor) !protocol_reply.ActivityPageReply {
+        return self.activityPageSince(store_path, session, cursor, null);
+    }
+
+    pub fn activityPageSince(self: Requests, store_path: []const u8, session: []const u8, cursor: protocol_reply.ActivityCursor, since: ?protocol_reply.SessionToken) !protocol_reply.ActivityPageReply {
         try self.check();
         try protocol_reply.validateIdentityInputs("", session);
         try cursor.validate();
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.activity_page_request, .{ paths.store.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
+        if (since) |value| {
+            var token: [protocol_reply.SessionToken.max_bytes]u8 = undefined;
+            try body.appendShape(protocol.activity_page_since_request, .{ paths.store.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit, value.format(&token) });
+        } else {
+            try body.appendShape(protocol.activity_page_request, .{ paths.store.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
+        }
         const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {

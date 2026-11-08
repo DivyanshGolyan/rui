@@ -85,8 +85,8 @@ const FeedWidget = struct {
     }
 };
 
-const ReadKind = union(enum) { list, conversation: Id };
-const ReadResult = union(enum) { list: []observations.Row, conversation: []observations.Block };
+const ReadKind = union(enum) { list, conversation: struct { id: Id, since: ?@import("protocol_reply.zig").SessionToken } };
+const ReadResult = union(enum) { list: []observations.Row, conversation: ?observations.Conversation };
 
 init: std.process.Init,
 options: Overview.Options,
@@ -99,6 +99,7 @@ list: fw.ListView = .{ .children = .{ .slice = &.{} }, .item_count = 0, .draw_cu
 rows: []*RowWidget = &.{},
 feed: fw.ScrollBars = .{ .scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 }, .draw_horizontal_scrollbar = true },
 blocks: []FeedWidget = &.{},
+feed_token: ?@import("protocol_reply.zig").SessionToken = null,
 following: bool = true,
 header: fw.Text = .{ .text = "" },
 status: fw.Text = .{ .text = "" },
@@ -223,7 +224,7 @@ fn startRead(self: *Self) !void {
     arena.* = std.heap.ArenaAllocator.init(self.init.gpa);
     self.read_arena = arena;
     self.read_result = null;
-    self.read_kind = if (self.destination) |id| .{ .conversation = id } else .list;
+    self.read_kind = if (self.destination) |id| .{ .conversation = .{ .id = id, .since = self.feed_token } } else .list;
     self.worker.start(self.init.io, self, readWork) catch |err| {
         self.freeArena(self.read_arena);
         self.read_arena = null;
@@ -236,14 +237,15 @@ fn readWork(raw: *anyopaque, task: *Task) !void {
     const alloc = self.read_arena.?.allocator();
     self.read_result = switch (self.read_kind) {
         .list => .{ .list = try observations.list(alloc, task.requests(), self.options.store, self.scratch) },
-        .conversation => |id| .{ .conversation = try observations.conversation(alloc, task.requests(), self.options.store, &id) },
+        .conversation => |conversation| .{ .conversation = try observations.conversation(alloc, task.requests(), self.options.store, &conversation.id, conversation.since) },
     };
 }
 
-fn completeRead(self: *Self) !void {
+fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
     if (self.worker.thread == null or !self.worker.completed()) return;
     self.worker.join() catch |err| {
         self.notice = @errorName(err);
+        ctx.redraw = true;
         self.freeArena(self.read_arena);
         self.read_arena = null;
         return;
@@ -270,6 +272,7 @@ fn completeRead(self: *Self) !void {
             self.rows = widgets;
             self.list.children = .{ .builder = .{ .userdata = self, .buildFn = rowAt } };
             self.list.item_count = @intCast(rows.len);
+            ctx.redraw = true;
             if (selected) |id| for (rows, 0..) |row, index| {
                 if (std.mem.eql(u8, &row.id, &id)) {
                     self.list.jumpToItem(@intCast(index));
@@ -278,12 +281,17 @@ fn completeRead(self: *Self) !void {
             };
             if (self.list.cursor >= rows.len) self.list.jumpToItem(@intCast(rows.len -| 1));
         },
-        .conversation => |blocks| {
-            const id = self.read_kind.conversation;
+        .conversation => |maybe_conversation| {
+            const id = self.read_kind.conversation.id;
             if (self.destination == null or !std.mem.eql(u8, &self.destination.?, &id)) {
                 self.freeArena(arena);
                 return;
             }
+            const conversation = maybe_conversation orelse {
+                self.freeArena(arena);
+                return;
+            };
+            const blocks = conversation.blocks;
             const widgets = try arena.allocator().alloc(FeedWidget, blocks.len);
             for (blocks, widgets) |block, *item| {
                 const prefix = if (block.kind == .user) "You\n" else "Assistant\n";
@@ -292,7 +300,9 @@ fn completeRead(self: *Self) !void {
             self.freeArena(self.old_feed_arena);
             self.old_feed_arena = self.feed_arena;
             self.feed_arena = arena;
+            self.feed_token = conversation.token;
             self.blocks = widgets;
+            ctx.redraw = true;
             self.feed.scroll_view.children = .{ .builder = .{ .userdata = self, .buildFn = blockAt } };
             self.feed.scroll_view.item_count = @intCast(widgets.len);
             if (self.following and widgets.len != 0) {
@@ -307,6 +317,7 @@ fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
     self.destination = id;
     self.following = true;
     self.blocks = &.{};
+    self.feed_token = null;
     self.feed.scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 };
     try ctx.requestFocus(self.activeDraft().field.widget());
     ctx.redraw = true;
@@ -484,13 +495,12 @@ fn event(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             ctx.redraw = true;
         },
         .tick => {
-            try self.completeRead();
+            try self.completeRead(ctx);
             try self.finishSubmission(ctx);
             if (self.worker.thread == null) self.startRead() catch |err| {
                 self.notice = @errorName(err);
             };
             try ctx.tick(500, self.widget());
-            ctx.redraw = true;
         },
         .mouse => |mouse| if (self.destination != null and (mouse.button == .wheel_up or mouse.button == .wheel_down)) {
             self.following = false;

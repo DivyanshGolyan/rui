@@ -14,6 +14,11 @@ pub const Row = struct {
     updated_at: ?u64,
 };
 
+pub const Conversation = struct {
+    blocks: []Block,
+    token: ?replies.SessionToken,
+};
+
 pub const Block = struct {
     kind: enum { user, assistant },
     /// Exact Host content remains distinct from terminal-safe display bytes.
@@ -102,14 +107,27 @@ pub fn list(allocator: std.mem.Allocator, requests: client.Requests, store: []co
 
 /// Reads Message content with the Host's length and digest binding. The
 /// returned blocks are values, not screen geometry or a mutable editor.
-pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, store: []const u8, id: []const u8) ![]Block {
+pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, store: []const u8, id: []const u8, since: ?replies.SessionToken) !?Conversation {
+    if (since) |token| {
+        const poll = switch (try requests.activityPageSince(store, id, .{}, token)) {
+            .page => |value| value,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        if (poll.facts.not_modified) return null;
+    }
     var blocks: std.ArrayList(Block) = .empty;
     var cursor: replies.ActivityCursor = .{};
+    var snapshot_token: ?replies.SessionToken = null;
+    var first = true;
     while (true) {
         const page = switch (try requests.activityPage(store, id, cursor)) {
             .page => |value| value,
             .failure => |failure| return requests.failRead(failure),
         };
+        if (first) {
+            snapshot_token = page.facts.token;
+            first = false;
+        }
         for (page.facts.items[0..page.facts.count]) |item| {
             const selected: ?struct { kind: @FieldType(Block, "kind"), content: protocol.ActivityItem.Content } = switch (item.value) {
                 .user => |message| .{ .kind = .user, .content = message.content },
@@ -124,5 +142,5 @@ pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, sto
         }
         cursor = page.continuation() orelse break;
     }
-    return blocks.toOwnedSlice(allocator);
+    return .{ .blocks = try blocks.toOwnedSlice(allocator), .token = snapshot_token };
 }
