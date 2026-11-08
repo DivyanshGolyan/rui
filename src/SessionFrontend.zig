@@ -6227,7 +6227,7 @@ fn testHeldOriginalWire(retry_unconfirmed: bool) !void {
             try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pending, 0));
         }
 
-        fn original(gate: *@This()) !void {
+        fn custody(gate: *@This()) !void {
             const frontend = &gate.held.self;
             const screen = gate.held.screen;
             const intent = frontend.submission.intent orelse return error.MissingFixtureMessage;
@@ -6239,9 +6239,14 @@ fn testHeldOriginalWire(retry_unconfirmed: bool) !void {
             try std.testing.expectEqualDeep(gate.pending.?, screen.consent.?);
             try std.testing.expectEqual(@as(?u64, 10), screen.ticket.?.action);
             try std.testing.expectEqualStrings("", frontend.input.composition().bytes);
+            try std.testing.expectEqual(@as(usize, 0), gate.decisions);
+        }
+
+        fn original(gate: *@This()) !void {
+            try gate.custody();
+            const screen = gate.held.screen;
             try std.testing.expect(screen.offered() == null);
             try std.testing.expectEqual(ConsentPolicy.Approval.held, screen.selected.approval);
-            try std.testing.expectEqual(@as(usize, 0), gate.decisions);
         }
 
         fn messageBody(gate: *@This(), request: []const u8) !void {
@@ -6319,7 +6324,27 @@ fn testHeldOriginalWire(retry_unconfirmed: bool) !void {
                     try gate.messageBody(received.request);
                     gate.messages += 1;
                     try std.testing.expect(frontend.submission.task.thread != null and !frontend.submission.task.completed());
-                    std.debug.print("HELD-WIRE-DELIVERED session=k7m2qx action=10 key={s} task_live=true wire=exact peer=held approval={s} offered={}\n", .{ gate.message_key.?, @tagName(screen.selected.approval), screen.offered() != null });
+                    // These are the actual current frame and terminal, not
+                    // an injected policy value or synthetic owner transition.
+                    const geometry = frontend.terminal.geometry();
+                    const painted = screen.backend.geometry();
+                    try std.testing.expectEqual(@as(u16, 80), geometry.col);
+                    try std.testing.expectEqual(@as(u16, 24), geometry.row);
+                    try std.testing.expectEqual(@as(u16, 80), painted.cols);
+                    try std.testing.expectEqual(@as(u16, 24), painted.rows);
+                    try std.testing.expect(!frontend.dirty and !screen.stale());
+                    try std.testing.expect(screen.ticket.?.delivered);
+                    try std.testing.expectEqual(screen.scope, screen.ticket.?.scope);
+                    try std.testing.expectEqual(screen.inputs, screen.ticket.?.inputs);
+                    try std.testing.expect(frontend.input.pending() == .none);
+                    var queued = [_]std.posix.pollfd{.{ .fd = frontend.terminal.input, .events = std.posix.POLL.IN, .revents = 0 }};
+                    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&queued, 0));
+                    try gate.custody();
+                    try gate.noRequest();
+                    std.debug.print("HELD-WIRE-DELIVERED session=k7m2qx action=10 key={s} task_live=true wire=exact peer=held frame={d} delivered=true geometry=80x24 input=empty approval={s} offered={}\n", .{ gate.message_key.?, screen.ticket.?.frame, @tagName(screen.selected.approval), screen.offered() != null });
+                    // The omission must fail here, before any new Enter can
+                    // consume an incorrectly offered occupied-slot decision.
+                    try std.testing.expect(screen.offered() == null);
                     try gate.original();
                     try gate.noRequest();
                     gate.held_frame = screen.ticket.?.frame;

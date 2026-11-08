@@ -17,7 +17,8 @@ class HeldOriginalProbeTest(unittest.TestCase):
     def log(self, case="accepted", approval="held", offered="false", complete=True):
         result = (f"HELD-WIRE-SETUP store={self.root} socket={self.socket}\n"
                   f"HELD-WIRE-DELIVERED session=k7m2qx action=10 key={self.key} "
-                  f"task_live=true wire=exact peer=held approval={approval} offered={offered}\n")
+                  f"task_live=true wire=exact peer=held frame=3 delivered=true geometry=80x24 "
+                  f"input=empty approval={approval} offered={offered}\n")
         if complete:
             count, retry = (2, "true") if case == "retry" else (1, "false")
             result += f"HELD-ORIGINAL fixture-only Message requests={count} explicit_retry={retry} decision=10:allow_once count=1\n"
@@ -53,6 +54,9 @@ class HeldOriginalProbeTest(unittest.TestCase):
         self.assertFalse(self.classify(text.replace("screen.offered() == null", "unrelated assertion"), flags=1)["red_control_observed"])
         self.assertFalse(self.classify(text.replace("approval=choice", "approval=held"), flags=1)["red_control_observed"])
         self.assertFalse(self.classify(text.replace("peer=held", "peer=answered"), flags=1)["red_control_observed"])
+        for old, changed in (("frame=3", "frame=0"), ("delivered=true", "delivered=false"),
+                             ("geometry=80x24", "geometry=60x24"), ("input=empty", "input=pending")):
+            self.assertFalse(self.classify(text.replace(old, changed), flags=1)["red_control_observed"])
 
     def test_results_require_exact_sequence_and_selected_index(self):
         def wire(flags, index=7):

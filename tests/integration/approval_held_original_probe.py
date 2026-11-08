@@ -54,7 +54,8 @@ def classify(case, returncode, stderr, root, registered_socket, flags):
     setup = f"HELD-WIRE-SETUP store={root} socket={registered_socket}\n"
     delivered = re.search(
         r"HELD-WIRE-DELIVERED session=k7m2qx action=10 key=([0-9a-f-]{36}) "
-        r"task_live=true wire=exact peer=held approval=(held|choice) offered=(true|false)\n", stderr)
+        r"task_live=true wire=exact peer=held frame=[1-9][0-9]* delivered=true geometry=80x24 "
+        r"input=empty approval=(held|choice) offered=(true|false)\n", stderr)
     ordered = setup in stderr and delivered is not None and stderr.find(setup) < delivered.start()
     requests = 2 if case == "retry" else 1
     recovered = "true" if case == "retry" else "false"
