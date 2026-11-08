@@ -502,3 +502,25 @@ test "native line index realizes a blank source row at one cell height" {
     const row = try (try index.builder().itemAtIdxForDraw(0, 0, ctx.arena)).?.draw(ctx);
     try std.testing.expectEqual(@as(u16, 1), row.size.height);
 }
+
+test "native terminal cell currently requires the entire large grapheme" {
+    const vaxis = @import("vaxis");
+    const allocator = std.testing.allocator;
+    const source = try allocator.alloc(u8, 1 + 2 * 65_536);
+    defer allocator.free(source);
+    source[0] = 'a';
+    for (0..65_536) |i| {
+        source[1 + 2 * i] = 0xcc;
+        source[2 + 2 * i] = 0x81;
+    }
+    var graphemes = vaxis.unicode.graphemeIterator(source);
+    const only = graphemes.next().?;
+    try std.testing.expectEqual(source.len, only.len);
+    try std.testing.expect(graphemes.next() == null);
+    var storage: [64 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var screen = try vaxis.AllocatingScreen.init(fixed.allocator(), 1, 1);
+    defer screen.deinit(fixed.allocator());
+    try std.testing.expectError(error.OutOfMemory, screen.writeCell(0, 0, .{ .char = .{ .grapheme = source, .width = 1 } }));
+    std.debug.print("native terminal single_grapheme_bytes={d} screen_allocator_capacity={d} result=OutOfMemory\n", .{ source.len, storage.len });
+}
