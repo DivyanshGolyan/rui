@@ -6378,7 +6378,7 @@ test "queued Message joins before deliberate Action 10 confirmation" {
                     try std.testing.expectEqual(@as(u64, 10), intent.decision.action);
                     try std.testing.expectEqual(protocol.PermissionDecision.allow_once, intent.decision.decision);
                     var bytes: [16384]u8 = undefined;
-                    const received = try gate.receive("/v1/permission-decision", &bytes);
+                    const received = try gate.receive("/v1/control/permission-decision", &bytes);
                     defer received.peer.close(std.testing.io);
                     const body_at = (std.mem.indexOf(u8, received.request, "\r\n\r\n") orelse return error.InvalidRequest) + 4;
                     var expected: protocol.RequestBuffer = .{};
