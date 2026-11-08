@@ -335,3 +335,32 @@ test "native horizontal text uses tab stops across viewport cuts" {
     try std.testing.expect(!std.mem.eql(u8, "界", middle.readCell(0, 0).char.grapheme));
     try std.testing.expectEqualStrings("Z", middle.readCell(1, 0).char.grapheme);
 }
+
+test "native scroll extent reaches u32 ceiling with bounded viewport work" {
+    const protocol = @import("protocol.zig");
+    // An escaped byte can occupy four display columns. This only establishes
+    // arithmetic representability, not that a particular Host stores this data.
+    const two_max_expanded = protocol.max_sqlite_content_bytes * 4 * 2;
+    try std.testing.expect(two_max_expanded > std.math.maxInt(u32));
+    try std.testing.expectEqual(@as(?u32, null), std.math.cast(u32, two_max_expanded));
+    try std.testing.expectEqual(u32, @FieldType(fw.ScrollView, "cursor"));
+
+    fw.DrawContext.init(.unicode);
+    var storage: [128 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var fixture: SeekFixture = .{ .count = std.math.maxInt(u32) };
+    var scroll: fw.ScrollView = .{
+        .children = .{ .builder = .{ .userdata = &fixture, .hasFn = SeekFixture.has, .buildFrameFn = SeekFixture.build } },
+        .item_count = @intCast(fixture.count),
+    };
+    const ctx: fw.DrawContext = .{ .arena = fixed.allocator(), .min = .{}, .max = .{ .width = 20, .height = 8 }, .cell_size = .{} };
+    scroll.jumpToEnd();
+    const surface = try scroll.draw(ctx);
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u32) - 1), scroll.cursor);
+    try std.testing.expect(fixture.builds <= 10);
+    try std.testing.expect(fixed.end_index < storage.len);
+    const last = surface.children[surface.children.len - 1];
+    try std.testing.expectEqual(@as(i17, 7), last.origin.row + @as(i17, last.surface.size.height) - 1);
+    try std.testing.expectEqualStrings("4", last.surface.readCell(13, 0).char.grapheme);
+    std.debug.print("native ceiling count={d} beyond_u32={d} builds={d} frame_bytes={d}\n", .{ fixture.count, two_max_expanded, fixture.builds, fixed.end_index });
+}
