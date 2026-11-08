@@ -100,7 +100,7 @@ const ReadKind = union(enum) {
     }
 };
 const PageResult = struct { page: *NativePagedFeed, row: ?u32, arrival: Arrival };
-const ReadResult = union(enum) { list: []observations.Row, page: PageResult, poll: bool };
+const ReadResult = union(enum) { list: []observations.Row, page: PageResult, poll: observations.SourceChange };
 
 init: std.process.Init,
 options: Overview.Options,
@@ -359,9 +359,10 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
             };
             if (self.list.cursor >= rows.len) self.list.jumpToItem(@intCast(rows.len -| 1));
         },
-        .poll => |changed| {
+        .poll => |result| {
             self.freeArena(arena);
-            if (changed) {
+            self.page.?.page.token = result.token;
+            if (result.changed) {
                 if (self.following) self.pending_page = tailRequest() else self.new_activity = true;
                 ctx.redraw = true;
             }

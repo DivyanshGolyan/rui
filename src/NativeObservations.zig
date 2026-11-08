@@ -268,21 +268,48 @@ test "native Activity page boundaries include undisplayed identities in both dir
     try std.testing.expect(empty.before == null and empty.after == null);
 }
 
-/// Poll only the opaque Host change token. A Host replacement is reported as
-/// an error rather than being compared or merged with the old page.
-pub fn sourceChanged(requests: client.Requests, store: []const u8, page: *const SourcePage) !bool {
+pub const SourceChange = struct {
+    changed: bool,
+    token: ?replies.SessionToken,
+
+    fn fromFacts(end: u64, facts: *const protocol.ActivityFacts) SourceChange {
+        return .{ .changed = !facts.not_modified and facts.end != end, .token = facts.token };
+    }
+};
+
+/// Follow from the saved snapshot end. Only an unpinned forward request
+/// without an ordinal can receive and use the Host's follow token.
+pub fn sourceChanged(requests: client.Requests, store: []const u8, page: *const SourcePage) !SourceChange {
     const instance = try servingInstance(requests.io, store);
     if (!std.mem.eql(u8, &instance, &page.instance)) return error.HostInstanceChanged;
     var fenced = requests;
     fenced.host_instance = &instance;
-    const reply = switch (try fenced.activityPageSince(store, &page.session, .{ .direction = .backward, .limit = 1 }, page.token)) {
+    const cursor: replies.ActivityCursor = .{ .position = page.end, .direction = .forward, .limit = 1 };
+    const reply = switch (try fenced.activityPageSince(store, &page.session, cursor, page.token)) {
         .page => |value| value,
         .failure => |failure| return fenced.failRead(failure),
     };
     try ensureServing(requests.io, store, instance);
-    // Without a usable token the result is conservatively treated as changed;
-    // the caller must not infer equality from an end cursor alone.
-    return !reply.facts.not_modified;
+    return SourceChange.fromFacts(page.end, &reply.facts);
+}
+
+test "native follow polling distinguishes unchanged snapshots and later activity" {
+    const t = std.testing;
+    const token: replies.SessionToken = .{ .instance = [_]u8{1} ** 16, .generation = 7, .session = "abc123".* };
+    var facts: protocol.ActivityFacts = .{ .end = 42, .token = token };
+    var change = SourceChange.fromFacts(42, &facts);
+    try t.expect(!change.changed);
+    try t.expectEqualDeep(token, change.token.?);
+    facts.not_modified = true;
+    facts.end = 0; // not-modified carries no new end on the wire
+    change = SourceChange.fromFacts(42, &facts);
+    try t.expect(!change.changed);
+    facts.not_modified = false;
+    facts.end = 43;
+    facts.token = null;
+    change = SourceChange.fromFacts(42, &facts);
+    try t.expect(change.changed);
+    try t.expect(change.token == null);
 }
 
 /// Load one identified item into exclusively owned temporary custody. Its
