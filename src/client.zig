@@ -384,7 +384,7 @@ test "native verified activity window stages only selected exact bytes" {
     try std.testing.expectEqualStrings("defghij", sink.window.slice());
     try std.testing.expectEqual(@as(u64, 10), sink.seen);
     var bounded: ContentWindowSink = .{ .start = 1 };
-    const source = [_]u8{'x'} ** (protocol.content_window_bytes + 20);
+    const source: [protocol.content_window_bytes + 20]u8 = @splat('x');
     try bounded.feed(&source);
     try std.testing.expectEqual(@as(usize, protocol.content_window_bytes), bounded.window.len);
     try std.testing.expectEqualSlices(u8, source[1 .. 1 + protocol.content_window_bytes], bounded.window.slice());
