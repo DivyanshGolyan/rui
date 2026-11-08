@@ -1287,7 +1287,7 @@ index 2c6edb6..81acf55 100644
 diff --git a/src/unicode.zig b/src/unicode.zig
 --- a/src/unicode.zig
 +++ b/src/unicode.zig
-@@ -50,3 +50,93 @@
+@@ -50,3 +50,100 @@
      try std.testing.expectEqual(Grapheme{ .start = 0, .len = 3 }, it.next().?);
      try std.testing.expectEqual(null, it.next());
  }
@@ -1309,6 +1309,13 @@ diff --git a/src/unicode.zig b/src/unicode.zig
 +    start: usize = 0,
 +    count: usize = 0,
 +    failure: ?anyerror = null,
++
++    /// Read one source byte, preserving source failures separately from EOF.
++    pub fn readByte(self: *PagedReader, at: usize) !?u8 {
++        const result = self.byteAt(at);
++        if (self.failure) |err| return err;
++        return result;
++    }
 +
 +    fn byteAt(self: *PagedReader, at: usize) ?u8 {
 +        if (self.failure != null or at >= self.source.length) return null;
@@ -1379,6 +1386,205 @@ diff --git a/src/unicode.zig b/src/unicode.zig
 +        if (self.reader.failure) |err| return err;
 +        if (value) |g| return .{ .start = g.start, .len = g.end - g.start };
 +        return null;
++    }
++};
+diff --git a/src/vxfw/PagedText.zig b/src/vxfw/PagedText.zig
+new file mode 100644
+--- /dev/null
++++ b/src/vxfw/PagedText.zig
+@@ -0,0 +1,194 @@
++//! Reader-backed native text geometry. Source bytes remain owned by the
++//! caller; this iterator retains only offsets and a bounded grapheme buffer.
++const std = @import("std");
++const vaxis = @import("../main.zig");
++const fw = @import("vxfw.zig");
++
++pub const Row = struct {
++    start: usize,
++    end: usize,
++    /// The exact source span remains intact, but a later visual realization
++    /// must mark an individual grapheme too large for its bounded cell.
++    oversized_grapheme: bool = false,
++};
++
++/// Word wrapping over a valid, terminal-safe UTF-8 source. The source must be
++/// immutable through the iterator lifetime. Every returned boundary is a
++/// source offset and remains usable for reflow at a different width.
++pub const WrapIterator = struct {
++    reader: *vaxis.unicode.PagedReader,
++    ctx: fw.DrawContext,
++    width: u16,
++    position: usize = 0,
++    line_end: usize = 0,
++    next_line: usize = 0,
++    line_ready: bool = false,
++
++    pub fn init(reader: *vaxis.unicode.PagedReader, ctx: fw.DrawContext, width: u16) !WrapIterator {
++        if (width == 0) return error.InvalidWidth;
++        return .{ .reader = reader, .ctx = ctx, .width = width };
++    }
++
++    fn loadLine(self: *WrapIterator) !bool {
++        if (self.position >= self.reader.source.length) return false;
++        var at = self.position;
++        var last_nonspace = at;
++        while (try self.reader.readByte(at)) |byte| {
++            if (byte == '\r' or byte == '\n') break;
++            at += 1;
++            if (byte != ' ' and byte != '\t') last_nonspace = at;
++        }
++        self.line_end = last_nonspace;
++        self.next_line = at;
++        if ((try self.reader.readByte(self.next_line)) == '\r') self.next_line += 1;
++        if ((try self.reader.readByte(self.next_line)) == '\n') self.next_line += 1;
++        self.line_ready = true;
++        return true;
++    }
++
++    fn isSpace(self: *WrapIterator, at: usize) !bool {
++        const byte = (try self.reader.readByte(at)) orelse return false;
++        return byte == ' ' or byte == '\t';
++    }
++
++    fn widthOf(self: *WrapIterator, span: vaxis.unicode.Grapheme) !usize {
++        // The exact source is untouched. Rendering an oversized cluster has
++        // no approved bounded representation, so do not substitute a marker.
++        if (span.len > 4096) return error.GraphemeTooLarge;
++        var bytes: [4096]u8 = undefined;
++        for (0..span.len) |i| bytes[i] = (try self.reader.readByte(span.start + i)) orelse return error.InvalidSourceRead;
++        return self.ctx.stringWidth(bytes[0..span.len]);
++    }
++
++    /// Return a single source-backed visual row. The position may advance
++    /// beyond the row end when native word wrapping discards leading spaces.
++    pub fn next(self: *WrapIterator) !?Row {
++        if (!self.line_ready and !try self.loadLine()) return null;
++        const start = self.position;
++        if (start == self.line_end) {
++            self.position = self.next_line;
++            self.line_ready = false;
++            return .{ .start = start, .end = start };
++        }
++        var row_width: usize = 0;
++        var oversized = false;
++        while (self.position < self.line_end) {
++            var word_end = self.position;
++            var word_width: usize = 0;
++            var seen_nonspace = false;
++            var long_word = false;
++            var look = try vaxis.unicode.PagedGraphemeIterator.init(self.reader, self.position);
++            while (try look.next()) |span| {
++                if (span.start >= self.line_end) break;
++                const space = try self.isSpace(span.start);
++                if (space and seen_nonspace) break;
++                if (!space) seen_nonspace = true;
++                word_width +|= try self.widthOf(span);
++                word_end = span.start + span.len;
++                if (word_width > self.width) {
++                    long_word = true;
++                    break;
++                }
++            }
++            if (long_word) {
++                var split = try vaxis.unicode.PagedGraphemeIterator.init(self.reader, self.position);
++                while (try split.next()) |span| {
++                    if (span.start >= self.line_end) break;
++                    const width = try self.widthOf(span);
++                    if (row_width + width > self.width) {
++                        if (self.position == start) {
++                            self.position = span.start + span.len;
++                            oversized = oversized or span.len > 4096;
++                        }
++                        return .{ .start = start, .end = self.position, .oversized_grapheme = oversized };
++                    }
++                    row_width += width;
++                    self.position = span.start + span.len;
++                    oversized = oversized or span.len > 4096;
++                }
++            } else if (row_width + word_width > self.width) {
++                const end = self.position;
++                while (self.position < self.line_end and try self.isSpace(self.position)) self.position += 1;
++                return .{ .start = start, .end = end, .oversized_grapheme = oversized };
++            } else {
++                if (word_end <= self.position) return error.InvalidSourceRead;
++                // A candidate that fits can still contain one marked cluster.
++                var check = try vaxis.unicode.PagedGraphemeIterator.init(self.reader, self.position);
++                while (try check.next()) |span| {
++                    if (span.start >= word_end) break;
++                    oversized = oversized or span.len > 4096;
++                }
++                self.position = word_end;
++                row_width += word_width;
++            }
++        }
++        const end = self.line_end;
++        self.position = self.next_line;
++        self.line_ready = false;
++        return .{ .start = start, .end = end, .oversized_grapheme = oversized };
++    }
++};
++
++/// Fixed-size row checkpoints over a reader-backed source. Reflow scans all
++/// source; seeking can replay up to the adaptive checkpoint interval. Neither
++/// the checkpoints nor a seek retain the source or one object per row.
++pub const Index = struct {
++    const checkpoint_limit = 256;
++    const Checkpoint = struct { row: usize, cursor: WrapIterator };
++
++    len: usize = 0,
++    checkpoints: [checkpoint_limit]Checkpoint = undefined,
++    checkpoint_count: usize = 0,
++    stride: usize = 1,
++    has_oversized_grapheme: bool = false,
++
++    pub fn init(reader: *vaxis.unicode.PagedReader, ctx: fw.DrawContext, width: u16) !Index {
++        var self: Index = .{};
++        var cursor = try WrapIterator.init(reader, ctx, width);
++        while (true) {
++            const before = cursor;
++            const row = (try cursor.next()) orelse break;
++            if (self.len == std.math.maxInt(u32)) return error.TooManyRows;
++            if (self.len % self.stride == 0) {
++                if (self.checkpoint_count == checkpoint_limit) {
++                    for (0..checkpoint_limit / 2) |i| self.checkpoints[i] = self.checkpoints[i * 2];
++                    self.checkpoint_count = checkpoint_limit / 2;
++                    self.stride *= 2;
++                }
++                if (self.len % self.stride == 0) {
++                    self.checkpoints[self.checkpoint_count] = .{ .row = self.len, .cursor = before };
++                    self.checkpoint_count += 1;
++                }
++            }
++            self.has_oversized_grapheme = self.has_oversized_grapheme or row.oversized_grapheme;
++            self.len += 1;
++        }
++        return self;
++    }
++
++    /// Returned offsets refer to the original immutable source, not a cache.
++    pub fn rowAt(self: *const Index, index: usize) !?Row {
++        if (index >= self.len) return null;
++        var checkpoint: usize = 0;
++        while (checkpoint + 1 < self.checkpoint_count and self.checkpoints[checkpoint + 1].row <= index) : (checkpoint += 1) {}
++        var cursor = self.checkpoints[checkpoint].cursor;
++        var row = self.checkpoints[checkpoint].row;
++        while (row < index) : (row += 1) _ = (try cursor.next()) orelse return error.InvalidSourceRead;
++        return (try cursor.next()) orelse return error.InvalidSourceRead;
++    }
++
++    /// Map a source byte anchor to its row; whitespace and line terminators
++    /// omitted by wrapping are associated with the following row where one
++    /// exists. An end-of-source anchor resolves to the last row.
++    pub fn rowForOffset(self: *const Index, offset: usize) !?usize {
++        if (self.len == 0) return null;
++        var checkpoint: usize = 0;
++        while (checkpoint + 1 < self.checkpoint_count and self.checkpoints[checkpoint + 1].cursor.position <= offset) : (checkpoint += 1) {}
++        var cursor = self.checkpoints[checkpoint].cursor;
++        var row = self.checkpoints[checkpoint].row;
++        while (try cursor.next()) |span| : (row += 1) {
++            if (offset < span.end or offset <= span.start) return row;
++        }
++        return self.len - 1;
 +    }
 +};
 diff --git a/src/vxfw/ScrollBars.zig b/src/vxfw/ScrollBars.zig
@@ -1993,10 +2199,17 @@ index fe46d2b..064ade1 100644
      fn nextWrap(self: *SoftwrapIterator) usize {
          // Find the first linear whitespace char
 diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
-index 587667d..fee1e82 100644
 --- a/src/vxfw/vxfw.zig
 +++ b/src/vxfw/vxfw.zig
-@@ -214,6 +214,21 @@ pub const DrawContext = struct {
+@@ -18,6 +18,7 @@
+ pub const FlexRow = @import("FlexRow.zig");
+ pub const ListView = @import("ListView.zig");
+ pub const Padding = @import("Padding.zig");
++pub const PagedText = @import("PagedText.zig");
+ pub const RichText = @import("RichText.zig");
+ pub const ScrollView = @import("ScrollView.zig");
+ pub const ScrollBars = @import("ScrollBars.zig");
+@@ -214,6 +215,21 @@
          );
      }
  
@@ -2018,7 +2231,7 @@ index 587667d..fee1e82 100644
      pub fn graphemeIterator(_: DrawContext, str: []const u8) vaxis.unicode.GraphemeIterator {
          return vaxis.unicode.graphemeIterator(str);
      }
-@@ -275,6 +290,11 @@ pub const Widget = struct {
+@@ -275,6 +291,11 @@
      captureHandler: ?*const fn (userdata: *anyopaque, ctx: *EventContext, event: Event) anyerror!void = null,
      eventHandler: ?*const fn (userdata: *anyopaque, ctx: *EventContext, event: Event) anyerror!void = null,
      drawFn: *const fn (userdata: *anyopaque, ctx: DrawContext) Allocator.Error!Surface,
@@ -2030,7 +2243,7 @@ index 587667d..fee1e82 100644
  
      pub fn captureEvent(self: Widget, ctx: *EventContext, event: Event) anyerror!void {
          if (self.captureHandler) |handle| {
-@@ -348,6 +368,8 @@ pub const Surface = struct {
+@@ -348,6 +369,8 @@
      buffer: []vaxis.Cell,
  
      children: []SubSurface,

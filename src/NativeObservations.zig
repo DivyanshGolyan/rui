@@ -172,3 +172,66 @@ fn conversationOnHost(allocator: std.mem.Allocator, requests: client.Requests, s
     }
     return .{ .blocks = try blocks.toOwnedSlice(allocator), .token = snapshot_token, .cursor = last, .instance = instance, .refresh = refresh };
 }
+
+/// One authoritative Activity page; no content bytes are retained here.
+/// Cursors preserve the Host's pinned end and source identity is bound to the
+/// serving Host instance, session and Activity position/ordinal.
+pub const SourcePage = struct {
+    pub const Item = struct {
+        kind: @FieldType(Block, "kind"),
+        position: u64,
+        ordinal: u64,
+        reference: protocol.ActivityItem.Content,
+    };
+
+    instance: protocol.InstanceId,
+    session: [protocol.session_id_bytes]u8,
+    items: [protocol.ActivityPage.items]Item = undefined,
+    count: usize = 0,
+    next: ?replies.ActivityCursor,
+    end: u64,
+    token: ?replies.SessionToken,
+};
+
+/// Fetch just one directional page. If a previous page is being followed,
+/// its Host fence must still be serving before and after the request.
+pub fn sourcePage(requests: client.Requests, store: []const u8, id: *const [protocol.session_id_bytes]u8, cursor: replies.ActivityCursor, expected_instance: ?protocol.InstanceId) !SourcePage {
+    const instance = try servingInstance(requests.io, store);
+    if (expected_instance) |expected| if (!std.mem.eql(u8, &instance, &expected)) return error.HostInstanceChanged;
+    var fenced = requests;
+    fenced.host_instance = &instance;
+    const page = switch (try fenced.activityPage(store, id, cursor)) {
+        .page => |value| value,
+        .failure => |failure| return fenced.failRead(failure),
+    };
+    var result: SourcePage = .{ .instance = instance, .session = id.*, .next = page.continuation(), .end = page.facts.end, .token = page.facts.token };
+    for (page.facts.items[0..page.facts.count]) |item| {
+        const selected: ?struct { kind: @FieldType(Block, "kind"), content: protocol.ActivityItem.Content } = switch (item.value) {
+            .user => |message| .{ .kind = .user, .content = message.content },
+            .assistant => |answer| .{ .kind = .assistant, .content = answer.content },
+            else => null,
+        };
+        const value = selected orelse continue;
+        result.items[result.count] = .{ .kind = value.kind, .position = item.position, .ordinal = item.ordinal, .reference = value.content };
+        result.count += 1;
+    }
+    const still_serving = try servingInstance(requests.io, store);
+    if (!std.mem.eql(u8, &instance, &still_serving)) return error.HostInstanceChanged;
+    return result;
+}
+
+/// Load one identified item into exclusively owned temporary custody. Its
+/// bytes cannot be observed before the complete source passes authentication.
+pub fn openPageSource(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io.Dir, store: []const u8, page: *const SourcePage, item_index: usize) !*client.VerifiedContentScratch {
+    if (item_index >= page.count) return error.InvalidTarget;
+    const item = page.items[item_index];
+    const instance = try servingInstance(requests.io, store);
+    if (!std.mem.eql(u8, &instance, &page.instance)) return error.HostInstanceChanged;
+    var fenced = requests;
+    fenced.host_instance = &instance;
+    const scratch = try fenced.readVerifiedActivityScratch(allocator, dir, store, &page.session, item.position, item.ordinal, .{ .bytes = item.reference.length, .digest = item.reference.digest });
+    errdefer scratch.close();
+    const still_serving = try servingInstance(requests.io, store);
+    if (!std.mem.eql(u8, &instance, &still_serving)) return error.HostInstanceChanged;
+    return scratch;
+}

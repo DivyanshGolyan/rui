@@ -625,3 +625,105 @@ test "native paged Unicode yields exact grapheme offsets across file windows" {
     };
     try std.testing.expectError(error.WitnessSourceFailure, Walk.all(&actual));
 }
+
+test "native paged word wrap matches contiguous source geometry" {
+    const vaxis = @import("vaxis");
+    fw.DrawContext.init(.unicode);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const cases = [_][]const u8{
+        "alpha beta gamma delta\nnext words\n",
+        "  alpha    beta  \n\nlong-unbroken-word-here\r\nlast",
+        "é中 👩🏽‍🚀 test e\u{301} 🇨🇭\nwidth界end",
+        "a\tb c\t\td\n   \n  x",
+    };
+    for (cases, 0..) |source, case_index| {
+        var name_buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "source-{d}", .{case_index});
+        const file = try tmp.dir.createFile(io, name, .{ .read = true });
+        defer file.close(io);
+        try file.writeStreamingAll(io, source);
+        for (1..21) |raw_width| {
+            const width: u16 = @intCast(raw_width);
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{ .width = width }, .max = .{ .width = width, .height = null }, .cell_size = .{} };
+            var expected: fw.Text.LineIndex = .{};
+            defer expected.deinit(std.testing.allocator);
+            const texts = [_]fw.Text{.{ .text = source }};
+            try expected.reflow(std.testing.allocator, &texts, ctx);
+            const backing: GraphemeFile = .{ .io = io, .file = file, .max_read = 3 };
+            var reader: vaxis.unicode.PagedReader = .{ .source = .{ .userdata = &backing, .length = source.len, .readFn = GraphemeFile.read } };
+            var paged = try fw.PagedText.WrapIterator.init(&reader, ctx, width);
+            var row: usize = 0;
+            while (try paged.next()) |actual| : (row += 1) {
+                try std.testing.expect(row < expected.len);
+                const widget = (try expected.builder().itemAtIdxForDraw(row, 0, ctx.arena)).?;
+                const text: *const fw.Text = @ptrCast(@alignCast(widget.userdata));
+                const observed = source[actual.start..actual.end];
+                try std.testing.expectEqualStrings(if (observed.len == 0) " " else observed, text.text);
+                try std.testing.expect(!actual.oversized_grapheme);
+            }
+            try std.testing.expectEqual(expected.len, row);
+        }
+    }
+}
+
+test "native paged checkpoints seek source offsets without per-row storage" {
+    const vaxis = @import("vaxis");
+    fw.DrawContext.init(.unicode);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "long-source", .{ .read = true });
+    defer file.close(io);
+    const chunk = [_]u8{'x'} ** 4096;
+    for (0..245) |_| try file.writeStreamingAll(io, &chunk);
+    const length = 245 * chunk.len;
+    const backing: GraphemeFile = .{ .io = io, .file = file, .max_read = 4096 };
+    var reader: vaxis.unicode.PagedReader = .{ .source = .{ .userdata = &backing, .length = length, .readFn = GraphemeFile.read } };
+    const width: u16 = 79;
+    const ctx: fw.DrawContext = .{ .arena = std.testing.allocator, .min = .{ .width = width }, .max = .{ .width = width, .height = null }, .cell_size = .{} };
+    const index = try fw.PagedText.Index.init(&reader, ctx, width);
+    try std.testing.expectEqual((length + width - 1) / width, index.len);
+    try std.testing.expect(index.checkpoint_count <= 256);
+    try std.testing.expect(@sizeOf(@TypeOf(index)) < 65536);
+    for ([_]usize{ 0, length / 2, length - 1 }) |offset| {
+        const row = (try index.rowForOffset(offset)).?;
+        try std.testing.expectEqual(offset / width, row);
+        const span = (try index.rowAt(row)).?;
+        try std.testing.expect(span.start <= offset and offset < span.end);
+    }
+    try std.testing.expectEqual(index.len - 1, (try index.rowForOffset(length)).?);
+    try std.testing.expectEqual(length, (try index.rowAt(index.len - 1)).?.end);
+    try std.testing.expect((try index.rowAt(index.len)) == null);
+}
+
+/// A verified source in the native feed working set. The owner must keep this
+/// object at a stable address while a framework reader borrows `pagedSource`,
+/// and close it after the last borrowed reader is gone.
+pub const VerifiedSource = struct {
+    item: observations.SourcePage.Item,
+    scratch: *@import("client.zig").VerifiedContentScratch,
+
+    pub fn open(allocator: std.mem.Allocator, requests: @import("client.zig").Requests, dir: std.Io.Dir, store: []const u8, page: *const observations.SourcePage, item_index: usize) !VerifiedSource {
+        if (item_index >= page.count) return error.InvalidTarget;
+        const scratch = try observations.openPageSource(allocator, requests, dir, store, page, item_index);
+        return .{ .item = page.items[item_index], .scratch = scratch };
+    }
+
+    pub fn close(self: *VerifiedSource) void {
+        self.scratch.close();
+        self.* = undefined;
+    }
+
+    pub fn pagedSource(self: *const VerifiedSource) !@import("vaxis").unicode.PagedSource {
+        return .{ .userdata = self, .length = std.math.cast(usize, self.item.reference.length) orelse return error.SourceTooLarge, .readFn = read };
+    }
+
+    fn read(raw: *const anyopaque, offset: u64, buffer: []u8) !usize {
+        const self: *const VerifiedSource = @ptrCast(@alignCast(raw));
+        return self.scratch.readAt(offset, buffer);
+    }
+};
