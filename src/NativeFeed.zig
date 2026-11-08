@@ -678,7 +678,7 @@ test "native paged checkpoints seek source offsets without per-row storage" {
     const io = std.testing.io;
     const file = try tmp.dir.createFile(io, "long-source", .{ .read = true });
     defer file.close(io);
-    const chunk = [_]u8{'x'} ** 4096;
+    const chunk: [4096]u8 = @splat('x');
     for (0..245) |_| try file.writeStreamingAll(io, &chunk);
     const length = 245 * chunk.len;
     const backing: GraphemeFile = .{ .io = io, .file = file, .max_read = 4096 };
