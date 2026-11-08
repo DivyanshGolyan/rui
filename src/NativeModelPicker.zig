@@ -76,10 +76,12 @@ pub fn receive(self: *Self, generation: u64, read: Read, default_model: ?[]const
             self.setLead(default_model);
             self.restore(id);
             const entry = self.selected();
-            if (id == null or self.menu.find(id.?) == null) self.phase = .models else switch (self.phase) {
+            if (id == null or self.menu.find(id.?) == null) {
+                self.phase = .models;
+            } else switch (self.phase) {
                 .sign_in => |provider| if (entry == null or !entry.?.providers.contains(provider)) { self.phase = .models; },
                 else => {},
-            };
+            }
         },
         .unanswered => self.read_status = .unanswered,
         .invalid => self.read_status = .invalid,
@@ -178,12 +180,29 @@ fn buildRow(raw: *const anyopaque, index: usize, cursor: usize) ?fw.Widget {
 fn drawRow(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const entry = self.shown().entry(self.row_index);
-    const label = try std.fmt.allocPrint(ctx.arena, "{s} {s}{s}", .{ if (self.row_selected) ">" else " ", entry.id, if (entry.known) "" else "  default limits" });
-    const text: fw.Text = .{ .text = label, .softwrap = false, .width_basis = .parent, .style = .{ .reverse = self.row_selected } };
-    var surface = try text.draw(ctx);
-    surface.widget = .{ .userdata = self, .drawFn = drawRow };
-    return surface;
+    const row = try ctx.arena.create(FrameRow);
+    row.* = .{
+        .label = try std.fmt.allocPrint(ctx.arena, "{s} {s}{s}", .{ if (self.row_selected) ">" else " ", entry.id, if (entry.known) "" else "  default limits" }),
+        .selected = self.row_selected,
+    };
+    return FrameRow.draw(row, ctx);
 }
+
+// ListView asks the builder for a row and draws it immediately, but retains
+// the resulting widget in the frame. Snapshot its content into the frame so
+// a later redraw cannot observe the builder's next row or a replaced menu.
+const FrameRow = struct {
+    label: []const u8,
+    selected: bool,
+
+    fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface {
+        const self: *FrameRow = @ptrCast(@alignCast(raw));
+        const text: fw.Text = .{ .text = self.label, .softwrap = false, .width_basis = .parent, .style = .{ .reverse = self.selected } };
+        var surface = try text.draw(ctx);
+        surface.widget = .{ .userdata = self, .drawFn = FrameRow.draw };
+        return surface;
+    }
+};
 
 fn testMenu(codex: []const u8, openai: []const u8) !models.Menu {
     return models.testMenu(&.{
@@ -259,4 +278,44 @@ test "single-provider pick returns the real default value and close ignores late
     picker.receive(token, .{ .menu = try testMenu("late\n", "") }, null);
     try std.testing.expect(!picker.isOpen());
     try std.testing.expect(picker.selected() == null);
+}
+
+fn expectRenderedRow(surface: fw.Surface, label: []const u8, selected_row: bool) !void {
+    try std.testing.expectEqualStrings(if (selected_row) ">" else " ", surface.readCell(0, 0).char.grapheme);
+    for (label, 0..) |byte, index| {
+        const cell = surface.readCell(index + 2, 0);
+        try std.testing.expectEqualSlices(u8, &.{byte}, cell.char.grapheme);
+        try std.testing.expectEqual(selected_row, cell.style.reverse);
+    }
+}
+
+test "native model rows retain distinct cells and selection across scroll and redraw" {
+    fw.DrawContext.init(.unicode);
+    var picker = Self.init(std.testing.allocator);
+    defer picker.deinit();
+    const token = picker.input(.open, null, 80).request_models;
+    picker.receive(token, .{ .menu = try testMenu("alpha\nbeta\ngamma\ndelta\n", "") }, null);
+    var frame = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer frame.deinit();
+    const ctx: fw.DrawContext = .{ .arena = frame.allocator(), .min = .{}, .max = .{ .width = 24, .height = 2 }, .cell_size = .{} };
+    const first = try picker.widget().draw(ctx);
+    try std.testing.expectEqual(@as(usize, 2), first.children.len);
+    try expectRenderedRow(first.children[0].surface, "alpha", true);
+    try expectRenderedRow(first.children[1].surface, "beta", false);
+
+    _ = picker.input(.last, null, 80);
+    const scrolled = try picker.widget().draw(ctx);
+    try std.testing.expectEqual(@as(usize, 2), scrolled.children.len);
+    try expectRenderedRow(scrolled.children[0].surface, "delta", false);
+    try expectRenderedRow(scrolled.children[1].surface, "gamma", true);
+
+    // Retained widgets redraw their original cells after traversal and after
+    // closing frees the model menu they were built from.
+    _ = picker.input(.edit, null, 80);
+    const redraw0 = try first.children[0].surface.widget.draw(ctx);
+    const redraw1 = try first.children[1].surface.widget.draw(ctx);
+    try expectRenderedRow(redraw0, "alpha", true);
+    try expectRenderedRow(redraw1, "beta", false);
+    const redraw_last = try scrolled.children[1].surface.widget.draw(ctx);
+    try expectRenderedRow(redraw_last, "gamma", true);
 }
