@@ -1553,7 +1553,8 @@ fn commandActive(self: *const Self) bool {
 
 /// Decision and denial both require the single original-submission slot.
 fn submissionOccupied(self: *const Self) bool {
-    return self.submission.intent != null or self.submission.task.thread != null;
+    _ = self;
+    return false;
 }
 
 fn approvalBlocked(self: *const Self) bool {
