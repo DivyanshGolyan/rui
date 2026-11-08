@@ -83,10 +83,13 @@ def main():
         fixture.answer("PICKER PAGE SEED ANSWER")
         seeded = subprocess.run(
             [str(binary), "session", "send", "--store", str(fixture.store),
-             "--to", fixture.session, "--key", "picker-page-seed"],
+             "--to", fixture.session, "--record", str(fixture.root / "picker-seed.json"),
+             "--key", "picker-page-seed"],
             input="PICKER PAGE SEED MESSAGE", text=True, env=fixture.env,
-            capture_output=True, timeout=20, check=True,
+            capture_output=True, timeout=20, check=False,
         )
+        (output / "seed-stderr.txt").write_text(seeded.stderr)
+        assert seeded.returncode == 0, f"seed command failed with exit {seeded.returncode}; see seed-stderr.txt"
         assert json.loads(seeded.stdout)["answer"]["status"] == "accepted", "seed was not admitted"
         with defer_signals():
             fixture.tty = DirectPty([sys.executable, str(pathlib.Path(__file__).resolve()), "--tty-exec",
