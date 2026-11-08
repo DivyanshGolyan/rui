@@ -90,6 +90,8 @@ feed_index: fw.Text.LineIndex = .{},
 feed_index_dirty: bool = true,
 feed_token: ?@import("protocol_reply.zig").SessionToken = null,
 following: bool = true,
+body_width: u16 = 0,
+body_bottom: u16 = 0,
 header: fw.Text = .{ .text = "" },
 status: fw.Text = .{ .text = "" },
 border: fw.Border = undefined,
@@ -391,8 +393,10 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
     switch (value) {
         .paste_start => self.pasting = true,
         .paste_end => self.pasting = false,
-        .mouse => |mouse| if (self.destination != null and (mouse.button == .wheel_up or mouse.button == .wheel_down)) {
-            self.following = false;
+        .mouse => |mouse| if (self.destination != null) {
+            const wheel = mouse.button == .wheel_up or mouse.button == .wheel_down;
+            const scrollbar = self.body_width != 0 and mouse.col == self.body_width - 1 and mouse.row > 0 and mouse.row < self.body_bottom and (mouse.type == .press or mouse.type == .drag);
+            if (wheel or scrollbar) self.following = false;
         },
         .key_press => |key| {
             if (!self.pasting and key.matches('r', .{ .ctrl = true })) {
@@ -438,6 +442,13 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             }
             if (self.destination == null and key.matches(vaxis.Key.enter, .{ .alt = true })) {
                 if (self.list.cursor < self.rows.len) try self.open(self.rows[self.list.cursor].row.id, ctx);
+                ctx.consumeAndRedraw();
+                return;
+            }
+            if (self.destination != null and key.matches(vaxis.Key.home, .{ .ctrl = true })) {
+                self.following = false;
+                self.feed.scroll_view.cursor = 0;
+                self.feed.scroll_view.ensureScroll();
                 ctx.consumeAndRedraw();
                 return;
             }
@@ -506,6 +517,8 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
     else
         try self.activeDraft().field.draw(ctx.withConstraints(.{}, .{ .width = width, .height = composer_max }));
     const body_height = height -| 2 -| composer.size.height;
+    self.body_width = width;
+    self.body_bottom = 1 + body_height;
     const body_ctx = ctx.withConstraints(.{ .width = width, .height = body_height }, .{ .width = width, .height = body_height });
     if (self.destination != null and body_height != 0) {
         const content_width = width -| @intFromBool(self.feed.draw_vertical_scrollbar);
