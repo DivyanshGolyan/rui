@@ -295,7 +295,7 @@ pub fn sourceChanged(requests: client.Requests, store: []const u8, page: *const 
 
 test "native follow polling distinguishes unchanged snapshots and later activity" {
     const t = std.testing;
-    const token: replies.SessionToken = .{ .instance = [_]u8{1} ** 16, .generation = 7, .session = "abc123".* };
+    const token: replies.SessionToken = .{ .instance = @splat(1), .generation = 7, .session = "abc123".* };
     var facts: protocol.ActivityFacts = .{ .end = 42, .token = token };
     var change = SourceChange.fromFacts(42, &facts);
     try t.expect(!change.changed);
