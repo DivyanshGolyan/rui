@@ -1247,3 +1247,25 @@ index 2c6edb6..81acf55 100644
 +    defer std.testing.allocator.free(value);
 +    try std.testing.expectEqualStrings("ab\n界c", value);
 +}
+diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
+index 1c569eb..e7c757b 100644
+--- a/src/vxfw/ScrollView.zig
++++ b/src/vxfw/ScrollView.zig
+@@ -267,6 +267,17 @@ pub fn ensureScroll(self: *ScrollView) void {
+     }
+ }
+ 
++/// Anchor the last item at the bottom, including when it exceeds the viewport.
++pub fn jumpToEnd(self: *ScrollView) void {
++    const count = self.item_count orelse return;
++    if (count == 0) return;
++    self.cursor = count - 1;
++    self.scroll.top = @min(self.scroll.top, self.cursor);
++    self.scroll.vertical_offset = 0;
++    self.scroll.pending_lines = 0;
++    self.scroll.wants_cursor = true;
++}
++
+ /// Inserts children until add_height is < 0
+ fn insertChildren(
+     self: *ScrollView,

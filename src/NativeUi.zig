@@ -278,8 +278,7 @@ fn completeRead(self: *Self) !void {
             self.feed.scroll_view.children = .{ .builder = .{ .userdata = self, .buildFn = blockAt } };
             self.feed.scroll_view.item_count = @intCast(widgets.len);
             if (self.following and widgets.len != 0) {
-                self.feed.scroll_view.cursor = @intCast(widgets.len - 1);
-                self.feed.scroll_view.ensureScroll();
+                self.feed.scroll_view.jumpToEnd();
             }
         },
     }
@@ -389,8 +388,7 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
                 if (!self.following) {
                     self.following = true;
                     if (self.blocks.len != 0) {
-                        self.feed.scroll_view.cursor = @intCast(self.blocks.len - 1);
-                        self.feed.scroll_view.ensureScroll();
+                        self.feed.scroll_view.jumpToEnd();
                     }
                 } else try self.back(ctx);
                 ctx.consumeAndRedraw();
