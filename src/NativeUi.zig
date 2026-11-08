@@ -527,7 +527,7 @@ fn makeExportCommand(allocator: std.mem.Allocator, store: []const u8, session: I
         hex[2 * i + 1] = digits[byte & 15];
     }
     const digest = std.fmt.bytesToHex(source.reference.digest, .lower);
-    return std.fmt.allocPrint(allocator, "{s} · position {d}, ordinal {d} · {d} bytes\nExpected SHA-256: {s}\nRaw export: rui session read-conversation --store-hex {s} --session {s} --position {d} --ordinal {d}\nRedirect output: source may contain terminal controls.", .{
+    return std.fmt.allocPrint(allocator, "{s} · position {d}, ordinal {d} · {d} bytes\nRui content digest v1: {s}\nRaw export: rui session read-conversation --store-hex {s} --session {s} --position {d} --ordinal {d}\nExport reads current Store. Redirect output: source may contain terminal controls.", .{
         if (source.kind == .user) "You" else "Assistant", source.position, source.ordinal, source.reference.length, &digest, hex, &session, source.position, source.ordinal,
     });
 }
@@ -783,6 +783,6 @@ test "native exact export command uses source identity and shell-safe store byte
     const command = try makeExportCommand(std.testing.allocator, "store with ' \x1b", "abc123".*, item);
     defer std.testing.allocator.free(command);
     try std.testing.expect(std.mem.indexOf(u8, command, "--store-hex 73746f726520776974682027201b --session abc123 --position 42 --ordinal 3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, command, "Expected SHA-256: abababab") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "Rui content digest v1: abababab") != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, command, 0x1b) == null);
 }
