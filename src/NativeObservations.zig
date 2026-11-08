@@ -126,6 +126,11 @@ pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, sto
     return result;
 }
 
+pub fn ensureServing(io: std.Io, store: []const u8, expected: protocol.InstanceId) !void {
+    const instance = try servingInstance(io, store);
+    if (!std.mem.eql(u8, &instance, &expected)) return error.HostInstanceChanged;
+}
+
 fn servingInstance(io: std.Io, store: []const u8) !protocol.InstanceId {
     return switch (client.hostStatus(io, store)) {
         .ready => |ready| ready.instance,
@@ -191,6 +196,7 @@ pub const SourcePage = struct {
     next: ?replies.ActivityCursor,
     end: u64,
     token: ?replies.SessionToken,
+    direction: @FieldType(replies.ActivityCursor, "direction"),
 };
 
 /// Fetch just one directional page. If a previous page is being followed,
@@ -204,7 +210,7 @@ pub fn sourcePage(requests: client.Requests, store: []const u8, id: *const [prot
         .page => |value| value,
         .failure => |failure| return fenced.failRead(failure),
     };
-    var result: SourcePage = .{ .instance = instance, .session = id.*, .next = page.continuation(), .end = page.facts.end, .token = page.facts.token };
+    var result: SourcePage = .{ .instance = instance, .session = id.*, .next = page.continuation(), .end = page.facts.end, .token = page.facts.token, .direction = cursor.direction };
     for (page.facts.items[0..page.facts.count]) |item| {
         const selected: ?struct { kind: @FieldType(Block, "kind"), content: protocol.ActivityItem.Content } = switch (item.value) {
             .user => |message| .{ .kind = .user, .content = message.content },

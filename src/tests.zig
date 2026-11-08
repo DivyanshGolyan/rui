@@ -79,6 +79,7 @@ test {
     _ = @import("SessionSubmission.zig");
     _ = @import("native_composer_test.zig");
     _ = @import("NativeFeed.zig");
+    _ = @import("NativePagedFeed.zig");
     _ = @import("NativeUi.zig");
     _ = @import("NativeObservations.zig");
     _ = @import("SessionFrontend.zig");

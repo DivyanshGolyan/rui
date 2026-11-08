@@ -378,10 +378,80 @@ pub const VerifiedContentScratch = opaque {
         state.close();
     }
 
+    /// An exact source span and a byte offset into that span's deterministic
+    /// terminal-safe spelling. The source identity must accompany the anchor.
+    pub const SourceAnchor = struct { start: u64, end: u64, in_projection: u8 };
+
+    /// Resolve a projection byte offset against the authenticated raw source.
+    /// This uses constant scratch and replays the prefix; it does not cache a
+    /// per-byte or per-row mapping.
+    pub fn sourceAnchor(self: *const VerifiedContentScratch, display_offset: u64) !SourceAnchor {
+        return (try self.mapProjection(.{ .display = display_offset })).anchor;
+    }
+
+    /// Restore a projection byte offset for an anchor from this same source.
+    pub fn projectionOffset(self: *const VerifiedContentScratch, anchor: SourceAnchor) !u64 {
+        return (try self.mapProjection(.{ .source = anchor })).display;
+    }
+
+    const AnchorQuery = union(enum) { display: u64, source: SourceAnchor };
+    const AnchorMatch = struct { anchor: SourceAnchor, display: u64 };
+
+    fn mapProjection(self: *const VerifiedContentScratch, query: AnchorQuery) !AnchorMatch {
+        const source: *const ScratchState = @ptrCast(@alignCast(self));
+        var terminal: @import("TerminalText.zig") = .{ .mode = .multiline };
+        var input: [protocol.content_window_bytes]u8 = undefined;
+        var output: [32]u8 = undefined;
+        var raw: u64 = 0;
+        var group_start: u64 = 0;
+        var projected: u64 = 0;
+        while (raw < source.length) {
+            const count = try self.readAt(raw, &input);
+            if (count == 0) return error.TruncatedResponse;
+            for (input[0..count]) |byte| {
+                var writer: std.Io.Writer = .fixed(&output);
+                try terminal.feed(&writer, &.{byte});
+                const emitted = writer.buffered().len;
+                const group_end = if (terminal.utf8_len != 0 and emitted != 0) raw else raw + 1;
+                if (emitted != 0) {
+                    if (matchAnchor(query, group_start, group_end, projected, emitted)) |matched| return matched;
+                    projected = try std.math.add(u64, projected, emitted);
+                    group_start = group_end;
+                }
+                raw += 1;
+            }
+        }
+        var writer: std.Io.Writer = .fixed(&output);
+        try terminal.finish(&writer);
+        const emitted = writer.buffered().len;
+        if (emitted != 0) {
+            if (matchAnchor(query, group_start, raw, projected, emitted)) |matched| return matched;
+            projected = try std.math.add(u64, projected, emitted);
+        }
+        const end: SourceAnchor = .{ .start = raw, .end = raw, .in_projection = 0 };
+        return switch (query) {
+            .display => |want| if (want == projected) .{ .anchor = end, .display = projected } else error.InvalidTarget,
+            .source => |want| if (std.meta.eql(want, end)) .{ .anchor = end, .display = projected } else error.InvalidTarget,
+        };
+    }
+
+    fn matchAnchor(query: AnchorQuery, raw_start: u64, raw_end: u64, projected: u64, emitted: usize) ?AnchorMatch {
+        return switch (query) {
+            .display => |want| if (want >= projected and want - projected < emitted) .{
+                .anchor = .{ .start = raw_start, .end = raw_end, .in_projection = @intCast(want - projected) },
+                .display = want,
+            } else null,
+            .source => |want| if (want.start == raw_start and want.end == raw_end and want.in_projection < emitted) .{
+                .anchor = want,
+                .display = projected + want.in_projection,
+            } else null,
+        };
+    }
+
     /// Produce a terminal-safe, unlinked display projection only after the
     /// original source has been completely authenticated. Both copies are
     /// temporary; the caller owns and must close each one.
-    pub fn projectMultiline(self: *const VerifiedContentScratch, allocator: std.mem.Allocator, dir: std.Io.Dir) !*DisplayScratch {
+    pub fn projectMultiline(self: *const VerifiedContentScratch, allocator: std.mem.Allocator, dir: std.Io.Dir, cancellation: ?*const Cancellation) !*DisplayScratch {
         const source: *const ScratchState = @ptrCast(@alignCast(self));
         const display = try ScratchState.create(allocator, source.io, dir);
         errdefer display.close();
@@ -390,6 +460,7 @@ pub const VerifiedContentScratch = opaque {
         var output: [protocol.content_window_bytes * @import("TerminalText.zig").max_bytes_per_byte + 16]u8 = undefined;
         var offset: u64 = 0;
         while (offset < source.length) {
+            if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
             const count = try self.readAt(offset, &input);
             if (count == 0) return error.TruncatedResponse;
             var writer: std.Io.Writer = .fixed(&output);
@@ -398,6 +469,7 @@ pub const VerifiedContentScratch = opaque {
             display.length = try std.math.add(u64, display.length, writer.buffered().len);
             offset += count;
         }
+        if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
         var writer: std.Io.Writer = .fixed(&output);
         try terminal.finish(&writer);
         try display.file.writeStreamingAll(display.io, writer.buffered());
@@ -4975,11 +5047,14 @@ test "native verified scratch streams terminal safe projection without changing 
     const state = try ScratchState.create(std.testing.allocator, io, tmp.dir);
     const source: *VerifiedContentScratch = @ptrCast(state);
     defer source.close();
-    var input: [4101]u8 = @splat('a');
-    @memcpy(input[4095..], "🙂\x1b\xff");
+    var input: [4104]u8 = @splat('a');
+    @memcpy(input[4095..], "🙂\x1b\xff\xf0\x80A");
     try state.file.writeStreamingAll(io, &input);
     state.length = input.len;
-    const display = try source.projectMultiline(std.testing.allocator, tmp.dir);
+    var cancelled: Cancellation = .{};
+    cancelled.requestStop();
+    try std.testing.expectError(error.Cancelled, source.projectMultiline(std.testing.allocator, tmp.dir, &cancelled));
+    const display = try source.projectMultiline(std.testing.allocator, tmp.dir, null);
     defer display.close();
     var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer expected.deinit();
@@ -4997,6 +5072,13 @@ test "native verified scratch streams terminal safe projection without changing 
         at += read;
     }
     try std.testing.expectEqualStrings(expected.written(), actual);
+    for (0..expected.written().len + 1) |offset| {
+        if (offset > 1 and offset < 4094) continue;
+        const anchor = try source.sourceAnchor(offset);
+        try std.testing.expectEqual(@as(u64, offset), try source.projectionOffset(anchor));
+        try std.testing.expect(anchor.start <= anchor.end and anchor.end <= input.len);
+    }
+    try std.testing.expectError(error.InvalidTarget, source.sourceAnchor(expected.written().len + 1));
     var original: [protocol.content_window_bytes]u8 = undefined;
     const count = try source.readAt(4094, &original);
     try std.testing.expectEqualSlices(u8, input[4094..], original[0..count]);

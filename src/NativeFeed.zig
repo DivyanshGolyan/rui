@@ -710,13 +710,14 @@ pub const VerifiedSource = struct {
     item: observations.SourcePage.Item,
     scratch: *@import("client.zig").VerifiedContentScratch,
     display: *@import("client.zig").DisplayScratch,
+    cancellation: ?*const @import("client.zig").Cancellation = null,
 
     pub fn open(allocator: std.mem.Allocator, requests: @import("client.zig").Requests, dir: std.Io.Dir, store: []const u8, page: *const observations.SourcePage, item_index: usize) !VerifiedSource {
         if (item_index >= page.count) return error.InvalidTarget;
         const scratch = try observations.openPageSource(allocator, requests, dir, store, page, item_index);
         errdefer scratch.close();
-        const display = try scratch.projectMultiline(allocator, dir);
-        return .{ .item = page.items[item_index], .scratch = scratch, .display = display };
+        const display = try scratch.projectMultiline(allocator, dir, requests.cancellation);
+        return .{ .item = page.items[item_index], .scratch = scratch, .display = display, .cancellation = requests.cancellation };
     }
 
     pub fn close(self: *VerifiedSource) void {
@@ -731,6 +732,7 @@ pub const VerifiedSource = struct {
 
     fn read(raw: *const anyopaque, offset: u64, buffer: []u8) !usize {
         const self: *const VerifiedSource = @ptrCast(@alignCast(raw));
+        if (self.cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
         return self.display.readAt(offset, buffer);
     }
 };
