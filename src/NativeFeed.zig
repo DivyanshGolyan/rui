@@ -89,11 +89,11 @@ fn appendPart(widgets: *std.ArrayList(fw.Text), arena: std.mem.Allocator, part: 
     while (lineAt(part, at)) |head| {
         // Recognition decides only source ranges; the native Text line
         // index owns wrapping and the rail geometry.
-        const quote = markdown.recognize(head.raw[0..@min(head.raw.len, markdown.head_limit)], true);
+        const logical = if (head.ending == .line_feed and std.mem.endsWith(u8, head.raw, "\r")) head.raw[0 .. head.raw.len - 1] else head.raw;
+        const quote = markdown.recognize(logical[0..@min(logical.len, markdown.head_limit)], true);
         if (quote == .quote) {
             if (at > prose_start) try widgets.append(arena, .{ .text = part[prose_start..at] });
-            const body = head.raw[quote.quote.bytes..];
-            try widgets.append(arena, .{ .text = if (body.len == 0) " " else body, .quote_rail = true });
+            try widgets.append(arena, .{ .text = head.raw, .quote_depth = quote.quote.depth, .quote_prefix_len = quote.quote.bytes });
             at = head.next;
             prose_start = at;
             continue;
@@ -340,7 +340,7 @@ test "native quote rail wraps on every row without changing source" {
     for (0..index.len) |i| {
         const widget = (try index.builder().itemAtIdxForDraw(i, 0, ctx.arena)).?;
         const text: *const fw.Text = @ptrCast(@alignCast(widget.userdata));
-        if (!text.quote_rail) continue;
+        if (text.quote_depth == 0) continue;
         const row = try widget.draw(ctx);
         try std.testing.expectEqualStrings("│", row.readCell(0, 0).char.grapheme);
         try std.testing.expect(row.readCell(0, 0).style.dim);
@@ -409,6 +409,81 @@ test "native table realizes visible rows without multiplying widest cell by hist
         }
     }
     try std.testing.expectEqual(@as(usize, 3), counted.calls);
-    std.debug.print("lazy-table input_bytes={d} rows={d} fixed_arena_high_water={d} realized_rows={d}\n", .{ source.len, index.len, fixed.end_index, counted.calls });
+    var frame_storage: [2 * 1024 * 1024]u8 = undefined;
+    var frame_fixed = std.heap.FixedBufferAllocator.init(&frame_storage);
+    const frame_ctx: fw.DrawContext = .{ .arena = frame_fixed.allocator(), .min = .{}, .max = .{ .width = 80, .height = 10 }, .cell_size = .{} };
+    var scroll: fw.ScrollView = .{ .children = .{ .builder = index.builder() }, .item_count = @intCast(index.len) };
+    counted.calls = 0;
+    scroll.jumpToEnd();
+    const actual_frame = try scroll.draw(frame_ctx);
+    try std.testing.expect(counted.calls > 0 and counted.calls <= 10);
+    try std.testing.expect(actual_frame.children.len <= 10);
+    const wide_row = actual_frame.children[actual_frame.children.len - 2].surface;
+    try std.testing.expectEqualStrings("W", wide_row.readCell(0, 0).char.grapheme);
+    std.debug.print("lazy-table input_bytes={d} rows={d} owner_arena_high_water={d} scroll_frame_bytes={d} scroll_format_calls={d}\n", .{ source.len, index.len, fixed.end_index, frame_fixed.end_index, counted.calls });
     try std.testing.expect(fixed.end_index < storage.len);
+    try std.testing.expect(frame_fixed.end_index < frame_storage.len);
+}
+
+test "native nested quotes keep literal prefixes when narrow and recover rails" {
+    fw.DrawContext.init(.unicode);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var feed: Self = .{};
+    defer feed.deinit(std.testing.allocator);
+    const source = "> > alpha\r\n>\r\n> > omega";
+    try feed.append(std.testing.allocator, arena.allocator(), &.{.{
+        .kind = .assistant,
+        .position = 8,
+        .ordinal = 0,
+        .reference = .{ .length = source.len, .digest = @import("protocol.zig").contentDigest(source) },
+        .source = source,
+        .display = source,
+    }});
+    try std.testing.expectEqual(@as(u4, 2), feed.widgets.items[1].quote_depth);
+    try std.testing.expectEqual(@as(u4, 1), feed.widgets.items[2].quote_depth);
+    try std.testing.expectEqual(@as(u4, 2), feed.widgets.items[3].quote_depth);
+    const wide: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{ .width = 8 }, .max = .{ .width = 8, .height = null }, .cell_size = .{} };
+    var index: fw.Text.LineIndex = .{};
+    defer index.deinit(std.testing.allocator);
+    const nested = [_]fw.Text{feed.widgets.items[1]};
+    try index.reflow(std.testing.allocator, &nested, wide);
+    const wide_row = try (try index.builder().itemAtIdxForDraw(0, 0, wide.arena)).?.draw(wide);
+    try std.testing.expectEqualStrings("│", wide_row.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("│", wide_row.readCell(2, 0).char.grapheme);
+    try std.testing.expect(wide_row.readCell(0, 0).style.dim and wide_row.readCell(2, 0).style.dim);
+    const narrow = wide.withConstraints(.{ .width = 2 }, .{ .width = 2, .height = null });
+    try index.reflow(std.testing.allocator, &nested, narrow);
+    const narrow_row = try (try index.builder().itemAtIdxForDraw(0, 0, narrow.arena)).?.draw(narrow);
+    try std.testing.expectEqualStrings(">", narrow_row.readCell(0, 0).char.grapheme);
+    try index.reflow(std.testing.allocator, &nested, wide);
+    const restored = try (try index.builder().itemAtIdxForDraw(0, 0, wide.arena)).?.draw(wide);
+    try std.testing.expectEqualStrings("│", restored.readCell(2, 0).char.grapheme);
+    const empty = [_]fw.Text{feed.widgets.items[2]};
+    try index.reflow(std.testing.allocator, &empty, wide);
+    const empty_row = try (try index.builder().itemAtIdxForDraw(0, 0, wide.arena)).?.draw(wide);
+    try std.testing.expectEqualStrings("│", empty_row.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings(source, feed.sourceAt(8, 0).?.source);
+}
+
+test "native quoted fence retains opaque text and original control bytes" {
+    fw.DrawContext.init(.unicode);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var feed: Self = .{};
+    defer feed.deinit(std.testing.allocator);
+    const source = "> ```\r\n> a | \x1b[31mb\r\n> --- | ---\r\n> ```\r\n";
+    const display = "> ```\r\n> a | \\x1b[31mb\r\n> --- | ---\r\n> ```\r\n";
+    try feed.append(std.testing.allocator, arena.allocator(), &.{.{
+        .kind = .assistant,
+        .position = 9,
+        .ordinal = 0,
+        .reference = .{ .length = source.len, .digest = @import("protocol.zig").contentDigest(source) },
+        .source = source,
+        .display = display,
+    }});
+    try std.testing.expectEqualStrings(display, feed.widgets.items[1].text);
+    try std.testing.expect(!feed.widgets.items[1].softwrap);
+    try std.testing.expect(feed.widgets.items[1].lazy_line == null);
+    try std.testing.expectEqualStrings(source, feed.sourceAt(9, 0).?.source);
 }
