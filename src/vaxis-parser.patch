@@ -1548,7 +1548,7 @@ index 1c569eb..5842e4f 100644
              break;
          }
 diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
-index fe46d2b..6481f1e 100644
+index fe46d2b..2275d57 100644
 --- a/src/vxfw/Text.zig
 +++ b/src/vxfw/Text.zig
 @@ -3,6 +3,126 @@ const vaxis = @import("../main.zig");
@@ -1586,7 +1586,7 @@ index fe46d2b..6481f1e 100644
 +                    .soft => |*iter| if (iter.next()) |wrapped| wrapped.bytes else null,
 +                    .hard => |*iter| iter.next(),
 +                };
-+                if (bytes) |row_bytes| return .{ .text = row_bytes, .style = source.style, .softwrap = false, .overflow = .clip, .virtual_horizontal = !source.softwrap, .pinned_horizontal = source.softwrap, .quote_rail = source.quote_rail };
++                if (bytes) |row_bytes| return .{ .text = row_bytes, .style = source.style, .softwrap = false, .overflow = .clip, .virtual_horizontal = !source.softwrap, .pinned_horizontal = source.softwrap, .quote_rail = source.quote_rail, .lazy_line = source.lazy_line };
 +                self.source_index += 1;
 +                self.iter = .fresh;
 +            }
@@ -1678,7 +1678,7 @@ index fe46d2b..6481f1e 100644
  const vxfw = @import("vxfw.zig");
  
  const Text = @This();
-@@ -13,14 +133,54 @@ text_align: enum { left, center, right } = .left,
+@@ -13,14 +133,62 @@ text_align: enum { left, center, right } = .left,
  softwrap: bool = true,
  overflow: enum { ellipsis, clip } = .ellipsis,
  width_basis: enum { parent, longest_line } = .longest_line,
@@ -1688,6 +1688,13 @@ index fe46d2b..6481f1e 100644
 +pinned_horizontal: bool = false,
 +/// Draw a subdued quote rail for a line-indexed prose row.
 +quote_rail: bool = false,
++/// Optional presentation of one hard source line, realized only in the draw
++/// arena. The callback and source bytes must outlive that arena's frame.
++pub const LazyLine = struct {
++    userdata: *const anyopaque,
++    renderFn: *const fn (*const anyopaque, []const u8, Allocator) Allocator.Error![]const u8,
++};
++lazy_line: ?LazyLine = null,
  
  pub fn widget(self: *const Text) vxfw.Widget {
      return .{
@@ -1705,10 +1712,11 @@ index fe46d2b..6481f1e 100644
 +    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = 1 });
 +    const base: vaxis.Cell = .{ .style = self.style };
 +    @memset(surface.buffer, base);
++    const text = if (self.lazy_line) |lazy| try lazy.renderFn(lazy.userdata, self.text, ctx.arena) else self.text;
 +    var column: usize = 0;
-+    var chars = ctx.graphemeIterator(self.text);
++    var chars = ctx.graphemeIterator(text);
 +    while (chars.next()) |char| {
-+        const grapheme = char.bytes(self.text);
++        const grapheme = char.bytes(text);
 +        const tab = std.mem.eql(u8, grapheme, "\t");
 +        const cell_width = if (tab) vxfw.DrawContext.tabWidth(column) else ctx.stringWidth(grapheme);
 +        const next = column + cell_width;
@@ -1733,7 +1741,7 @@ index fe46d2b..6481f1e 100644
  fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
      const self: *const Text = @ptrCast(@alignCast(ptr));
      return self.draw(ctx);
-@@ -76,6 +236,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+@@ -76,6 +244,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                      continue;
                  }
                  const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
@@ -1741,7 +1749,7 @@ index fe46d2b..6481f1e 100644
                  surface.writeCell(col, row, .{
                      .char = .{ .grapheme = grapheme, .width = grapheme_width },
                      .style = self.style,
-@@ -96,12 +257,17 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+@@ -96,12 +265,17 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                  .center => (container_size.width - resolved_line_width) / 2,
                  .right => container_size.width - resolved_line_width,
              };
@@ -1759,7 +1767,7 @@ index fe46d2b..6481f1e 100644
                  if (col + grapheme_width >= container_size.width and
                      line_width > container_size.width and
                      self.overflow == .ellipsis)
-@@ -204,6 +370,10 @@ pub const SoftwrapIterator = struct {
+@@ -204,6 +378,10 @@ pub const SoftwrapIterator = struct {
      line: []const u8 = "",
      index: usize = 0,
      hard_iter: LineIterator,
@@ -1770,7 +1778,7 @@ index fe46d2b..6481f1e 100644
  
      pub const Line = struct {
          width: u16,
-@@ -225,14 +395,15 @@ pub const SoftwrapIterator = struct {
+@@ -225,14 +403,15 @@ pub const SoftwrapIterator = struct {
              self.line = self.hard_iter.next() orelse return null;
              self.line = std.mem.trimEnd(u8, self.line, " \t");
              self.index = 0;
@@ -1788,7 +1796,7 @@ index fe46d2b..6481f1e 100644
  
              if (self.ctx.max.width) |max| {
                  if (cur_width + next_width > max) {
-@@ -244,17 +415,30 @@ pub const SoftwrapIterator = struct {
+@@ -244,17 +423,30 @@ pub const SoftwrapIterator = struct {
                      if (trimmed_width > max) {
                          // Won't fit on line by itself, so fit as much on this line as we can
                          var iter = self.ctx.graphemeIterator(word);
@@ -1819,7 +1827,7 @@ index fe46d2b..6481f1e 100644
                      // We are softwrapping, advance index to the start of the next word
                      const end = self.index;
                      self.index = std.mem.indexOfNonePos(u8, self.line, self.index, soft_breaks) orelse self.line.len;
-@@ -263,11 +447,21 @@ pub const SoftwrapIterator = struct {
+@@ -263,11 +455,21 @@ pub const SoftwrapIterator = struct {
              }
  
              self.index = idx;
