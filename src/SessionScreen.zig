@@ -791,10 +791,6 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     // says so. The choice takes the input's row in place of the draft, which
     // it keeps.
     const selector = self.select(footer.command or footer.original != null).row == .selector;
-    // A paused Action has no held selector in which to show the original's
-    // recovery key. At the smallest archived geometry do not paint an empty
-    // draft with that essential instruction silently missing.
-    if (footer.compact_archive != null and !self.actionVisible() and size.row == 2 and size.col < 24 and bytes.len == 0) return error.TerminalTooSmall;
     const draft = try self.prepareDraft(if (selector) "" else bytes, size);
     const window = self.backend.window();
     const scratch = self.backend.scratch();
