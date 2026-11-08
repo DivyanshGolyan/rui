@@ -715,9 +715,12 @@ pub const Footer = struct {
     command: bool = false,
     /// A retained original occupies the one submission slot.
     original: ?Original = null,
+    /// At minimum geometry the archive and original share compact rows.
+    compact_archive: ?CompactArchive = null,
     status: []const u8 = "",
     status_essential: bool = false,
     notice: []const u8 = "",
+    notice_essential: bool = false,
     /// The list above the input for the draft, with its highlighted row.
     commands: ?slash_commands.Shown = null,
     session: ?SessionLine = null,
@@ -725,6 +728,7 @@ pub const Footer = struct {
     queued: ?Queued = null,
 
     pub const Original = enum { not_sent, sending, unconfirmed, rejected };
+    pub const CompactArchive = enum { archiving, archived };
 
     /// While its row draws, the frame shows `status` in place of the
     /// footer's: the row confirms a send that status says `Sent` of.
@@ -822,6 +826,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
         .status = status,
         .status_essential = footer.status_essential,
         .notice = footer.notice,
+        .notice_essential = footer.notice_essential,
         .command_rows = if (selector) 0 else if (footer.commands) |commands| commands.rows() else 0,
         .calls = calls[0..if (selected) 0 else live.count],
         .total_calls = live.total,
@@ -894,7 +899,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.list_row - 1, .height = 1 }), size.col, layout.draft, rule_label);
     const overflow = try scratch.create([32]u8);
     if (layout.list_height != 0) self.drawCommands(window, &layout, &self.commands.?, overflow);
-    if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col, footer.original) else {
+    if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col, footer.original, footer.compact_archive) else {
         // Continuation rows align under the text; only the draft's first
         // line has a glyph. Each shown line is printed whole: draft_layout
         // already broke it to fit.
@@ -953,9 +958,13 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     return .{ .frame = self.frames, .notice = layout.notice.length != 0 };
 }
 
-fn drawChoice(self: *const Self, window: vaxis.Window, width: u16, original: ?Footer.Original) void {
+fn drawChoice(self: *const Self, window: vaxis.Window, width: u16, original: ?Footer.Original, compact_archive: ?Footer.CompactArchive) void {
     const waiting: []const u8 = switch (self.selected.approval) {
-        .held => if (original) |state| switch (state) {
+        .held => if (original) |state| if (compact_archive != null) switch (state) {
+            .not_sent, .unconfirmed => "Ctrl-R",
+            .rejected => "/discard",
+            .sending => "Sending…",
+        } else switch (state) {
             .not_sent => "Not sent · Ctrl-R",
             .sending => "Sending…",
             .unconfirmed => if (width < 13) "Not sure" else "Unconfirmed · Ctrl-R",

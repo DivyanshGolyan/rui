@@ -97,6 +97,8 @@ pub const Input = struct {
     status: []const u8,
     status_essential: bool = false,
     notice: []const u8 = "",
+    /// A critical notice cannot be silently displaced by a required footer.
+    notice_essential: bool = false,
     /// The command list's lines, each one row.
     command_rows: usize = 0,
     calls: []const []const u8,
@@ -195,7 +197,10 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
         self.status_height = 0;
     }
     // A notice that cannot show whole gives way, as the live line does.
-    if (@as(u32, self.status_height) + notice_rows > input.height - 1) self.notice.clear();
+    if (@as(u32, self.status_height) + notice_rows > input.height - 1) {
+        if (input.notice_essential and notice_rows != 0) return error.TerminalTooSmall;
+        self.notice.clear();
+    }
     self.line_height = if (self.notice.length != 0) notice_rows else @intFromBool(input.height -| self.status_height >= 3);
     if (input.selected and input.action_visible and self.notice.length == 0 and
         @as(u32, self.status_height) + self.line_height >= input.height - 1) self.line_height = 0;

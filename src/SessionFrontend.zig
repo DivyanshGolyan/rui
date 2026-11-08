@@ -1333,12 +1333,23 @@ fn drawFrame(self: *Self) !void {
     const geometry = self.terminal.geometry();
     // A tiny held Action still needs a whole recovery instruction. Keep the
     // occupied row truthful and reserve one status row for the next action.
-    const compact_original = waiting and self.line.archive_state == .active and
-        self.originalDisplay() != null and (geometry.col < 32 or geometry.row <= 4);
-    const status = if (compact_original) switch (self.originalDisplay().?) {
-        .not_sent, .unconfirmed => "Ctrl-R",
-        .rejected => "/discard",
-        .sending => "",
+    const compact_original = waiting and self.originalDisplay() != null and (geometry.col < 32 or geometry.row <= 4);
+    const compact_archive: ?Screen.Footer.CompactArchive = if (compact_original) switch (self.line.archive_state) {
+        .active => null,
+        .archiving => .archiving,
+        .archived => .archived,
+    } else null;
+    const status = if (compact_original) blk: {
+        const original = self.originalDisplay().?;
+        if (compact_archive) |archive| break :blk switch (archive) {
+            .archiving => if (original == .rejected) "Stop Rej" else "Stopping",
+            .archived => if (original == .rejected) "Arch Rej" else "Archived",
+        };
+        break :blk switch (original) {
+            .not_sent, .unconfirmed => "Ctrl-R",
+            .rejected => "/discard",
+            .sending => "",
+        };
     } else statusLines(&status_buffer, context.buffered(), base_status, self.line.archive_state);
     var queued_buffer: [Frame.status_capacity]u8 = undefined;
     const queued: ?Screen.Footer.Queued = if (self.queuedRow()) |row| .{
@@ -1353,7 +1364,7 @@ fn drawFrame(self: *Self) !void {
     self.dirty = false;
     const notice_revision = self.upgrade_note_revision;
     const rendered_upgrade = said.text == null and self.notice == null and !screen.actionVisible() and self.upgrade_note_len != 0;
-    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .original = self.originalDisplay(), .status = status, .status_essential = (compact_original and self.originalDisplay().? != .sending) or self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
+    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .original = self.originalDisplay(), .compact_archive = compact_archive, .status = status, .status_essential = (compact_original and self.originalDisplay().? != .sending) or self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .notice_essential = waiting and self.submissionOccupied() and notice != null and std.mem.startsWith(u8, notice.?, "!"), .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
     _ = screen.presented(delivered);
     if (delivered.notice and rendered_upgrade and notice_revision == self.upgrade_note_revision) self.upgrade_note_shown = true;
 }
@@ -3573,6 +3584,139 @@ test "occupied original blocks stale and drawn Action decisions and retained rea
             try std.testing.expectEqual(ConsentPolicy.Approval.reason, held.screen.selected.approval);
         } else self.submission.intent = null;
     }
+}
+
+// Test-owned PTY: the frontend's geometry() must observe the kernel size,
+// not the 80x24 fallback used by HeldFrontend's ordinary pipe output.
+const CapacityTestPty = struct {
+    master: c_int,
+    slave: c_int,
+    extern "c" fn openpty(*c_int, *c_int, ?[*]u8, ?*anyopaque, ?*const std.posix.winsize) c_int;
+
+    fn init() !@This() {
+        var master: c_int = -1;
+        var slave: c_int = -1;
+        if (openpty(&master, &slave, null, null, null) != 0) return error.TestUnexpectedResult;
+        errdefer {
+            _ = std.c.close(master);
+            _ = std.c.close(slave);
+        }
+        const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+        if (std.c.fcntl(master, std.c.F.SETFL, std.c.fcntl(master, std.c.F.GETFL) | nonblock) < 0) return error.TestUnexpectedResult;
+        return .{ .master = master, .slave = slave };
+    }
+    fn resize(self: @This(), row: u16, col: u16) !void {
+        var size: std.posix.winsize = .{ .row = row, .col = col, .xpixel = 0, .ypixel = 0 };
+        if (std.c.ioctl(self.slave, @intCast(std.c.T.IOCSWINSZ), &size) != 0) return error.TestUnexpectedResult;
+    }
+    fn drain(self: @This()) void {
+        var bytes: [8192]u8 = undefined;
+        while (std.c.read(self.master, &bytes, bytes.len) > 0) {}
+    }
+    fn close(self: @This()) void {
+        _ = std.c.close(self.master);
+        _ = std.c.close(self.slave);
+    }
+    fn row(screen: *Screen, y: u16, buffer: []u8) []const u8 {
+        const cells = Screen.Test.window(screen);
+        var used: usize = 0;
+        for (0..cells.width) |x| {
+            const text = cells.readCell(@intCast(x), y).?.char.grapheme;
+            @memcpy(buffer[used..][0..text.len], text);
+            used += text.len;
+        }
+        return std.mem.trimEnd(u8, buffer[0..used], " ");
+    }
+};
+
+test "real tiny frontend preserves archive and original recovery custody" {
+    for ([_]protocol.SessionArchiveState{ .archiving, .archived }) |archive| for ([_]Submission.State{ .unconfirmed, .rejected }) |state| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const pty = try CapacityTestPty.init();
+        const previous_output = held.terminal.output;
+        held.terminal.output = pty.slave;
+        defer {
+            held.terminal.output = previous_output;
+            pty.close();
+        }
+        try pty.resize(2, 8);
+        try std.testing.expectEqual(@as(u16, 2), held.terminal.geometry().row);
+        try std.testing.expectEqual(@as(u16, 8), held.terminal.geometry().col);
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        const self = &held.self;
+        self.line.archive_state = archive;
+        const original = self.input.submitText("original message");
+        self.submission.intent = .{ .message = original };
+        self.submission.state = state;
+        self.submission.key = @splat('K');
+        try self.drawFrame();
+        var row: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(if (archive == .archived) (if (state == .rejected) "Arch Rej" else "Archived") else if (state == .rejected) "Stop Rej" else "Stopping", CapacityTestPty.row(held.screen, 0, &row));
+        try std.testing.expectEqualStrings(if (state == .rejected) "/discard" else "Ctrl-R", CapacityTestPty.row(held.screen, 1, &row));
+        try std.testing.expect(held.screen.ticket.?.delivered and held.screen.offered() == null);
+        try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        pty.drain();
+        if (state == .rejected) {
+            // This is actual typed admission through the frontend stream.
+            try stepKeys(held, "/discard\r");
+            try std.testing.expect(self.submission.view() == null);
+            try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+            try std.testing.expect(held.screen.offered() == null);
+        } else {
+            try stepKeys(held, "\x12");
+            try std.testing.expectEqual(@as([36]u8, @splat('K')), self.submission.retry.?);
+            try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+            self.submission.retry = null;
+        }
+        try pty.resize(24, 80);
+        try std.testing.expectEqual(@as(u16, 80), held.terminal.geometry().col);
+        if (state == .rejected) try stepKeys(held, "\x07");
+        self.dirty = true;
+        try held.settle();
+        try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+        if (state == .rejected) {
+            try std.testing.expectEqual(ConsentPolicy.Choice.allow_once, held.screen.offered().?.choice);
+            try std.testing.expectEqual(@as(u64, 0xa), held.screen.offered().?.action);
+        } else {
+            try std.testing.expect(held.screen.offered() == null);
+            self.submission.intent = null;
+        }
+        pty.drain();
+    };
+}
+
+test "real tiny frontend fails closed rather than lose critical notice" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const pty = try CapacityTestPty.init();
+    const previous_output = held.terminal.output;
+    held.terminal.output = pty.slave;
+    defer {
+        held.terminal.output = previous_output;
+        pty.close();
+    }
+    try pty.resize(2, 8);
+    try std.testing.expectEqual(@as(u16, 8), held.terminal.geometry().col);
+    try std.testing.expectEqual(@as(u16, 2), held.terminal.geometry().row);
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    const self = &held.self;
+    self.line.archive_state = .archived;
+    self.submission.intent = .{ .message = self.input.submitText("original message") };
+    self.submission.state = .rejected;
+    self.notice = "! Critical retained notice";
+    try std.testing.expectError(error.TerminalTooSmall, self.drawFrame());
+    var bytes: [64]u8 = undefined;
+    try std.testing.expect(std.c.read(pty.master, &bytes, bytes.len) < 0);
+    try std.testing.expect(held.screen.offered() == null);
+    try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+    try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+    try std.testing.expectEqualStrings("! Critical retained notice", self.notice.?);
+    try std.testing.expectError(error.RenderBackendPoisoned, held.screen.backend.encode());
+    self.submission.intent = null;
 }
 
 test "arrows move the choice only once input is fresh, and Enter decides the option shown" {
