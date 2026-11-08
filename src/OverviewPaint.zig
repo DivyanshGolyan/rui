@@ -3498,6 +3498,26 @@ test "the Session row's highlight stays in view while the picker is open, even o
     }
 }
 
+test "the bottom edge yields to the only actionable picker row" {
+    for ([_]u16{ 6, 60 }) |width| for ([_]u16{ 9, 10 }) |height| {
+        var state = try pickerState(null);
+        var owner: OverviewModelPicker = .{};
+        defer state.deinit();
+        try expectEffects(&.{}, try owner.step(&state, .{ .resized = .{ .width = width, .height = height } }));
+        try modelOpen(&owner, &state, &.{chatgpt});
+        var screen = try sizedModelRender(&owner, &state, .{}, width, height, .{ .unicode = true }, 0);
+        defer screen.deinit();
+        const region = layout(&state, 1, 0).picker;
+        try std.testing.expectEqual(@as(u16, 1), region.len());
+        try std.testing.expect(state.shownPicker() != null);
+        try std.testing.expectEqual(@as(u16, if (height == 9) 0 else 1), view.bottomRuleRows(&state, 1));
+        try std.testing.expectEqualStrings("›", screen.cell(2, region.start).char.grapheme);
+        const before = owner.selected(&state).?;
+        try expectEffects(&.{}, try modelPress(&owner, &state, .{}, .next));
+        try std.testing.expect(!std.mem.eql(u8, before, owner.selected(&state).?));
+    };
+}
+
 test "with no sign-in served, the picker shows each login line instead of models" {
     var state = try pickerState(null);
     var owner: OverviewModelPicker = .{};
@@ -3816,7 +3836,7 @@ test "quote draft overview fence opacity does not promote code markers" {
         for (0..20) |_| _ = rows.next();
         try std.testing.expectEqualStrings(if (method == .wcwidth) "   ghijkl" else "   >>  kl", rows.next().?);
         try std.testing.expectEqualStrings(if (method == .wcwidth) "" else "   >>", rows.next().?);
-        try std.testing.expectEqual(@as(?Rendered.Cursor, .{ .row = 22, .column = if (method == .wcwidth) 3 else 7 }), shaped.cursor);
+        try std.testing.expectEqual(@as(?Rendered.Cursor, .{ .row = 21, .column = if (method == .wcwidth) 3 else 7 }), shaped.cursor);
     }
 }
 

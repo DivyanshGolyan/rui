@@ -2846,10 +2846,12 @@ pub fn layout(state: *const State, draft_rows: u16, command_rows: usize) Layout 
     return .{ .top = top, .list = if (top + 1 < picker.start) .{ .start = top + 1, .end = picker.start } else .{}, .picker = picker, .input = input, .commands = .{ .start = input + 1, .end = below + 1 } };
 }
 
-/// Keep the bottom edge only when it leaves the existing top and selected row.
+/// Keep the decorative edge only after the selected Session and an open
+/// picker have each retained a row.
 pub fn bottomRuleRows(state: *const State, draft_rows: u16) u16 {
     const kept: usize = @intFromBool(state.selected != null and state.rows.items.len != 0);
-    return @intFromBool(@as(usize, state.size.height) >= topRows(state) + kept + 1 + draft_rows + hintRows(state) + 1);
+    const picker: usize = @intFromBool(state.picker != null);
+    return @intFromBool(@as(usize, state.size.height) >= topRows(state) + kept + picker + 1 + draft_rows + hintRows(state) + 1);
 }
 
 /// Rows the line under the input takes: one, or as many as a notice has
