@@ -313,6 +313,7 @@ fn readWork(raw: *anyopaque, task: *Task) !void {
                 errdefer page.destroy();
                 const row = if (anchor) |value| try page.rowForAnchor(value, task.requests().cancellation) else null;
                 if (anchor != null and row == null) return error.HistoryAnchorUnavailable;
+                try page.prepareForPublication(task.requests().cancellation);
                 break :load .{ .page = .{ .page = page, .row = row, .arrival = job.request.arrival } };
             },
         },

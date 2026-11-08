@@ -56,7 +56,8 @@ width: u16,
 
 /// Load at most one authoritative Activity page. Each selected Message is
 /// held in two unlinked files (exact verified and terminal-safe projection).
-/// Total temporary disk is their combined sizes; no content lives in an arena.
+/// Temporary disk also includes line and table checkpoint/interval sidecars;
+/// no Message content lives in an arena.
 pub fn load(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io.Dir, store: []const u8, session: *const [protocol.session_id_bytes]u8, cursor: replies.ActivityCursor, instance: ?protocol.InstanceId, width: u16) !*Self {
     if (width == 0) return error.InvalidWidth;
     const page = try observations.sourcePage(requests, store, session, cursor, instance);
@@ -76,14 +77,22 @@ pub fn load(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io
         item.index = try fw.PagedText.Index.initStyled(&item.reader, ctx, width, item.rich.provider());
         const added = try std.math.add(usize, item.index.len, 1);
         self.row_count = try std.math.add(usize, self.row_count, added);
-        // No reference to the worker's cancellation token crosses publication.
-        item.source.cancellation = null;
         self.items[self.count] = item;
         self.count += 1;
     }
     self.window = RowWindow.init(self.row_count, window_rows);
     try observations.ensureServing(requests.io, store, self.page.instance);
     return self;
+}
+
+/// Detach the worker token only after all indexing and anchor resolution have
+/// completed; the page may then safely outlive its joined worker.
+pub fn prepareForPublication(self: *Self, cancellation: ?*const client.Cancellation) !void {
+    if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
+    for (self.items[0..self.count]) |item| {
+        item.source.cancellation = null;
+        item.rich.releaseCancellation();
+    }
 }
 
 pub fn destroy(self: *Self) void {
@@ -173,8 +182,6 @@ pub fn rowForAnchor(self: *Self, anchor: Anchor, cancellation: ?*const client.Ca
         if (id.position == anchor.position and id.ordinal == anchor.ordinal and std.meta.eql(id.reference, anchor.reference)) {
             const row = if (anchor.source) |source| blk: {
                 const projection = try item.source.scratch.projectionOffsetCancelable(source, cancellation);
-                item.source.cancellation = cancellation;
-                defer item.source.cancellation = null;
                 const offset = std.math.cast(usize, projection) orelse return error.InvalidTarget;
                 const line = (try item.index.rowForOffset(offset)) orelse return error.InvalidTarget;
                 break :blk base + 1 + line;

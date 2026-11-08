@@ -71,6 +71,7 @@ const Checkpoint = extern struct {
     }
 };
 
+const DecodeGate = struct { after: usize, stop: *client.Cancellation };
 const table_checkpoint_size = 256;
 const TableCheckpoint = extern struct { first: u64, previous_end: u64, offset: u64 };
 
@@ -94,6 +95,7 @@ table_count: u64 = 0,
 table_bytes: u64 = 0,
 table_end: u64 = 0,
 table_indexing: bool = true,
+test_decode_gate: if (@import("builtin").is_test) ?DecodeGate else void = if (@import("builtin").is_test) null else {},
 table_cache_base: u64 = 0,
 table_cache_count: usize = 0,
 table_cache_next_offset: u64 = 0,
@@ -177,8 +179,13 @@ pub fn buildRaw(io: std.Io, dir: std.Io.Dir, raw_source: vaxis.unicode.PagedSour
     } else if (start != source.length) return error.InvalidSourceRead;
     try self.indexTables(raw_source, cancellation);
     self.table_indexing = false;
-    self.cancellation = null;
     return self;
+}
+
+/// The worker must retain its cancellation owner until the framework has
+/// finished indexing. Call only after that index succeeds and before publish.
+pub fn releaseCancellation(self: *Self) void {
+    self.cancellation = null;
 }
 
 fn scratch(io: std.Io, dir: std.Io.Dir) !std.Io.File {
@@ -281,6 +288,7 @@ pub fn provider(self: *Self) fw.PagedText.LineProvider {
 
 fn lineStyle(raw: *const anyopaque, index: usize) !fw.PagedText.LineStyle {
     const self: *const Self = @ptrCast(@alignCast(raw));
+    if (self.cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
     const line = (try self.lineAt(index)) orelse return error.InvalidSourceRead;
     return .{
         .horizontal = line.mode == .@"opaque" or line.table_role != .none,
@@ -532,6 +540,7 @@ fn tablePoint(self: *const Self, block: u64) !TableCheckpoint {
 pub fn tableAt(self_const: *const Self, index: u64) !?Table {
     const self = @constCast(self_const);
     if (index >= self.table_count) return null;
+    if (self.cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
     const base = index / table_checkpoint_size * table_checkpoint_size;
     if (self.table_cache_count == 0 or self.table_cache_base != base) {
         const point = try self.tablePoint(index / table_checkpoint_size);
@@ -558,6 +567,9 @@ pub fn tableAt(self_const: *const Self, index: u64) !?Table {
         }
         self.table_cache[self.table_cache_count] = group;
         self.table_cache_count += 1;
+        if (@import("builtin").is_test) if (self.test_decode_gate) |gate| {
+            if (self.table_cache_count == gate.after) gate.stop.requestStop();
+        };
         self.table_cache_next_offset = try std.math.add(u64, self.table_cache_next_offset, at);
         self.table_cache_previous_end = end;
     }
@@ -984,4 +996,34 @@ test "native rich compact table intervals handle many small tables and cancellat
     const only = (try entries.next(io)).?;
     try std.testing.expectEqualStrings("raw", only.name);
     try std.testing.expect((try entries.next(io)) == null);
+}
+
+test "native rich framework indexing cancels during sidecar decode and closes files" {
+    fw.DrawContext.init(.unicode);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "raw", .{ .read = true });
+    defer file.close(io);
+    const row = "a | b\n--- | ---\n\n";
+    for (0..300) |_| try file.writeStreamingAll(io, row);
+    const backing: TestSource = .{ .io = io, .file = file };
+    const source: vaxis.unicode.PagedSource = .{ .userdata = &backing, .length = row.len * 300, .readFn = TestSource.read };
+    var stop: client.Cancellation = .{};
+    var rich = try Self.build(io, tmp.dir, source, &stop);
+    try std.testing.expectEqual(@as(u64, 300), rich.table_count);
+    const handles = [_]std.posix.fd_t{ rich.file.handle, rich.tables.handle, rich.table_checkpoints.handle };
+    for (handles) |fd| try std.testing.expect(std.c.fcntl(fd, std.c.F.GETFD) >= 0);
+    rich.test_decode_gate = .{ .after = 17, .stop = &stop };
+    var reader: vaxis.unicode.PagedReader = .{ .source = source };
+    const ctx: fw.DrawContext = .{ .arena = std.testing.allocator, .min = .{}, .max = .{ .width = 80, .height = null }, .cell_size = .{} };
+    try std.testing.expectError(error.Cancelled, fw.PagedText.Index.initStyled(&reader, ctx, 80, rich.provider()));
+    try std.testing.expectEqual(@as(usize, 17), rich.table_cache_count);
+    try std.testing.expect(stop.stopped.load(.acquire));
+    rich.close();
+    for (handles) |fd| {
+        const result = std.c.fcntl(fd, std.c.F.GETFD);
+        try std.testing.expectEqual(@as(c_int, -1), result);
+        try std.testing.expectEqual(std.posix.E.BADF, std.posix.errno(result));
+    }
 }
