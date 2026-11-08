@@ -73,14 +73,24 @@ const RowWidget = struct {
     }
 };
 
-const ReadKind = union(enum) { list, conversation: struct {
-    id: Id,
-    epoch: u64,
-    since: ?@import("protocol_reply.zig").SessionToken,
-    after: ?@import("protocol_reply.zig").ActivityCursor,
-    instance: ?protocol.InstanceId,
-    refresh: bool,
-} };
+const ReadKind = union(enum) {
+    list: u64,
+    conversation: struct {
+        id: Id,
+        epoch: u64,
+        since: ?@import("protocol_reply.zig").SessionToken,
+        after: ?@import("protocol_reply.zig").ActivityCursor,
+        instance: ?protocol.InstanceId,
+        refresh: bool,
+    },
+
+    fn isCurrent(self: ReadKind, destination: ?Id, epoch: u64) bool {
+        return switch (self) {
+            .list => |started| destination == null and started == epoch,
+            .conversation => |started| destination != null and started.epoch == epoch and std.mem.eql(u8, &destination.?, &started.id),
+        };
+    }
+};
 const ReadResult = union(enum) { list: []observations.Row, conversation: ?observations.Conversation };
 
 init: std.process.Init,
@@ -101,7 +111,7 @@ feed_cursor: ?@import("protocol_reply.zig").ActivityCursor = null,
 feed_instance: ?protocol.InstanceId = null,
 feed_force_refresh: bool = false,
 feed_stale: bool = false,
-feed_epoch: u64 = 0,
+navigation_epoch: u64 = 0,
 following: bool = true,
 body_width: u16 = 0,
 body_bottom: u16 = 0,
@@ -112,7 +122,7 @@ notice: []const u8 = "",
 notice_buffer: [256]u8 = undefined,
 pasting: bool = false,
 worker: Task = .{},
-read_kind: ReadKind = .list,
+read_kind: ReadKind = .{ .list = 0 },
 read_arena: ?*std.heap.ArenaAllocator = null,
 read_result: ?ReadResult = null,
 read_refreshing: std.atomic.Value(bool) = .init(false),
@@ -232,7 +242,7 @@ fn startRead(self: *Self) !void {
     self.read_arena = arena;
     self.read_result = null;
     self.read_refreshing.store(false, .release);
-    self.read_kind = if (self.destination) |id| .{ .conversation = .{ .id = id, .epoch = self.feed_epoch, .since = self.feed_token, .after = self.feed_cursor, .instance = self.feed_instance, .refresh = self.feed_force_refresh } } else .list;
+    self.read_kind = if (self.destination) |id| .{ .conversation = .{ .id = id, .epoch = self.navigation_epoch, .since = self.feed_token, .after = self.feed_cursor, .instance = self.feed_instance, .refresh = self.feed_force_refresh } } else .{ .list = self.navigation_epoch };
     self.worker.start(self.init.io, self, readWork) catch |err| {
         self.freeArena(self.read_arena);
         self.read_arena = null;
@@ -251,11 +261,8 @@ fn readWork(raw: *anyopaque, task: *Task) !void {
 
 fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
     if (self.worker.thread == null or !self.worker.completed()) return;
+    const relevant = self.read_kind.isCurrent(self.destination, self.navigation_epoch);
     self.worker.join() catch |err| {
-        const relevant = switch (self.read_kind) {
-            .list => self.destination == null,
-            .conversation => |conversation| self.destination != null and conversation.epoch == self.feed_epoch and std.mem.eql(u8, &self.destination.?, &conversation.id),
-        };
         if (relevant) {
             if (self.read_kind == .conversation) {
                 self.feed_stale = true;
@@ -269,13 +276,13 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
     };
     const arena = self.read_arena.?;
     self.read_arena = null;
+    if (!relevant) {
+        self.freeArena(arena);
+        return;
+    }
     errdefer self.freeArena(arena);
     switch (self.read_result.?) {
         .list => |rows| {
-            if (self.destination != null) {
-                self.freeArena(arena);
-                return;
-            }
             const selected: ?Id = if (self.list.cursor < self.rows.len) self.rows[self.list.cursor].row.id else null;
             const widgets = try arena.allocator().alloc(*RowWidget, rows.len);
             for (rows, 0..) |row, index| {
@@ -299,11 +306,6 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
             if (self.list.cursor >= rows.len) self.list.jumpToItem(@intCast(rows.len -| 1));
         },
         .conversation => |maybe_conversation| {
-            const id = self.read_kind.conversation.id;
-            if (self.destination == null or self.read_kind.conversation.epoch != self.feed_epoch or !std.mem.eql(u8, &self.destination.?, &id)) {
-                self.freeArena(arena);
-                return;
-            }
             const conversation = maybe_conversation orelse {
                 self.freeArena(arena);
                 return;
@@ -346,7 +348,7 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
 fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
     _ = try self.getDraft(id);
     self.destination = id;
-    self.feed_epoch +%= 1;
+    self.navigation_epoch +%= 1;
     self.following = true;
     self.content.clearRetainingCapacity();
     self.freeFeedArenas(&self.old_feed_arenas);
@@ -365,7 +367,7 @@ fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
 
 fn back(self: *Self, ctx: *fw.EventContext) !void {
     self.destination = null;
-    self.feed_epoch +%= 1;
+    self.navigation_epoch +%= 1;
     try ctx.requestFocus(self.overview_draft.field.widget());
     ctx.redraw = true;
 }
@@ -546,7 +548,7 @@ fn event(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
         },
         .tick => {
             if (self.worker.thread != null and self.read_refreshing.load(.acquire)) switch (self.read_kind) {
-                .conversation => |conversation| if (self.destination != null and conversation.epoch == self.feed_epoch and std.mem.eql(u8, &self.destination.?, &conversation.id) and !self.feed_stale) {
+                .conversation => if (self.read_kind.isCurrent(self.destination, self.navigation_epoch) and !self.feed_stale) {
                     self.feed_stale = true;
                     ctx.redraw = true;
                 },
@@ -606,4 +608,18 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
     children[2] = .{ .origin = .{ .col = 0, .row = @intCast(1 + body_height) }, .surface = composer, .z_index = 0 };
     children[3] = .{ .origin = .{ .col = 0, .row = height - 1 }, .surface = status, .z_index = 0 };
     return fw.Surface.initWithChildren(ctx.arena, self.widget(), .{ .width = width, .height = height }, children);
+}
+
+test "navigation epoch rejects stale overview and session reads" {
+    const id: Id = "abc123".*;
+    const other: Id = "abc124".*;
+    const list: ReadKind = .{ .list = 3 };
+    try std.testing.expect(list.isCurrent(null, 3));
+    try std.testing.expect(!list.isCurrent(null, 5));
+    try std.testing.expect(!list.isCurrent(id, 3));
+    const conversation: ReadKind = .{ .conversation = .{ .id = id, .epoch = 4, .since = null, .after = null, .instance = null, .refresh = false } };
+    try std.testing.expect(conversation.isCurrent(id, 4));
+    try std.testing.expect(!conversation.isCurrent(id, 6));
+    try std.testing.expect(!conversation.isCurrent(other, 4));
+    try std.testing.expect(!conversation.isCurrent(null, 4));
 }
