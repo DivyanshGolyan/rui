@@ -197,3 +197,25 @@ test "native scrollbar retains bottom thumb when horizontal row is reserved" {
         try std.testing.expectEqualStrings("▐", vertical.readCell(0, height - 2).char.grapheme);
     };
 }
+
+test "native horizontal line viewport reaches Unicode past one million columns" {
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+    for (0..1_000_000) |_| try source.writer.writeByte('x');
+    try source.writer.writeAll("界Z");
+    var storage: [64 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = fixed.allocator(), .min = .{ .width = 12 }, .max = .{ .width = 12, .height = null }, .cell_size = .{} };
+    var index: fw.Text.LineIndex = .{};
+    defer index.deinit(std.testing.allocator);
+    const input = [_]fw.Text{.{ .text = source.written(), .softwrap = false }};
+    try index.reflow(std.testing.allocator, &input, ctx);
+    try std.testing.expectEqual(@as(usize, 1), index.len);
+    const row = (try index.builder().itemAtIdxForDraw(0, 0, ctx.arena)).?;
+    const surface = try row.drawHorizontalFn.?(row.userdata, ctx, 1_000_000, 12);
+    try std.testing.expectEqual(@as(?u64, 1_000_003), surface.scroll_width);
+    try std.testing.expectEqualStrings("界", surface.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("Z", surface.readCell(2, 0).char.grapheme);
+    try std.testing.expect(fixed.end_index < storage.len);
+}

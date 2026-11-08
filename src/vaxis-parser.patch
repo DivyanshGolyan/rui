@@ -1248,9 +1248,18 @@ index 2c6edb6..81acf55 100644
 +    try std.testing.expectEqualStrings("ab\n界c", value);
 +}
 diff --git a/src/vxfw/ScrollBars.zig b/src/vxfw/ScrollBars.zig
-index eff49f1..3d72b55 100644
+index eff49f1..8339ef1 100644
 --- a/src/vxfw/ScrollBars.zig
 +++ b/src/vxfw/ScrollBars.zig
+@@ -66,7 +66,7 @@ horizontal_scrollbar_drag_thumb: vaxis.Cell = .{
+ last_frame_size: vxfw.Size = .{ .width = 0, .height = 0 },
+ /// You should not change this variable, treat it as private to the implementation. Used to track
+ /// the width of the content so we map horizontal scroll thumb position to view position.
+-last_frame_max_content_width: u32 = 0,
++last_frame_max_content_width: u64 = 0,
+ /// You should not change this variable, treat it as private to the implementation. Used to track
+ /// the position of the mouse relative to the scroll thumb for mouse interaction.
+ mouse_offset_into_thumb: u8 = 0,
 @@ -180,7 +180,7 @@ pub fn handleCapture(self: *ScrollBars, ctx: *vxfw.EventContext, event: vxfw.Eve
                              .slice => |slice| break :count @floatFromInt(slice.len),
                              .builder => |builder| {
@@ -1260,6 +1269,15 @@ index eff49f1..3d72b55 100644
                                      counter += 1;
  
                                  break :count @floatFromInt(counter);
+@@ -251,7 +251,7 @@ pub fn handleCapture(self: *ScrollBars, ctx: *vxfw.EventContext, event: vxfw.Eve
+ 
+                     const new_view_col_start_f =
+                         new_thumb_col_start_f * max_content_width_f / widget_width_f;
+-                    const new_view_col_start: u32 = @intFromFloat(@ceil(new_view_col_start_f));
++                    const new_view_col_start: u64 = @intFromFloat(@ceil(new_view_col_start_f));
+ 
+                     self.scroll_view.scroll.left =
+                         @min(new_view_col_start, self.last_frame_max_content_width);
 @@ -389,7 +389,7 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                  .slice => |slice| break :count @floatFromInt(slice.len),
                  .builder => |builder| {
@@ -1278,8 +1296,35 @@ index eff49f1..3d72b55 100644
  
          // Once we know the thumb height and its position we can draw the scroll bar.
  
+@@ -479,21 +479,21 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+ 
+         const widget_width_f: f32 = @floatFromInt(max.width);
+ 
+-        const max_content_width: u32 = width: {
++        const max_content_width: u64 = width: {
+             if (self.estimated_content_width) |w| break :width w;
+ 
+-            var max_content_width: u32 = 0;
++            var max_content_width: u64 = 0;
+             for (scroll_view_surface.children) |child| {
+-                max_content_width = @max(max_content_width, child.surface.size.width);
++                max_content_width = @max(max_content_width, child.surface.scroll_width orelse child.surface.size.width);
+             }
+             break :width max_content_width;
+         };
+         const max_content_width_f: f32 =
+-            if (self.scroll_view.scroll.left + max.width > max_content_width)
++            if (self.scroll_view.scroll.left +| max.width > max_content_width)
+                 // If we've managed to overscroll horizontally for whatever reason - for example if the
+                 // content changes - we make sure the scroll thumb doesn't disappear by increasing the
+                 // max content width to match the current overscrolled position.
+-                @floatFromInt(self.scroll_view.scroll.left + max.width)
++                @floatFromInt(self.scroll_view.scroll.left +| max.width)
+             else
+                 @floatFromInt(max_content_width);
+ 
 diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
-index 1c569eb..10429b7 100644
+index 1c569eb..39c2bdf 100644
 --- a/src/vxfw/ScrollView.zig
 +++ b/src/vxfw/ScrollView.zig
 @@ -11,10 +11,22 @@ const ScrollView = @This();
@@ -1308,7 +1353,13 @@ index 1c569eb..10429b7 100644
      }
  };
  
-@@ -38,6 +50,7 @@ const Scroll = struct {
+@@ -33,11 +45,12 @@ const Scroll = struct {
+     /// If there is more room to scroll down.
+     has_more_vertical: bool = true,
+     /// The column of the first in-view column.
+-    left: u32 = 0,
++    left: u64 = 0,
+     /// If there is more room to scroll right.
      has_more_horizontal: bool = true,
      /// The cursor must be in the viewport.
      wants_cursor: bool = false,
@@ -1334,7 +1385,7 @@ index 1c569eb..10429b7 100644
                      self.cursor -|= 1;
                  }
                  // If we didn't change state, we don't redraw
-@@ -267,6 +280,18 @@ pub fn ensureScroll(self: *ScrollView) void {
+@@ -267,6 +280,29 @@ pub fn ensureScroll(self: *ScrollView) void {
      }
  }
  
@@ -1350,10 +1401,21 @@ index 1c569eb..10429b7 100644
 +    self.scroll.anchor_end = true;
 +}
 +
++const DrawnChild = struct { surface: vxfw.Surface, shifted: bool };
++
++fn drawChild(self: *ScrollView, child: vxfw.Widget, ctx: vxfw.DrawContext, width: u16) Allocator.Error!DrawnChild {
++    if (child.drawHorizontalFn) |draw| return .{ .surface = try draw(child.userdata, ctx, self.scroll.left, width), .shifted = true };
++    return .{ .surface = try child.draw(ctx), .shifted = false };
++}
++
++fn childColumn(self: *ScrollView, offset: u16, shifted: bool) i17 {
++    return @as(i17, offset) - if (shifted) @as(i17, 0) else @as(i17, @intCast(@min(self.scroll.left, 65535)));
++}
++
  /// Inserts children until add_height is < 0
  fn insertChildren(
      self: *ScrollView,
-@@ -280,7 +305,7 @@ fn insertChildren(
+@@ -280,7 +316,7 @@ fn insertChildren(
      var upheight = add_height;
      while (self.scroll.top >= 0) : (self.scroll.top -= 1) {
          // Get the child
@@ -1362,7 +1424,26 @@ index 1c569eb..10429b7 100644
  
          const child_offset: u16 = if (self.draw_cursor) 2 else 0;
          const max_size = ctx.max.size();
-@@ -375,6 +400,22 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+@@ -292,15 +328,15 @@ fn insertChildren(
+         );
+ 
+         // Draw the child
+-        const surf = try child.draw(child_ctx);
++        const drawn = try self.drawChild(child, child_ctx, max_size.width - child_offset);
++        const surf = drawn.surface;
+ 
+         // Accumulate the height. Traversing backward so do this before setting origin
+         upheight -= surf.size.height;
+ 
+         // Insert the child to the beginning of the list
+-        const col_offset: i17 = if (self.draw_cursor) 2 else 0;
+         try child_list.insert(ctx.arena, 0, .{
+-            .origin = .{ .col = col_offset - @as(i17, @intCast(self.scroll.left)), .row = upheight },
++            .origin = .{ .col = self.childColumn(child_offset, drawn.shifted), .row = upheight },
+             .surface = surf,
+             .z_index = 0,
+         });
+@@ -375,6 +411,22 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
      //      will check for this at the end and only include visible children
      var accumulated_height: i17 = -(self.scroll.vertical_offset + self.scroll.pending_lines);
  
@@ -1376,7 +1457,7 @@ index 1c569eb..10429b7 100644
 +                .{ .width = max_size.width - child_offset, .height = 0 },
 +                .{ .width = null, .height = null },
 +            );
-+            const last_surface = try last.draw(child_ctx);
++            const last_surface = (try self.drawChild(last, child_ctx, max_size.width - child_offset)).surface;
 +            accumulated_height = @as(i17, max_size.height) - @as(i17, last_surface.size.height);
 +            self.scroll.vertical_offset = -accumulated_height;
 +        }
@@ -1385,7 +1466,7 @@ index 1c569eb..10429b7 100644
      // We handled the pending scroll by assigning accumulated_height. Reset it's state
      self.scroll.pending_lines = 0;
  
-@@ -399,7 +440,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+@@ -399,7 +451,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
  
      const child_offset: u16 = if (self.draw_cursor) 2 else 0;
  
@@ -1394,7 +1475,22 @@ index 1c569eb..10429b7 100644
          // Defer the increment
          defer i += 1;
  
-@@ -435,7 +476,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+@@ -410,11 +462,12 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+         );
+ 
+         // Draw the child
+-        const surf = try child.draw(child_ctx);
++        const drawn = try self.drawChild(child, child_ctx, max_size.width - child_offset);
++        const surf = drawn.surface;
+ 
+         // Add the child surface to our list. It's offset from parent is the accumulated height
+         try child_list.append(ctx.arena, .{
+-            .origin = .{ .col = child_offset - @as(i17, @intCast(self.scroll.left)), .row = accumulated_height },
++            .origin = .{ .col = self.childColumn(child_offset, drawn.shifted), .row = accumulated_height },
+             .surface = surf,
+             .z_index = 0,
+         });
+@@ -435,7 +488,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
      // see if we just drew the last item on the bottom of the screen. If we just drew the last item
      // we can set `scroll.has_more` to false.
      if (self.scroll.has_more_vertical and accumulated_height <= max_size.height) {
@@ -1403,8 +1499,35 @@ index 1c569eb..10429b7 100644
      }
  
      var total_height: usize = totalHeight(&child_list);
+@@ -457,7 +510,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+         const sub = try ctx.arena.alloc(vxfw.SubSurface, 1);
+         const child = child_list.items[cursored_idx];
+         sub[0] = .{
+-            .origin = .{ .col = child_offset - @as(i17, @intCast(self.scroll.left)), .row = 0 },
++            .origin = .{ .col = self.childColumn(child_offset, child.surface.scroll_width != null), .row = 0 },
+             .surface = child.surface,
+             .z_index = 0,
+         };
+@@ -503,7 +556,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+             self.scroll.vertical_offset = 0;
+             child_list.deinit(ctx.arena);
+             try child_list.append(ctx.arena, .{
+-                .origin = .{ .col = 0 - @as(i17, @intCast(self.scroll.left)), .row = 0 },
++                .origin = .{ .col = self.childColumn(0, sub.surface.scroll_width != null), .row = 0 },
+                 .surface = sub.surface,
+                 .z_index = 0,
+             });
+@@ -538,7 +591,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+     // Reset horizontal scroll info.
+     self.scroll.has_more_horizontal = false;
+     for (child_list.items) |child| {
+-        if (child.surface.size.width -| self.scroll.left > max_size.width) {
++        if ((child.surface.scroll_width orelse child.surface.size.width) -| self.scroll.left > max_size.width) {
+             self.scroll.has_more_horizontal = true;
+             break;
+         }
 diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
-index fe46d2b..b9b9a7f 100644
+index fe46d2b..d17eea1 100644
 --- a/src/vxfw/Text.zig
 +++ b/src/vxfw/Text.zig
 @@ -3,6 +3,123 @@ const vaxis = @import("../main.zig");
@@ -1439,7 +1562,7 @@ index fe46d2b..b9b9a7f 100644
 +                    .soft => |*iter| if (iter.next()) |wrapped| wrapped.bytes else null,
 +                    .hard => |*iter| iter.next(),
 +                };
-+                if (bytes) |row_bytes| return .{ .text = row_bytes, .style = source.style, .softwrap = false, .overflow = .clip };
++                if (bytes) |row_bytes| return .{ .text = row_bytes, .style = source.style, .softwrap = false, .overflow = .clip, .virtual_horizontal = !source.softwrap };
 +                self.source_index += 1;
 +                self.iter = .fresh;
 +            }
@@ -1531,7 +1654,57 @@ index fe46d2b..b9b9a7f 100644
  const vxfw = @import("vxfw.zig");
  
  const Text = @This();
-@@ -76,6 +193,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+@@ -13,14 +130,49 @@ text_align: enum { left, center, right } = .left,
+ softwrap: bool = true,
+ overflow: enum { ellipsis, clip } = .ellipsis,
+ width_basis: enum { parent, longest_line } = .longest_line,
++/// Only for a single hard line produced by LineIndex.
++virtual_horizontal: bool = false,
+ 
+ pub fn widget(self: *const Text) vxfw.Widget {
+     return .{
+         .userdata = @constCast(self),
+         .drawFn = typeErasedDrawFn,
++        .drawHorizontalFn = if (self.virtual_horizontal) drawHorizontal else null,
+     };
+ }
+ 
++// Single-line viewport realization; the original bytes remain borrowed and
++// intact. Graphemes crossing either edge are clipped as complete units.
++fn drawHorizontal(ptr: *anyopaque, ctx: vxfw.DrawContext, left: u64, width: u16) Allocator.Error!vxfw.Surface {
++    const self: *const Text = @ptrCast(@alignCast(ptr));
++    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = 1 });
++    const base: vaxis.Cell = .{ .style = self.style };
++    @memset(surface.buffer, base);
++    var column: usize = 0;
++    var chars = ctx.graphemeIterator(self.text);
++    while (chars.next()) |char| {
++        const grapheme = char.bytes(self.text);
++        const tab = std.mem.eql(u8, grapheme, "\t");
++        const cell_width = if (tab) 8 else ctx.stringWidth(grapheme);
++        const next = column + cell_width;
++        if (tab) {
++            const first = @max(column, left);
++            const last = @min(next, @as(usize, left) + width);
++            if (first < last) for (first..last) |cell| {
++                surface.writeCell(@intCast(cell - left), 0, .{ .char = .{ .grapheme = " ", .width = 1 }, .style = self.style });
++            };
++        } else if (column >= left and next <= @as(usize, left) + width and cell_width > 0 and cell_width <= std.math.maxInt(u8)) {
++            surface.writeCell(@intCast(column - left), 0, .{
++                .char = .{ .grapheme = grapheme, .width = @intCast(cell_width) },
++                .style = self.style,
++            });
++        }
++        column = next;
++    }
++    surface.scroll_width = @intCast(column);
++    return surface;
++}
++
+ fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
+     const self: *const Text = @ptrCast(@alignCast(ptr));
+     return self.draw(ctx);
+@@ -76,6 +228,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                      continue;
                  }
                  const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
@@ -1539,7 +1712,7 @@ index fe46d2b..b9b9a7f 100644
                  surface.writeCell(col, row, .{
                      .char = .{ .grapheme = grapheme, .width = grapheme_width },
                      .style = self.style,
-@@ -102,6 +220,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+@@ -102,6 +255,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                  const grapheme = char.bytes(line);
                  const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
  
@@ -1547,7 +1720,7 @@ index fe46d2b..b9b9a7f 100644
                  if (col + grapheme_width >= container_size.width and
                      line_width > container_size.width and
                      self.overflow == .ellipsis)
-@@ -204,6 +323,10 @@ pub const SoftwrapIterator = struct {
+@@ -204,6 +358,10 @@ pub const SoftwrapIterator = struct {
      line: []const u8 = "",
      index: usize = 0,
      hard_iter: LineIterator,
@@ -1558,7 +1731,7 @@ index fe46d2b..b9b9a7f 100644
  
      pub const Line = struct {
          width: u16,
-@@ -225,14 +348,15 @@ pub const SoftwrapIterator = struct {
+@@ -225,14 +383,15 @@ pub const SoftwrapIterator = struct {
              self.line = self.hard_iter.next() orelse return null;
              self.line = std.mem.trimEnd(u8, self.line, " \t");
              self.index = 0;
@@ -1576,7 +1749,7 @@ index fe46d2b..b9b9a7f 100644
  
              if (self.ctx.max.width) |max| {
                  if (cur_width + next_width > max) {
-@@ -244,17 +368,30 @@ pub const SoftwrapIterator = struct {
+@@ -244,17 +403,30 @@ pub const SoftwrapIterator = struct {
                      if (trimmed_width > max) {
                          // Won't fit on line by itself, so fit as much on this line as we can
                          var iter = self.ctx.graphemeIterator(word);
@@ -1607,7 +1780,7 @@ index fe46d2b..b9b9a7f 100644
                      // We are softwrapping, advance index to the start of the next word
                      const end = self.index;
                      self.index = std.mem.indexOfNonePos(u8, self.line, self.index, soft_breaks) orelse self.line.len;
-@@ -263,11 +400,21 @@ pub const SoftwrapIterator = struct {
+@@ -263,11 +435,21 @@ pub const SoftwrapIterator = struct {
              }
  
              self.index = idx;
@@ -1629,3 +1802,26 @@ index fe46d2b..b9b9a7f 100644
      /// Determines the index of the end of the next word
      fn nextWrap(self: *SoftwrapIterator) usize {
          // Find the first linear whitespace char
+diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
+index 587667d..9766bfd 100644
+--- a/src/vxfw/vxfw.zig
++++ b/src/vxfw/vxfw.zig
+@@ -275,6 +275,9 @@ pub const Widget = struct {
+     captureHandler: ?*const fn (userdata: *anyopaque, ctx: *EventContext, event: Event) anyerror!void = null,
+     eventHandler: ?*const fn (userdata: *anyopaque, ctx: *EventContext, event: Event) anyerror!void = null,
+     drawFn: *const fn (userdata: *anyopaque, ctx: DrawContext) Allocator.Error!Surface,
++    /// Optional horizontally virtualized drawing. The returned surface is
++    /// already shifted by `left` and reports its unshifted extent.
++    drawHorizontalFn: ?*const fn (userdata: *anyopaque, ctx: DrawContext, left: u64, width: u16) Allocator.Error!Surface = null,
+ 
+     pub fn captureEvent(self: Widget, ctx: *EventContext, event: Event) anyerror!void {
+         if (self.captureHandler) |handle| {
+@@ -348,6 +351,8 @@ pub const Surface = struct {
+     buffer: []vaxis.Cell,
+ 
+     children: []SubSurface,
++    /// Logical width of an already horizontally clipped surface.
++    scroll_width: ?u64 = null,
+ 
+     pub fn empty(widget: Widget) Surface {
+         return .{
