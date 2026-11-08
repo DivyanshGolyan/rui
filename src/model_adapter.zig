@@ -1679,6 +1679,11 @@ test "plain JSON runs batch writes and conserve scan plus output allowance" {
     try std.testing.expectEqual(@as(usize, 0), try writePlainJsonRun(&sink, "\\", &escaped));
 }
 
+fn diagnosticExpect(location: std.builtin.SourceLocation, condition: bool) !void {
+    if (!condition) std.debug.print("adapter diagnostic assertion {s}:{d}\n", .{ location.file, location.line });
+    try std.testing.expect(condition);
+}
+
 const PreparationTestSetup = struct {
     tmp: std.testing.TmpDir,
     storage: store.Store,
@@ -1729,8 +1734,8 @@ const PreparationTestSetup = struct {
         try command.configuration.compaction_trigger.value.set("115200");
         command.configuration.reasoning_effort.state = .explicit_null;
         const configured = self.storage.configure(&command, .{});
-        try std.testing.expect(configured == .accepted);
-        try std.testing.expect(protocol.validSessionId(configured.accepted.session.slice()));
+        try diagnosticExpect(@src(), configured == .accepted);
+        try diagnosticExpect(@src(), protocol.validSessionId(configured.accepted.session.slice()));
         return configured.accepted.session;
     }
 
@@ -1758,7 +1763,7 @@ const PreparationTestSetup = struct {
             .digest = protocol.contentDigest(text),
         };
         defer command.removeTemporaryContent(std.testing.io) catch unreachable;
-        try std.testing.expect(self.storage.submitMessageWithModel(&command, null, .{}) == .accepted);
+        try diagnosticExpect(@src(), self.storage.submitMessageWithModel(&command, null, .{}) == .accepted);
     }
 };
 
@@ -1962,32 +1967,32 @@ fn drainLivePreparation(
         // any fallible assertion below can drop it.
         switch (progress) {
             .pending => {
-                try std.testing.expect(steps <= step_bound);
+                try diagnosticExpect(@src(), steps <= step_bound);
                 const stats = preparation.advanceStats();
-                try std.testing.expect(stats.work_bytes <= byte_allowance);
-                try std.testing.expect(stats.work_items <= item_allowance);
-                try std.testing.expect(stats.request_bytes >= last_request);
+                try diagnosticExpect(@src(), stats.work_bytes <= byte_allowance);
+                try diagnosticExpect(@src(), stats.work_items <= item_allowance);
+                try diagnosticExpect(@src(), stats.request_bytes >= last_request);
                 last_request = stats.request_bytes;
-                try std.testing.expect(preparation.state.active);
+                try diagnosticExpect(@src(), preparation.state.active);
             },
             .prepared => |request| {
                 var transferred = false;
                 errdefer if (!transferred) request.deinit(std.testing.io, preparation.writer.budget);
-                try std.testing.expect(steps <= step_bound);
+                try diagnosticExpect(@src(), steps <= step_bound);
                 const stats = preparation.advanceStats();
-                try std.testing.expect(stats.work_bytes <= byte_allowance);
-                try std.testing.expect(stats.work_items <= item_allowance);
-                try std.testing.expect(stats.request_bytes >= last_request);
-                try std.testing.expect(!preparation.state.active);
+                try diagnosticExpect(@src(), stats.work_bytes <= byte_allowance);
+                try diagnosticExpect(@src(), stats.work_items <= item_allowance);
+                try diagnosticExpect(@src(), stats.request_bytes >= last_request);
+                try diagnosticExpect(@src(), !preparation.state.active);
                 transferred = true;
                 return request;
             },
             .failed => |err| {
-                try std.testing.expect(steps <= step_bound);
+                try diagnosticExpect(@src(), steps <= step_bound);
                 const stats = preparation.advanceStats();
-                try std.testing.expect(stats.work_bytes <= byte_allowance);
-                try std.testing.expect(stats.work_items <= item_allowance);
-                try std.testing.expect(stats.request_bytes >= last_request);
+                try diagnosticExpect(@src(), stats.work_bytes <= byte_allowance);
+                try diagnosticExpect(@src(), stats.work_items <= item_allowance);
+                try diagnosticExpect(@src(), stats.request_bytes >= last_request);
                 return err;
             },
         }
@@ -2002,7 +2007,7 @@ fn stepPreparationToOffset(preparation: *Preparation, target: u64, step_bound: u
     var steps: usize = 0;
     while (true) {
         steps += 1;
-        try std.testing.expect(steps <= step_bound);
+        try diagnosticExpect(@src(), steps <= step_bound);
         const progress = preparation.advance(1, 1);
         switch (progress) {
             .pending => {},
@@ -2012,14 +2017,14 @@ fn stepPreparationToOffset(preparation: *Preparation, target: u64, step_bound: u
             // is inactive after sealing, so callers must not cancel it.
             .prepared => |request| {
                 request.deinit(std.testing.io, preparation.writer.budget);
-                try std.testing.expect(false);
+                try diagnosticExpect(@src(), false);
                 unreachable;
             },
             .failed => |err| return err,
         }
         const written = preparation.advanceStats().request_bytes;
         if (written == target) return;
-        try std.testing.expect(written < target);
+        try diagnosticExpect(@src(), written < target);
     }
 }
 
@@ -3098,13 +3103,13 @@ test "request preparation replays a large private reasoning item within each adv
         var turns: usize = 0;
         while (true) {
             turns += 1;
-            try std.testing.expect(turns < 1000000);
+            try diagnosticExpect(@src(), turns < 1000000);
             // Replay reads and writes no more than each advance charges.
             const written = preparation.writer.offset;
             const progress = preparation.advance(7, 2);
-            try std.testing.expect(preparation.advanceStats().work_bytes <= 7);
-            try std.testing.expect(preparation.advanceStats().work_items <= 2);
-            try std.testing.expect(preparation.writer.offset - written <= 7);
+            try diagnosticExpect(@src(), preparation.advanceStats().work_bytes <= 7);
+            try diagnosticExpect(@src(), preparation.advanceStats().work_items <= 2);
+            try diagnosticExpect(@src(), preparation.writer.offset - written <= 7);
             if (progress == .pending) try preparation.checkIntegrity(binding);
             switch (progress) {
                 .pending => {},
@@ -3113,8 +3118,8 @@ test "request preparation replays a large private reasoning item within each adv
                     defer request.deinit(std.testing.io, preparation.writer.budget);
                     var request_buffer: [64 * 1024]u8 = undefined;
                     const length = try request.file.readPositionalAll(std.testing.io, &request_buffer, 0);
-                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], replayed.buffered()) != null);
-                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], "private") == null);
+                    try diagnosticExpect(@src(), std.mem.indexOf(u8, request_buffer[0..length], replayed.buffered()) != null);
+                    try diagnosticExpect(@src(), std.mem.indexOf(u8, request_buffer[0..length], "private") == null);
                     break;
                 },
             }
@@ -3325,7 +3330,8 @@ test "request preparation replays reasoning continuation without its private rea
             .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"content\":[],\"contents\":[\"open\"],\"encrypted_content\":\"opaque\"}",
         },
     };
-    for (cases) |case| for ([_][2]usize{ .{ 1, 1 }, .{ 7, 3 }, .{ 16384, 64 } }) |schedule| {
+    for (cases, 0..) |case, case_index| for ([_][2]usize{ .{ 1, 1 }, .{ 7, 3 }, .{ 16384, 64 } }) |schedule| {
+        std.debug.print("adapter diagnostic continuation case={d} bytes={d} items={d}\n", .{ case_index, schedule[0], schedule[1] });
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -3352,8 +3358,8 @@ test "request preparation replays reasoning continuation without its private rea
         defer std.testing.allocator.free(body);
         const expected = try requestGolden(setup.workspace, session.slice(), body);
         defer std.testing.allocator.free(expected);
-        try std.testing.expectEqualStrings(expected, result.bytes);
-        try std.testing.expect(std.mem.indexOf(u8, result.bytes, "private") == null);
+        try diagnosticExpect(@src(), std.mem.eql(u8, expected, result.bytes));
+        try diagnosticExpect(@src(), std.mem.indexOf(u8, result.bytes, "private") == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     };
 }
