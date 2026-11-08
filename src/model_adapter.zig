@@ -1708,6 +1708,14 @@ const PreparationTestSetup = struct {
         self.workspace = self.workspace_buffer[0..try directory.realPath(std.testing.io, &self.workspace_buffer)];
     }
 
+    fn usePrivateWorkspace(self: *PreparationTestSetup) !void {
+        try self.tmp.dir.createDir(std.testing.io, "private-workspace", .default_dir);
+        var directory = try self.tmp.dir.openDir(std.testing.io, "private-workspace", .{});
+        defer directory.close(std.testing.io);
+        self.workspace = self.workspace_buffer[0..try directory.realPath(std.testing.io, &self.workspace_buffer)];
+        try std.testing.expect(std.mem.indexOf(u8, self.workspace, "private") != null);
+    }
+
     fn close(self: *PreparationTestSetup) void {
         self.storage.close() catch unreachable;
         self.tmp.cleanup();
@@ -3062,6 +3070,7 @@ test "request preparation replays a large private reasoning item within each adv
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
+        try setup.usePrivateWorkspace();
         const session = try setup.configure("large-config");
         try setup.submit("large-input", "large-input-key", session.slice(), "hi");
         var admitted = (try setup.storage.admitNextModelAttempt(.{})).?;
@@ -3083,7 +3092,7 @@ test "request preparation replays a large private reasoning item within each adv
             try writer.writeAll("\",");
             for (0..1000) |_| try writer.writeAll("\"future\":{\"open\":[0,null]},");
         }
-        try item.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\",\"annotations\":[],\"annotations\":false}]," ++ summary ++ ",");
+        try item.writeAll("\"content\":[{\"type\":\"reasoning_text\",\"text\":\"RUI_PRIVATE_REASONING_SENTINEL_A\",\"annotations\":[],\"annotations\":false}]," ++ summary ++ ",");
         try item.writeAll("\"id\":\"r\",\"type\":\"reasoning\",\"status\":\"completed\"}");
         try replayed.writeAll("\"id\":\"r\",\"status\":\"completed\"}");
         try settleComposedForTesting(&setup, first, "large-metadata", .reasoning, item.buffered(), &.{});
@@ -3114,7 +3123,7 @@ test "request preparation replays a large private reasoning item within each adv
                     var request_buffer: [64 * 1024]u8 = undefined;
                     const length = try request.file.readPositionalAll(std.testing.io, &request_buffer, 0);
                     try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], replayed.buffered()) != null);
-                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], "private") == null);
+                    try std.testing.expect(std.mem.indexOf(u8, request_buffer[0..length], "RUI_PRIVATE_REASONING_SENTINEL_A") == null);
                     break;
                 },
             }
@@ -3308,16 +3317,16 @@ test "request preparation replays reasoning continuation without its private rea
     // no reasoning text and stays.
     const cases = [_]struct { saved: []const u8, replayed: []const u8 }{
         .{
-            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"private\"},{\"type\":\"reasoning_text\",\"text\":\"more private\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
+            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"RUI_PRIVATE_REASONING_SENTINEL_A\"},{\"type\":\"reasoning_text\",\"text\":\"RUI_PRIVATE_REASONING_SENTINEL_B\"}],\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
             // Rebuilt from Rui's form: parts first, then the provider bag.
             .replayed = "{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"visible\"}],\"id\":\"r\",\"encrypted_content\":\"opaque\",\"status\":\"completed\"}",
         },
         .{
-            .saved = "{\"content\" : [ {\"text\":\"private\",\"type\":\"reasoning_text\",\"annotations\":[]} ] , \"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
+            .saved = "{\"content\" : [ {\"text\":\"RUI_PRIVATE_REASONING_SENTINEL_A\",\"type\":\"reasoning_text\",\"annotations\":[]} ] , \"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
             .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
         },
         .{
-            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"c\\u006fntent\":[{\"type\":\"reasoning_text\",\"text\":\"private\"}]}",
+            .saved = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\",\"c\\u006fntent\":[{\"type\":\"reasoning_text\",\"text\":\"RUI_PRIVATE_REASONING_SENTINEL_A\"}]}",
             .replayed = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}",
         },
         .{
@@ -3329,6 +3338,7 @@ test "request preparation replays reasoning continuation without its private rea
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
+        try setup.usePrivateWorkspace();
         const session = try setup.configure("reasoning-text-config");
         try setup.submit("reasoning-text-one", "reasoning-text-one", session.slice(), "original");
         const source = (try setup.storage.admitNextModelAttempt(.{})).?.permit.binding;
@@ -3353,7 +3363,8 @@ test "request preparation replays reasoning continuation without its private rea
         const expected = try requestGolden(setup.workspace, session.slice(), body);
         defer std.testing.allocator.free(expected);
         try std.testing.expectEqualStrings(expected, result.bytes);
-        try std.testing.expect(std.mem.indexOf(u8, result.bytes, "private") == null);
+        try std.testing.expect(std.mem.indexOf(u8, result.bytes, "RUI_PRIVATE_REASONING_SENTINEL_A") == null);
+        try std.testing.expect(std.mem.indexOf(u8, result.bytes, "RUI_PRIVATE_REASONING_SENTINEL_B") == null);
         try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     };
 }
