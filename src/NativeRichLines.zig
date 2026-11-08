@@ -4,35 +4,45 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const markdown = @import("markdown_prefix.zig");
+const table = @import("table_row.zig");
+const fw = vaxis.vxfw;
 const client = @import("client.zig");
 const Self = @This();
 
 pub const Mode = enum(u8) { prose, @"opaque" };
+pub const TableRole = enum(u8) { none, header, rule, body };
 pub const Line = extern struct {
     start: u64,
     end: u64,
     next: u64,
+    table_group: u64 = 0,
     mode: Mode,
     quote_depth: u8,
     quote_prefix: u8,
-    reserved: [5]u8 = @splat(0),
+    table_role: TableRole = .none,
+    reserved: [4]u8 = @splat(0),
+};
+pub const Table = extern struct {
+    widths: [table.max_columns]u64 = @splat(0),
+    alignment: [table.max_columns]u8 = @splat(0),
+    count: u8,
+    reserved: [7]u8 = @splat(0),
 };
 
 io: std.Io,
 file: std.Io.File,
+tables: std.Io.File,
 count: u64 = 0,
+table_count: u64 = 0,
 
 /// The source and its authenticated owner must outlive this disposable index.
 /// Scanning is linear in source bytes and retains one bounded head and page.
 pub fn build(io: std.Io, dir: std.Io.Dir, source: vaxis.unicode.PagedSource, cancellation: ?*const client.Cancellation) !Self {
-    var random: [16]u8 = undefined;
-    try std.Io.randomSecure(io, &random);
-    var name_buffer: [64]u8 = undefined;
-    const name = try std.fmt.bufPrint(&name_buffer, "rui-lines-{s}.tmp", .{std.fmt.bytesToHex(random, .lower)});
-    const file = try dir.createFile(io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+    const file = try scratch(io, dir);
     errdefer file.close(io);
-    try dir.deleteFile(io, name);
-    var self: Self = .{ .io = io, .file = file };
+    const tables = try scratch(io, dir);
+    errdefer tables.close(io);
+    var self: Self = .{ .io = io, .file = file, .tables = tables };
     var reader: vaxis.unicode.PagedReader = .{ .source = source };
     var context: markdown.Context = .plain;
     var head: [markdown.head_limit]u8 = undefined;
@@ -53,7 +63,19 @@ pub fn build(io: std.Io, dir: std.Io.Dir, source: vaxis.unicode.PagedSource, can
     }
     if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
     if (start < source.length) try self.append(&context, head[0..head_len], start, source.length, source.length, .canonical_eof);
+    try self.indexTables(source, cancellation);
     return self;
+}
+
+fn scratch(io: std.Io, dir: std.Io.Dir) !std.Io.File {
+    var random: [16]u8 = undefined;
+    try std.Io.randomSecure(io, &random);
+    var name_buffer: [64]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buffer, "rui-lines-{s}.tmp", .{std.fmt.bytesToHex(random, .lower)});
+    const file = try dir.createFile(io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+    errdefer file.close(io);
+    try dir.deleteFile(io, name);
+    return file;
 }
 
 fn append(self: *Self, context: *markdown.Context, head: []const u8, start: usize, end: usize, next: usize, ending: markdown.HeadEnding) !void {
@@ -83,7 +105,108 @@ pub fn lineAt(self: *const Self, index: u64) !?Line {
     return line;
 }
 
+fn indexTables(self: *Self, source: vaxis.unicode.PagedSource, cancellation: ?*const client.Cancellation) !void {
+    var first_buf: [table.max_source_bytes]u8 = undefined;
+    var second_buf: [table.max_source_bytes]u8 = undefined;
+    var i: u64 = 0;
+    while (i + 1 < self.count) {
+        if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
+        var first = (try self.lineAt(i)).?;
+        var delimiter = (try self.lineAt(i + 1)).?;
+        if (!eligible(first) or !eligible(delimiter) or first.next == first.end) {
+            i += 1;
+            continue;
+        }
+        const header = (try readLine(source, first, &first_buf)) orelse {
+            i += 1;
+            continue;
+        };
+        const rule = (try readLine(source, delimiter, &second_buf)) orelse {
+            i += 1;
+            continue;
+        };
+        const columns = switch (table.header(header, rule, ending(delimiter))) {
+            .columns => |value| value,
+            else => {
+                i += 1;
+                continue;
+            },
+        };
+        const first_row = switch (table.parse(header, .line_feed, columns.count)) {
+            .row => |value| value,
+            else => return error.InvalidSourceRead,
+        };
+        var group: Table = .{ .count = columns.count };
+        for (columns.alignment[0..columns.count], 0..) |alignment, col| group.alignment[col] = @intFromEnum(alignment);
+        measure(&group, header, first_row);
+        first.table_group = self.table_count;
+        first.table_role = .header;
+        delimiter.table_group = self.table_count;
+        delimiter.table_role = .rule;
+        try self.writeLine(i, first);
+        try self.writeLine(i + 1, delimiter);
+        var next = i + 2;
+        while (next < self.count) : (next += 1) {
+            if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
+            var line = (try self.lineAt(next)).?;
+            if (!eligible(line)) break;
+            const raw = (try readLine(source, line, &first_buf)) orelse break;
+            const parsed = switch (table.parse(raw, ending(line), columns.count)) {
+                .row => |value| value,
+                else => break,
+            };
+            if (!parsed.has_pipe) break;
+            measure(&group, raw, parsed);
+            line.table_group = self.table_count;
+            line.table_role = .body;
+            try self.writeLine(next, line);
+        }
+        try self.tables.writeStreamingAll(self.io, std.mem.asBytes(&group));
+        self.table_count = try std.math.add(u64, self.table_count, 1);
+        i = next;
+    }
+}
+
+fn eligible(line: Line) bool {
+    return line.mode == .prose and line.quote_depth == 0;
+}
+
+fn ending(line: Line) table.Ending {
+    return if (line.next > line.end) .line_feed else .canonical_eof;
+}
+
+fn readLine(source: vaxis.unicode.PagedSource, line: Line, buffer: *[table.max_source_bytes]u8) !?[]const u8 {
+    const len = line.end - line.start;
+    if (len > buffer.len) return null;
+    var filled: usize = 0;
+    while (filled < len) {
+        const n = try source.readFn(source.userdata, line.start + filled, buffer[filled..@intCast(len)]);
+        if (n == 0 or n > len - filled) return error.InvalidSourceRead;
+        filled += n;
+    }
+    return buffer[0..@intCast(len)];
+}
+
+fn measure(group: *Table, raw: []const u8, row: table.Row) void {
+    const ctx: fw.DrawContext = .{ .arena = std.heap.page_allocator, .min = .{}, .max = .{}, .cell_size = .{} };
+    for (row.cells[0..row.count], 0..) |cell, col| group.widths[col] = @max(group.widths[col], ctx.hardLineWidth(raw[cell.start..cell.end]));
+}
+
+fn writeLine(self: *Self, index: u64, line: Line) !void {
+    const offset = try std.math.mul(u64, index, @sizeOf(Line));
+    try self.file.writePositionalAll(self.io, std.mem.asBytes(&line), offset);
+}
+
+pub fn tableAt(self: *const Self, index: u64) !?Table {
+    if (index >= self.table_count) return null;
+    var group: Table = undefined;
+    const offset = try std.math.mul(u64, index, @sizeOf(Table));
+    if (try self.tables.readPositionalAll(self.io, std.mem.asBytes(&group), offset) != @sizeOf(Table)) return error.TruncatedResponse;
+    return group;
+}
+
 pub fn close(self: *Self) void {
+    self.tables.close(self.io);
     self.file.close(self.io);
     self.* = undefined;
 }
@@ -129,4 +252,37 @@ test "native rich line index keeps bounded quote and fenced source facts" {
     const only = (try entries.next(io)).?;
     try std.testing.expectEqualStrings("display", only.name);
     try std.testing.expect((try entries.next(io)) == null);
+}
+
+test "native rich table index retains column facts without padded rows" {
+    fw.DrawContext.init(.unicode);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "display", .{ .read = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, "before\na | b\n--- | :---:\n");
+    for (0..5000) |_| try file.writeStreamingAll(io, "s | 界\n");
+    const wide: [4000]u8 = @splat('W');
+    try file.writeStreamingAll(io, &wide);
+    try file.writeStreamingAll(io, " | X\n\n```\na | b\n--- | ---\n```\nafter\n");
+    const source_length = try file.length(io);
+    const backing: TestSource = .{ .io = io, .file = file };
+    var index = try Self.build(io, tmp.dir, .{ .userdata = &backing, .length = @intCast(source_length), .readFn = TestSource.read }, null);
+    defer index.close();
+    try std.testing.expectEqual(@as(u64, 1), index.table_count);
+    try std.testing.expectEqual(TableRole.header, (try index.lineAt(1)).?.table_role);
+    try std.testing.expectEqual(TableRole.rule, (try index.lineAt(2)).?.table_role);
+    try std.testing.expectEqual(TableRole.body, (try index.lineAt(5003)).?.table_role);
+    const group = (try index.tableAt(0)).?;
+    try std.testing.expectEqual(@as(u8, 2), group.count);
+    try std.testing.expectEqual(@as(u64, 4000), group.widths[0]);
+    try std.testing.expectEqual(@as(u64, 2), group.widths[1]);
+    try std.testing.expectEqual(@intFromEnum(table.Alignment.center), group.alignment[1]);
+    try std.testing.expect((try index.tableAt(1)) == null);
+    try std.testing.expectEqual(Mode.@"opaque", (try index.lineAt(5005)).?.mode);
+    try std.testing.expectEqual(TableRole.none, (try index.lineAt(5006)).?.table_role);
+    try std.testing.expectEqual(index.count * @sizeOf(Line), try index.file.length(io));
+    try std.testing.expectEqual(@as(u64, @sizeOf(Table)), try index.tables.length(io));
+    std.debug.print("rich-index source_bytes={d} lines={d} line_disk_bytes={d} table_disk_bytes={d}\n", .{ source_length, index.count, try index.file.length(io), try index.tables.length(io) });
 }
