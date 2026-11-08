@@ -1270,10 +1270,63 @@ index 1c569eb..e7c757b 100644
  fn insertChildren(
      self: *ScrollView,
 diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
-index fe46d2b..2787c54 100644
+index fe46d2b..530600a 100644
 --- a/src/vxfw/Text.zig
 +++ b/src/vxfw/Text.zig
-@@ -204,6 +204,10 @@ pub const SoftwrapIterator = struct {
+@@ -3,6 +3,52 @@ const vaxis = @import("../main.zig");
+ 
+ const Allocator = std.mem.Allocator;
+ 
++/// A reusable extent index over native Text wrapping. The ScrollView draws
++/// only indexed rows it can see; source slices remain owned by the caller.
++/// Rebuilding the index uses memory proportional to visual row count, not
++/// the number of cells in the entire document.
++pub const LineIndex = struct {
++    lines: std.ArrayList(Text) = .empty,
++    width: ?u16 = null,
++
++    pub fn deinit(self: *LineIndex, allocator: Allocator) void {
++        self.lines.deinit(allocator);
++        self.* = .{};
++    }
++
++    pub fn reflow(self: *LineIndex, allocator: Allocator, sources: []const Text, ctx: vxfw.DrawContext) Allocator.Error!void {
++        const width = ctx.max.width orelse ctx.min.width;
++        var lines: std.ArrayList(Text) = .empty;
++        errdefer lines.deinit(allocator);
++        if (width != 0) {
++            const line_ctx = ctx.withConstraints(.{ .width = width }, .{ .width = width, .height = null });
++            for (sources) |source| {
++                if (source.softwrap) {
++                    var iter = SoftwrapIterator.init(source.text, line_ctx);
++                    while (iter.next()) |line| try lines.append(allocator, .{ .text = line.bytes, .style = source.style, .softwrap = false, .overflow = .clip });
++                } else {
++                    var iter: LineIterator = .{ .buf = source.text };
++                    while (iter.next()) |line| try lines.append(allocator, .{ .text = line, .style = source.style, .softwrap = false, .overflow = .clip });
++                }
++            }
++        }
++        if (lines.items.len > std.math.maxInt(u32)) return error.OutOfMemory;
++        self.lines.deinit(allocator);
++        self.lines = lines;
++        self.width = width;
++    }
++
++    pub fn builder(self: *LineIndex) vxfw.ScrollView.Builder {
++        return .{ .userdata = self, .buildFn = lineAt };
++    }
++
++    fn lineAt(raw: *const anyopaque, index: usize, _: usize) ?vxfw.Widget {
++        const self: *const LineIndex = @ptrCast(@alignCast(raw));
++        if (index >= self.lines.items.len) return null;
++        return self.lines.items[index].widget();
++    }
++};
++
+ const vxfw = @import("vxfw.zig");
+ 
+ const Text = @This();
+@@ -204,6 +250,10 @@ pub const SoftwrapIterator = struct {
      line: []const u8 = "",
      index: usize = 0,
      hard_iter: LineIterator,
@@ -1284,7 +1337,7 @@ index fe46d2b..2787c54 100644
  
      pub const Line = struct {
          width: u16,
-@@ -225,14 +229,15 @@ pub const SoftwrapIterator = struct {
+@@ -225,14 +275,15 @@ pub const SoftwrapIterator = struct {
              self.line = self.hard_iter.next() orelse return null;
              self.line = std.mem.trimEnd(u8, self.line, " \t");
              self.index = 0;
@@ -1302,7 +1355,7 @@ index fe46d2b..2787c54 100644
  
              if (self.ctx.max.width) |max| {
                  if (cur_width + next_width > max) {
-@@ -244,17 +249,21 @@ pub const SoftwrapIterator = struct {
+@@ -244,17 +295,21 @@ pub const SoftwrapIterator = struct {
                      if (trimmed_width > max) {
                          // Won't fit on line by itself, so fit as much on this line as we can
                          var iter = self.ctx.graphemeIterator(word);
@@ -1324,7 +1377,7 @@ index fe46d2b..2787c54 100644
                      // We are softwrapping, advance index to the start of the next word
                      const end = self.index;
                      self.index = std.mem.indexOfNonePos(u8, self.line, self.index, soft_breaks) orelse self.line.len;
-@@ -263,6 +272,7 @@ pub const SoftwrapIterator = struct {
+@@ -263,6 +318,7 @@ pub const SoftwrapIterator = struct {
              }
  
              self.index = idx;

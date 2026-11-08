@@ -43,3 +43,26 @@ test "native text keeps the end of a long unbroken Unicode line" {
     try std.testing.expectEqualStrings("界", surface.readCell(0, 125).char.grapheme);
     try std.testing.expectEqualStrings("!", surface.readCell(2, 125).char.grapheme);
 }
+
+test "native text extent indexes long output without full-height cell surfaces" {
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+    for (0..1_000_000) |_| try source.writer.writeByte('x');
+    try source.writer.writeAll("界!");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{ .width = 80 }, .max = .{ .width = 80, .height = null }, .cell_size = .{} };
+    var index: fw.Text.LineIndex = .{};
+    defer index.deinit(std.testing.allocator);
+    const inputs = [_]fw.Text{.{ .text = source.written() }};
+    try index.reflow(std.testing.allocator, &inputs, ctx);
+    try std.testing.expectEqual(@as(usize, 12_501), index.lines.items.len);
+    const first = try index.builder().itemAtIdx(0, 0).?.draw(ctx);
+    const last = try index.builder().itemAtIdx(index.lines.items.len - 1, 0).?.draw(ctx);
+    try std.testing.expectEqual(@as(u16, 1), first.size.height);
+    try std.testing.expectEqual(@as(u16, 1), last.size.height);
+    try std.testing.expectEqualStrings("x", first.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("界", last.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("!", last.readCell(2, 0).char.grapheme);
+}

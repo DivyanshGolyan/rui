@@ -72,19 +72,6 @@ const RowWidget = struct {
     }
 };
 
-const FeedWidget = struct {
-    text: fw.Text,
-
-    fn widget(self: *FeedWidget) fw.Widget {
-        return .{ .userdata = self, .drawFn = FeedWidget.draw };
-    }
-
-    fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface {
-        const self: *FeedWidget = @ptrCast(@alignCast(raw));
-        return self.text.draw(ctx.withConstraints(ctx.min, .{ .width = ctx.min.width, .height = null }));
-    }
-};
-
 const ReadKind = union(enum) { list, conversation: struct { id: Id, since: ?@import("protocol_reply.zig").SessionToken } };
 const ReadResult = union(enum) { list: []observations.Row, conversation: ?observations.Conversation };
 
@@ -98,7 +85,9 @@ destination: ?Id = null,
 list: fw.ListView = .{ .children = .{ .slice = &.{} }, .item_count = 0, .draw_cursor = false },
 rows: []*RowWidget = &.{},
 feed: fw.ScrollBars = .{ .scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 }, .draw_horizontal_scrollbar = true },
-blocks: []FeedWidget = &.{},
+blocks: []fw.Text = &.{},
+feed_index: fw.Text.LineIndex = .{},
+feed_index_dirty: bool = true,
 feed_token: ?@import("protocol_reply.zig").SessionToken = null,
 following: bool = true,
 header: fw.Text = .{ .text = "" },
@@ -161,6 +150,7 @@ fn deinit(self: *Self) void {
     self.freeArena(self.read_arena);
     self.freeArena(self.list_arena);
     self.freeArena(self.old_list_arena);
+    self.feed_index.deinit(self.init.gpa);
     self.freeArena(self.feed_arena);
     self.freeArena(self.old_feed_arena);
     var values = self.drafts.valueIterator();
@@ -210,12 +200,6 @@ fn rowAt(raw: *const anyopaque, index: usize, _: usize) ?fw.Widget {
     const self: *Self = @ptrCast(@alignCast(@constCast(raw)));
     if (index >= self.rows.len) return null;
     return self.rows[index].widget();
-}
-
-fn blockAt(raw: *const anyopaque, index: usize, _: usize) ?fw.Widget {
-    const self: *Self = @ptrCast(@alignCast(@constCast(raw)));
-    if (index >= self.blocks.len) return null;
-    return self.blocks[index].widget();
 }
 
 fn startRead(self: *Self) !void {
@@ -292,22 +276,18 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
                 return;
             };
             const blocks = conversation.blocks;
-            const widgets = try arena.allocator().alloc(FeedWidget, blocks.len);
+            const widgets = try arena.allocator().alloc(fw.Text, blocks.len);
             for (blocks, widgets) |block, *item| {
                 const prefix = if (block.kind == .user) "You\n" else "Assistant\n";
-                item.* = .{ .text = .{ .text = try std.fmt.allocPrint(arena.allocator(), "{s}{s}\n", .{ prefix, block.display }), .softwrap = true, .width_basis = .parent } };
+                item.* = .{ .text = try std.fmt.allocPrint(arena.allocator(), "{s}{s}\n", .{ prefix, block.display }), .softwrap = true, .width_basis = .parent };
             }
             self.freeArena(self.old_feed_arena);
             self.old_feed_arena = self.feed_arena;
             self.feed_arena = arena;
             self.feed_token = conversation.token;
             self.blocks = widgets;
+            self.feed_index_dirty = true;
             ctx.redraw = true;
-            self.feed.scroll_view.children = .{ .builder = .{ .userdata = self, .buildFn = blockAt } };
-            self.feed.scroll_view.item_count = @intCast(widgets.len);
-            if (self.following and widgets.len != 0) {
-                self.feed.scroll_view.jumpToEnd();
-            }
         },
     }
 }
@@ -317,6 +297,7 @@ fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
     self.destination = id;
     self.following = true;
     self.blocks = &.{};
+    self.feed_index_dirty = true;
     self.feed_token = null;
     self.feed.scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 };
     try ctx.requestFocus(self.activeDraft().field.widget());
@@ -526,6 +507,17 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
         try self.activeDraft().field.draw(ctx.withConstraints(.{}, .{ .width = width, .height = composer_max }));
     const body_height = height -| 2 -| composer.size.height;
     const body_ctx = ctx.withConstraints(.{ .width = width, .height = body_height }, .{ .width = width, .height = body_height });
+    if (self.destination != null and body_height != 0) {
+        const content_width = width -| @intFromBool(self.feed.draw_vertical_scrollbar);
+        if (self.feed_index_dirty or self.feed_index.width == null or self.feed_index.width.? != content_width) {
+            try self.feed_index.reflow(self.init.gpa, self.blocks, body_ctx.withConstraints(.{ .width = content_width }, .{ .width = content_width, .height = null }));
+            self.feed_index_dirty = false;
+            self.feed.scroll_view.children = .{ .builder = self.feed_index.builder() };
+            self.feed.scroll_view.item_count = @intCast(self.feed_index.lines.items.len);
+            self.feed.estimated_content_height = @intCast(self.feed_index.lines.items.len);
+        }
+        if (self.following) self.feed.scroll_view.jumpToEnd();
+    }
     const body = if (self.destination == null) try self.list.draw(body_ctx) else try self.feed.draw(body_ctx);
     const children = try ctx.arena.alloc(fw.SubSurface, 4);
     children[0] = .{ .origin = .{ .col = 0, .row = 0 }, .surface = header, .z_index = 0 };
