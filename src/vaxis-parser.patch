@@ -1548,7 +1548,7 @@ index 1c569eb..5842e4f 100644
              break;
          }
 diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
-index fe46d2b..2275d57 100644
+index fe46d2b..2e91d8e 100644
 --- a/src/vxfw/Text.zig
 +++ b/src/vxfw/Text.zig
 @@ -3,6 +3,126 @@ const vaxis = @import("../main.zig");
@@ -1678,7 +1678,7 @@ index fe46d2b..2275d57 100644
  const vxfw = @import("vxfw.zig");
  
  const Text = @This();
-@@ -13,14 +133,62 @@ text_align: enum { left, center, right } = .left,
+@@ -13,14 +133,63 @@ text_align: enum { left, center, right } = .left,
  softwrap: bool = true,
  overflow: enum { ellipsis, clip } = .ellipsis,
  width_basis: enum { parent, longest_line } = .longest_line,
@@ -1690,11 +1690,12 @@ index fe46d2b..2275d57 100644
 +quote_rail: bool = false,
 +/// Optional presentation of one hard source line, realized only in the draw
 +/// arena. The callback and source bytes must outlive that arena's frame.
++lazy_line: ?LazyLine = null,
++
 +pub const LazyLine = struct {
 +    userdata: *const anyopaque,
 +    renderFn: *const fn (*const anyopaque, []const u8, Allocator) Allocator.Error![]const u8,
 +};
-+lazy_line: ?LazyLine = null,
  
  pub fn widget(self: *const Text) vxfw.Widget {
      return .{
@@ -1741,7 +1742,7 @@ index fe46d2b..2275d57 100644
  fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
      const self: *const Text = @ptrCast(@alignCast(ptr));
      return self.draw(ctx);
-@@ -76,6 +244,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+@@ -76,6 +245,7 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                      continue;
                  }
                  const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
@@ -1749,7 +1750,7 @@ index fe46d2b..2275d57 100644
                  surface.writeCell(col, row, .{
                      .char = .{ .grapheme = grapheme, .width = grapheme_width },
                      .style = self.style,
-@@ -96,12 +265,17 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+@@ -96,12 +266,17 @@ pub fn draw(self: *const Text, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                  .center => (container_size.width - resolved_line_width) / 2,
                  .right => container_size.width - resolved_line_width,
              };
@@ -1767,7 +1768,7 @@ index fe46d2b..2275d57 100644
                  if (col + grapheme_width >= container_size.width and
                      line_width > container_size.width and
                      self.overflow == .ellipsis)
-@@ -204,6 +378,10 @@ pub const SoftwrapIterator = struct {
+@@ -204,6 +379,10 @@ pub const SoftwrapIterator = struct {
      line: []const u8 = "",
      index: usize = 0,
      hard_iter: LineIterator,
@@ -1778,7 +1779,7 @@ index fe46d2b..2275d57 100644
  
      pub const Line = struct {
          width: u16,
-@@ -225,14 +403,15 @@ pub const SoftwrapIterator = struct {
+@@ -225,14 +404,15 @@ pub const SoftwrapIterator = struct {
              self.line = self.hard_iter.next() orelse return null;
              self.line = std.mem.trimEnd(u8, self.line, " \t");
              self.index = 0;
@@ -1796,7 +1797,7 @@ index fe46d2b..2275d57 100644
  
              if (self.ctx.max.width) |max| {
                  if (cur_width + next_width > max) {
-@@ -244,17 +423,30 @@ pub const SoftwrapIterator = struct {
+@@ -244,17 +424,30 @@ pub const SoftwrapIterator = struct {
                      if (trimmed_width > max) {
                          // Won't fit on line by itself, so fit as much on this line as we can
                          var iter = self.ctx.graphemeIterator(word);
@@ -1827,7 +1828,7 @@ index fe46d2b..2275d57 100644
                      // We are softwrapping, advance index to the start of the next word
                      const end = self.index;
                      self.index = std.mem.indexOfNonePos(u8, self.line, self.index, soft_breaks) orelse self.line.len;
-@@ -263,11 +455,21 @@ pub const SoftwrapIterator = struct {
+@@ -263,11 +456,21 @@ pub const SoftwrapIterator = struct {
              }
  
              self.index = idx;
