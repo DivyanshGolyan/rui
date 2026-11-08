@@ -1392,7 +1392,7 @@ diff --git a/src/vxfw/PagedText.zig b/src/vxfw/PagedText.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/vxfw/PagedText.zig
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,202 @@
 +//! Reader-backed native text geometry. Source bytes remain owned by the
 +//! caller; this iterator retains only offsets and a bounded grapheme buffer.
 +const std = @import("std");
@@ -1455,6 +1455,14 @@ new file mode 100644
 +        return self.ctx.stringWidth(bytes[0..span.len]);
 +    }
 +
++    fn finishEarly(self: *WrapIterator, start: usize, end: usize, oversized: bool) Row {
++        if (self.position == self.line_end) {
++            self.position = self.next_line;
++            self.line_ready = false;
++        }
++        return .{ .start = start, .end = end, .oversized_grapheme = oversized };
++    }
++
 +    /// Return a single source-backed visual row. The position may advance
 +    /// beyond the row end when native word wrapping discards leading spaces.
 +    pub fn next(self: *WrapIterator) !?Row {
@@ -1495,7 +1503,7 @@ new file mode 100644
 +                            self.position = span.start + span.len;
 +                            oversized = oversized or span.len > 4096;
 +                        }
-+                        return .{ .start = start, .end = self.position, .oversized_grapheme = oversized };
++                        return self.finishEarly(start, self.position, oversized);
 +                    }
 +                    row_width += width;
 +                    self.position = span.start + span.len;
@@ -1504,7 +1512,7 @@ new file mode 100644
 +            } else if (row_width + word_width > self.width) {
 +                const end = self.position;
 +                while (self.position < self.line_end and try self.isSpace(self.position)) self.position += 1;
-+                return .{ .start = start, .end = end, .oversized_grapheme = oversized };
++                return self.finishEarly(start, end, oversized);
 +            } else {
 +                if (word_end <= self.position) return error.InvalidSourceRead;
 +                // A candidate that fits can still contain one marked cluster.
