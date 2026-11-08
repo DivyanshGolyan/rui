@@ -202,7 +202,7 @@ fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.
     for (page.items[0..page.count], 0..) |item, index| {
         if (item.kind == .hosted_call or item.sender != null) continue;
         const tool = item.kind == .tool_result;
-        const budget = if (item.kind == .user and page.count == 1) max_scratch_bytes else item_bytes;
+        const budget: u64 = if (item.kind == .user and page.count == 1) max_scratch_bytes else item_bytes;
         if (!tool and item.content.bytes > budget) {
             prepared.bodies[index] = .omitted;
             continue;

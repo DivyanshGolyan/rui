@@ -6891,7 +6891,11 @@ test "filtered admission pages preserve a queue snapshot across a stop" {
         const page = try store_core.activityPageForTesting(&storage, request);
         request.end = page.end;
         for (page.items[0..page.count]) |item| {
-            try std.testing.expect(item.value.admission.state == if (seen == 0) .applied else .excluded);
+            if (seen == 0) {
+                try std.testing.expect(item.value.admission.state == .applied);
+            } else {
+                try std.testing.expect(item.value.admission.state == .excluded);
+            }
             seen += 1;
         }
         if (!page.more) break;
