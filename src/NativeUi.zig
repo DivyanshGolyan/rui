@@ -305,7 +305,7 @@ fn readWork(raw: *anyopaque, task: *Task) !void {
                 defer dir.close(self.init.io);
                 var cursor = job.request.cursor;
                 const page = while (true) {
-                    const loaded = try NativePagedFeed.load(self.init.gpa, task.requests(), dir, self.options.store, &conversation.id, cursor, job.request.instance, job.width);
+                    const loaded = try NativePagedFeed.load(self.init.gpa, task.requests(), dir, self.options.store, &conversation.id, cursor, job.request.instance, job.width, (self.init.environ_map.get("NO_COLOR") orelse "").len == 0);
                     if (loaded.count != 0 or loaded.page.next == null) break loaded;
                     cursor = loaded.page.next.?;
                     loaded.destroy();
@@ -539,7 +539,17 @@ fn makeExportCommand(allocator: std.mem.Allocator, store: []const u8, session: I
     }
     const digest = std.fmt.bytesToHex(source.reference.digest, .lower);
     return std.fmt.allocPrint(allocator, "Item {d} of {d} from page at opening · {s}\nposition {d}, ordinal {d} · {d} bytes\nRui content digest v1: {s}\nVerified export: rui session export-activity --store-hex {s} --content-bytes {d} --content-digest {s} --session {s} --position {d} --ordinal {d}\nAppend --output PATH for a new file. Source may contain terminal controls.", .{
-        selected + 1, count, if (source.queued) "Queued" else if (source.kind == .user) "You" else "Assistant", source.position, source.ordinal, source.reference.length, &digest, hex, source.reference.length, &digest, &session, source.position, source.ordinal,
+        selected + 1,            count,
+        if (source.queued) "Queued" else switch (source.kind) {
+            .user => "You",
+            .assistant => "Assistant",
+            .tool => "Tool result",
+        },
+        source.position,         source.ordinal,
+        source.reference.length, &digest,
+        hex,                     source.reference.length,
+        &digest,                 &session,
+        source.position,         source.ordinal,
     });
 }
 

@@ -183,8 +183,9 @@ fn conversationOnHost(allocator: std.mem.Allocator, requests: client.Requests, s
 /// serving Host instance, session and Activity position/ordinal.
 pub const SourcePage = struct {
     pub const Item = struct {
-        kind: @FieldType(Block, "kind"),
+        kind: enum { user, assistant, tool },
         queued: bool = false,
+        presentation: ?protocol.ToolPresentation = null,
         position: u64,
         ordinal: u64,
         reference: protocol.ActivityItem.Content,
@@ -230,14 +231,15 @@ pub fn sourcePage(requests: client.Requests, store: []const u8, id: *const [prot
 }
 
 fn sourceItem(item: protocol.ActivityItem) ?SourcePage.Item {
-    const selected: ?struct { kind: @FieldType(Block, "kind"), queued: bool = false, content: protocol.ActivityItem.Content } = switch (item.value) {
+    const selected: ?struct { kind: @FieldType(SourcePage.Item, "kind"), queued: bool = false, presentation: ?protocol.ToolPresentation = null, content: protocol.ActivityItem.Content } = switch (item.value) {
         .admission => |message| if (message.state == .queued) .{ .kind = .user, .queued = true, .content = message.content } else null,
         .user => |message| .{ .kind = .user, .content = message.content },
         .assistant => |answer| .{ .kind = .assistant, .content = answer.content },
+        .tool_result => |result| .{ .kind = .tool, .presentation = result.presentation, .content = result.content },
         else => null,
     };
     const value = selected orelse return null;
-    return .{ .kind = value.kind, .queued = value.queued, .position = item.position, .ordinal = item.ordinal, .reference = value.content };
+    return .{ .kind = value.kind, .queued = value.queued, .presentation = value.presentation, .position = item.position, .ordinal = item.ordinal, .reference = value.content };
 }
 
 test "native queued admissions retain distinct identities and exclude applied admissions" {
@@ -255,6 +257,18 @@ test "native queued admissions retain distinct identities and exclude applied ad
     message.state = .applied;
     try std.testing.expect(sourceItem(.{ .position = 3, .ordinal = 0, .at = 1, .value = .{ .admission = message } }) == null);
     try std.testing.expect(!sourceItem(.{ .position = 4, .ordinal = 0, .at = 1, .value = .{ .user = message } }).?.queued);
+}
+
+test "native compact tool selection keeps result source identity and status" {
+    const reference: protocol.ActivityItem.Content = .{ .length = 59, .digest = @splat(3) };
+    const presentation: protocol.ToolPresentation = .{ .description = null, .code = .failed, .publication_position = 5 };
+    const item: protocol.ActivityItem = .{ .position = 5, .ordinal = 1, .at = 10, .value = .{ .tool_result = .{ .content = reference, .presentation = presentation } } };
+    const selected = sourceItem(item).?;
+    try std.testing.expectEqual(@as(u64, 5), selected.position);
+    try std.testing.expectEqual(@as(u64, 1), selected.ordinal);
+    try std.testing.expectEqual(.tool, selected.kind);
+    try std.testing.expectEqual(.failed, selected.presentation.?.code);
+    try std.testing.expect(std.meta.eql(reference, selected.reference));
 }
 
 const PageBounds = struct { before: ?replies.ActivityCursor = null, after: ?replies.ActivityCursor = null };
