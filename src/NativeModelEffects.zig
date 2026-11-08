@@ -9,14 +9,16 @@ const view = @import("overview_view.zig");
 const stderr = @import("stderr.zig");
 const session_view = @import("session_view.zig");
 const protocol = @import("protocol.zig");
+const observations = @import("NativeObservations.zig");
 const Self = @This();
 
-pub const Session = struct { id: [protocol.session_id_bytes]u8, epoch: u64 };
-const Job = union(enum) { list: u64, save: view.Default, session: Session };
+pub const Session = struct { id: [protocol.session_id_bytes]u8, epoch: u64, sequence: u64, instance: protocol.InstanceId };
+const Job = union(enum) { list: u64, save: view.Default, session: Session, reconcile };
 pub const Completion = union(enum) {
     list: struct { generation: u64, read: @import("NativeModelPicker.zig").Read, failure: ?anyerror },
     save: struct { binding: view.Default, failure: ?anyerror },
     session: struct { request: Session, binding: ?view.Default, failure: ?anyerror },
+    reconcile: struct { values: ?preferences.Values, failure: ?anyerror },
 };
 allocator: std.mem.Allocator,
 io: std.Io,
@@ -28,12 +30,18 @@ active: ?Job = null,
 pending_list: ?u64 = null,
 pending_save: ?view.Default = null,
 pending_session: ?Session = null,
+pending_reconcile: bool = false,
+reconciled: ?preferences.Values = null,
 session_binding: ?view.Default = null,
 menu: ?models.Menu = null,
 
 pub fn requestList(self: *Self, generation: u64) void { self.pending_list = generation; }
 pub fn requestSave(self: *Self, binding: view.Default) void { self.pending_save = binding; }
 pub fn requestSession(self: *Self, request: Session) void { self.pending_session = request; }
+pub fn requestReconcile(self: *Self) void { self.pending_reconcile = true; }
+pub fn reconciling(self: *const Self) bool {
+    return self.pending_reconcile or if (self.active) |job| job == .reconcile else false;
+}
 pub fn cancelSession(self: *Self) void {
     self.pending_session = null;
     if (self.active) |job| if (job == .session) self.task.cancel();
@@ -48,10 +56,10 @@ pub fn cancelList(self: *Self) void {
 
 pub fn start(self: *Self) !void {
     if (self.task.thread != null) return;
-    const job: Job = if (self.pending_save) |binding| .{ .save = binding } else if (self.pending_session) |request| .{ .session = request } else if (self.pending_list) |generation| .{ .list = generation } else return;
+    const job: Job = if (self.pending_save) |binding| .{ .save = binding } else if (self.pending_reconcile) .reconcile else if (self.pending_session) |request| .{ .session = request } else if (self.pending_list) |generation| .{ .list = generation } else return;
     self.active = job;
     try self.task.start(self.io, self, work);
-    switch (job) { .save => self.pending_save = null, .session => self.pending_session = null, .list => self.pending_list = null }
+    switch (job) { .save => self.pending_save = null, .session => self.pending_session = null, .list => self.pending_list = null, .reconcile => self.pending_reconcile = false }
 }
 fn work(raw: *anyopaque, task: *Task) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
@@ -62,8 +70,16 @@ fn work(raw: *anyopaque, task: *Task) !void {
             self.menu = try models.read(self.allocator, try replies.modelListProviders(body));
         },
         .session => |request| {
-            const current = try session_view.current(task.requests(), self.store, &request.id, self.scratch.?);
+            try observations.ensureServing(self.io, self.store, request.instance);
+            var requests = task.requests();
+            requests.host_instance = &request.instance;
+            const current = try session_view.current(requests, self.store, &request.id, self.scratch.?);
+            try observations.ensureServing(self.io, self.store, request.instance);
             self.session_binding = view.Default.of(@tagName(current.settings.provider.value), current.settings.model.slice()) orelse return error.InvalidResponse;
+        },
+        .reconcile => {
+            const readiness: preferences.Readinesses = .initFill(.configured);
+            self.reconciled = try preferences.update(self.home, .{}, &readiness);
         },
         .save => |binding| {
             const readiness: preferences.Readinesses = .initFill(.configured);
@@ -79,6 +95,11 @@ pub fn complete(self: *Self) ?Completion {
     return switch (job) {
         .list => |generation| .{ .list = .{ .generation = generation, .read = if (failure) |err| (if (err == error.InvalidModelList) .invalid else .unanswered) else .{ .menu = self.takeMenu() }, .failure = failure } },
         .save => |binding| .{ .save = .{ .binding = binding, .failure = failure } },
+        .reconcile => blk: {
+            const values = self.reconciled;
+            self.reconciled = null;
+            break :blk .{ .reconcile = .{ .values = values, .failure = failure } };
+        },
         .session => |request| blk: {
             const binding = self.session_binding;
             self.session_binding = null;
@@ -92,7 +113,7 @@ fn takeMenu(self: *Self) models.Menu { const menu = self.menu.?; self.menu = nul
 /// the newest pending pick before returning, even as the UI closes.
 pub fn deinit(self: *Self) void {
     if (self.task.thread != null) {
-        if (self.active.? != .save) self.task.cancel();
+        if (self.active.? == .list or self.active.? == .session) self.task.cancel();
         self.task.join() catch |err| if (self.active.? == .save) {
             reportSaveFailure(err);
         };
@@ -127,4 +148,24 @@ test "model job queue cancels obsolete reads without losing newest save" {
     effects.requestList(5);
     try std.testing.expectEqual(@as(?u64, 5), effects.pending_list);
     try std.testing.expect(effects.pending_save.?.eql(&latest));
+}
+
+test "model reconciliation republishes locked current preferences without changing other fields" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &path);
+    const home = path[0..len];
+    const readiness: preferences.Readinesses = .initFill(.configured);
+    _ = try preferences.update(home, .{ .provider = .{ .set = "codex" }, .model = .{ .set = "kept-model" }, .notifications = false }, &readiness);
+    var effects: Self = .{ .allocator = std.testing.allocator, .io = std.testing.io, .home = home, .store = "", .active = .reconcile };
+    var task: Task = .{};
+    task.io = std.testing.io;
+    try work(&effects, &task);
+    const values = effects.reconciled.?;
+    try std.testing.expectEqualStrings("kept-model", values.model.slice());
+    try std.testing.expect(!values.notifications);
+    const loaded = try preferences.load(home);
+    try std.testing.expectEqualStrings("kept-model", loaded.model.slice());
+    try std.testing.expect(!loaded.notifications);
 }

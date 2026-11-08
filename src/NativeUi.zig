@@ -17,6 +17,8 @@ const Submission = @import("SessionSubmission.zig");
 const defaults = @import("product_defaults.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
+const preferences = @import("preferences.zig");
+const new_session_selection = @import("new_session_selection.zig");
 const Self = @This();
 const Id = [protocol.session_id_bytes]u8;
 
@@ -160,6 +162,8 @@ model_picker: NativeModelPicker,
 model_effects: NativeModelEffects,
 model_default: ?model_view.Default = null,
 model_save_uncertain: bool = false,
+model_uncertain_binding: ?model_view.Default = null,
+model_session_sequence: u64 = 0,
 
 pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Hooks) !void {
     const self = try init.gpa.create(Self);
@@ -199,6 +203,7 @@ pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Ho
 
 fn deinit(self: *Self) void {
     self.model_effects.deinit();
+    if (self.model_save_uncertain) stderr.diagnostic("rui: model default publication or durability unconfirmed; inspect defaults before another update.\n", .{});
     if (self.model_effects.scratch) |file| file.close(self.init.io);
     self.model_picker.deinit();
     self.worker.cancel();
@@ -502,8 +507,21 @@ fn submit(self: *Self) !void {
     if (text.len == 0) return;
     if (std.mem.eql(u8, text, "/model")) {
         if (self.destination) |id| {
-            self.model_effects.requestSession(.{ .id = id, .epoch = self.navigation_epoch });
-            self.notice = "Reading this Session's model…";
+            self.model_session_sequence +%= 1;
+            self.model_effects.cancelSession();
+            if (self.page) |page| {
+                if (!self.feed_stale and std.mem.eql(u8, &id, &page.page.session)) {
+                    self.model_effects.requestSession(.{ .id = id, .epoch = self.navigation_epoch, .sequence = self.model_session_sequence, .instance = page.page.instance });
+                    self.notice = "Reading this Session's model…";
+                } else self.notice = "Session model unavailable until its current page is ready";
+            } else self.notice = "Session model unavailable until its current page is ready";
+            current.field.clearRetainingCapacity();
+            current.revision +%= 1;
+            return;
+        }
+        if (self.model_save_uncertain and !self.model_effects.reconciling()) {
+            self.model_effects.requestReconcile();
+            self.notice = "Reconciling model defaults…";
             current.field.clearRetainingCapacity();
             current.revision +%= 1;
             return;
@@ -518,7 +536,7 @@ fn submit(self: *Self) !void {
         return;
     }
     if (self.destination == null and (self.model_effects.saving() or self.model_save_uncertain)) {
-        self.notice = if (self.model_save_uncertain) "Model save uncertain · inspect defaults or choose again; draft retained" else "Saving model default; draft retained";
+        self.notice = if (self.model_save_uncertain) "Model save uncertain · use /model to reconcile; draft retained" else "Saving model default; draft retained";
         return;
     }
     self.submitted_destination = self.destination;
@@ -675,6 +693,17 @@ fn modelAction(self: *Self, input: NativeModelPicker.Input) void {
     }
 }
 
+fn reconciledDefault(self: *const Self, values: preferences.Values) ?model_view.Default {
+    const saved = model_view.Default.of(if (values.provider.len == 0) null else values.provider.slice(), if (values.model.len == 0) null else values.model.slice());
+    if (saved) |binding| {
+        if (self.model_uncertain_binding) |target| if (binding.eql(&target)) return binding;
+        if (self.model_default) |current| if (binding.eql(&current)) return binding;
+    }
+    const snapshot: new_session_selection.Snapshot = .{ .intent = self.options.selectors, .defaults = values };
+    const resolved = snapshot.resolveUnprompted() catch return null;
+    return model_view.Default.of(resolved.provider.slice(), resolved.model.slice());
+}
+
 fn applyModelCompletion(self: *Self, result: NativeModelEffects.Completion) !void {
     switch (result) {
         .list => |answer| {
@@ -692,9 +721,15 @@ fn applyModelCompletion(self: *Self, result: NativeModelEffects.Completion) !voi
         },
         .session => |answer| {
             const id = self.destination orelse return;
-            if (answer.request.epoch != self.navigation_epoch or !std.mem.eql(u8, &id, &answer.request.id)) return;
+            if (answer.request.epoch != self.navigation_epoch or answer.request.sequence != self.model_session_sequence or !std.mem.eql(u8, &id, &answer.request.id)) return;
+            const page = self.page orelse return;
+            if (self.feed_stale or !std.mem.eql(u8, &page.page.session, &id) or !std.mem.eql(u8, &page.page.instance, &answer.request.instance)) return;
             if (answer.failure) |err| {
                 if (err == error.CanonicalStoreFailure or err == error.OutOfMemory) return err;
+                if (err == error.HostInstanceChanged) {
+                    self.feed_stale = true;
+                    self.queuePage(tailRequest());
+                }
                 self.notice = "This Session's model is unavailable";
                 return;
             }
@@ -706,15 +741,38 @@ fn applyModelCompletion(self: *Self, result: NativeModelEffects.Completion) !voi
             writer.print(" · {s} · new Session: /model in overview", .{binding.provider.signIn()}) catch unreachable;
             self.notice = writer.buffered();
         },
+        .reconcile => |answer| {
+            // A queued later pick owns the next publication; this older read
+            // must neither clear its uncertainty nor replace its intent.
+            if (self.model_effects.pending_save != null) return;
+            if (answer.failure != null) {
+                self.notice = "Model reconciliation failed · use /model to retry";
+                return;
+            }
+            const values = answer.values orelse return;
+            const binding = self.reconciledDefault(values) orelse {
+                self.notice = "Cannot resolve saved defaults · repair them, then use /model";
+                return;
+            };
+            self.model_default = binding;
+            self.model_save_uncertain = false;
+            self.model_uncertain_binding = null;
+            self.notice = "Model defaults reconciled";
+        },
         .save => |answer| {
             if (answer.failure) |err| {
                 // This error can occur before rename or after it, during
                 // directory sync. It cannot prove either publication state.
-                if (err == error.PreferenceDirectorySyncFailed) self.model_save_uncertain = true;
-                self.notice = if (self.model_effects.pending_save != null) "Saving newer model default…" else if (self.model_save_uncertain) "Model save uncertain · inspect defaults or choose again" else "Model default not saved";
+                if (err == error.PreferenceDirectorySyncFailed) {
+                    self.model_save_uncertain = true;
+                    self.model_uncertain_binding = answer.binding;
+                }
+                self.notice = if (self.model_effects.pending_save != null) "Saving newer model default…" else if (self.model_save_uncertain) "Model save uncertain · use /model to reconcile" else "Model default not saved";
             } else {
                 self.model_default = answer.binding;
                 self.model_save_uncertain = false;
+                self.model_uncertain_binding = null;
+                self.model_effects.pending_reconcile = false;
                 self.notice = if (self.model_effects.pending_save != null) "Saving newer model default…" else "Model default saved";
             }
         },
@@ -1117,12 +1175,23 @@ test "native conversation model command reads fixed Session facts and never pick
     try self.drafts.put(id, draft);
     self.destination = id;
     self.navigation_epoch = 7;
+    self.model_session_sequence = 0;
+    var page: NativePagedFeed = undefined;
+    page.page.session = id;
+    page.page.instance = @splat(7);
+    self.page = null;
+    self.feed_stale = false;
     self.submission = .{ .io = std.testing.io, .store = "", .session = "", .directory = "", .environment = .empty };
     self.model_picker = NativeModelPicker.init(std.testing.allocator);
     defer self.model_picker.deinit();
     self.model_effects = .{ .allocator = std.testing.allocator, .io = std.testing.io, .home = "", .store = "" };
     self.model_default = model_view.Default.of("codex", "global");
     self.notice = "";
+    try draft.field.insertSliceAtCursor("/model");
+    try self.submit();
+    try std.testing.expect(self.model_effects.pending_session == null);
+    try std.testing.expect(std.mem.indexOf(u8, self.notice, "current page") != null);
+    self.page = &page;
     try draft.field.insertSliceAtCursor("/model");
     try self.submit();
     try std.testing.expect(!self.model_picker.isOpen());
@@ -1132,16 +1201,18 @@ test "native conversation model command reads fixed Session facts and never pick
     defer std.testing.allocator.free(command_draft);
     try std.testing.expectEqualStrings("", command_draft);
     try std.testing.expectEqual(@as(u64, 7), self.model_effects.pending_session.?.epoch);
+    try std.testing.expectEqual(@as(u64, 2), self.model_effects.pending_session.?.sequence);
     try std.testing.expectEqualSlices(u8, &id, &self.model_effects.pending_session.?.id);
+    const request = self.model_effects.pending_session.?;
     const fixed = model_view.Default.of("openai", "fixed-model").?;
-    try self.applyModelCompletion(.{ .session = .{ .request = .{ .id = id, .epoch = 7 }, .binding = fixed, .failure = null } });
+    try self.applyModelCompletion(.{ .session = .{ .request = request, .binding = fixed, .failure = null } });
     try std.testing.expect(std.mem.indexOf(u8, self.notice, "fixed-model") != null);
     try std.testing.expect(std.mem.indexOf(u8, self.notice, "API key") != null);
     try std.testing.expectEqualStrings("global", self.model_default.?.model.slice());
     self.navigation_epoch = 8;
     const old_notice = try std.testing.allocator.dupe(u8, self.notice);
     defer std.testing.allocator.free(old_notice);
-    try self.applyModelCompletion(.{ .session = .{ .request = .{ .id = id, .epoch = 7 }, .binding = null, .failure = error.CanonicalStoreFailure } });
+    try self.applyModelCompletion(.{ .session = .{ .request = request, .binding = null, .failure = error.CanonicalStoreFailure } });
     try std.testing.expectEqualStrings(old_notice, self.notice);
 }
 
@@ -1205,4 +1276,96 @@ test "native model save admits only confirmed binding and holds draft on uncerta
     try self.applyModelCompletion(.{ .save = .{ .binding = newest, .failure = null } });
     try std.testing.expect(!self.model_save_uncertain);
     try std.testing.expectEqualStrings("newest", self.model_default.?.model.slice());
+}
+
+test "session model replies require latest request and displayed Host instance" {
+    var self: Self = undefined;
+    const id: Id = "abc123".*;
+    self.destination = id;
+    self.navigation_epoch = 7;
+    self.model_session_sequence = 2;
+    var page: NativePagedFeed = undefined;
+    page.page.session = id;
+    page.page.instance = @splat(1);
+    self.page = &page;
+    self.feed_stale = false;
+    self.notice = "new request";
+    const old: NativeModelEffects.Session = .{ .id = id, .epoch = 7, .sequence = 1, .instance = @splat(1) };
+    const current: NativeModelEffects.Session = .{ .id = id, .epoch = 7, .sequence = 2, .instance = @splat(1) };
+    const binding = model_view.Default.of("codex", "old-host-model").?;
+    try self.applyModelCompletion(.{ .session = .{ .request = old, .binding = binding, .failure = null } });
+    try self.applyModelCompletion(.{ .session = .{ .request = old, .binding = null, .failure = error.CanonicalStoreFailure } });
+    try std.testing.expectEqualStrings("new request", self.notice);
+    page.page.instance = @splat(2);
+    try self.applyModelCompletion(.{ .session = .{ .request = current, .binding = binding, .failure = null } });
+    try self.applyModelCompletion(.{ .session = .{ .request = current, .binding = null, .failure = error.OutOfMemory } });
+    try std.testing.expectEqualStrings("new request", self.notice);
+    page.page.instance = @splat(1);
+    try self.applyModelCompletion(.{ .session = .{ .request = current, .binding = binding, .failure = null } });
+    try std.testing.expect(std.mem.indexOf(u8, self.notice, "old-host-model") != null);
+}
+
+test "model reconciliation keeps newer picks and releases confirmed defaults" {
+    var self: Self = undefined;
+    self.options = undefined;
+    self.options.selectors = .{};
+    self.model_effects = .{ .allocator = std.testing.allocator, .io = std.testing.io, .home = "", .store = "" };
+    self.model_default = model_view.Default.of("codex", "old");
+    self.model_save_uncertain = true;
+    self.model_uncertain_binding = model_view.Default.of("codex", "attempted");
+    self.notice = "";
+    var observed: preferences.Values = .{};
+    try observed.provider.set("codex");
+    try observed.model.set("old");
+    try self.applyModelCompletion(.{ .reconcile = .{ .values = null, .failure = error.PreferenceDirectorySyncFailed } });
+    try std.testing.expect(self.model_save_uncertain);
+    self.model_effects.requestSave(model_view.Default.of("openai", "newer").?);
+    try self.applyModelCompletion(.{ .reconcile = .{ .values = observed, .failure = null } });
+    try std.testing.expect(self.model_save_uncertain);
+    try std.testing.expectEqualStrings("old", self.model_default.?.model.slice());
+    self.model_effects.pending_save = null;
+    try self.applyModelCompletion(.{ .reconcile = .{ .values = observed, .failure = null } });
+    try std.testing.expect(!self.model_save_uncertain);
+    try std.testing.expectEqualStrings("old", self.model_default.?.model.slice());
+    self.model_save_uncertain = true;
+    self.model_uncertain_binding = model_view.Default.of("codex", "attempted");
+    try observed.model.set("attempted");
+    try self.applyModelCompletion(.{ .reconcile = .{ .values = observed, .failure = null } });
+    try std.testing.expect(!self.model_save_uncertain);
+    try std.testing.expectEqualStrings("attempted", self.model_default.?.model.slice());
+}
+
+test "model command queues retryable reconciliation without discarding a Message draft" {
+    fw.DrawContext.init(.unicode);
+    var self: Self = undefined;
+    self.init = undefined;
+    self.init.gpa = std.testing.allocator;
+    self.overview_draft = try Draft.create(std.testing.allocator);
+    defer self.overview_draft.destroy(std.testing.allocator);
+    self.destination = null;
+    self.submission = .{ .io = std.testing.io, .store = "", .session = "", .directory = "", .environment = .empty };
+    self.model_picker = NativeModelPicker.init(std.testing.allocator);
+    defer self.model_picker.deinit();
+    self.model_effects = .{ .allocator = std.testing.allocator, .io = std.testing.io, .home = "", .store = "" };
+    self.model_default = model_view.Default.of("codex", "old");
+    self.model_save_uncertain = true;
+    self.model_uncertain_binding = model_view.Default.of("codex", "attempted");
+    self.notice = "";
+    try self.overview_draft.field.insertSliceAtCursor("hello");
+    try self.submit();
+    const retained = try self.overview_draft.field.snapshot();
+    defer std.testing.allocator.free(retained);
+    try std.testing.expectEqualStrings("hello", retained);
+    self.overview_draft.field.clearRetainingCapacity();
+    try self.overview_draft.field.insertSliceAtCursor("/model");
+    try self.submit();
+    try std.testing.expect(self.model_effects.pending_reconcile);
+    try std.testing.expect(!self.model_picker.isOpen());
+    try std.testing.expect(self.model_save_uncertain);
+    self.model_effects.pending_reconcile = false;
+    try self.applyModelCompletion(.{ .reconcile = .{ .values = null, .failure = error.AccessDenied } });
+    try std.testing.expect(self.model_save_uncertain);
+    try self.overview_draft.field.insertSliceAtCursor("/model");
+    try self.submit();
+    try std.testing.expect(self.model_effects.pending_reconcile);
 }
