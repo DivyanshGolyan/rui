@@ -305,7 +305,7 @@ fn readWork(raw: *anyopaque, task: *Task) !void {
                 defer dir.close(self.init.io);
                 var cursor = job.request.cursor;
                 const page = while (true) {
-                    const loaded = try NativePagedFeed.load(self.init.gpa, task.requests(), dir, self.options.store, &conversation.id, cursor, job.request.instance, job.width, if (self.init.environ_map.get("NO_COLOR")) |value| value.*.len == 0 else true);
+                    const loaded = try NativePagedFeed.load(self.init.gpa, task.requests(), dir, self.options.store, &conversation.id, cursor, job.request.instance, job.width, if (self.init.environ_map.get("NO_COLOR")) |value| value.len == 0 else true);
                     if (loaded.count != 0 or loaded.page.next == null) break loaded;
                     cursor = loaded.page.next.?;
                     loaded.destroy();
