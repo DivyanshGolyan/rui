@@ -909,6 +909,9 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
         _ = window.child(.{ .x_off = size.col - 1, .y_off = layout.navigation_height, .width = 1, .height = 1 }).printSegment(.{ .text = "…", .style = self.style(.quiet) }, .{ .wrap = .none });
     }
     const line_row = size.row - layout.line_height;
+    if (layout.bottom_rule_height != 0) {
+        window.child(.{ .y_off = line_row - 1, .height = 1 }).fill(.{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.style(.quiet) });
+    }
     // Whether the line under the input says Enter denies: only then does a
     // reason's frame offer the denial.
     var says_deny = false;
@@ -1157,9 +1160,11 @@ test "the input keeps the bottom rows under a rule while content starts at the t
     _ = try Test.render(screen, &out.writer, size, "", 0, .{ .session = session }, &.{});
     const window = Test.window(screen);
     var storage: [160]u8 = undefined;
-    try std.testing.expectEqualStrings("─", window.readCell(0, 21).?.char.grapheme);
-    try std.testing.expectEqualStrings("─", window.readCell(79, 21).?.char.grapheme);
-    try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(0, 20).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(79, 20).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", window.readCell(0, 21).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(0, 22).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(79, 22).?.char.grapheme);
     try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · low · 69% left", rowText(screen, 23, &storage));
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 23).?.style.fg);
     try screen.append("› inspect\n  Done.\n");
@@ -1168,26 +1173,26 @@ test "the input keeps the bottom rows under a rule while content starts at the t
     try std.testing.expectEqualStrings("D", window.readCell(2, 1).?.char.grapheme);
     try std.testing.expectEqualStrings(" ", window.readCell(0, 2).?.char.grapheme);
     // The draft grows upward: the rule moves up, the line stays last.
-    try std.testing.expectEqualStrings("─", window.readCell(0, 20).?.char.grapheme);
-    try std.testing.expectEqualStrings("›", window.readCell(0, 21).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(0, 19).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", window.readCell(0, 20).?.char.grapheme);
     // A draft continuation has no glyph; its text aligns under the first row.
-    try std.testing.expectEqualStrings(" ", window.readCell(0, 22).?.char.grapheme);
-    try std.testing.expectEqualStrings("l", window.readCell(2, 22).?.char.grapheme);
+    try std.testing.expectEqualStrings(" ", window.readCell(0, 21).?.char.grapheme);
+    try std.testing.expectEqualStrings("l", window.readCell(2, 21).?.char.grapheme);
     try std.testing.expectEqualStrings("F", window.readCell(0, 23).?.char.grapheme);
     // Status sits directly above the rule.
     _ = try Test.render(screen, &out.writer, size, "next", 4, .{ .status = "Sending…", .session = session }, &.{});
-    try std.testing.expectEqualStrings("S", window.readCell(0, 20).?.char.grapheme);
-    try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 20).?.style.fg);
-    try std.testing.expectEqualStrings("─", window.readCell(0, 21).?.char.grapheme);
-    try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
+    try std.testing.expectEqualStrings("S", window.readCell(0, 19).?.char.grapheme);
+    try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 19).?.style.fg);
+    try std.testing.expectEqualStrings("─", window.readCell(0, 20).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", window.readCell(0, 21).?.char.grapheme);
     // A notice takes the line until the next key, in the failure colour
     // when it reports one; the input does not move.
     for ([_][]const u8{ "Work continues while you compose.", "! Unknown command /x · /help" }, [_]vaxis.Color{ .default, .{ .index = 9 } }) |notice, colour| {
         _ = try Test.render(screen, &out.writer, size, "next", 4, .{ .status = "Sending…", .notice = notice, .session = session }, &.{});
         try std.testing.expectEqualStrings(notice, rowText(screen, 23, &storage));
         try std.testing.expectEqual(colour, window.readCell(0, 23).?.style.fg);
-        try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
-        try std.testing.expectEqualStrings("S", window.readCell(0, 20).?.char.grapheme);
+        try std.testing.expectEqualStrings("›", window.readCell(0, 21).?.char.grapheme);
+        try std.testing.expectEqualStrings("S", window.readCell(0, 19).?.char.grapheme);
     }
     for ([_]u16{ 51, 40 }, [_][]const u8{ "Fix flaky store tests · gpt-6.1-sol · 69% left", "Fix flaky stor… · gpt-6.1-sol · 69% left" }) |columns, expected| {
         _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .session = session }, &.{});

@@ -2836,7 +2836,7 @@ pub fn layout(state: *const State, draft_rows: u16, command_rows: usize) Layout 
     const top: u16 = @intCast(@min(topRows(state), height));
     const kept: u16 = @intFromBool(state.selected != null and state.rows.items.len != 0);
     const fits = height >= 6 and state.size.width >= 6;
-    const below = if (fits) height - 1 - hintRows(state) - draft_rows else height;
+    const below = if (fits) height - 1 - hintRows(state) - draft_rows - bottomRuleRows(state, draft_rows) else height;
     const listed: u16 = if (fits) @intCast(@min(command_rows, draft_layout.cap(height) -| draft_rows, below -| (top + 1 + kept))) else 0;
     const input = below - listed;
     var picker: Layout.Rows = .{ .start = input, .end = input };
@@ -2844,6 +2844,12 @@ pub fn layout(state: *const State, draft_rows: u16, command_rows: usize) Layout 
         picker.start = input - @as(u16, @intCast(pickerFit(state, input - (top + 1 + kept)).used()));
     }
     return .{ .top = top, .list = if (top + 1 < picker.start) .{ .start = top + 1, .end = picker.start } else .{}, .picker = picker, .input = input, .commands = .{ .start = input + 1, .end = below + 1 } };
+}
+
+/// Keep the bottom edge only when it leaves the existing top and selected row.
+pub fn bottomRuleRows(state: *const State, draft_rows: u16) u16 {
+    const kept: usize = @intFromBool(state.selected != null and state.rows.items.len != 0);
+    return @intFromBool(@as(usize, state.size.height) >= topRows(state) + kept + 1 + draft_rows + hintRows(state) + 1);
 }
 
 /// Rows the line under the input takes: one, or as many as a notice has
