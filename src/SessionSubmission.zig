@@ -50,7 +50,7 @@ pub const End = union(enum) {
     absent,
     // A Message's admission orders it among delivered ones. An accepted
     // reason names the Action whose denial the caller begins next.
-    accepted: struct { kind: Kind, confirmed: bool, admission: ?u64 = null, denies: ?u64 = null },
+    accepted: struct { kind: Kind, confirmed: bool, admission: ?u64 = null, denies: ?u64 = null, session: ?[protocol.session_id_bytes]u8 = null },
     rejected: struct { kind: Kind, code: protocol.Bounded(protocol.max_code_bytes) },
     failed: struct { err: anyerror },
 
@@ -65,6 +65,9 @@ session: []const u8,
 directory: []const u8,
 /// The terminal's environment, carried by each Message for its Bash.
 environment: client.Environment,
+/// Creation settings are stable for this admission until its worker joins.
+configuration: ?client.ConfigureInput = null,
+captured_hook: ?*const fn (std.Io) anyerror!void = null,
 intent: ?Intent = null,
 /// Original Message bytes, frozen before starting the worker.
 message_bytes: [65_536]u8 = undefined,
@@ -368,7 +371,9 @@ fn apply(self: *Self, result: anyerror!void) !End {
             else => null,
         };
         const denies: ?u64 = if (intent == .message_then_deny) intent.message_then_deny.action else null;
-        return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission, .denies = denies } };
+        const resolved = self.reply.?.context.session.slice();
+        const session: ?[protocol.session_id_bytes]u8 = if (resolved.len == protocol.session_id_bytes) resolved[0..protocol.session_id_bytes].* else null;
+        return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission, .denies = denies, .session = session } };
     }
     self.state = .rejected;
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -404,10 +409,11 @@ fn submit(raw: *anyopaque, task: *Task) !void {
     if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
     if (self.publication == .not_sent) self.publication = .unknown;
     self.captured = switch (self.intent.?) {
-        .message, .message_then_deny => try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = self.intent.?.text().? }, self.target).get(),
+        .message, .message_then_deny => try client.captureMessage(task.io, .{ .store = self.store, .session = self.session, .text_path = "", .text = self.intent.?.text().?, .configuration = self.configuration }, self.target).get(),
         .decision => |decision| try client.capturePermissionDecision(task.io, .{ .store = self.store, .session = self.session, .action_id = decision.action, .decision = decision.decision }, self.target),
     };
     self.publication = .published;
+    if (self.captured_hook) |hook| try hook(task.io);
     self.reply = try task.requests().sendCaptured(&self.captured.?, self.environment, &self.reply_buffer).get();
 }
 

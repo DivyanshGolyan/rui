@@ -4,6 +4,7 @@ const TerminalText = @import("TerminalText.zig");
 const stderr = @import("stderr.zig");
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const Overview = @import("Overview.zig");
+const NativeUi = @import("NativeUi.zig");
 const session_reads = @import("session_reads.zig");
 const overview_view = @import("overview_view.zig");
 const TestObservation = @import("TestObservation.zig");
@@ -1503,7 +1504,7 @@ fn openOverview(init: std.process.Init, options: Overview.Options) !void {
     defer init.gpa.destroy(directory_buffer);
     var with_directory = options;
     with_directory.directory = requestDirectory(init, directory_buffer) catch |err| return Overview.printFailure(err, options.store, options.open, null);
-    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate });
+    return NativeUi.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate });
 }
 
 fn captureGate(io: std.Io) !void {
