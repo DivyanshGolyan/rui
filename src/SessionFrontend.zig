@@ -3612,6 +3612,9 @@ const CapacityTestPty = struct {
     extern "c" fn grantpt(c_int) c_int;
     extern "c" fn unlockpt(c_int) c_int;
     extern "c" fn ptsname(c_int) ?[*:0]const u8;
+    // Darwin's sys/ioctl.h declares an unsigned long request; Zig 0.17's
+    // std.c.ioctl instead declares c_int, which cannot represent IOC_IN.
+    extern "c" fn ioctl(c_int, c_ulong, ...) c_int;
 
     fn init() !@This() {
         const flags: c_int = @bitCast(std.c.O{ .ACCMODE = .RDWR, .NOCTTY = true, .NONBLOCK = true, .CLOEXEC = true });
@@ -3632,7 +3635,11 @@ const CapacityTestPty = struct {
             .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => 0x80000000 | ((@sizeOf(std.posix.winsize) & 0x1fff) << 16) | (@as(usize, 't') << 8) | 103,
             else => std.c.T.IOCSWINSZ,
         };
-        if (std.c.ioctl(self.slave, @intCast(set_window_size), &size) != 0) return error.TestUnexpectedResult;
+        const result = switch (@import("builtin").os.tag) {
+            .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => ioctl(self.slave, @intCast(set_window_size), &size),
+            else => std.c.ioctl(self.slave, @intCast(set_window_size), &size),
+        };
+        if (result != 0) return error.TestUnexpectedResult;
     }
     fn drain(self: @This()) void {
         var bytes: [8192]u8 = undefined;
