@@ -239,6 +239,46 @@ test "bounded user interval authenticates complete source before exposing scratc
     try std.testing.expectError(error.InvalidContentInterval, stageUserInterval(io, scratch, Source{ .bytes = bytes }, item, 0, bytes.len, 1));
 }
 
+test "bounded user intervals reject external changes and scratch corruption" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(io, "interval-faults", .{ .read = true });
+    defer scratch.close(io);
+    const Source = struct {
+        bytes: []const u8,
+        fn read(self: @This(), _: protocol_reply.ConversationPage.Item, _: usize, sink: anytype) !void {
+            try sink.feed(self.bytes);
+        }
+    };
+    const Fault = struct {
+        fn stage(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
+            const count = try std.testing.io.vtable.fileWritePositional(userdata, file, header, data, splat, offset);
+            if (count != 0) _ = try std.testing.io.vtable.fileWritePositional(userdata, file, "", &.{"!"}, 1, offset);
+            return count;
+        }
+    };
+    const original = "prefix-keep-suffix";
+    const item: protocol_reply.ConversationPage.Item = .{ .position = 1, .ordinal = 0, .kind = .user, .admitted_at = 1, .content = .{ .bytes = original.len, .digest = protocol.contentDigest(original) } };
+    _ = try stageUserInterval(io, scratch, Source{ .bytes = original }, item, 0, original.len, 0);
+    _ = try stageUserInterval(io, scratch, Source{ .bytes = original }, item, 0, 7, 4);
+    try std.testing.expectError(error.ContentBindingMismatch, stageUserInterval(io, scratch, Source{ .bytes = "Prefix-keep-suffix" }, item, 0, 7, 4));
+    try std.testing.expectError(error.ContentBindingMismatch, stageUserInterval(io, scratch, Source{ .bytes = "prefix-keep-suffiX" }, item, 0, 7, 4));
+    try std.testing.expectError(error.ContentBindingMismatch, stageUserInterval(io, scratch, Source{ .bytes = original[0 .. original.len - 1] }, item, 0, 7, 4));
+    try std.testing.expectError(error.ContentBindingMismatch, stageUserInterval(io, scratch, Source{ .bytes = original ++ "x" }, item, 0, 7, 4));
+    var vtable = io.vtable.*;
+    vtable.fileWritePositional = Fault.stage;
+    const faulty: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    try std.testing.expectError(error.ContentBindingMismatch, stageUserInterval(faulty, scratch, Source{ .bytes = original }, item, 0, 7, 4));
+
+    const full = try std.testing.allocator.alloc(u8, max_scratch_bytes);
+    defer std.testing.allocator.free(full);
+    @memset(full, 'z');
+    const large: protocol_reply.ConversationPage.Item = .{ .position = 2, .ordinal = 0, .kind = .user, .admitted_at = 1, .content = .{ .bytes = full.len, .digest = protocol.contentDigest(full) } };
+    const span = try stageUserInterval(io, scratch, Source{ .bytes = full }, large, 0, 0, full.len);
+    try std.testing.expectEqual(@as(u64, max_scratch_bytes), span.length);
+}
+
 // The source authenticates the complete result, including discarded prefixes.
 // After all writes, scratch is checked against independently received retained bytes.
 fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.File, source: anytype) !Prepared {
