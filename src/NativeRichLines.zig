@@ -150,10 +150,11 @@ fn drawTable(raw: *const anyopaque, index: usize, ctx: fw.DrawContext, left: u64
             const value = bytes[cell.start..cell.end];
             const content_width = ctx.hardLineWidth(value);
             const padding = group.widths[col] - content_width;
-            const leading: u64 = switch (std.meta.intToEnum(table.Alignment, group.alignment[col]) catch return error.InvalidSourceRead) {
-                .left => 0,
-                .right => padding,
-                .center => padding / 2,
+            const leading: u64 = switch (group.alignment[col]) {
+                @intFromEnum(table.Alignment.left) => 0,
+                @intFromEnum(table.Alignment.right) => padding,
+                @intFromEnum(table.Alignment.center) => padding / 2,
+                else => return error.InvalidSourceRead,
             };
             painter.repeated(" ", leading);
             try painter.text(value);
