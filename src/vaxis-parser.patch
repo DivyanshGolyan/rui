@@ -1404,7 +1404,7 @@ index 1c569eb..39c2bdf 100644
 +const DrawnChild = struct { surface: vxfw.Surface, shifted: bool };
 +
 +fn drawChild(self: *ScrollView, child: vxfw.Widget, ctx: vxfw.DrawContext, width: u16) Allocator.Error!DrawnChild {
-+    if (child.drawHorizontalFn) |draw| return .{ .surface = try draw(child.userdata, ctx, self.scroll.left, width), .shifted = true };
++    if (child.drawHorizontalFn) |draw_horizontal| return .{ .surface = try draw_horizontal(child.userdata, ctx, self.scroll.left, width), .shifted = true };
 +    return .{ .surface = try child.draw(ctx), .shifted = false };
 +}
 +
