@@ -8,6 +8,9 @@ const protocol = @import("protocol.zig");
 const Overview = @import("Overview.zig");
 const observations = @import("NativeObservations.zig");
 const NativePagedFeed = @import("NativePagedFeed.zig");
+const NativeModelPicker = @import("NativeModelPicker.zig");
+const NativeModelEffects = @import("NativeModelEffects.zig");
+const model_view = @import("overview_view.zig");
 const replies = @import("protocol_reply.zig");
 const Task = @import("ClientTask.zig");
 const Submission = @import("SessionSubmission.zig");
@@ -150,7 +153,11 @@ submitted_draft: ?*Draft = null,
 submitted_revision: u64 = 0,
 submitted_destination: ?Id = null,
 submitted_session: Id = @splat(0),
+submitted_binding: ?model_view.Default = null,
 compaction: [20]u8 = undefined,
+model_picker: NativeModelPicker,
+model_effects: NativeModelEffects,
+model_default: ?model_view.Default = null,
 
 pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Hooks) !void {
     const self = try init.gpa.create(Self);
@@ -168,6 +175,9 @@ pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Ho
         .overview_draft = draft,
         .drafts = std.AutoHashMap(Id, *Draft).init(init.gpa),
         .submission = .{ .io = init.io, .store = options.store, .session = "", .directory = options.directory, .environment = .{ .map = init.environ_map } },
+        .model_picker = NativeModelPicker.init(init.gpa),
+        .model_effects = .{ .allocator = init.gpa, .io = init.io, .home = options.home, .store = options.store },
+        .model_default = model_view.Default.of(options.provider, options.model),
     };
     defer self.deinit();
     if (options.open) |id| {
@@ -181,6 +191,8 @@ pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Ho
 }
 
 fn deinit(self: *Self) void {
+    self.model_effects.deinit();
+    self.model_picker.deinit();
     self.worker.cancel();
     self.worker.join() catch {};
     const was_pending = self.submission.view() != null;
@@ -477,6 +489,16 @@ fn submit(self: *Self) !void {
     const text = try current.field.snapshot();
     defer self.init.gpa.free(text);
     if (text.len == 0) return;
+    if (std.mem.eql(u8, text, "/model")) {
+        if (self.body_width < 7 or self.body_bottom <= 1) {
+            self.notice = "Widen or enlarge for /model; draft retained";
+            return;
+        }
+        self.modelAction(.open);
+        current.field.clearRetainingCapacity();
+        current.revision +%= 1;
+        return;
+    }
     self.submitted_destination = self.destination;
     self.submitted_draft = current;
     self.submitted_revision = current.revision;
@@ -487,8 +509,9 @@ fn submit(self: *Self) !void {
     self.submission.configuration = null;
     self.submission.captured_hook = null;
     if (self.destination == null) {
-        const provider = self.options.provider orelse defaults.provider;
-        const model = self.options.model orelse defaults.recommended_model;
+        self.submitted_binding = self.model_default;
+        const provider = if (self.submitted_binding) |*binding| @tagName(binding.provider) else self.options.provider orelse defaults.provider;
+        const model = if (self.submitted_binding) |*binding| binding.model.slice() else self.options.model orelse defaults.recommended_model;
         const compaction = try std.fmt.bufPrint(&self.compaction, "{d}", .{client.defaultCompactionTrigger(std.meta.stringToEnum(protocol.Provider, provider) orelse .codex, model)});
         self.submission.configuration = .{ .store = self.options.store, .session = .create, .require_model = true, .workspace = .{ .present = true, .value = self.options.workspace }, .provider = .{ .present = true, .value = provider }, .model = .{ .present = true, .value = model }, .tools = defaults.tools, .permission_mode = .{ .present = true, .value = defaults.permission_mode }, .compaction_trigger = .{ .present = true, .value = compaction }, .reasoning_effort = client.defaultStartEffort(model, null) };
         self.submission.captured_hook = self.hooks.captured;
@@ -613,6 +636,55 @@ fn navigateEdge(self: *Self, backward: bool, ctx: *fw.EventContext) !bool {
     return false;
 }
 
+fn modelAction(self: *Self, input: NativeModelPicker.Input) void {
+    const result = self.model_picker.input(input, self.model_default, self.body_width);
+    if (!self.model_picker.isOpen()) self.model_effects.cancelList();
+    switch (result) {
+        .none => {},
+        .request_models => |generation| {
+            self.model_effects.requestList(generation);
+            self.notice = "Loading models…";
+        },
+        .selected => |binding| {
+            self.model_default = binding;
+            self.model_effects.requestSave(binding);
+            self.notice = "Saving model default…";
+        },
+        .widen => self.notice = "Widen for /model",
+    }
+}
+
+fn completeModel(self: *Self, ctx: *fw.EventContext) !void {
+    if (self.model_effects.complete()) |result| {
+        switch (result) {
+            .list => |answer| {
+                if (answer.failure) |err| if (err == error.CanonicalStoreFailure or err == error.OutOfMemory) return err;
+                const current = self.model_picker.isOpen() and answer.generation == self.model_picker.generation;
+                self.model_picker.receive(answer.generation, answer.read, if (self.model_default) |*binding| binding.model.slice() else null);
+                if (current) {
+                    self.notice = switch (self.model_picker.read_status) {
+                        .unread => "Loading models…",
+                        .read => if (self.model_picker.menu.entries.len == 0) "No models available" else "↑/↓ select · Enter choose · Esc close",
+                        .unanswered => "Models unavailable: Host did not answer",
+                        .invalid => "Models unavailable: invalid Host reply",
+                    };
+                    if (self.model_picker.menu.loading()) self.model_effects.requestList(answer.generation);
+                }
+            },
+            .save => |answer| {
+                if (answer.failure) |err| {
+                    self.notice = std.fmt.bufPrint(&self.notice_buffer, "Model default save failed: {s}", .{@errorName(err)}) catch unreachable;
+                } else self.notice = if (self.model_effects.pending_save != null) "Saving model default…" else "Model default saved";
+            },
+        }
+        ctx.redraw = true;
+    }
+    self.model_effects.start() catch |err| {
+        self.notice = std.fmt.bufPrint(&self.notice_buffer, "Model operation failed: {s}", .{@errorName(err)}) catch unreachable;
+        ctx.redraw = true;
+    };
+}
+
 fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (value) {
@@ -621,6 +693,7 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             ctx.consumeEvent();
         },
         .paste_start => {
+            if (self.model_picker.isOpen()) self.modelAction(.edit);
             self.pasting = true;
             if (self.export_open) ctx.consumeAndRedraw();
         },
@@ -702,6 +775,15 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
                     }
                 }
             }
+            if (self.model_picker.isOpen() and !self.pasting) {
+                const action: ?NativeModelPicker.Input = if (key.matches(vaxis.Key.escape, .{})) .close else if (key.matches(vaxis.Key.up, .{})) .previous else if (key.matches(vaxis.Key.down, .{})) .next else if (key.matches(vaxis.Key.home, .{})) .first else if (key.matches(vaxis.Key.end, .{})) .last else if (key.matches(vaxis.Key.left, .{}) and self.model_picker.choice() != null) .left else if (key.matches(vaxis.Key.right, .{}) and self.model_picker.choice() != null) .right else if (key.matches(vaxis.Key.enter, .{})) .enter else null;
+                if (action) |pressed| {
+                    self.modelAction(pressed);
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                self.modelAction(.edit);
+            }
             if (self.destination == null and key.matches(vaxis.Key.up, .{ .alt = true })) {
                 self.list.prevItem(ctx);
                 return;
@@ -756,6 +838,7 @@ fn event(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             ctx.redraw = true;
         },
         .tick => {
+            try self.completeModel(ctx);
             try self.completeRead(ctx);
             try self.finishSubmission(ctx);
             if (self.page) |page| {
@@ -789,7 +872,17 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
         try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  New activity · Esc follows", .{&id})
     else
         try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  Esc returns", .{&id})) else "Sessions  ·  Alt-↑/↓ select · Alt-Enter open";
-    self.status.text = if (self.export_open) "Alt-↑/↓ select from page at opening · Wheel/Page scroll · Esc close" else if (self.notice.len == 0) "Enter send · Alt-E export · Shift-Enter/Ctrl-J newline · Ctrl-Q quit" else self.notice;
+    self.status.text = if (self.model_picker.choice()) |choice| blk: {
+        const entry = self.model_picker.selected().?;
+        const codex = model_view.Provider.codex;
+        const openai = model_view.Provider.openai;
+        break :blk try std.fmt.allocPrint(ctx.arena, "Use: {s}{s}  {s}{s}  ←/→ choose · Enter confirm · Esc back", .{
+            if (entry.providers.contains(codex) and choice == codex) "> " else "  ",
+            if (entry.providers.contains(codex)) codex.signIn() else "",
+            if (entry.providers.contains(openai) and choice == openai) "> " else "  ",
+            if (entry.providers.contains(openai)) openai.signIn() else "",
+        });
+    } else if (self.export_open) "Alt-↑/↓ select from page at opening · Wheel/Page scroll · Esc close" else if (self.notice.len == 0) "Enter send · Alt-E export · Shift-Enter/Ctrl-J newline · Ctrl-Q quit" else self.notice;
     const header = try self.header.draw(ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 }));
     const status = try self.status.draw(ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 }));
     self.border = .{ .child = self.activeDraft().field.widget() };
@@ -798,7 +891,10 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
         try self.border.draw(ctx.withConstraints(.{}, .{ .width = width, .height = composer_max }))
     else
         try self.activeDraft().field.draw(ctx.withConstraints(.{}, .{ .width = width, .height = composer_max }));
-    const body_height = height -| 2 -| composer.size.height;
+    const available = height -| 2 -| composer.size.height;
+    if (available == 0 and self.model_picker.isOpen()) self.modelAction(.edit);
+    const picker_height: u16 = if (self.model_picker.isOpen()) @min(available, @as(u16, @intCast(@max(@as(usize, 1), @min(self.model_picker.menu.entries.len, 8))))) else 0;
+    const body_height = available - picker_height;
     self.body_width = width;
     self.body_bottom = 1 + body_height;
     const body_ctx = ctx.withConstraints(.{ .width = width, .height = body_height }, .{ .width = width, .height = body_height });
@@ -819,11 +915,16 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
         self.feed_stale = true;
         self.notice = @errorName(err);
     };
-    const children = try ctx.arena.alloc(fw.SubSurface, 4);
+    const children = try ctx.arena.alloc(fw.SubSurface, if (picker_height == 0) 4 else 5);
     children[0] = .{ .origin = .{ .col = 0, .row = 0 }, .surface = header, .z_index = 0 };
     children[1] = .{ .origin = .{ .col = 0, .row = 1 }, .surface = body, .z_index = 0 };
-    children[2] = .{ .origin = .{ .col = 0, .row = @intCast(1 + body_height) }, .surface = composer, .z_index = 0 };
+    children[2] = .{ .origin = .{ .col = 0, .row = @intCast(1 + body_height + picker_height) }, .surface = composer, .z_index = 0 };
     children[3] = .{ .origin = .{ .col = 0, .row = height - 1 }, .surface = status, .z_index = 0 };
+    if (picker_height != 0) {
+        const picker_ctx = ctx.withConstraints(.{ .width = width, .height = picker_height }, .{ .width = width, .height = picker_height });
+        const picker_surface = try self.model_picker.widget().draw(picker_ctx);
+        children[4] = .{ .origin = .{ .col = 0, .row = @intCast(1 + body_height) }, .surface = picker_surface, .z_index = 0 };
+    }
     return fw.Surface.initWithChildren(ctx.arena, self.widget(), .{ .width = width, .height = height }, children);
 }
 
@@ -883,4 +984,75 @@ test "native pending navigation survives worker start failure" {
     try std.testing.expectError(error.WitnessSpawnFailure, self.startReadUsing(Failure.start));
     try std.testing.expect(self.pending_page != null and std.meta.eql(original, self.pending_page.?));
     try std.testing.expect(self.read_arena == null and self.worker.thread == null);
+}
+
+test "native model routing retains composer keys and queues the selected default" {
+    fw.DrawContext.init(.unicode);
+    var self: Self = undefined;
+    self.model_picker = NativeModelPicker.init(std.testing.allocator);
+    defer self.model_picker.deinit();
+    self.model_effects = .{ .allocator = std.testing.allocator, .io = std.testing.io, .home = "", .store = "" };
+    self.model_default = null;
+    self.pasting = false;
+    self.export_open = false;
+    self.destination = null;
+    self.body_width = 80;
+    self.notice = "";
+    self.modelAction(.open);
+    const generation = self.model_effects.pending_list.?;
+    self.model_picker.receive(generation, .{ .menu = try @import("model_picker.zig").testMenu(&.{
+        .{ .provider = .codex, .list = .{ .live = .{ .bytes = "alpha\nbeta\n" } } },
+    }) }, null);
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    try capture(&self, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.down } });
+    try std.testing.expect(ctx.consume_event);
+    try std.testing.expectEqualStrings("beta", self.model_picker.selected().?.id);
+    ctx.consume_event = false;
+    try capture(&self, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try std.testing.expect(ctx.consume_event);
+    try std.testing.expect(!self.model_picker.isOpen());
+    try std.testing.expectEqualStrings("beta", self.model_default.?.model.slice());
+    try std.testing.expectEqualStrings("beta", self.model_effects.pending_save.?.model.slice());
+    try std.testing.expect(self.model_effects.pending_list == null);
+
+    self.modelAction(.open);
+    ctx.consume_event = false;
+    try capture(&self, &ctx, .{ .key_press = .{ .codepoint = 'x' } });
+    try std.testing.expect(!ctx.consume_event);
+    try std.testing.expect(!self.model_picker.isOpen());
+}
+
+test "native model command opens without sending and retains draft when hidden" {
+    fw.DrawContext.init(.unicode);
+    var self: Self = undefined;
+    self.init = undefined;
+    self.init.gpa = std.testing.allocator;
+    self.overview_draft = try Draft.create(std.testing.allocator);
+    defer self.overview_draft.destroy(std.testing.allocator);
+    self.destination = null;
+    self.submission = .{ .io = std.testing.io, .store = "", .session = "", .directory = "", .environment = .empty };
+    self.model_picker = NativeModelPicker.init(std.testing.allocator);
+    defer self.model_picker.deinit();
+    self.model_effects = .{ .allocator = std.testing.allocator, .io = std.testing.io, .home = "", .store = "" };
+    self.model_default = null;
+    self.body_width = 80;
+    self.body_bottom = 10;
+    self.notice = "";
+    try self.overview_draft.field.insertSliceAtCursor("/model");
+    try self.submit();
+    try std.testing.expect(self.model_picker.isOpen());
+    try std.testing.expect(self.model_effects.pending_list != null);
+    try std.testing.expect(self.submission.view() == null);
+    const after = try self.overview_draft.field.snapshot();
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings("", after);
+
+    self.modelAction(.edit);
+    self.body_width = 4;
+    try self.overview_draft.field.insertSliceAtCursor("/model");
+    try self.submit();
+    try std.testing.expect(!self.model_picker.isOpen());
+    const retained = try self.overview_draft.field.snapshot();
+    defer std.testing.allocator.free(retained);
+    try std.testing.expectEqualStrings("/model", retained);
 }
