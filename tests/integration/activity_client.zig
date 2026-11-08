@@ -70,16 +70,7 @@ pub fn main(init: std.process.Init) !void {
         const path = init.environ_map.get("TMPDIR") orelse return error.InvalidTemporaryDirectory;
         var dir = try std.Io.Dir.cwd().openDir(init.io, path, .{});
         defer dir.close(init.io);
-        var random: [16]u8 = undefined;
-        try std.Io.randomSecure(init.io, &random);
-        var name_buffer: [64]u8 = undefined;
-        const name = try std.fmt.bufPrint(&name_buffer, "rui-window-test-{s}.tmp", .{std.fmt.bytesToHex(random, .lower)});
-        const scratch = try dir.createFile(init.io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
-        dir.deleteFile(init.io, name) catch |err| {
-            scratch.close(init.io);
-            return err;
-        };
-        var content = scoped.readVerifiedActivityScratch(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), .{ .bytes = try std.fmt.parseInt(u64, args[6], 10), .digest = digest }, scratch) catch |err| {
+        const content = scoped.readVerifiedActivityScratch(std.heap.c_allocator, dir, args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), .{ .bytes = try std.fmt.parseInt(u64, args[6], 10), .digest = digest }) catch |err| {
             if (cancel) {
                 try std.Io.File.stderr().writeStreamingAll(init.io, "SCRATCH_READ_RETURNED\n");
                 try std.Io.sleep(init.io, .fromSeconds(3), .awake);

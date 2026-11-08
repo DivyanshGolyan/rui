@@ -331,14 +331,16 @@ pub const Requests = struct {
         return sink.window;
     }
 
-    /// Consume a fresh, unlinked, exclusively owned scratch file. The file is
-    /// closed on failure and is returned only after complete authentication.
-    /// Temporary disk cost is the complete content length; closing the result
-    /// releases it. The caller must fence the Host and retain the source identity.
-    pub fn readVerifiedActivityScratch(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: protocol_reply.CommandObservation.ContentReference, scratch: std.Io.File) !VerifiedContentScratch {
-        errdefer scratch.close(self.io);
-        if (try self.readActivityContent(store_path, session, position, ordinal, expected, scratch)) |failure| return self.failRead(failure);
-        return .{ .io = self.io, .file = scratch, .length = expected.bytes };
+    /// Create and exclusively own an unlinked scratch file until complete
+    /// length, digest and EOF verification. No file handle escapes. Temporary
+    /// disk cost is the complete source length until the result is closed.
+    /// The caller must fence the Host and retain the source identity.
+    pub fn readVerifiedActivityScratch(self: Requests, allocator: std.mem.Allocator, dir: std.Io.Dir, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: protocol_reply.CommandObservation.ContentReference) !*VerifiedContentScratch {
+        const state = try ScratchState.create(allocator, self.io, dir);
+        errdefer state.close();
+        if (try self.readActivityContent(store_path, session, position, ordinal, expected, state.file)) |failure| return self.failRead(failure);
+        state.length = expected.bytes;
+        return @ptrCast(state);
     }
 
     /// The first line of a Message admission row (ordinal 0), read into
@@ -359,42 +361,69 @@ pub const Requests = struct {
     }
 };
 
-/// An exclusively owned, authenticated temporary copy. This is not a Store
-/// replacement: close it when the bounded working set evicts its source.
-pub const VerifiedContentScratch = struct {
-    io: std.Io,
-    file: std.Io.File,
-    length: u64,
-
+/// An authenticated temporary copy with no public writable file handle.
+/// Close it when its source leaves the bounded working set.
+pub const VerifiedContentScratch = opaque {
     pub fn readAt(self: *const VerifiedContentScratch, start: u64, buffer: []u8) !usize {
-        if (start > self.length) return error.InvalidTarget;
+        const state: *const ScratchState = @ptrCast(@alignCast(self));
+        if (start > state.length) return error.InvalidTarget;
         if (buffer.len > protocol.content_window_bytes) return error.WindowTooLarge;
-        const wanted: usize = @intCast(@min(self.length - start, buffer.len));
-        if (try self.file.readPositionalAll(self.io, buffer[0..wanted], start) != wanted) return error.TruncatedResponse;
+        const wanted: usize = @intCast(@min(state.length - start, buffer.len));
+        if (try state.file.readPositionalAll(state.io, buffer[0..wanted], start) != wanted) return error.TruncatedResponse;
         return wanted;
     }
 
     pub fn close(self: *VerifiedContentScratch) void {
+        const state: *ScratchState = @ptrCast(@alignCast(self));
+        state.close();
+    }
+};
+
+const ScratchState = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    file: std.Io.File,
+    length: u64 = 0,
+
+    fn create(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !*ScratchState {
+        var random: [16]u8 = undefined;
+        try std.Io.randomSecure(io, &random);
+        var name_buffer: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "rui-window-{s}.tmp", .{std.fmt.bytesToHex(random, .lower)});
+        const file = try dir.createFile(io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+        errdefer file.close(io);
+        try dir.deleteFile(io, name);
+        const state = try allocator.create(ScratchState);
+        state.* = .{ .allocator = allocator, .io = io, .file = file };
+        return state;
+    }
+
+    fn close(self: *ScratchState) void {
+        const allocator = self.allocator;
         self.file.close(self.io);
-        self.* = undefined;
+        allocator.destroy(self);
     }
 };
 
 test "native verified scratch reads exact bounded source ranges" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const io = std.testing.io;
-    const file = try tmp.dir.createFile(io, "content", .{ .read = true });
-    try file.writeStreamingAll(io, "first-é-last");
-    var content: VerifiedContentScratch = .{ .io = io, .file = file, .length = "first-é-last".len };
+    const state = try ScratchState.create(std.testing.allocator, std.testing.io, tmp.dir);
+    try state.file.writeStreamingAll(state.io, "first-é-last");
+    state.length = "first-é-last".len;
+    const content: *VerifiedContentScratch = @ptrCast(state);
     defer content.close();
     var buffer: [protocol.content_window_bytes]u8 = undefined;
     const count = try content.readAt(6, &buffer);
     try std.testing.expectEqualStrings("é-last", buffer[0..count]);
-    try std.testing.expectEqual(@as(usize, 0), try content.readAt(content.length, &buffer));
-    try std.testing.expectError(error.InvalidTarget, content.readAt(content.length + 1, &buffer));
+    try std.testing.expectEqual(@as(usize, 0), try content.readAt(state.length, &buffer));
+    try std.testing.expectError(error.InvalidTarget, content.readAt(state.length + 1, &buffer));
     var too_large: [protocol.content_window_bytes + 1]u8 = undefined;
     try std.testing.expectError(error.WindowTooLarge, content.readAt(0, &too_large));
+    var directory = try tmp.dir.openDir(std.testing.io, ".", .{ .iterate = true });
+    defer directory.close(std.testing.io);
+    var iterator = directory.iterate();
+    try std.testing.expect((try iterator.next(std.testing.io)) == null);
 }
 
 /// Exact authenticated bytes beginning at the requested source offset.
