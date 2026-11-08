@@ -119,6 +119,16 @@ new_activity: bool = false,
 no_older: bool = false,
 no_newer: bool = false,
 feed_stale: bool = false,
+export_open: bool = false,
+export_session: Id = undefined,
+export_sources: [protocol.ActivityPage.items]observations.SourcePage.Item = undefined,
+export_count: usize = 0,
+export_selected: usize = 0,
+export_command: ?[]u8 = null,
+export_old_command: ?[]u8 = null,
+export_text: [1]fw.Text = .{.{ .text = "" }},
+export_index: fw.Text.LineIndex = .{},
+export_view: fw.ScrollBars = .{ .scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 } },
 navigation_epoch: u64 = 0,
 following: bool = true,
 body_width: u16 = 0,
@@ -178,6 +188,9 @@ fn deinit(self: *Self) void {
     _ = self.submission.join();
     if (was_pending) self.recoveryGuide();
     self.submission.close();
+    if (self.export_command) |command| self.init.gpa.free(command);
+    if (self.export_old_command) |command| self.init.gpa.free(command);
+    self.export_index.deinit(self.init.gpa);
     self.freeArena(self.read_arena);
     self.freeArena(self.list_arena);
     self.freeArena(self.old_list_arena);
@@ -505,12 +518,46 @@ fn finishSubmission(self: *Self, ctx: *fw.EventContext) !void {
     }
 }
 
+fn makeExportCommand(allocator: std.mem.Allocator, store: []const u8, session: Id, source: observations.SourcePage.Item) ![]u8 {
+    const hex = try allocator.alloc(u8, try std.math.mul(usize, store.len, 2));
+    defer allocator.free(hex);
+    const digits = "0123456789abcdef";
+    for (store, 0..) |byte, i| {
+        hex[2 * i] = digits[byte >> 4];
+        hex[2 * i + 1] = digits[byte & 15];
+    }
+    const digest = std.fmt.bytesToHex(source.reference.digest, .lower);
+    return std.fmt.allocPrint(allocator, "{s} · position {d}, ordinal {d} · {d} bytes\nExpected SHA-256: {s}\nRaw export: rui session read-conversation --store-hex {s} --session {s} --position {d} --ordinal {d}\nRedirect output: source may contain terminal controls.", .{
+        if (source.kind == .user) "You" else "Assistant", source.position, source.ordinal, source.reference.length, &digest, hex, &session, source.position, source.ordinal,
+    });
+}
+
+fn updateExport(self: *Self) !void {
+    const command = try makeExportCommand(self.init.gpa, self.options.store, self.export_session, self.export_sources[self.export_selected]);
+    if (self.export_old_command) |old| self.init.gpa.free(old);
+    self.export_old_command = self.export_command;
+    self.export_command = command;
+    self.export_text[0] = .{ .text = command };
+    self.export_index.width = null;
+    self.export_view.scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 };
+}
+
+fn openExport(self: *Self) !void {
+    const page = self.page orelse return;
+    self.export_count = page.sources(&self.export_sources);
+    if (self.export_count == 0) return;
+    self.export_selected = page.sourceIndexAt(self.feed.scroll_view.cursor) orelse 0;
+    self.export_session = page.page.session;
+    try self.updateExport();
+    self.export_open = true;
+}
+
 fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (value) {
         .paste_start => self.pasting = true,
         .paste_end => self.pasting = false,
-        .mouse => |mouse| if (self.destination != null) {
+        .mouse => |mouse| if (self.destination != null and !self.export_open) {
             const wheel = mouse.button == .wheel_up or mouse.button == .wheel_down;
             const scrollbar = self.body_width != 0 and mouse.col == self.body_width - 1 and mouse.row > 0 and mouse.row < self.body_bottom and (mouse.type == .press or mouse.type == .drag);
             if (wheel or scrollbar) self.following = false;
@@ -565,6 +612,33 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
                 }
                 ctx.consumeAndRedraw();
                 return;
+            }
+            if (!self.pasting and self.destination != null and key.matches('e', .{ .alt = true })) {
+                if (self.export_open) self.export_open = false else try self.openExport();
+                ctx.consumeAndRedraw();
+                return;
+            }
+            if (self.export_open) {
+                if (key.matches(vaxis.Key.escape, .{})) {
+                    self.export_open = false;
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (key.matches(vaxis.Key.up, .{ .alt = true }) or key.matches(vaxis.Key.down, .{ .alt = true })) {
+                    if (key.matches(vaxis.Key.up, .{ .alt = true })) self.export_selected -|= 1 else self.export_selected = @min(self.export_selected + 1, self.export_count - 1);
+                    try self.updateExport();
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (key.matches(vaxis.Key.page_up, .{}) or key.matches(vaxis.Key.page_down, .{})) {
+                    try self.export_view.scroll_view.handleEvent(ctx, .{ .key_press = .{ .codepoint = if (key.matches(vaxis.Key.page_up, .{})) 'u' else 'd', .mods = .{ .ctrl = true } } });
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (key.matches(vaxis.Key.enter, .{})) {
+                    ctx.consumeAndRedraw();
+                    return;
+                }
             }
             if (self.destination == null and key.matches(vaxis.Key.up, .{ .alt = true })) {
                 self.list.prevItem(ctx);
@@ -633,7 +707,7 @@ fn event(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             };
             try ctx.tick(500, self.widget());
         },
-        .mouse => |mouse| if (self.destination != null and (mouse.button == .wheel_up or mouse.button == .wheel_down)) {
+        .mouse => |mouse| if (self.destination != null and !self.export_open and (mouse.button == .wheel_up or mouse.button == .wheel_down)) {
             self.following = false;
         },
         else => {},
@@ -651,7 +725,7 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
         try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  New activity · Esc follows", .{&id})
     else
         try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  Esc returns", .{&id})) else "Sessions  ·  Alt-↑/↓ select · Alt-Enter open";
-    self.status.text = if (self.notice.len == 0) "Enter send · Shift-Enter or Ctrl-J newline · Ctrl-Q quit" else self.notice;
+    self.status.text = if (self.export_open) "Alt-↑/↓ item · Wheel/Page scroll · Esc close · Redirect output to a file" else if (self.notice.len == 0) "Enter send · Alt-E export · Shift-Enter/Ctrl-J newline · Ctrl-Q quit" else self.notice;
     const header = try self.header.draw(ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 }));
     const status = try self.status.draw(ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 }));
     self.border = .{ .child = self.activeDraft().field.widget() };
@@ -667,7 +741,16 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
     if (self.destination != null and body_height != 0) {
         if (self.following) self.feed.scroll_view.jumpToEnd();
     }
-    const body = if (self.destination == null) try self.list.draw(body_ctx) else try self.feed.draw(body_ctx);
+    const body = if (self.destination == null) try self.list.draw(body_ctx) else if (self.export_open) body: {
+        const export_width = width -| @intFromBool(self.export_view.draw_vertical_scrollbar);
+        if (self.export_index.width == null or self.export_index.width.? != export_width) {
+            try self.export_index.reflow(self.init.gpa, &self.export_text, body_ctx.withConstraints(.{ .width = export_width }, .{ .width = export_width, .height = null }));
+            self.export_view.scroll_view.children = .{ .builder = self.export_index.builder() };
+            self.export_view.scroll_view.item_count = @intCast(self.export_index.len);
+            self.export_view.estimated_content_height = @intCast(self.export_index.len);
+        }
+        break :body try self.export_view.draw(body_ctx);
+    } else try self.feed.draw(body_ctx);
     if (self.page) |page| if (page.fault()) |err| {
         self.feed_stale = true;
         self.notice = @errorName(err);
@@ -692,4 +775,14 @@ test "navigation epoch rejects stale overview and session reads" {
     try std.testing.expect(!conversation.isCurrent(id, 6));
     try std.testing.expect(!conversation.isCurrent(other, 4));
     try std.testing.expect(!conversation.isCurrent(null, 4));
+}
+
+
+test "native exact export command uses source identity and shell-safe store bytes" {
+    const item: observations.SourcePage.Item = .{ .kind = .assistant, .position = 42, .ordinal = 3, .reference = .{ .length = 4, .digest = @splat(0xab) } };
+    const command = try makeExportCommand(std.testing.allocator, "store with ' \x1b", "abc123".*, item);
+    defer std.testing.allocator.free(command);
+    try std.testing.expect(std.mem.indexOf(u8, command, "--store-hex 73746f726520776974682027201b --session abc123 --position 42 --ordinal 3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, command, "Expected SHA-256: abababab") != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, command, 0x1b) == null);
 }

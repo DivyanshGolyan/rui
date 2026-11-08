@@ -107,6 +107,23 @@ fn hasRow(raw: *const anyopaque, row: usize, _: usize) bool {
     return row < self.row_count;
 }
 
+/// Snapshot only public Activity identities; exact content remains in its
+/// verified scratch owner and is never reconstructed from rendered cells.
+pub fn sources(self: *const Self, out: *[protocol.ActivityPage.items]observations.SourcePage.Item) usize {
+    for (self.items[0..self.count], 0..) |item, i| out[i] = item.source.item;
+    return self.count;
+}
+
+pub fn sourceIndexAt(self: *const Self, row: usize) ?usize {
+    var remaining = row;
+    for (self.items[0..self.count], 0..) |item, i| {
+        const rows = 1 + item.index.len;
+        if (remaining < rows) return i;
+        remaining -= rows;
+    }
+    return null;
+}
+
 const Location = struct { item: *Item, row: ?usize };
 
 fn locate(self: *const Self, row: usize) ?Location {
