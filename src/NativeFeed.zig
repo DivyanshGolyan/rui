@@ -662,7 +662,10 @@ test "native paged word wrap matches contiguous source geometry" {
                 const widget = (try expected.builder().itemAtIdxForDraw(row, 0, ctx.arena)).?;
                 const text: *const fw.Text = @ptrCast(@alignCast(widget.userdata));
                 const observed = source[actual.start..actual.end];
-                try std.testing.expectEqualStrings(if (observed.len == 0) " " else observed, text.text);
+                std.testing.expectEqualStrings(if (observed.len == 0) " " else observed, text.text) catch |err| {
+                    std.debug.print("paged wrap mismatch case={d} width={d} row={d} start={d} end={d} source={any} expected={any} actual={any}\n", .{ case_index, width, row, actual.start, actual.end, source, text.text, observed });
+                    return err;
+                };
                 try std.testing.expect(!actual.oversized_grapheme);
             }
             try std.testing.expectEqual(expected.len, row);
