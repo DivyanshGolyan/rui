@@ -7,7 +7,7 @@ const markdown = @import("markdown_prefix.zig");
 const client = @import("client.zig");
 const Self = @This();
 
-pub const Mode = enum(u8) { prose, opaque };
+pub const Mode = enum(u8) { prose, @"opaque" };
 pub const Line = extern struct {
     start: u64,
     end: u64,
@@ -67,7 +67,7 @@ fn append(self: *Self, context: *markdown.Context, head: []const u8, start: usiz
         .start = start,
         .end = end,
         .next = next,
-        .mode = if (decision.projection.mode == .prose) .prose else .opaque,
+        .mode = if (decision.projection.mode == .prose) .prose else .@"opaque",
         .quote_depth = if (quote) |value| value.depth else 0,
         .quote_prefix = if (quote) |value| value.bytes else 0,
     };
@@ -117,7 +117,7 @@ test "native rich line index keeps bounded quote and fenced source facts" {
     try std.testing.expectEqual(Mode.prose, quote.mode);
     try std.testing.expectEqual(@as(u8, 2), quote.quote_depth);
     try std.testing.expectEqualStrings("> > ", bytes[0..quote.quote_prefix]);
-    for (1..4) |i| try std.testing.expectEqual(Mode.opaque, (try index.lineAt(i)).?.mode);
+    for (1..4) |i| try std.testing.expectEqual(Mode.@"opaque", (try index.lineAt(i)).?.mode);
     try std.testing.expectEqual(Mode.prose, (try index.lineAt(4)).?.mode);
     try std.testing.expect((try index.lineAt(5)) == null);
     var original: [bytes.len]u8 = undefined;
