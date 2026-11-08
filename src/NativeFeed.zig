@@ -3,6 +3,7 @@ const std = @import("std");
 const fw = @import("vaxis").vxfw;
 const observations = @import("NativeObservations.zig");
 const markdown = @import("markdown_prefix.zig");
+const table = @import("table_row.zig");
 const Self = @This();
 
 sources: std.ArrayList(observations.Block) = .empty,
@@ -50,14 +51,117 @@ fn appendDisplay(widgets: *std.ArrayList(fw.Text), arena: std.mem.Allocator, dis
         };
         const mode = decision.projection.mode;
         if (previous) |last| if (last != mode) {
-            try widgets.append(arena, .{ .text = display[segment_start..at], .softwrap = last == .prose });
+            try appendPart(widgets, arena, display[segment_start..at], last);
             segment_start = at;
         };
         previous = mode;
         context = decision.next;
         at = if (end < display.len) end + 1 else end;
     }
-    if (previous) |last| try widgets.append(arena, .{ .text = display[segment_start..], .softwrap = last == .prose });
+    if (previous) |last| try appendPart(widgets, arena, display[segment_start..], last);
+}
+
+const Line = struct {
+    raw: []const u8,
+    next: usize,
+    ending: table.Ending,
+};
+
+fn lineAt(bytes: []const u8, at: usize) ?Line {
+    if (at >= bytes.len) return null;
+    const end = std.mem.indexOfScalarPos(u8, bytes, at, '\n') orelse bytes.len;
+    return .{ .raw = bytes[at..end], .next = if (end < bytes.len) end + 1 else end, .ending = if (end < bytes.len) .line_feed else .canonical_eof };
+}
+
+const TableLine = struct { raw: []const u8, parsed: table.Row };
+
+fn appendPart(widgets: *std.ArrayList(fw.Text), arena: std.mem.Allocator, part: []const u8, mode: markdown.Context.Mode) !void {
+    if (mode != .prose) {
+        try widgets.append(arena, .{ .text = part, .softwrap = false });
+        return;
+    }
+    var at: usize = 0;
+    var prose_start: usize = 0;
+    while (lineAt(part, at)) |head| {
+        if (head.ending != .line_feed) break;
+        const delimiter = lineAt(part, head.next) orelse break;
+        // Quoted blocks have their own presentation owner; don't silently
+        // reinterpret their raw quote markers as table cells.
+        if (markdown.recognize(head.raw[0..@min(head.raw.len, markdown.head_limit)], true) == .quote) {
+            at = head.next;
+            continue;
+        }
+        const columns = switch (table.header(head.raw, delimiter.raw, delimiter.ending)) {
+            .columns => |value| value,
+            else => {
+                at = head.next;
+                continue;
+            },
+        };
+        const first = switch (table.parse(head.raw, head.ending, columns.count)) {
+            .row => |value| value,
+            else => unreachable,
+        };
+        var rows: std.ArrayList(TableLine) = .empty;
+        try rows.append(arena, .{ .raw = head.raw, .parsed = first });
+        var next = delimiter.next;
+        while (lineAt(part, next)) |line| {
+            const parsed = switch (table.parse(line.raw, line.ending, columns.count)) {
+                .row => |value| value,
+                else => break,
+            };
+            if (!parsed.has_pipe) break;
+            try rows.append(arena, .{ .raw = line.raw, .parsed = parsed });
+            next = line.next;
+        }
+        if (at > prose_start) try widgets.append(arena, .{ .text = part[prose_start..at] });
+        const rendered = try renderTable(arena, rows.items, columns);
+        try widgets.append(arena, .{ .text = rendered, .softwrap = false });
+        at = next;
+        prose_start = at;
+    }
+    if (prose_start < part.len) try widgets.append(arena, .{ .text = part[prose_start..] });
+}
+
+fn renderTable(arena: std.mem.Allocator, rows: []const TableLine, columns: table.Columns) ![]const u8 {
+    const ctx: fw.DrawContext = .{ .arena = arena, .min = .{}, .max = .{}, .cell_size = .{} };
+    var widths: [table.max_columns]usize = @splat(0);
+    for (rows) |row| for (row.parsed.cells[0..row.parsed.count], 0..) |cell, col| {
+        widths[col] = @max(widths[col], tableCellWidth(ctx, row.raw[cell.start..cell.end]));
+    };
+    var output: std.Io.Writer.Allocating = .init(arena);
+    for (rows, 0..) |row, row_index| {
+        if (row_index == 1) try tableRule(&output.writer, widths[0..columns.count]);
+        for (row.parsed.cells[0..row.parsed.count], 0..) |cell, col| {
+            if (col != 0) try output.writer.writeAll(" │ ");
+            const text = row.raw[cell.start..cell.end];
+            const padding = widths[col] - tableCellWidth(ctx, text);
+            const leading = switch (columns.alignment[col]) {
+                .left => @as(usize, 0),
+                .right => padding,
+                .center => padding / 2,
+            };
+            for (0..leading) |_| try output.writer.writeByte(' ');
+            try output.writer.writeAll(text);
+            for (leading..padding) |_| try output.writer.writeByte(' ');
+        }
+        try output.writer.writeByte('\n');
+    }
+    if (rows.len == 1) try tableRule(&output.writer, widths[0..columns.count]);
+    return output.written();
+}
+
+fn tableCellWidth(ctx: fw.DrawContext, text: []const u8) usize {
+    // Native hard-line text expands each tab to eight cells.
+    return ctx.stringWidth(text) + 7 * std.mem.count(u8, text, "\t");
+}
+
+fn tableRule(writer: *std.Io.Writer, widths: []const usize) !void {
+    for (widths, 0..) |width, col| {
+        if (col != 0) try writer.writeAll("─┼─");
+        for (0..width) |_| try writer.writeAll("─");
+    }
+    try writer.writeByte('\n');
 }
 
 pub fn sourceAt(self: *const Self, position: u64, ordinal: u64) ?observations.Block {
@@ -107,4 +211,45 @@ test "native feed keeps prose wrapped and fenced source horizontally scrollable"
     try std.testing.expect(!feed.widgets.items[2].softwrap);
     try std.testing.expect(feed.widgets.items[3].softwrap);
     try std.testing.expectEqualStrings(source, feed.sourceAt(1, 0).?.source);
+}
+
+test "native feed measures Unicode tables and preserves original source" {
+    fw.DrawContext.init(.unicode);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var feed: Self = .{};
+    defer feed.deinit(std.testing.allocator);
+    const source = "intro\nname | 表\n--- | ---:\na | 7\noutro";
+    try feed.append(std.testing.allocator, arena.allocator(), &.{.{
+        .kind = .assistant,
+        .position = 2,
+        .ordinal = 0,
+        .reference = .{ .length = source.len, .digest = @import("protocol.zig").contentDigest(source) },
+        .source = source,
+        .display = source,
+    }});
+    try std.testing.expectEqualStrings("intro\n", feed.widgets.items[1].text);
+    try std.testing.expect(!feed.widgets.items[2].softwrap);
+    try std.testing.expectEqualStrings("name │ 表\n─────┼───\na    │  7\n", feed.widgets.items[2].text);
+    try std.testing.expectEqualStrings("outro", feed.widgets.items[3].text);
+    try std.testing.expectEqualStrings(source, feed.sourceAt(2, 0).?.source);
+}
+
+test "native feed does not interpret table syntax inside a fence" {
+    fw.DrawContext.init(.unicode);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var feed: Self = .{};
+    defer feed.deinit(std.testing.allocator);
+    const source = "```\na | b\n--- | ---\nx | y\n```";
+    try feed.append(std.testing.allocator, arena.allocator(), &.{.{
+        .kind = .assistant,
+        .position = 3,
+        .ordinal = 0,
+        .reference = .{ .length = source.len, .digest = @import("protocol.zig").contentDigest(source) },
+        .source = source,
+        .display = source,
+    }});
+    try std.testing.expectEqualStrings(source, feed.widgets.items[1].text);
+    try std.testing.expect(!feed.widgets.items[1].softwrap);
 }
