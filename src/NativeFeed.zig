@@ -765,3 +765,79 @@ test "native paged source scroll view realizes only visible rows" {
     try std.testing.expect(fixed.end_index < storage.len);
     std.debug.print("paged actual-scroll source={d} rows={d} visible={d} frame_bytes={d}\n", .{ length, index.len, drawn.children.len, fixed.end_index });
 }
+
+test "native oversized paged grapheme renders one bounded replacement and preserves source offsets" {
+    const vaxis = @import("vaxis");
+    fw.DrawContext.init(.unicode);
+    const allocator = std.testing.allocator;
+    const prefix = "e\u{301}👩🏽‍🚀";
+    const accents = fw.PagedText.max_cell_grapheme_bytes / 2 + 64;
+    const cluster_len = 1 + 2 * accents;
+    const source = try allocator.alloc(u8, prefix.len + cluster_len + 1);
+    defer allocator.free(source);
+    @memcpy(source[0..prefix.len], prefix);
+    source[prefix.len] = 'a';
+    for (0..accents) |i| {
+        source[prefix.len + 1 + 2 * i] = 0xcc;
+        source[prefix.len + 2 + 2 * i] = 0x81;
+    }
+    source[source.len - 1] = 'Z';
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "large-grapheme", .{ .read = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, source);
+    const backing: GraphemeFile = .{ .io = io, .file = file, .max_read = 37 };
+    var reader: vaxis.unicode.PagedReader = .{ .source = .{ .userdata = &backing, .length = source.len, .readFn = GraphemeFile.read } };
+    var graphemes = try vaxis.unicode.PagedGraphemeIterator.init(&reader, 0);
+    const first = (try graphemes.next()).?;
+    const second = (try graphemes.next()).?;
+    const large = (try graphemes.next()).?;
+    const last = (try graphemes.next()).?;
+    try std.testing.expectEqualStrings("e\u{301}", source[first.start..][0..first.len]);
+    try std.testing.expectEqualStrings("👩🏽‍🚀", source[second.start..][0..second.len]);
+    try std.testing.expectEqual(prefix.len, large.start);
+    try std.testing.expectEqual(cluster_len, large.len);
+    try std.testing.expectEqual(prefix.len + cluster_len, last.start);
+    try std.testing.expectEqualStrings("Z", source[last.start..][0..last.len]);
+    try std.testing.expect((try graphemes.next()) == null);
+
+    const geometry: fw.DrawContext = .{ .arena = allocator, .min = .{ .width = 12 }, .max = .{ .width = 12, .height = null }, .cell_size = .{} };
+    var index = try fw.PagedText.Index.init(&reader, geometry, 12);
+    try std.testing.expectEqual(@as(usize, 1), index.len);
+    const row = (try index.rowAt(0)).?;
+    try std.testing.expect(row.oversized_grapheme);
+    try std.testing.expectEqual(source.len, row.end);
+    try std.testing.expectEqual(@as(?usize, 0), try index.rowForOffset(large.start + 4096));
+    var storage: [256 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const ctx: fw.DrawContext = .{ .arena = fixed.allocator(), .min = .{ .width = 12 }, .max = .{ .width = 12, .height = null }, .cell_size = .{} };
+    const widget = (try index.builder().itemAtIdxForDraw(0, 0, ctx.arena)).?;
+    const surface = try widget.draw(ctx);
+    const marker_column: u16 = @intCast(geometry.stringWidth(prefix));
+    try std.testing.expectEqualStrings("e\u{301}", surface.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("👩🏽‍🚀", surface.readCell(1, 0).char.grapheme);
+    try std.testing.expectEqualStrings("�", surface.readCell(marker_column, 0).char.grapheme);
+    try std.testing.expectEqualStrings("Z", surface.readCell(marker_column + 1, 0).char.grapheme);
+    try std.testing.expect(index.fault == null);
+
+    const Horizontal = struct {
+        fn line(_: *const anyopaque, _: usize) !fw.PagedText.LineStyle {
+            return .{ .horizontal = true };
+        }
+    };
+    var context: u8 = 0;
+    var horizontal = try fw.PagedText.Index.initStyled(&reader, geometry, 12, .{ .userdata = &context, .lineFn = Horizontal.line });
+    const horizontal_widget = (try horizontal.builder().itemAtIdxForDraw(0, 0, ctx.arena)).?;
+    const shifted = try horizontal_widget.drawHorizontalFn.?(horizontal_widget.userdata, ctx, marker_column, 4);
+    try std.testing.expectEqualStrings("�", shifted.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("Z", shifted.readCell(1, 0).char.grapheme);
+    try std.testing.expect(horizontal.fault == null);
+    const copied = try allocator.alloc(u8, source.len);
+    defer allocator.free(copied);
+    try std.testing.expectEqual(source.len, try file.readPositionalAll(io, copied, 0));
+    try std.testing.expectEqualSlices(u8, source, copied);
+    try std.testing.expect(fixed.end_index < storage.len);
+    std.debug.print("native oversized display source_bytes={d} cluster_bytes={d} frame_bytes={d} source_exact=true\n", .{ source.len, cluster_len, fixed.end_index });
+}
