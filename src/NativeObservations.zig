@@ -19,10 +19,15 @@ pub const Conversation = struct {
     token: ?replies.SessionToken,
     /// Last activity item, including non-message items, for the next delta.
     cursor: ?replies.ActivityCursor,
+    instance: protocol.InstanceId,
+    refresh: bool,
 };
 
 pub const Block = struct {
     kind: enum { user, assistant },
+    position: u64,
+    ordinal: u64,
+    reference: protocol.ActivityItem.Content,
     /// Exact Host content remains distinct from terminal-safe display bytes.
     source: []const u8,
     display: []const u8,
@@ -109,7 +114,26 @@ pub fn list(allocator: std.mem.Allocator, requests: client.Requests, store: []co
 
 /// Reads Message content with the Host's length and digest binding. The
 /// returned blocks are values, not screen geometry or a mutable editor.
-pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, store: []const u8, id: []const u8, since: ?replies.SessionToken, after: ?replies.ActivityCursor) !?Conversation {
+pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, store: []const u8, id: []const u8, since: ?replies.SessionToken, after: ?replies.ActivityCursor, previous_instance: ?protocol.InstanceId, force_refresh: bool, refreshing: *std.atomic.Value(bool)) !?Conversation {
+    const instance = try servingInstance(requests.io, store);
+    var fenced = requests;
+    fenced.host_instance = &instance;
+    const refresh = force_refresh or if (previous_instance) |previous| !std.mem.eql(u8, &instance, &previous) else false;
+    if (refresh) refreshing.store(true, .release);
+    const result = try conversationOnHost(allocator, fenced, store, id, if (refresh) null else since, if (refresh) null else after, instance, refresh);
+    const still_serving = try servingInstance(requests.io, store);
+    if (!std.mem.eql(u8, &instance, &still_serving)) return error.HostInstanceChanged;
+    return result;
+}
+
+fn servingInstance(io: std.Io, store: []const u8) !protocol.InstanceId {
+    return switch (client.hostStatus(io, store)) {
+        .ready => |ready| ready.instance,
+        else => error.HostUnavailable,
+    };
+}
+
+fn conversationOnHost(allocator: std.mem.Allocator, requests: client.Requests, store: []const u8, id: []const u8, since: ?replies.SessionToken, after: ?replies.ActivityCursor, instance: protocol.InstanceId, refresh: bool) !?Conversation {
     if (since) |token| {
         const poll = switch (try requests.activityPageSince(store, id, .{}, token)) {
             .page => |value| value,
@@ -142,9 +166,9 @@ pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, sto
             var sink: Bytes = .{ .allocator = allocator };
             if (try requests.readActivityContent(store, id, item.position, item.ordinal, .{ .bytes = value.content.length, .digest = value.content.digest }, &sink)) |failure| return requests.failRead(failure);
             const source = try sink.bytes.toOwnedSlice(allocator);
-            try blocks.append(allocator, .{ .kind = value.kind, .source = source, .display = try safe(allocator, .multiline, source) });
+            try blocks.append(allocator, .{ .kind = value.kind, .position = item.position, .ordinal = item.ordinal, .reference = value.content, .source = source, .display = try safe(allocator, .multiline, source) });
         }
         cursor = page.continuation() orelse break;
     }
-    return .{ .blocks = try blocks.toOwnedSlice(allocator), .token = snapshot_token, .cursor = last };
+    return .{ .blocks = try blocks.toOwnedSlice(allocator), .token = snapshot_token, .cursor = last, .instance = instance, .refresh = refresh };
 }

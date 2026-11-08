@@ -64,6 +64,8 @@ pub const Cancellation = struct {
 /// A worker owns each socket; no socket escapes or closes from another thread.
 pub const Requests = struct {
     io: std.Io,
+    /// Optional serving-lifetime fence for multi-request observations.
+    host_instance: ?*const protocol.InstanceId = null,
     cancellation: ?*const Cancellation = null,
     /// One borrower writes; the caller reads/resets only after return or join.
     read_failure: ?*?protocol_reply.ReadFailure = null,
@@ -1964,8 +1966,12 @@ fn openRead(requests: Requests, paths: *const platform.Paths, comptime route: []
     const fd = try connectRequest(requests, address, null);
     errdefer closeSocket(requests.io, fd);
     var header_buffer: [512]u8 = undefined;
-    const header = try std.fmt.bufPrint(&header_buffer, "POST " ++ route ++ " HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len});
-    try writeAllRequest(requests, fd, header, null);
+    var used = (try std.fmt.bufPrint(&header_buffer, "POST " ++ route ++ " HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n", .{body.len})).len;
+    if (requests.host_instance) |instance| {
+        used += (try std.fmt.bufPrint(header_buffer[used..], "X-Rui-Host-Instance: {s}\r\n", .{std.fmt.bytesToHex(instance.*, .lower)})).len;
+    }
+    used += (try std.fmt.bufPrint(header_buffer[used..], "\r\n", .{})).len;
+    try writeAllRequest(requests, fd, header_buffer[0..used], null);
     try writeAllRequest(requests, fd, body, null);
     return fd;
 }

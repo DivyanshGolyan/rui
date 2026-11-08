@@ -7,6 +7,7 @@ const client = @import("client.zig");
 const protocol = @import("protocol.zig");
 const Overview = @import("Overview.zig");
 const observations = @import("NativeObservations.zig");
+const NativeFeed = @import("NativeFeed.zig");
 const Task = @import("ClientTask.zig");
 const Submission = @import("SessionSubmission.zig");
 const defaults = @import("product_defaults.zig");
@@ -77,6 +78,8 @@ const ReadKind = union(enum) { list, conversation: struct {
     epoch: u64,
     since: ?@import("protocol_reply.zig").SessionToken,
     after: ?@import("protocol_reply.zig").ActivityCursor,
+    instance: ?protocol.InstanceId,
+    refresh: bool,
 } };
 const ReadResult = union(enum) { list: []observations.Row, conversation: ?observations.Conversation };
 
@@ -90,11 +93,14 @@ destination: ?Id = null,
 list: fw.ListView = .{ .children = .{ .slice = &.{} }, .item_count = 0, .draw_cursor = false },
 rows: []*RowWidget = &.{},
 feed: fw.ScrollBars = .{ .scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 }, .draw_horizontal_scrollbar = true },
-blocks: std.ArrayList(fw.Text) = .empty,
+content: NativeFeed = .{},
 feed_index: fw.Text.LineIndex = .{},
 feed_index_dirty: bool = true,
 feed_token: ?@import("protocol_reply.zig").SessionToken = null,
 feed_cursor: ?@import("protocol_reply.zig").ActivityCursor = null,
+feed_instance: ?protocol.InstanceId = null,
+feed_force_refresh: bool = false,
+feed_stale: bool = false,
 feed_epoch: u64 = 0,
 following: bool = true,
 body_width: u16 = 0,
@@ -109,6 +115,7 @@ worker: Task = .{},
 read_kind: ReadKind = .list,
 read_arena: ?*std.heap.ArenaAllocator = null,
 read_result: ?ReadResult = null,
+read_refreshing: std.atomic.Value(bool) = .init(false),
 list_arena: ?*std.heap.ArenaAllocator = null,
 old_list_arena: ?*std.heap.ArenaAllocator = null,
 feed_arenas: std.ArrayList(*std.heap.ArenaAllocator) = .empty,
@@ -162,7 +169,7 @@ fn deinit(self: *Self) void {
     self.feed_index.deinit(self.init.gpa);
     self.freeFeedArenas(&self.feed_arenas);
     self.freeFeedArenas(&self.old_feed_arenas);
-    self.blocks.deinit(self.init.gpa);
+    self.content.deinit(self.init.gpa);
     var values = self.drafts.valueIterator();
     while (values.next()) |value| value.*.destroy(self.init.gpa);
     self.drafts.deinit();
@@ -224,7 +231,8 @@ fn startRead(self: *Self) !void {
     arena.* = std.heap.ArenaAllocator.init(self.init.gpa);
     self.read_arena = arena;
     self.read_result = null;
-    self.read_kind = if (self.destination) |id| .{ .conversation = .{ .id = id, .epoch = self.feed_epoch, .since = self.feed_token, .after = self.feed_cursor } } else .list;
+    self.read_refreshing.store(false, .release);
+    self.read_kind = if (self.destination) |id| .{ .conversation = .{ .id = id, .epoch = self.feed_epoch, .since = self.feed_token, .after = self.feed_cursor, .instance = self.feed_instance, .refresh = self.feed_force_refresh } } else .list;
     self.worker.start(self.init.io, self, readWork) catch |err| {
         self.freeArena(self.read_arena);
         self.read_arena = null;
@@ -237,15 +245,24 @@ fn readWork(raw: *anyopaque, task: *Task) !void {
     const alloc = self.read_arena.?.allocator();
     self.read_result = switch (self.read_kind) {
         .list => .{ .list = try observations.list(alloc, task.requests(), self.options.store, self.scratch) },
-        .conversation => |conversation| .{ .conversation = try observations.conversation(alloc, task.requests(), self.options.store, &conversation.id, conversation.since, conversation.after) },
+        .conversation => |conversation| .{ .conversation = try observations.conversation(alloc, task.requests(), self.options.store, &conversation.id, if (conversation.refresh) null else conversation.since, if (conversation.refresh) null else conversation.after, conversation.instance, conversation.refresh, &self.read_refreshing) },
     };
 }
 
 fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
     if (self.worker.thread == null or !self.worker.completed()) return;
     self.worker.join() catch |err| {
-        self.notice = @errorName(err);
-        ctx.redraw = true;
+        const relevant = switch (self.read_kind) {
+            .list => self.destination == null,
+            .conversation => |conversation| self.destination != null and conversation.epoch == self.feed_epoch and std.mem.eql(u8, &self.destination.?, &conversation.id),
+        };
+        if (relevant) {
+            if (self.read_kind == .conversation) {
+                self.feed_stale = true;
+                self.feed_force_refresh = true;
+            } else self.notice = @errorName(err);
+            ctx.redraw = true;
+        }
         self.freeArena(self.read_arena);
         self.read_arena = null;
         return;
@@ -292,24 +309,36 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
                 return;
             };
             const blocks = conversation.blocks;
-            if (blocks.len == 0) {
-                self.feed_cursor = conversation.cursor;
-                self.feed_token = conversation.token;
-                self.freeArena(arena);
-                return;
-            }
-            const widgets = try arena.allocator().alloc(fw.Text, blocks.len);
-            for (blocks, widgets) |block, *item| {
-                const prefix = if (block.kind == .user) "You\n" else "Assistant\n";
-                item.* = .{ .text = try std.fmt.allocPrint(arena.allocator(), "{s}{s}\n", .{ prefix, block.display }), .softwrap = true, .width_basis = .parent };
-            }
-            try self.blocks.ensureUnusedCapacity(self.init.gpa, widgets.len);
-            try self.feed_arenas.append(self.init.gpa, arena);
-            self.blocks.appendSliceAssumeCapacity(widgets);
+            if (conversation.refresh) {
+                var fresh: NativeFeed = .{};
+                errdefer fresh.deinit(self.init.gpa);
+                try fresh.append(self.init.gpa, arena.allocator(), blocks);
+                var arenas: std.ArrayList(*std.heap.ArenaAllocator) = .empty;
+                errdefer arenas.deinit(self.init.gpa);
+                if (blocks.len != 0) try arenas.append(self.init.gpa, arena);
+                self.freeFeedArenas(&self.old_feed_arenas);
+                self.old_feed_arenas = self.feed_arenas;
+                self.feed_arenas = arenas;
+                self.content.deinit(self.init.gpa);
+                self.content = fresh;
+                if (blocks.len == 0) self.freeArena(arena);
+                self.feed_index_dirty = true;
+                ctx.redraw = true;
+            } else if (blocks.len != 0) {
+                try self.feed_arenas.ensureUnusedCapacity(self.init.gpa, 1);
+                try self.content.append(self.init.gpa, arena.allocator(), blocks);
+                self.feed_arenas.appendAssumeCapacity(arena);
+                self.feed_index_dirty = true;
+                ctx.redraw = true;
+            } else self.freeArena(arena);
             self.feed_cursor = conversation.cursor;
             self.feed_token = conversation.token;
-            self.feed_index_dirty = true;
-            ctx.redraw = true;
+            self.feed_instance = conversation.instance;
+            self.feed_force_refresh = false;
+            if (self.feed_stale) {
+                self.feed_stale = false;
+                ctx.redraw = true;
+            }
         },
     }
 }
@@ -319,13 +348,16 @@ fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
     self.destination = id;
     self.feed_epoch +%= 1;
     self.following = true;
-    self.blocks.clearRetainingCapacity();
+    self.content.clearRetainingCapacity();
     self.freeFeedArenas(&self.old_feed_arenas);
     self.old_feed_arenas = self.feed_arenas;
     self.feed_arenas = .empty;
     self.feed_index_dirty = true;
     self.feed_token = null;
     self.feed_cursor = null;
+    self.feed_instance = null;
+    self.feed_force_refresh = false;
+    self.feed_stale = false;
     self.feed.scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 };
     try ctx.requestFocus(self.activeDraft().field.widget());
     ctx.redraw = true;
@@ -481,7 +513,7 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             if (self.destination != null and key.matches(vaxis.Key.escape, .{})) {
                 if (!self.following) {
                     self.following = true;
-                    if (self.blocks.items.len != 0) {
+                    if (self.content.widgets.items.len != 0) {
                         self.feed.scroll_view.jumpToEnd();
                     }
                 } else try self.back(ctx);
@@ -513,6 +545,13 @@ fn event(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             ctx.redraw = true;
         },
         .tick => {
+            if (self.worker.thread != null and self.read_refreshing.load(.acquire)) switch (self.read_kind) {
+                .conversation => |conversation| if (self.destination != null and conversation.epoch == self.feed_epoch and std.mem.eql(u8, &self.destination.?, &conversation.id) and !self.feed_stale) {
+                    self.feed_stale = true;
+                    ctx.redraw = true;
+                },
+                .list => {},
+            };
             try self.completeRead(ctx);
             try self.finishSubmission(ctx);
             if (self.worker.thread == null) self.startRead() catch |err| {
@@ -532,7 +571,10 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
     const width = ctx.max.width orelse 0;
     const height = ctx.max.height orelse 0;
     if (width == 0 or height == 0) return fw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = height });
-    self.header.text = if (self.destination) |id| try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  Esc returns", .{&id}) else "Sessions  ·  Alt-↑/↓ select · Alt-Enter open";
+    self.header.text = if (self.destination) |id| (if (self.feed_stale)
+        try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  History may be stale · Esc returns", .{&id})
+    else
+        try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  Esc returns", .{&id})) else "Sessions  ·  Alt-↑/↓ select · Alt-Enter open";
     self.status.text = if (self.notice.len == 0) "Enter send · Shift-Enter or Ctrl-J newline · Ctrl-Q quit" else self.notice;
     const header = try self.header.draw(ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 }));
     const status = try self.status.draw(ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 }));
@@ -549,7 +591,7 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
     if (self.destination != null and body_height != 0) {
         const content_width = width -| @intFromBool(self.feed.draw_vertical_scrollbar);
         if (self.feed_index_dirty or self.feed_index.width == null or self.feed_index.width.? != content_width) {
-            try self.feed_index.reflow(self.init.gpa, self.blocks.items, body_ctx.withConstraints(.{ .width = content_width }, .{ .width = content_width, .height = null }));
+            try self.feed_index.reflow(self.init.gpa, self.content.widgets.items, body_ctx.withConstraints(.{ .width = content_width }, .{ .width = content_width, .height = null }));
             self.feed_index_dirty = false;
             self.feed.scroll_view.children = .{ .builder = self.feed_index.builder() };
             self.feed.scroll_view.item_count = @intCast(self.feed_index.lines.items.len);
