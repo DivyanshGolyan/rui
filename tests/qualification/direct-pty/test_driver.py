@@ -117,6 +117,20 @@ finally:
         screen.feed(b"\x1b[?2026h\r\x1b[2Kready\x1b[?2026l")
         self.assertTrue(screen.reached("ready"))
 
+    def test_private_dsr_does_not_prevent_owned_pty_teardown(self):
+        child = ("import os,time; "
+                 "os.write(1,b'\\x1b[?996n\\x1b[?2026hready\\x1b[?2026l'); "
+                 "time.sleep(30)")
+        with tempfile.TemporaryDirectory() as directory:
+            tty = DirectPty([sys.executable, "-c", child], env=os.environ,
+                            cwd=directory, output=directory)
+            try:
+                tty.marker("ready")
+            finally:
+                tty.close()
+            self.assertTrue(tty.closed)
+            self.assertIsNotNone(tty.process.poll(), "PTY child was not reaped")
+
     def test_restoration_excludes_only_darwin_write_history(self):
         # Exercise finish's real restoration boundary. Model the Darwin-only
         # write-history bit even on Linux, but never excuse NONBLOCK, access

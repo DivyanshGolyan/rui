@@ -42,6 +42,29 @@ class SgrAdapterTests(unittest.TestCase):
 
 
 class ScreenCaptureTests(unittest.TestCase):
+    def test_private_dsr_fragmentation_keeps_normal_dsr_csi_and_osc(self):
+        raw = ("\x1b[?2026h\x1b[1;1HX\x1b[5n\x1b[?996n"
+               "\x1b[6n\x1b]0;observer-title\x07\x1b[2;3HY\x1b[?2026l").encode()
+        for split in range(len(raw) + 1):
+            capture = ScreenCapture(20, 4)
+            replies = []
+            capture.screen.write_process_input = replies.append
+            capture.feed(raw[:split])
+            capture.feed(raw[split:])
+            self.assertEqual(["\x1b[0n", "\x1b[1;2R"], replies, split)
+            self.assertEqual("X", capture.screen.display[0].rstrip(), split)
+            self.assertEqual("  Y", capture.screen.display[1].rstrip(), split)
+            self.assertEqual("observer-title", capture.screen.title, split)
+            self.assertEqual((3, 1), (capture.screen.cursor.x, capture.screen.cursor.y), split)
+            self.assertEqual(1, capture.generation, split)
+        capture = ScreenCapture(20, 4)
+        replies = []
+        capture.screen.write_process_input = replies.append
+        for byte in raw:
+            capture.feed(bytes([byte]))
+        self.assertEqual(["\x1b[0n", "\x1b[1;2R"], replies)
+        self.assertEqual("  Y", capture.screen.display[1].rstrip())
+
     def test_split_indexed_and_rgb_frame_preserves_exact_draft_cursor_and_styles(self):
         frame = ("\x1b[?2026h\x1b[2J\x1b[2;1H"
                  " › \x1b[38:5:123;48:5:234m/upgrade"

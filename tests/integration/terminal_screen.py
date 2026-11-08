@@ -57,6 +57,13 @@ def assert_details_unavailable(capture, *, columns, rows):
 
 class CombiningScreen(pyte.Screen):
     """Keep zero-width Unicode marks without dropping the following draw text."""
+    def report_device_status(self, mode, private=False):
+        # pyte dispatches private CSI ? ... n with private=True, but its Screen
+        # only implements the ordinary DSRs. This observer does not reply to
+        # unsupported private device-status probes.
+        if not private:
+            super().report_device_status(mode)
+
     # A variation selector can widen a cell beyond its first scalar's width.
     @property
     def display(self):
