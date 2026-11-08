@@ -2458,7 +2458,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          return .{
 --- a/src/Loop.zig
 +++ b/src/Loop.zig
-@@ -9,18 +9,49 @@
+@@ -9,18 +9,52 @@
  const Vaxis = @import("Vaxis.zig");
  
  const log = std.log.scoped(.vaxis);
@@ -2469,19 +2469,22 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +const DarwinFdSet = extern struct { bits: [32]u32 = @splat(0) };
 +extern "c" fn select(c_int, ?*DarwinFdSet, ?*DarwinFdSet, ?*DarwinFdSet, ?*std.posix.timeval) c_int;
 +
-+fn inputReady(fd: std.posix.fd_t, timeout_ms: u16) !bool {
++fn inputReady(io: std.Io, fd: std.posix.fd_t, timeout_ms: u16) !bool {
 +    if (comptime builtin.os.tag == .macos) {
 +        if (fd < 0 or fd >= 1024) return error.InputReadinessUnavailable;
-+        var fds: DarwinFdSet = .{};
-+        const n: usize = @intCast(fd);
-+        fds.bits[n / 32] |= @as(u32, 1) << @as(u5, @intCast(n % 32));
-+        var timeout: std.posix.timeval = .{ .sec = 0, .usec = @as(i32, timeout_ms) * 1000 };
-+        const result = select(fd + 1, &fds, null, null, &timeout);
-+        if (result < 0) {
-+            if (std.posix.errno(result) == .INTR) return false;
-+            return error.InputReadinessUnavailable;
++        while (true) {
++            try io.checkCancel();
++            var fds: DarwinFdSet = .{};
++            const n: usize = @intCast(fd);
++            fds.bits[n / 32] |= @as(u32, 1) << @as(u5, @intCast(n % 32));
++            var timeout: std.posix.timeval = .{ .sec = 0, .usec = @as(i32, timeout_ms) * 1000 };
++            const result = select(fd + 1, &fds, null, null, &timeout);
++            if (result < 0) {
++                if (std.posix.errno(result) == .INTR) continue;
++                return error.InputReadinessUnavailable;
++            }
++            return result != 0;
 +        }
-+        return result != 0;
 +    }
 +    var fds = [1]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
 +    if (try std.posix.poll(&fds, timeout_ms) == 0) return false;
@@ -2509,7 +2512,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          thread: ?std.Io.Future(void) = null,
          // Queued key text must outlive the input task, including on failure.
          cache: GraphemeCache = .{},
-@@ -98,7 +129,7 @@
+@@ -98,7 +132,7 @@
          /// Returns the next event, blocking until available. After buffered events
          /// are drained, returns Closed on stop or the input task's failure.
          pub fn nextEvent(self: *Self) !T {
@@ -2518,7 +2521,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          }
  
          /// blocks until an event is available. Useful when your application is
-@@ -109,17 +140,80 @@
+@@ -109,17 +143,80 @@
  
          /// returns an event if one is available, otherwise null. Non-blocking.
          pub fn tryEvent(self: *Self) !?T {
@@ -2530,8 +2533,8 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +        /// frame was presented. A failed push may leave a harmless serial gap.
 +        pub fn tryStampedEvent(self: *Self) !?Stamped {
              return try self.queue.tryPop();
-         }
- 
++        }
++
 +        pub fn inputWatermark(self: *Self) u64 {
 +            return self.issued_sequence.load(.acquire);
 +        }
@@ -2561,8 +2564,8 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +            var count: c_int = 0;
 +            if (ioctl(self.tty.fd.handle, request, &count) != 0 or count < 0) return error.InputFreshnessUnavailable;
 +            return @intCast(count);
-+        }
-+
+         }
+ 
 +        fn issueSequence(self: *Self) u64 {
 +            const previous = self.issued_sequence.fetchAdd(1, .acq_rel);
 +            if (previous == std.math.maxInt(u64)) @panic("input sequence exhausted");
@@ -2601,7 +2604,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          }
  
          pub fn winsizeCallback(ptr: *anyopaque) void {
-@@ -150,13 +244,14 @@
+@@ -150,13 +247,14 @@
              var retry: ReadRetry = .{};
              while (true) {
                  try self.io.checkCancel();
@@ -2617,16 +2620,15 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
              }
          }
  
-@@ -177,18 +272,40 @@
-                     if (@hasField(Event, "winsize")) {
+@@ -178,17 +276,39 @@
                          try self.postEvent(.{ .winsize = winsize });
                      }
-+
+ 
 +                    // A separate open file description leaves the writer blocking,
 +                    // while ensuring read under input_lock can never wait for input.
 +                    const input_fd = try std.posix.openat(std.posix.AT.FDCWD, "/dev/tty", .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .NOCTTY = true, .CLOEXEC = true }, 0);
 +                    defer (std.Io.File{ .handle = input_fd, .flags = .{ .nonblocking = true } }).close(self.io);
- 
++
                      // initialize the read buffer
                      var buf: [1024]u8 = undefined;
                      var read_start: usize = 0;
@@ -2639,7 +2641,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +                        // Avoid reserving a batch across an idle blocking read:
 +                        // ordinary post-frame input can then be fresh on its
 +                        // first key, while parser-held bytes retain their age.
-+                        if (!try inputReady(input_fd, 16)) continue;
++                        if (!try inputReady(self.io, input_fd, 16)) continue;
 +                        self.lockInput();
 +                        var batch = pending_batch orelse if (self.stale_bytes != 0)
 +                            InputBatch{ .owner = self, .sequence = self.stale_sequence }
@@ -2659,7 +2661,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                          if (bytes_read == 0) return error.EndOfStream;
                          retry = .{};
                          const n = read_start + bytes_read;
-@@ -196,15 +313,10 @@
+@@ -196,15 +316,10 @@
                          while (seq_start < n) {
                              if (n - seq_start == 1 and buf[seq_start] == 0x1b) {
                                  // Preserve ESC only when continuation bytes are already queued.
@@ -2670,14 +2672,14 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 -                                }};
 -                                _ = std.posix.poll(&poll_fds, 0) catch 0;
 -                                if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
-+                                if (try inputReady(input_fd, 0)) {
++                                if (try inputReady(self.io, input_fd, 0)) {
                                      buf[0] = buf[seq_start];
                                      read_start = 1;
 +                                    pending_batch = batch;
                                      continue :read_loop;
                                  }
                              }
-@@ -214,6 +326,7 @@
+@@ -214,6 +329,7 @@
                                  // There is no consumed length on parse errors. Discard
                                  // this batch rather than retrying the same bad bytes.
                                  read_start = 0;
@@ -2685,7 +2687,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
                                  continue :read_loop;
                              };
                              if (result.n == 0) {
-@@ -224,14 +337,16 @@
+@@ -224,14 +340,16 @@
                                      buf[seq_start - initial_start] = buf[seq_start];
                                  }
                                  read_start = seq_start - initial_start;
