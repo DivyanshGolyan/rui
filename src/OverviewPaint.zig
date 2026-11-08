@@ -127,7 +127,14 @@ pub fn draw(window: vaxis.Window, scratch: Allocator, state: *State, model_list:
         try ruleLine(&painter, input.view);
         if (at.commands.len() != 0) try commandLines(&painter, &result.commands.?, at.commands);
         const hinted = height - hintRows(state);
-        try composer(&painter, state, model_list, draft, &input, .{ .start = at.commands.end, .end = hinted });
+        const bottom = view.bottomRuleRows(state, @intCast(input.view.rows));
+        try composer(&painter, state, model_list, draft, &input, .{ .start = at.commands.end, .end = hinted - bottom });
+        if (bottom != 0) {
+            painter.at(hinted - 1);
+            painter.begin(false);
+            try ruleRun(&painter, width);
+            try painter.finish();
+        }
         painter.at(hinted);
         try hints(&painter, state, draft, at.commands.len() != 0);
         if (state.notice) |*notice| {
@@ -1859,28 +1866,28 @@ test "the cursor sits at the composer's caret and hides while a start is pending
             defer text.deinit();
             try screen.write(&text.writer);
             var lines = std.mem.splitScalar(u8, text.written(), '\n');
-            for (0..22) |_| _ = lines.next();
+            for (0..21) |_| _ = lines.next();
             try std.testing.expectEqualStrings(expected, lines.next().?);
         }
     };
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 3 });
+    try Expect.cursor(&state, draft, 80, .{ .row = 21, .column = 3 });
     draft = try typeText(&state, "Fix 中");
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 9 });
+    try Expect.cursor(&state, draft, 80, .{ .row = 21, .column = 9 });
     // The caret sits where the editor holds it, with the text after it.
     draft.cursor = 4;
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 7 });
+    try Expect.cursor(&state, draft, 80, .{ .row = 21, .column = 7 });
     try Expect.composerLine(&state, draft, " › Fix 中");
     // A draft wider than the composer wraps between words into rows that
     // grow upward from the bottom: "Fix ", 76 x, then 24 x and " end".
     const long = "Fix " ++ @as([100]u8, @splat('x')) ++ " end";
     draft = try typeText(&state, long);
-    try Expect.cursor(&state, draft, 80, .{ .row = 22, .column = 31 });
+    try Expect.cursor(&state, draft, 80, .{ .row = 21, .column = 31 });
     // Two cells wide, the space before "end" hangs past the edge: "en",
     // then "d".
-    try Expect.cursor(&state, draft, 6, .{ .row = 22, .column = 4 });
+    try Expect.cursor(&state, draft, 6, .{ .row = 21, .column = 4 });
     // On the soft break after "Fix ", the caret starts the next row.
     draft.cursor = 4;
-    try Expect.cursor(&state, draft, 80, .{ .row = 21, .column = 3 });
+    try Expect.cursor(&state, draft, 80, .{ .row = 20, .column = 3 });
     try Expect.composerLine(&state, draft, "   " ++ @as([24]u8, @splat('x')) ++ " end");
     draft.cursor = long.len;
     _ = try submit(&state, draft);
@@ -1899,7 +1906,7 @@ test "a draft past its cap scrolls inside the composer and the rule counts what 
             defer written.deinit();
             try screen.write(&written.writer);
             var lines = std.mem.splitScalar(u8, written.written(), '\n');
-            for (0..28) |_| _ = lines.next();
+            for (0..27) |_| _ = lines.next();
             // Ten rows of draft under the rule, the hints on the last row.
             try std.testing.expectEqualStrings(rule, lines.next().?);
             try std.testing.expectEqualStrings(top, lines.next().?);
@@ -2148,9 +2155,9 @@ test "render draws each band" {
         \\
         \\
         \\
-        \\
         \\ ──────────────────────────────────────────────────────────────────────────────
         \\ › Type a task to start a Session
+        \\────────────────────────────────────────────────────────────────────────────────
         \\ ↑↓ select · enter open
         \\
     ,
@@ -2174,9 +2181,9 @@ test "render draws each band" {
         \\
         \\
         \\
-        \\
         \\.llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
         \\.n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
         \\.qqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
@@ -2236,9 +2243,9 @@ test "render draws each band" {
         \\
         \\
         \\
-        \\
         \\ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         \\ › Type a task to start a Session
+        \\────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         \\ ↑↓ select · enter open
         \\
     );
@@ -2263,9 +2270,9 @@ test "render draws each band" {
         \\
         \\
         \\
-        \\
         \\ ──────────────────────────────────────────────────────────────────────────────
         \\ › Type a task to start a Session
+        \\────────────────────────────────────────────────────────────────────────────────
         \\ ↑↓ select · enter open
         \\
     ,
@@ -2289,9 +2296,9 @@ test "render draws each band" {
         \\
         \\
         \\
-        \\
         \\.llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
         \\.n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
         \\.qqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
@@ -2351,9 +2358,9 @@ test "render draws each band" {
         \\
         \\
         \\
-        \\
         \\ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         \\ › Type a task to start a Session
+        \\────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         \\ ↑↓ select · enter open
         \\
     );
@@ -2378,9 +2385,9 @@ test "render draws each band" {
         \\
         \\
         \\
-        \\
         \\ ──────────────────────────────────────────────────────────────────────────────
         \\ › Type a task to start a Session
+        \\────────────────────────────────────────────────────────────────────────────────
         \\ ↑↓ select · enter open · ctrl+x stop
         \\
     ,
@@ -2404,9 +2411,9 @@ test "render draws each band" {
         \\
         \\
         \\
-        \\
         \\.llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
         \\.n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
@@ -2466,9 +2473,9 @@ test "render draws each band" {
         \\
         \\
         \\
-        \\
         \\ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         \\ › Type a task to start a Session
+        \\────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         \\ ↑↓ select · enter open · ctrl+x stop
         \\
     );
@@ -2498,9 +2505,9 @@ test "render draws an empty Store" {
         \\
         \\
         \\
-        \\
         \\ ──────────────────────────────────────────────────────────────────────────────
         \\ › Type a task to start a Session
+        \\────────────────────────────────────────────────────────────────────────────────
         \\
         \\
     ,
@@ -2524,9 +2531,9 @@ test "render draws an empty Store" {
         \\
         \\
         \\
-        \\
         \\.llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
         \\.n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
         \\
         \\
     ,
@@ -2586,9 +2593,9 @@ test "render draws an empty Store" {
         \\
         \\
         \\
-        \\
         \\ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         \\ › Type a task to start a Session
+        \\────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         \\
         \\
     );
@@ -2618,9 +2625,9 @@ test "render draws twenty mixed rows" {
         \\  ◌ Trace Host shutdown order                                                5s
         \\
         \\ Idle · 1
-        \\  ○ Check macOS socket cleanup                                               2h
         \\ ──────────────────────────────────────────────────────────────────────────────
         \\ › Type a task to start a Session
+        \\────────────────────────────────────────────────────────────────────────────────
         \\ ↑↓ select · enter open · ctrl+x stop
         \\
     ,
@@ -2644,9 +2651,9 @@ test "render draws twenty mixed rows" {
         \\..n.iiiiiiiiiiiiiiiiiiiiiiiii................................................qq
         \\
         \\.IIIIqqqq
-        \\..n.iiiiiiiiiiiiiiiiiiiiiiiiii...............................................qq
         \\.llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
         \\.n.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
+        \\llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
     ,
@@ -2706,9 +2713,9 @@ test "render draws twenty mixed rows" {
         \\
         \\
         \\
-        \\
         \\ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         \\ › Type a task to start a Session
+        \\────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         \\ ↑↓ select · enter open · ctrl+x stop
         \\
     );
@@ -2740,9 +2747,9 @@ test "render draws ASCII without colour" {
         \\  : Trace Host shutdown order                                                5s
         \\
         \\ Idle - 1
-        \\  o Check macOS socket cleanup                                               2h
         \\ ------------------------------------------------------------------------------
         \\ > Type a task to start a Session
+        \\--------------------------------------------------------------------------------
         \\ ^v select - enter open - ctrl+x stop
         \\
     ,
@@ -2766,9 +2773,9 @@ test "render draws ASCII without colour" {
         \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn................................................nn
         \\
         \\.NNNNnnnn
-        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnnn...............................................nn
         \\.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\.n.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+        \\nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\
     ,
@@ -2828,9 +2835,9 @@ test "render draws ASCII without colour" {
         \\
         \\
         \\
-        \\
         \\ ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
         \\ > Type a task to start a Session
+        \\--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
         \\ ^v select - enter open - ctrl+x stop
         \\
     );
@@ -2873,10 +2880,23 @@ test "the composer needs six rows and six columns, and shows nothing smaller" {
         const fits = width >= 6 and height >= 6;
         try std.testing.expectEqual(fits, screen.cursor != null);
         if (screen.cursor) |cursor| {
-            try std.testing.expectEqual(height - 2, cursor.row);
+            try std.testing.expectEqual(height - 2 - @as(u16, @intFromBool(std.mem.eql(u8, screen.cell(0, height - 2).char.grapheme, "─"))), cursor.row);
             try std.testing.expect(cursor.column < width);
         }
     };
+}
+
+test "the bottom edge separates the composer from its hints in both scripts" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    for ([_]Caps{ .{}, .{ .unicode = false } }, [_][]const u8{ "─", "-" }) |caps, glyph| {
+        var screen = try sizedRender(&state, .{ .bytes = "draft", .cursor = 5 }, 40, 24, caps, 0);
+        defer screen.deinit();
+        try std.testing.expectEqualStrings(glyph, screen.cell(0, 22).char.grapheme);
+        try std.testing.expectEqualStrings(glyph, screen.cell(39, 22).char.grapheme);
+        try std.testing.expectEqual(@as(u16, 21), screen.cursor.?.row);
+        try std.testing.expect(!std.mem.eql(u8, glyph, screen.cell(0, 23).char.grapheme));
+    }
 }
 
 test "a full-capacity draft of spaces keeps the composer's caret on screen" {
@@ -3479,6 +3499,26 @@ test "the Session row's highlight stays in view while the picker is open, even o
     }
 }
 
+test "the bottom edge yields to the only actionable picker row" {
+    for ([_]u16{ 6, 60 }) |width| for ([_]u16{ 9, 10 }) |height| {
+        var state = try pickerState(null);
+        var owner: OverviewModelPicker = .{};
+        defer state.deinit();
+        try expectEffects(&.{}, try owner.step(&state, .{ .resized = .{ .width = width, .height = height } }));
+        try modelOpen(&owner, &state, &.{chatgpt});
+        var screen = try sizedModelRender(&owner, &state, .{}, width, height, .{ .unicode = true }, 0);
+        defer screen.deinit();
+        const region = layout(&state, 1, 0).picker;
+        try std.testing.expectEqual(@as(u16, 1), region.len());
+        try std.testing.expect(state.shownPicker() != null);
+        try std.testing.expectEqual(@as(u16, if (height == 9) 0 else 1), view.bottomRuleRows(&state, 1));
+        try std.testing.expectEqualStrings("›", screen.cell(2, region.start).char.grapheme);
+        const before = owner.selected(&state).?;
+        try expectEffects(&.{}, try modelPress(&owner, &state, .{}, .next));
+        try std.testing.expect(!std.mem.eql(u8, before, owner.selected(&state).?));
+    };
+}
+
 test "with no sign-in served, the picker shows each login line instead of models" {
     var state = try pickerState(null);
     var owner: OverviewModelPicker = .{};
@@ -3750,11 +3790,11 @@ test "quote draft overview paints literal markers and shared gutters at every ca
         defer text.deinit();
         try screen.write(&text.writer);
         var lines = std.mem.splitScalar(u8, text.written(), '\n');
-        for (0..20) |_| _ = lines.next();
+        for (0..19) |_| _ = lines.next();
         try std.testing.expectEqualStrings(" › > alpha", lines.next().?);
         try std.testing.expectEqualStrings("   > beta", lines.next().?);
         try std.testing.expectEqualStrings("   > gamma", lines.next().?);
-        const row: u16 = if (cursor < 8) 20 else if (cursor < 13) 21 else 22;
+        const row: u16 = if (cursor < 8) 19 else if (cursor < 13) 20 else 21;
         const column: u16 = @intCast(3 + if (cursor < 8) cursor else 2 + cursor - (if (cursor < 13) @as(usize, 8) else 13));
         try std.testing.expectEqual(@as(?Rendered.Cursor, .{ .row = row, .column = column }), screen.cursor);
     }
@@ -3784,7 +3824,7 @@ test "quote draft overview fence opacity does not promote code markers" {
     defer text.deinit();
     try screen.write(&text.writer);
     var lines = std.mem.splitScalar(u8, text.written(), '\n');
-    for (0..16) |_| _ = lines.next();
+    for (0..15) |_| _ = lines.next();
     for ([_][]const u8{ " › ```", "   > alpha", "   beta gamma", "   ```", "   > alpha", "   > beta", "   > gamma" }) |row| try std.testing.expectEqualStrings(row, lines.next().?);
     const nested = "> > ab👩‍🚀abcdefghijkl";
     for ([_]gwidth.Method{ .wcwidth, .unicode }) |method| {
@@ -3794,10 +3834,10 @@ test "quote draft overview fence opacity does not promote code markers" {
         defer actual.deinit();
         try shaped.write(&actual.writer);
         var rows = std.mem.splitScalar(u8, actual.written(), '\n');
-        for (0..21) |_| _ = rows.next();
+        for (0..20) |_| _ = rows.next();
         try std.testing.expectEqualStrings(if (method == .wcwidth) "   ghijkl" else "   >>  kl", rows.next().?);
         try std.testing.expectEqualStrings(if (method == .wcwidth) "" else "   >>", rows.next().?);
-        try std.testing.expectEqual(@as(?Rendered.Cursor, .{ .row = 22, .column = if (method == .wcwidth) 3 else 7 }), shaped.cursor);
+        try std.testing.expectEqual(@as(?Rendered.Cursor, .{ .row = 21, .column = if (method == .wcwidth) 3 else 7 }), shaped.cursor);
     }
 }
 

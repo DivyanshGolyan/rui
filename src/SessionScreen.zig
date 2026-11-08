@@ -909,6 +909,9 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
         _ = window.child(.{ .x_off = size.col - 1, .y_off = layout.navigation_height, .width = 1, .height = 1 }).printSegment(.{ .text = "…", .style = self.style(.quiet) }, .{ .wrap = .none });
     }
     const line_row = size.row - layout.line_height;
+    if (layout.bottom_rule_height != 0) {
+        window.child(.{ .y_off = line_row - 1, .height = 1 }).fill(.{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.style(.quiet) });
+    }
     // Whether the line under the input says Enter denies: only then does a
     // reason's frame offer the denial.
     var says_deny = false;
@@ -1157,9 +1160,11 @@ test "the input keeps the bottom rows under a rule while content starts at the t
     _ = try Test.render(screen, &out.writer, size, "", 0, .{ .session = session }, &.{});
     const window = Test.window(screen);
     var storage: [160]u8 = undefined;
-    try std.testing.expectEqualStrings("─", window.readCell(0, 21).?.char.grapheme);
-    try std.testing.expectEqualStrings("─", window.readCell(79, 21).?.char.grapheme);
-    try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(0, 20).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(79, 20).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", window.readCell(0, 21).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(0, 22).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(79, 22).?.char.grapheme);
     try std.testing.expectEqualStrings("Fix flaky store tests · gpt-6.1-sol · low · 69% left", rowText(screen, 23, &storage));
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 23).?.style.fg);
     try screen.append("› inspect\n  Done.\n");
@@ -1168,26 +1173,26 @@ test "the input keeps the bottom rows under a rule while content starts at the t
     try std.testing.expectEqualStrings("D", window.readCell(2, 1).?.char.grapheme);
     try std.testing.expectEqualStrings(" ", window.readCell(0, 2).?.char.grapheme);
     // The draft grows upward: the rule moves up, the line stays last.
-    try std.testing.expectEqualStrings("─", window.readCell(0, 20).?.char.grapheme);
-    try std.testing.expectEqualStrings("›", window.readCell(0, 21).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", window.readCell(0, 19).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", window.readCell(0, 20).?.char.grapheme);
     // A draft continuation has no glyph; its text aligns under the first row.
-    try std.testing.expectEqualStrings(" ", window.readCell(0, 22).?.char.grapheme);
-    try std.testing.expectEqualStrings("l", window.readCell(2, 22).?.char.grapheme);
+    try std.testing.expectEqualStrings(" ", window.readCell(0, 21).?.char.grapheme);
+    try std.testing.expectEqualStrings("l", window.readCell(2, 21).?.char.grapheme);
     try std.testing.expectEqualStrings("F", window.readCell(0, 23).?.char.grapheme);
     // Status sits directly above the rule.
     _ = try Test.render(screen, &out.writer, size, "next", 4, .{ .status = "Sending…", .session = session }, &.{});
-    try std.testing.expectEqualStrings("S", window.readCell(0, 20).?.char.grapheme);
-    try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 20).?.style.fg);
-    try std.testing.expectEqualStrings("─", window.readCell(0, 21).?.char.grapheme);
-    try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
+    try std.testing.expectEqualStrings("S", window.readCell(0, 19).?.char.grapheme);
+    try std.testing.expectEqual(vaxis.Color{ .index = 8 }, window.readCell(0, 19).?.style.fg);
+    try std.testing.expectEqualStrings("─", window.readCell(0, 20).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", window.readCell(0, 21).?.char.grapheme);
     // A notice takes the line until the next key, in the failure colour
     // when it reports one; the input does not move.
     for ([_][]const u8{ "Work continues while you compose.", "! Unknown command /x · /help" }, [_]vaxis.Color{ .default, .{ .index = 9 } }) |notice, colour| {
         _ = try Test.render(screen, &out.writer, size, "next", 4, .{ .status = "Sending…", .notice = notice, .session = session }, &.{});
         try std.testing.expectEqualStrings(notice, rowText(screen, 23, &storage));
         try std.testing.expectEqual(colour, window.readCell(0, 23).?.style.fg);
-        try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
-        try std.testing.expectEqualStrings("S", window.readCell(0, 20).?.char.grapheme);
+        try std.testing.expectEqualStrings("›", window.readCell(0, 21).?.char.grapheme);
+        try std.testing.expectEqualStrings("S", window.readCell(0, 19).?.char.grapheme);
     }
     for ([_]u16{ 51, 40 }, [_][]const u8{ "Fix flaky store tests · gpt-6.1-sol · 69% left", "Fix flaky stor… · gpt-6.1-sol · 69% left" }) |columns, expected| {
         _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .session = session }, &.{});
@@ -1227,19 +1232,19 @@ test "a draft past its cap scrolls inside the input and the rule counts what it 
     const draft = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13";
     _ = try Test.render(screen, &out.writer, size, draft, draft.len, .{}, &.{});
     var storage: [160]u8 = undefined;
-    try std.testing.expectEqualStrings("──────────── ↑ 3 more lines ────────────", rowText(screen, 28, &storage));
-    try std.testing.expectEqualStrings("  4", rowText(screen, 29, &storage));
-    try std.testing.expectEqualStrings("  13", rowText(screen, 38, &storage));
+    try std.testing.expectEqualStrings("──────────── ↑ 3 more lines ────────────", rowText(screen, 27, &storage));
+    try std.testing.expectEqualStrings("  4", rowText(screen, 28, &storage));
+    try std.testing.expectEqualStrings("  13", rowText(screen, 37, &storage));
     // Moving the caret up inside the shown lines keeps them; above them,
     // the input scrolls by one row and the rule counts both sides.
     _ = try Test.render(screen, &out.writer, size, draft, 6, .{}, &.{});
-    try std.testing.expectEqualStrings("  4", rowText(screen, 29, &storage));
+    try std.testing.expectEqualStrings("  4", rowText(screen, 28, &storage));
     _ = try Test.render(screen, &out.writer, size, draft, 4, .{}, &.{});
-    try std.testing.expectEqualStrings("───────── ↑ 2 · ↓ 1 more lines ─────────", rowText(screen, 28, &storage));
-    try std.testing.expectEqualStrings("  3", rowText(screen, 29, &storage));
+    try std.testing.expectEqualStrings("───────── ↑ 2 · ↓ 1 more lines ─────────", rowText(screen, 27, &storage));
+    try std.testing.expectEqualStrings("  3", rowText(screen, 28, &storage));
     _ = try Test.render(screen, &out.writer, size, draft, 0, .{}, &.{});
-    try std.testing.expectEqualStrings("──────────── ↓ 3 more lines ────────────", rowText(screen, 28, &storage));
-    try std.testing.expectEqualStrings("› 1", rowText(screen, 29, &storage));
+    try std.testing.expectEqualStrings("──────────── ↓ 3 more lines ────────────", rowText(screen, 27, &storage));
+    try std.testing.expectEqualStrings("› 1", rowText(screen, 28, &storage));
 }
 
 test "the transcript fills every row above the rule" {
@@ -1262,14 +1267,14 @@ test "the transcript fills every row above the rule" {
             }
             _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
             const window = Test.window(screen);
-            // Twenty-one rows sit above the rule, the input row and the line.
-            const first = rows -| 21;
+            // Twenty rows sit above the rule, the input row and the line.
+            const first = rows -| 20;
             for (first..rows, 0..) |row, y| {
                 var bytes: [16]u8 = undefined;
                 const expected = try std.fmt.bufPrint(&bytes, "row{d:0>2}", .{row});
                 for (expected, 0..) |byte, x| try std.testing.expectEqualStrings(&.{byte}, window.readCell(@intCast(x), @intCast(y)).?.char.grapheme);
             }
-            try std.testing.expectEqualStrings("›", window.readCell(0, 22).?.char.grapheme);
+            try std.testing.expectEqualStrings("›", window.readCell(0, 21).?.char.grapheme);
             try screen.beginTranscript(0);
             try std.testing.expect(!screen.browse(false, true));
             _ = try Test.render(screen, &out.writer, size, "", 0, .{}, &.{});
@@ -1303,10 +1308,10 @@ test "mandatory status and calls wrap wide clusters before the edge" {
     var live: View.Live = .{};
     _ = try Test.render(screen, &out.writer, size, "", 0, .{ .status = "1234567中Z" }, &live);
     const window = Test.window(screen);
-    // Two status rows sit right above the rule on row 9.
-    try std.testing.expectEqualStrings("7", window.readCell(6, 7).?.char.grapheme);
-    try std.testing.expectEqualStrings("中", window.readCell(0, 8).?.char.grapheme);
-    try std.testing.expectEqualStrings("Z", window.readCell(2, 8).?.char.grapheme);
+    // Two status rows sit right above the rule on row 8.
+    try std.testing.expectEqualStrings("7", window.readCell(6, 6).?.char.grapheme);
+    try std.testing.expectEqualStrings("中", window.readCell(0, 7).?.char.grapheme);
+    try std.testing.expectEqualStrings("Z", window.readCell(2, 7).?.char.grapheme);
     live.count = 1;
     live.total = 1;
     live.entries[0] = .{ .operation = 7, .ordinal = 9, .presentation = .{ .description = .{}, .code = .unresolved, .publication_position = null } };
@@ -1318,9 +1323,9 @@ test "mandatory status and calls wrap wide clusters before the edge" {
     try std.testing.expectEqualStrings("3", window.readCell(6, 0).?.char.grapheme);
     try std.testing.expectEqualStrings("中", window.readCell(5, 1).?.char.grapheme);
     try std.testing.expectEqualStrings("Z", window.readCell(7, 1).?.char.grapheme);
-    try std.testing.expectEqualStrings("I", window.readCell(0, 8).?.char.grapheme);
+    try std.testing.expectEqualStrings("I", window.readCell(0, 7).?.char.grapheme);
     _ = try Test.render(screen, &out.writer, size, "", 0, .{ .status = "́Z" }, &live);
-    try std.testing.expectEqualStrings("\\", window.readCell(0, 8).?.char.grapheme);
+    try std.testing.expectEqualStrings("\\", window.readCell(0, 7).?.char.grapheme);
     try std.testing.expectEqualStrings("中", window.readCell(5, 1).?.char.grapheme);
 }
 
@@ -1718,20 +1723,21 @@ test "prepared Action preserves selected inspection until explicit return" {
             var storage: [160]u8 = undefined;
             // The conversation, then the whole Action right above the rule.
             try std.testing.expectEqualStrings("› clean the build cache", rowText(screen, 0, &storage));
-            try std.testing.expectEqualStrings("", rowText(screen, 7, &storage));
-            try std.testing.expectEqualStrings("Run Bash: exact command", rowText(screen, 8, &storage));
-            try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 9).?.char.grapheme);
+            try std.testing.expectEqualStrings("", rowText(screen, 6, &storage));
+            try std.testing.expectEqualStrings("Run Bash: exact command", rowText(screen, 7, &storage));
+            try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 8).?.char.grapheme);
             // The choice takes the input's row, Allow once highlighted; the
             // draft stays hidden, and the line under it says how to choose.
-            try std.testing.expectEqualStrings("  › Allow once      Deny", rowText(screen, 10, &storage));
-            try std.testing.expect(Test.window(screen).readCell(2, 10).?.style.reverse);
-            try std.testing.expect(!Test.window(screen).readCell(18, 10).?.style.reverse);
+            try std.testing.expectEqualStrings("  › Allow once      Deny", rowText(screen, 9, &storage));
+            try std.testing.expect(Test.window(screen).readCell(2, 9).?.style.reverse);
+            try std.testing.expect(!Test.window(screen).readCell(18, 9).?.style.reverse);
+            try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 10).?.char.grapheme);
             try std.testing.expect(!screen.backend.storage.?.vx.screen.cursor_vis);
             try std.testing.expectEqualStrings("←→ choose · enter confirms", rowText(screen, 11, &storage));
             try std.testing.expect(press(screen, .{ .pick = .deny }, size, false) == .picked);
             _ = try Test.render(screen, &out.writer, size, "kept draft", 10, .{}, &.{});
-            try std.testing.expectEqualStrings("    Allow once    › Deny", rowText(screen, 10, &storage));
-            try std.testing.expect(Test.window(screen).readCell(18, 10).?.style.reverse);
+            try std.testing.expectEqualStrings("    Allow once    › Deny", rowText(screen, 9, &storage));
+            try std.testing.expect(Test.window(screen).readCell(18, 9).?.style.reverse);
         }
         if (oversized) {
             const tiny: std.posix.winsize = .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 };
@@ -2877,11 +2883,11 @@ test "live and transcript chrome have identical cells with calls queue work draf
             if (transcript) try screen.beginTranscript(0);
             _ = screen.presented(try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, chrome, &held));
             var row: [256]u8 = undefined;
-            try std.testing.expectEqual(rows - 5, screen.height);
+            try std.testing.expectEqual(rows - 6, screen.height);
             const raw = &screen.backend.storage.?.vx.screen_last;
             for (0..rows) |y| {
                 const glyph = raw.readCell(79, @intCast(y)).?.char.grapheme;
-                try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, glyph, "│"));
+                try std.testing.expectEqual(y < rows - 6, std.mem.eql(u8, glyph, "│"));
             }
             try std.testing.expectEqualStrings("▐", raw.readCell(11, 0).?.char.grapheme);
             try std.testing.expectEqual(@as(u16, 2), screen.drawn.rows);
@@ -2889,18 +2895,18 @@ test "live and transcript chrome have identical cells with calls queue work draf
             try std.testing.expectEqualStrings("BODY-FIRST ▐", contentColumnsText(screen, 0, &row));
             try std.testing.expectEqualStrings("BODY-LAST", contentColumnsText(screen, 1, &row));
             try expectTrackRow(screen, 2, "  • Held call · 42s", 80, &row);
-            for (3..rows - 5) |y| try expectTrackRow(screen, @intCast(y), "", 80, &row);
-            try std.testing.expectEqualStrings("", rowText(screen, rows - 5, &row));
-            try std.testing.expectEqualStrings("› QUEUED-SOURCE                                                         3 queued", rowText(screen, rows - 4, &row));
-            try std.testing.expectEqual(@as(usize, 80 * "─".len), rowText(screen, rows - 3, &row).len);
-            try std.testing.expectEqualStrings("›", rowText(screen, rows - 2, &row));
+            for (3..rows - 6) |y| try expectTrackRow(screen, @intCast(y), "", 80, &row);
+            try std.testing.expectEqualStrings("", rowText(screen, rows - 6, &row));
+            try std.testing.expectEqualStrings("› QUEUED-SOURCE                                                         3 queued", rowText(screen, rows - 5, &row));
+            try std.testing.expectEqual(@as(usize, 80 * "─".len), rowText(screen, rows - 4, &row).len);
+            try std.testing.expectEqualStrings("›", rowText(screen, rows - 3, &row));
             if (transcript) try std.testing.expectEqualStrings("Looking back · Ctrl-G: latest", rowText(screen, rows - 1, &row));
         }
         const waiting: protocol.WorkState = .{ .working = .{ .since = 100 } };
         _ = try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .queued = chrome.queued, .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &.{});
         const raw = &screen.backend.storage.?.vx.screen_last;
-        try std.testing.expectEqual(rows - 5, screen.height);
-        for (0..rows) |y| try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, raw.readCell(79, @intCast(y)).?.char.grapheme, "│"));
+        try std.testing.expectEqual(rows - 6, screen.height);
+        for (0..rows) |y| try std.testing.expectEqual(y < rows - 6, std.mem.eql(u8, raw.readCell(79, @intCast(y)).?.char.grapheme, "│"));
         var work_row: [256]u8 = undefined;
         try std.testing.expectEqual(@as(u16, 2), screen.drawn.rows);
         try expectTrackRow(screen, 2, "• Waiting · 42s", 80, &work_row);
@@ -2912,7 +2918,7 @@ test "live and transcript chrome have identical cells with calls queue work draf
         // short body's call above. Rail ownership cannot decide call readiness.
         try screen.latest();
         screen.live.text.clear();
-        for (0..rows - 5) |index| {
+        for (0..rows - 6) |index| {
             if (index != 0) try screen.append("\n");
             try screen.append("FULL-BODY");
         }
@@ -2920,14 +2926,14 @@ test "live and transcript chrome have identical cells with calls queue work draf
             if (transcript) try screen.beginTranscript(0);
             _ = screen.presented(try Test.render(screen, &out.writer, .{ .row = rows, .col = 80, .xpixel = 0, .ypixel = 0 }, "", 0, chrome, &held));
             const full = &screen.backend.storage.?.vx.screen_last;
-            try std.testing.expectEqual(rows - 5, screen.height);
-            try std.testing.expectEqual(rows - 5, screen.drawn.rows);
-            for (0..rows) |y| try std.testing.expectEqual(y < rows - 5, std.mem.eql(u8, full.readCell(79, @intCast(y)).?.char.grapheme, "│"));
-            try std.testing.expectEqualStrings("FULL-BODY", contentColumnsText(screen, rows - 6, &row));
-            try std.testing.expectEqualStrings("  • Held call · 42s", rowText(screen, rows - 5, &row));
-            try std.testing.expectEqualStrings(" ", full.readCell(79, rows - 5).?.char.grapheme);
-            try std.testing.expectEqualStrings("› QUEUED-SOURCE                                                         3 queued", rowText(screen, rows - 4, &row));
-            try std.testing.expectEqualStrings("›", rowText(screen, rows - 2, &row));
+            try std.testing.expectEqual(rows - 6, screen.height);
+            try std.testing.expectEqual(rows - 6, screen.drawn.rows);
+            for (0..rows) |y| try std.testing.expectEqual(y < rows - 6, std.mem.eql(u8, full.readCell(79, @intCast(y)).?.char.grapheme, "│"));
+            try std.testing.expectEqualStrings("FULL-BODY", contentColumnsText(screen, rows - 7, &row));
+            try std.testing.expectEqualStrings("  • Held call · 42s", rowText(screen, rows - 6, &row));
+            try std.testing.expectEqualStrings(" ", full.readCell(79, rows - 6).?.char.grapheme);
+            try std.testing.expectEqualStrings("› QUEUED-SOURCE                                                         3 queued", rowText(screen, rows - 5, &row));
+            try std.testing.expectEqualStrings("›", rowText(screen, rows - 3, &row));
             if (transcript) try std.testing.expectEqualStrings("Looking back · Ctrl-G: latest", rowText(screen, rows - 1, &row));
         }
     };
@@ -2943,8 +2949,8 @@ test "live and transcript chrome have identical cells with calls queue work draf
             if (transcript) try screen.beginTranscript(0);
             _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = columns, .xpixel = 0, .ypixel = 0 }, "", 0, .{}, &.{});
             const raw = &screen.backend.storage.?.vx.screen_last;
-            try std.testing.expectEqual(@as(u16, 21), screen.height);
-            for (0..24) |y| try std.testing.expectEqual(y < 21, std.mem.eql(u8, raw.readCell(columns - 1, @intCast(y)).?.char.grapheme, "│"));
+            try std.testing.expectEqual(@as(u16, 20), screen.height);
+            for (0..24) |y| try std.testing.expectEqual(y < 20, std.mem.eql(u8, raw.readCell(columns - 1, @intCast(y)).?.char.grapheme, "│"));
             var row: [8192]u8 = undefined;
             try std.testing.expectEqualStrings("PRIOR ▐ │", contentColumnsText(screen, 0, &row));
             try std.testing.expect(std.mem.startsWith(u8, contentColumnsText(screen, 1, &row), "› line1"));
@@ -2954,7 +2960,7 @@ test "live and transcript chrome have identical cells with calls queue work draf
             try std.testing.expectEqualStrings("edited 2", contentColumnsText(screen, 3, &row));
             try std.testing.expectEqualStrings("▐", raw.readCell(10, 4).?.char.grapheme);
             try std.testing.expectEqualStrings("▐", raw.readCell(columns - 2, 4).?.char.grapheme);
-            try std.testing.expectEqualStrings("›", rowText(screen, 22, &row));
+            try std.testing.expectEqualStrings("›", rowText(screen, 21, &row));
         }
     };
 }
@@ -3087,22 +3093,22 @@ test "quote draft screen paints literal markers and shared gutters at every care
     var storage: [160]u8 = undefined;
     for (0..raw.len + 1) |cursor| {
         _ = try Test.render(screen, &out.writer, size, raw, cursor, .{}, &.{});
-        try std.testing.expectEqualStrings("› > alpha", rowText(screen, 20, &storage));
-        try std.testing.expectEqualStrings("  > beta", rowText(screen, 21, &storage));
-        try std.testing.expectEqualStrings("  > gamma", rowText(screen, 22, &storage));
-        const expected_row: u16 = if (cursor < 8) 20 else if (cursor < 13) 21 else 22;
+        try std.testing.expectEqualStrings("› > alpha", rowText(screen, 19, &storage));
+        try std.testing.expectEqualStrings("  > beta", rowText(screen, 20, &storage));
+        try std.testing.expectEqualStrings("  > gamma", rowText(screen, 21, &storage));
+        const expected_row: u16 = if (cursor < 8) 19 else if (cursor < 13) 20 else 21;
         const expected_col: u16 = @intCast(2 + if (cursor < 8) cursor else 2 + cursor - (if (cursor < 13) @as(usize, 8) else 13));
         try std.testing.expectEqual(expected_row, screen.backend.storage.?.vx.screen.cursor.row);
         try std.testing.expectEqual(expected_col, screen.backend.storage.?.vx.screen.cursor.col);
     }
     // Recognition uses original tabs, not the one-cell display replacement.
     _ = try Test.render(screen, &out.writer, size, ">\talpha beta gamma", 0, .{}, &.{});
-    try std.testing.expectEqualStrings("  beta gamma", rowText(screen, 22, &storage));
+    try std.testing.expectEqualStrings("  beta gamma", rowText(screen, 21, &storage));
     // Reflow is local; neither painter nor layout inserts into the draft.
     _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = 80, .xpixel = 0, .ypixel = 0 }, raw, raw.len, .{}, &.{});
-    try std.testing.expectEqualStrings("› > alpha beta gamma", rowText(screen, 22, &storage));
+    try std.testing.expectEqualStrings("› > alpha beta gamma", rowText(screen, 21, &storage));
     _ = try Test.render(screen, &out.writer, size, raw, raw.len, .{}, &.{});
-    try std.testing.expectEqualStrings("  > gamma", rowText(screen, 22, &storage));
+    try std.testing.expectEqualStrings("  > gamma", rowText(screen, 21, &storage));
     const Input = @import("SessionInput.zig");
     var stream: @import("TerminalInput.zig") = .{};
     const input = try std.testing.allocator.create(Input);
@@ -3132,12 +3138,12 @@ test "quote draft screen hidden labels and exact edge caret include continuation
     const raw = "> abcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefghabcdefgh";
     _ = try Test.render(screen, &out.writer, size, raw, raw.len, .{}, &.{});
     var storage: [160]u8 = undefined;
-    try std.testing.expectEqualStrings("  >", rowText(screen, 38, &storage));
+    try std.testing.expectEqualStrings("  >", rowText(screen, 37, &storage));
     try std.testing.expectEqual(@as(u16, 4), screen.backend.storage.?.vx.screen.cursor.col);
-    try std.testing.expectEqual(@as(u16, 38), screen.backend.storage.?.vx.screen.cursor.row);
+    try std.testing.expectEqual(@as(u16, 37), screen.backend.storage.?.vx.screen.cursor.row);
     try std.testing.expectEqual(@as(usize, 26), screen.draft_anchor);
     _ = try Test.render(screen, &out.writer, size, raw, 0, .{}, &.{});
-    try std.testing.expectEqualStrings("› > abcdefgh", rowText(screen, 29, &storage));
+    try std.testing.expectEqualStrings("› > abcdefgh", rowText(screen, 28, &storage));
     try std.testing.expectEqual(@as(usize, 0), screen.draft_anchor);
 }
 
@@ -3153,19 +3159,19 @@ test "quote draft screen fence opacity does not promote code markers" {
     const raw = "```\n> alpha beta gamma\n```\n> alpha beta gamma";
     _ = try Test.render(screen, &out.writer, .{ .row = 24, .col = 12, .xpixel = 0, .ypixel = 0 }, raw, 0, .{}, &.{});
     var storage: [160]u8 = undefined;
-    for ([_][]const u8{ "› ```", "  > alpha", "  beta gamma", "  ```", "  > alpha", "  > beta", "  > gamma" }, 16..) |row, index| {
+    for ([_][]const u8{ "› ```", "  > alpha", "  beta gamma", "  ```", "  > alpha", "  > beta", "  > gamma" }, 15..) |row, index| {
         try std.testing.expectEqualStrings(row, rowText(screen, @intCast(index), &storage));
     }
     const nested = "> > ab👩‍🚀abcdefghijkl";
     const size: std.posix.winsize = .{ .row = 24, .col = 8, .xpixel = 0, .ypixel = 0 };
     _ = screen.setWidth(.wcwidth);
     _ = try Test.render(screen, &out.writer, size, nested, nested.len, .{}, &.{});
-    try std.testing.expectEqualStrings("  ghijkl", rowText(screen, 21, &storage));
-    try std.testing.expectEqualStrings("", rowText(screen, 22, &storage));
+    try std.testing.expectEqualStrings("  ghijkl", rowText(screen, 20, &storage));
+    try std.testing.expectEqualStrings("", rowText(screen, 21, &storage));
     _ = screen.setWidth(.unicode);
     _ = try Test.render(screen, &out.writer, size, nested, nested.len, .{}, &.{});
-    try std.testing.expectEqualStrings("  >>  kl", rowText(screen, 21, &storage));
-    try std.testing.expectEqualStrings("  >>", rowText(screen, 22, &storage));
+    try std.testing.expectEqualStrings("  >>  kl", rowText(screen, 20, &storage));
+    try std.testing.expectEqualStrings("  >>", rowText(screen, 21, &storage));
 }
 
 test "typed saved-file loading preserves raw provenance through prepend Message overlay and safe rich paint" {
