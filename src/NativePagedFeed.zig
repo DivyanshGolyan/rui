@@ -83,21 +83,7 @@ pub fn load(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io
         errdefer if (item.rich) |*rich| rich.close();
         item.preview_len = 0;
         if (item.source.item.queued) {
-            const prefix = "Queued · ";
-            @memcpy(item.preview[0..prefix.len], prefix);
-            var used: usize = 0;
-            while (used < 4096) : (used += 1) {
-                const byte = (try item.reader.readByte(used)) orelse break;
-                if (byte == '\n') break;
-                item.preview[prefix.len + used] = byte;
-            }
-            const truncated = used == 4096 and used < item.reader.source.length;
-            while (used != 0 and !std.unicode.utf8ValidateSlice(item.preview[prefix.len .. prefix.len + used])) used -= 1;
-            item.preview_len = prefix.len + used;
-            if (truncated) {
-                @memcpy(item.preview[item.preview_len..][0..3], "…");
-                item.preview_len += 3;
-            }
+            item.preview_len = try queuedPreview(&item.reader, &item.preview);
         } else {
             item.rich = try RichLines.buildRaw(requests.io, dir, try item.source.rawSource(), item.reader.source, requests.cancellation);
             item.index = try fw.PagedText.Index.initStyled(&item.reader, ctx, width, item.rich.?.provider());
@@ -109,6 +95,37 @@ pub fn load(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io
     self.window = RowWindow.init(self.row_count, window_rows);
     try observations.ensureServing(requests.io, store, self.page.instance);
     return self;
+}
+
+/// Materialize at most one bounded, terminal-safe first line. The reader is
+/// already authenticated; the preview never replaces its exact source.
+fn queuedPreview(reader: *vaxis.unicode.PagedReader, preview: *[4096 + 16]u8) !usize {
+    const prefix = "Queued · ";
+    @memcpy(preview[0..prefix.len], prefix);
+    var used: usize = 0;
+    while (used < 4096) : (used += 1) {
+        const byte = (try reader.readByte(used)) orelse break;
+        if (byte == '\n') break;
+        preview[prefix.len + used] = byte;
+    }
+    const truncated = used == 4096 and used < reader.source.length;
+    while (used != 0 and !std.unicode.utf8ValidateSlice(preview[prefix.len .. prefix.len + used])) used -= 1;
+    var len = prefix.len + used;
+    if (truncated) {
+        @memcpy(preview[len..][0..3], "…");
+        len += 3;
+    }
+    return len;
+}
+
+fn queuedWidget(arena: std.mem.Allocator, text: []const u8, width: u16) std.mem.Allocator.Error!fw.Widget {
+    const label = try arena.create(fw.Text);
+    label.* = .{ .text = text, .softwrap = false, .pinned_horizontal = true };
+    const box = try arena.create(fw.SizedBox);
+    box.* = .{ .child = label.widget(), .size = .{ .width = width, .height = 1 } };
+    var widget = box.widget();
+    widget.pinnedHorizontal = true;
+    return widget;
 }
 
 /// Detach the worker token only after all indexing and anchor resolution have
@@ -184,8 +201,9 @@ fn drawRow(raw: *const anyopaque, row: usize, cursor: usize, arena: std.mem.Allo
     const global_row = self.window.global(row) orelse return null;
     const location = self.locate(global_row) orelse return null;
     if (location.row) |line| return location.item.index.?.builder().itemAtIdxForDraw(line, cursor, arena);
+    if (location.item.source.item.queued) return try queuedWidget(arena, location.item.preview[0..location.item.preview_len], self.width);
     const label = try arena.create(fw.Text);
-    label.* = .{ .text = if (location.item.source.item.queued) location.item.preview[0..location.item.preview_len] else if (location.item.source.item.kind == .user) "You" else "Assistant", .softwrap = false, .pinned_horizontal = true };
+    label.* = .{ .text = if (location.item.source.item.kind == .user) "You" else "Assistant", .softwrap = false, .pinned_horizontal = true };
     return label.widget();
 }
 
@@ -227,4 +245,36 @@ test "native paged feed declarations retain one bounded page owner" {
     std.testing.refAllDecls(@This());
     try std.testing.expect(@sizeOf(Self) < 16384);
     try std.testing.expectEqual(protocol.ActivityPage.items, @typeInfo(@FieldType(Self, "items")).array.len);
+}
+
+test "native queued preview clips UTF8 boundary and marks viewport overflow" {
+    const Source = struct {
+        fn read(raw: *const anyopaque, offset: u64, out: []u8) !usize {
+            const bytes: *[]const u8 = @ptrCast(@alignCast(raw));
+            const start: usize = @intCast(offset);
+            const count = @min(out.len, bytes.len - start);
+            @memcpy(out[0..count], bytes.*[start..][0..count]);
+            return count;
+        }
+    };
+    var bytes: [4100]u8 = @splat('x');
+    @memcpy(bytes[4094..4098], "😀");
+    bytes[4098] = '\n';
+    const source: []const u8 = &bytes;
+    var reader: vaxis.unicode.PagedReader = .{ .source = .{ .userdata = &source, .length = source.len, .readFn = Source.read } };
+    var preview: [4096 + 16]u8 = undefined;
+    const len = try queuedPreview(&reader, &preview);
+    const text = preview[0..len];
+    try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+    try std.testing.expect(std.mem.endsWith(u8, text, "…"));
+    try std.testing.expectEqual(@as(usize, "Queued · ".len + 4094 + 3), len);
+    fw.DrawContext.init(.unicode);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{ .width = 20 }, .max = .{ .width = null, .height = null }, .cell_size = .{} };
+    const widget = try queuedWidget(ctx.arena, text, 20);
+    try std.testing.expect(widget.pinnedHorizontal);
+    const surface = try widget.draw(ctx);
+    try std.testing.expectEqual(@as(u16, 20), surface.size.width);
+    try std.testing.expectEqualStrings("…", surface.readCell(19, 0).char.grapheme);
 }
