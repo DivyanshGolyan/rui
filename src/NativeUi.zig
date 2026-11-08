@@ -16,6 +16,7 @@ const Task = @import("ClientTask.zig");
 const Submission = @import("SessionSubmission.zig");
 const defaults = @import("product_defaults.zig");
 const stderr = @import("stderr.zig");
+const TerminalText = @import("TerminalText.zig");
 const Self = @This();
 const Id = [protocol.session_id_bytes]u8;
 
@@ -140,7 +141,7 @@ header: fw.Text = .{ .text = "" },
 status: fw.Text = .{ .text = "" },
 border: fw.Border = undefined,
 notice: []const u8 = "",
-notice_buffer: [256]u8 = undefined,
+notice_buffer: [2048]u8 = undefined,
 pasting: bool = false,
 worker: Task = .{},
 read_kind: ReadKind = .{ .list = 0 },
@@ -158,12 +159,18 @@ compaction: [20]u8 = undefined,
 model_picker: NativeModelPicker,
 model_effects: NativeModelEffects,
 model_default: ?model_view.Default = null,
+model_save_uncertain: bool = false,
 
 pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Hooks) !void {
     const self = try init.gpa.create(Self);
     defer init.gpa.destroy(self);
     const scratch = try hooks.scratch(init);
     const draft = Draft.create(init.gpa) catch |err| {
+        scratch.close(init.io);
+        return err;
+    };
+    const model_scratch = hooks.scratch(init) catch |err| {
+        draft.destroy(init.gpa);
         scratch.close(init.io);
         return err;
     };
@@ -176,7 +183,7 @@ pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Ho
         .drafts = std.AutoHashMap(Id, *Draft).init(init.gpa),
         .submission = .{ .io = init.io, .store = options.store, .session = "", .directory = options.directory, .environment = .{ .map = init.environ_map } },
         .model_picker = NativeModelPicker.init(init.gpa),
-        .model_effects = .{ .allocator = init.gpa, .io = init.io, .home = options.home, .store = options.store },
+        .model_effects = .{ .allocator = init.gpa, .io = init.io, .home = options.home, .store = options.store, .scratch = model_scratch },
         .model_default = model_view.Default.of(options.provider, options.model),
     };
     defer self.deinit();
@@ -192,6 +199,7 @@ pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Ho
 
 fn deinit(self: *Self) void {
     self.model_effects.deinit();
+    if (self.model_effects.scratch) |file| file.close(self.init.io);
     self.model_picker.deinit();
     self.worker.cancel();
     self.worker.join() catch {};
@@ -441,6 +449,8 @@ fn retirePage(self: *Self) void {
 
 fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
     _ = try self.getDraft(id);
+    if (self.model_picker.isOpen()) self.modelAction(.edit);
+    self.model_effects.cancelSession();
     self.worker.cancel();
     self.retirePage();
     self.destination = id;
@@ -456,6 +466,7 @@ fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
 }
 
 fn back(self: *Self, ctx: *fw.EventContext) !void {
+    self.model_effects.cancelSession();
     self.worker.cancel();
     self.retirePage();
     self.pending_page = null;
@@ -490,6 +501,13 @@ fn submit(self: *Self) !void {
     defer self.init.gpa.free(text);
     if (text.len == 0) return;
     if (std.mem.eql(u8, text, "/model")) {
+        if (self.destination) |id| {
+            self.model_effects.requestSession(.{ .id = id, .epoch = self.navigation_epoch });
+            self.notice = "Reading this Session's model…";
+            current.field.clearRetainingCapacity();
+            current.revision +%= 1;
+            return;
+        }
         if (self.body_width < 7 or self.body_bottom <= 1) {
             self.notice = "Widen or enlarge for /model; draft retained";
             return;
@@ -497,6 +515,10 @@ fn submit(self: *Self) !void {
         self.modelAction(.open);
         current.field.clearRetainingCapacity();
         current.revision +%= 1;
+        return;
+    }
+    if (self.destination == null and (self.model_effects.saving() or self.model_save_uncertain)) {
+        self.notice = if (self.model_save_uncertain) "Model save uncertain · inspect defaults or choose again; draft retained" else "Saving model default; draft retained";
         return;
     }
     self.submitted_destination = self.destination;
@@ -646,7 +668,6 @@ fn modelAction(self: *Self, input: NativeModelPicker.Input) void {
             self.notice = "Loading models…";
         },
         .selected => |binding| {
-            self.model_default = binding;
             self.model_effects.requestSave(binding);
             self.notice = "Saving model default…";
         },
@@ -654,29 +675,55 @@ fn modelAction(self: *Self, input: NativeModelPicker.Input) void {
     }
 }
 
+fn applyModelCompletion(self: *Self, result: NativeModelEffects.Completion) !void {
+    switch (result) {
+        .list => |answer| {
+            const current = self.model_picker.isOpen() and answer.generation == self.model_picker.generation;
+            self.model_picker.receive(answer.generation, answer.read, if (self.model_default) |*binding| binding.model.slice() else null);
+            if (!current) return;
+            if (answer.failure) |err| if (err == error.CanonicalStoreFailure or err == error.OutOfMemory) return err;
+            self.notice = switch (self.model_picker.read_status) {
+                .unread => "Loading models…",
+                .read => if (self.model_picker.menu.entries.len == 0) "No models available" else "↑/↓ select · Enter choose · Esc close",
+                .unanswered => "Models unavailable: Host did not answer",
+                .invalid => "Models unavailable: invalid Host reply",
+            };
+            if (self.model_picker.menu.loading()) self.model_effects.requestList(answer.generation);
+        },
+        .session => |answer| {
+            const id = self.destination orelse return;
+            if (answer.request.epoch != self.navigation_epoch or !std.mem.eql(u8, &id, &answer.request.id)) return;
+            if (answer.failure) |err| {
+                if (err == error.CanonicalStoreFailure or err == error.OutOfMemory) return err;
+                self.notice = "This Session's model is unavailable";
+                return;
+            }
+            const binding = answer.binding orelse return;
+            var writer: std.Io.Writer = .fixed(&self.notice_buffer);
+            var safe: TerminalText = .{ .mode = .label };
+            safe.feed(&writer, binding.model.slice()) catch unreachable;
+            safe.finish(&writer) catch unreachable;
+            writer.print(" · {s} · new Session: /model in overview", .{binding.provider.signIn()}) catch unreachable;
+            self.notice = writer.buffered();
+        },
+        .save => |answer| {
+            if (answer.failure) |err| {
+                // This error can occur before rename or after it, during
+                // directory sync. It cannot prove either publication state.
+                if (err == error.PreferenceDirectorySyncFailed) self.model_save_uncertain = true;
+                self.notice = if (self.model_effects.pending_save != null) "Saving newer model default…" else if (self.model_save_uncertain) "Model save uncertain · inspect defaults or choose again" else "Model default not saved";
+            } else {
+                self.model_default = answer.binding;
+                self.model_save_uncertain = false;
+                self.notice = if (self.model_effects.pending_save != null) "Saving newer model default…" else "Model default saved";
+            }
+        },
+    }
+}
+
 fn completeModel(self: *Self, ctx: *fw.EventContext) !void {
     if (self.model_effects.complete()) |result| {
-        switch (result) {
-            .list => |answer| {
-                if (answer.failure) |err| if (err == error.CanonicalStoreFailure or err == error.OutOfMemory) return err;
-                const current = self.model_picker.isOpen() and answer.generation == self.model_picker.generation;
-                self.model_picker.receive(answer.generation, answer.read, if (self.model_default) |*binding| binding.model.slice() else null);
-                if (current) {
-                    self.notice = switch (self.model_picker.read_status) {
-                        .unread => "Loading models…",
-                        .read => if (self.model_picker.menu.entries.len == 0) "No models available" else "↑/↓ select · Enter choose · Esc close",
-                        .unanswered => "Models unavailable: Host did not answer",
-                        .invalid => "Models unavailable: invalid Host reply",
-                    };
-                    if (self.model_picker.menu.loading()) self.model_effects.requestList(answer.generation);
-                }
-            },
-            .save => |answer| {
-                if (answer.failure) |err| {
-                    self.notice = std.fmt.bufPrint(&self.notice_buffer, "Model default save failed: {s}", .{@errorName(err)}) catch unreachable;
-                } else self.notice = if (self.model_effects.pending_save != null) "Saving model default…" else "Model default saved";
-            },
-        }
+        try self.applyModelCompletion(result);
         ctx.redraw = true;
     }
     self.model_effects.start() catch |err| {
@@ -1011,7 +1058,7 @@ test "native model routing retains composer keys and queues the selected default
     try capture(&self, &ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
     try std.testing.expect(ctx.consume_event);
     try std.testing.expect(!self.model_picker.isOpen());
-    try std.testing.expectEqualStrings("beta", self.model_default.?.model.slice());
+    try std.testing.expect(self.model_default == null);
     try std.testing.expectEqualStrings("beta", self.model_effects.pending_save.?.model.slice());
     try std.testing.expect(self.model_effects.pending_list == null);
 
@@ -1055,4 +1102,107 @@ test "native model command opens without sending and retains draft when hidden" 
     const retained = try self.overview_draft.field.snapshot();
     defer std.testing.allocator.free(retained);
     try std.testing.expectEqualStrings("/model", retained);
+}
+
+test "native conversation model command reads fixed Session facts and never picks a default" {
+    fw.DrawContext.init(.unicode);
+    var self: Self = undefined;
+    self.init = undefined;
+    self.init.gpa = std.testing.allocator;
+    const draft = try Draft.create(std.testing.allocator);
+    defer draft.destroy(std.testing.allocator);
+    self.drafts = std.AutoHashMap(Id, *Draft).init(std.testing.allocator);
+    defer self.drafts.deinit();
+    const id: Id = "abc123".*;
+    try self.drafts.put(id, draft);
+    self.destination = id;
+    self.navigation_epoch = 7;
+    self.submission = .{ .io = std.testing.io, .store = "", .session = "", .directory = "", .environment = .empty };
+    self.model_picker = NativeModelPicker.init(std.testing.allocator);
+    defer self.model_picker.deinit();
+    self.model_effects = .{ .allocator = std.testing.allocator, .io = std.testing.io, .home = "", .store = "" };
+    self.model_default = model_view.Default.of("codex", "global");
+    self.notice = "";
+    try draft.field.insertSliceAtCursor("/model");
+    try self.submit();
+    try std.testing.expect(!self.model_picker.isOpen());
+    try std.testing.expect(self.model_effects.pending_save == null);
+    try std.testing.expect(self.submission.view() == null);
+    const command_draft = try draft.field.snapshot();
+    defer std.testing.allocator.free(command_draft);
+    try std.testing.expectEqualStrings("", command_draft);
+    try std.testing.expectEqual(@as(u64, 7), self.model_effects.pending_session.?.epoch);
+    try std.testing.expectEqualSlices(u8, &id, &self.model_effects.pending_session.?.id);
+    const fixed = model_view.Default.of("openai", "fixed-model").?;
+    try self.applyModelCompletion(.{ .session = .{ .request = .{ .id = id, .epoch = 7 }, .binding = fixed, .failure = null } });
+    try std.testing.expect(std.mem.indexOf(u8, self.notice, "fixed-model") != null);
+    try std.testing.expect(std.mem.indexOf(u8, self.notice, "API key") != null);
+    try std.testing.expectEqualStrings("global", self.model_default.?.model.slice());
+    self.navigation_epoch = 8;
+    const old_notice = try std.testing.allocator.dupe(u8, self.notice);
+    defer std.testing.allocator.free(old_notice);
+    try self.applyModelCompletion(.{ .session = .{ .request = .{ .id = id, .epoch = 7 }, .binding = null, .failure = error.CanonicalStoreFailure } });
+    try std.testing.expectEqualStrings(old_notice, self.notice);
+}
+
+test "stale model list failures cannot terminate the current picker" {
+    var self: Self = undefined;
+    self.model_picker = NativeModelPicker.init(std.testing.allocator);
+    defer self.model_picker.deinit();
+    self.model_default = null;
+    self.model_effects = .{ .allocator = std.testing.allocator, .io = std.testing.io, .home = "", .store = "" };
+    self.body_width = 80;
+    self.notice = "";
+    self.modelAction(.open);
+    const old = self.model_picker.generation;
+    self.modelAction(.edit);
+    try self.applyModelCompletion(.{ .list = .{ .generation = old, .read = .unanswered, .failure = error.CanonicalStoreFailure } });
+    self.modelAction(.open);
+    try self.applyModelCompletion(.{ .list = .{ .generation = old, .read = .unanswered, .failure = error.OutOfMemory } });
+    try std.testing.expect(self.model_picker.isOpen());
+    try std.testing.expectError(error.CanonicalStoreFailure, self.applyModelCompletion(.{ .list = .{ .generation = self.model_picker.generation, .read = .unanswered, .failure = error.CanonicalStoreFailure } }));
+}
+
+test "native model save admits only confirmed binding and holds draft on uncertainty" {
+    fw.DrawContext.init(.unicode);
+    var self: Self = undefined;
+    self.init = undefined;
+    self.init.gpa = std.testing.allocator;
+    self.overview_draft = try Draft.create(std.testing.allocator);
+    defer self.overview_draft.destroy(std.testing.allocator);
+    self.destination = null;
+    self.submission = .{ .io = std.testing.io, .store = "", .session = "", .directory = "", .environment = .empty };
+    self.model_picker = NativeModelPicker.init(std.testing.allocator);
+    defer self.model_picker.deinit();
+    self.model_effects = .{ .allocator = std.testing.allocator, .io = std.testing.io, .home = "", .store = "" };
+    self.model_default = model_view.Default.of("codex", "old");
+    self.model_save_uncertain = false;
+    self.notice = "";
+    const first = model_view.Default.of("codex", "first").?;
+    const newest = model_view.Default.of("openai", "newest").?;
+    self.model_effects.requestSave(first);
+    try self.overview_draft.field.insertSliceAtCursor("hello");
+    try self.submit();
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expectEqualStrings("old", self.model_default.?.model.slice());
+    const retained = try self.overview_draft.field.snapshot();
+    defer std.testing.allocator.free(retained);
+    try std.testing.expectEqualStrings("hello", retained);
+    self.model_effects.requestSave(newest);
+    try self.applyModelCompletion(.{ .save = .{ .binding = first, .failure = null } });
+    try std.testing.expectEqualStrings("first", self.model_default.?.model.slice());
+    try self.submit();
+    try std.testing.expect(self.submission.view() == null);
+    self.model_effects.pending_save = null;
+    try self.applyModelCompletion(.{ .save = .{ .binding = newest, .failure = error.AccessDenied } });
+    try std.testing.expectEqualStrings("first", self.model_default.?.model.slice());
+    try std.testing.expect(!self.model_save_uncertain);
+    try self.applyModelCompletion(.{ .save = .{ .binding = newest, .failure = error.PreferenceDirectorySyncFailed } });
+    try std.testing.expect(self.model_save_uncertain);
+    try std.testing.expectEqualStrings("first", self.model_default.?.model.slice());
+    try self.submit();
+    try std.testing.expect(self.submission.view() == null);
+    try self.applyModelCompletion(.{ .save = .{ .binding = newest, .failure = null } });
+    try std.testing.expect(!self.model_save_uncertain);
+    try std.testing.expectEqualStrings("newest", self.model_default.?.model.slice());
 }
