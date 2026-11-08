@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """Disposable real-Host picker journey; local stub only, no user Store."""
+import fcntl
 import os
 import pathlib
 import sys
+import termios
 from types import SimpleNamespace
+
+# The native backend opens /dev/tty. Acquire the PTY as controlling terminal
+# in a separate child before exec, not via preexec_fn in the threaded parent.
+if sys.argv[1:2] == ["--tty-exec"]:
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    fd = os.open("/dev/tty", os.O_RDWR)
+    os.close(fd)
+    os.execv(sys.argv[2], sys.argv[2:])
 
 # Fixture subprocesses inherit only a small non-secret environment. Fixture.start
 # installs its own HOME and a synthetic local provider endpoint.
@@ -65,7 +76,8 @@ def main():
     try:
         fixture.start()
         with defer_signals():
-            fixture.tty = DirectPty([str(binary), "--store", str(fixture.store)],
+            fixture.tty = DirectPty([sys.executable, str(pathlib.Path(__file__).resolve()), "--tty-exec",
+                                    str(binary), "--store", str(fixture.store)],
                                     env=fixture.env, cwd=fixture.root, output=output)
         tty = fixture.tty
         tty.marker("Sessions")
