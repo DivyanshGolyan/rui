@@ -3086,7 +3086,10 @@ fn exportActivity(init: std.process.Init, parsed: *const cli_args.Parsed) !void 
     var temp_dir = try std.Io.Dir.cwd().openDir(init.io, temp_path, .{});
     defer temp_dir.close(init.io);
     const requests_: client.Requests = .{ .io = init.io };
-    const source = try requests_.readVerifiedActivityScratch(init.gpa, temp_dir, store, session, position, ordinal, .{ .bytes = length, .digest = digest });
+    const source = requests_.readVerifiedActivityScratch(init.gpa, temp_dir, store, session, position, ordinal, .{ .bytes = length, .digest = digest }) catch |err| switch (err) {
+        error.ContentBindingMismatch, error.TruncatedResponse, error.InvalidResponse => return error.ExportSourceUnverified,
+        else => return readTransportFailure(init.io, store, err),
+    };
     defer source.close();
     const path = parsed.get("output").?;
     const name = std.fs.path.basename(path);

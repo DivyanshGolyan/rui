@@ -51,6 +51,7 @@ pub const Code = enum {
     message_empty,
     environment_too_large,
     internal_unexpected,
+    export_source_unverified,
     host_not_serving,
     host_identity_unconfirmed,
     upgrade_ineligible,
@@ -255,6 +256,7 @@ pub const pending = .{
 fn mapped(err: anyerror) ?Code {
     return switch (err) {
         error.OutOfMemory => .memory_exhausted,
+        error.ExportSourceUnverified => .export_source_unverified,
         error.HostNotServing => .host_not_serving,
         error.InvalidHostInfo, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
@@ -418,6 +420,7 @@ pub fn facts(code: Code) Facts {
         .terminal_input_incomplete => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "complete key, UTF-8 and bracketed-paste sequences within two seconds" }, .says = "The terminal sent an incomplete key, character or paste sequence, and it expired; nothing was sent.", .next = "Type the Message again; if this repeats, check the terminal's keyboard and paste settings." },
         .message_empty => .{ .act = .fix, .input = .stdin, .accepted = .{ .grammar = "nonempty Message text on stdin" }, .says = "Standard input was empty; provide Message text.", .next = "Pipe or redirect a nonempty Message into this command." },
         .environment_too_large => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "an inherited environment within the Message byte limit" }, .says = "The inherited environment is too large for a Message.", .next = "Unset or shorten the largest variables, then recover the saved request with rui request recover HANDLE." },
+        .export_source_unverified => .{ .act = .operate, .input = null, .accepted = .none, .says = "Rui could not verify the selected source against its captured identity; no export file was created.", .next = "Check the Store and Host, then inspect the source again before retrying. The source may have changed or the reply may be incomplete." },
         .internal_unexpected => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui could not complete this operation because of an internal fault.", .next = "Keep the saved request, if any, and report this code with the command to the Rui maintainer." },
         .host_identity_unconfirmed => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host's exact process/build identity could not be verified.", .next = "Inspect this Store with its owning client. Do not pause a guessed or replacement Host." },
         .upgrade_ineligible => .{ .act = .operate, .input = null, .accepted = .none, .says = "This installation is not eligible for automatic release upgrade.", .next = "Use the standalone release installer for a managed source build, or the application/package owner for an unmanaged binary." },
@@ -774,4 +777,12 @@ test "fresh CLI argument errors are distinct from saved tool refusals" {
     var out = std.Io.Writer.fixed(&bytes);
     try writeSavedLine(&out, .invalid_arguments, .{ .resource = "session", .operation = "send" });
     try std.testing.expectEqualStrings("rui session send: arguments: The tool arguments are invalid. Accepted: arguments satisfying the selected tool schema. Next: Correct the arguments to match the selected tool schema. This rejection was saved and replays as saved; a resend needs a new key. [invalid_arguments]\n", out.buffered());
+}
+
+test "native export verification failure tells the user no file was published" {
+    try std.testing.expectEqual(Code.export_source_unverified, of(error.ExportSourceUnverified));
+    const detail = facts(.export_source_unverified);
+    try std.testing.expectEqual(Act.operate, detail.act);
+    try std.testing.expect(std.mem.indexOf(u8, detail.says, "no export file was created") != null);
+    try std.testing.expect(std.mem.indexOf(u8, detail.next, "source may have changed") != null);
 }

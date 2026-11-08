@@ -114,6 +114,14 @@ index 8974863..2322388 100644
  };
  
  /// Shared cursor query state. The count and idle deadline are updated together
+@@ -380,7 +384,6 @@ inline fn parseOsc(input: []const u8, paste_allocator: ?std.mem.Allocator) !Resul
+                 alloc.free(text);
+                 return null_event;
+             };
+-            log.debug("decoded paste: {s}", .{text});
+             return .{
+                 .event = .{ .paste = text },
+                 .n = sequence.len,
 @@ -415,6 +419,7 @@ inline fn parseCsi(input: []const u8, text_buf: []u8, cursor_position_requests:
          }
      } else return .{ .event = null, .n = 0 };
