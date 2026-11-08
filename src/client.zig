@@ -321,6 +321,16 @@ pub const Requests = struct {
         return readPublicContentResponse(self, fd, expected, sink);
     }
 
+    /// Verify the complete bound content before returning a bounded byte window.
+    /// Each call streams from offset zero; the selected bytes remain private
+    /// until length, digest and physical EOF have all been checked.
+    pub fn readVerifiedActivityWindow(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: protocol_reply.CommandObservation.ContentReference, start: u64) !ContentWindow {
+        if (start > expected.bytes) return error.InvalidTarget;
+        var sink: ContentWindowSink = .{ .start = start };
+        if (try self.readActivityContent(store_path, session, position, ordinal, expected, &sink)) |failure| return self.failRead(failure);
+        return sink.window;
+    }
+
     /// The first line of a Message admission row (ordinal 0), read into
     /// `buffer`, whose length is the limit. Closing the connection early ends
     /// the Host's exchange as an ordinary disconnect. The bytes are
@@ -338,6 +348,47 @@ pub const Requests = struct {
         return readFirstLine(self, fd, buffer);
     }
 };
+
+/// Exact authenticated bytes beginning at the requested source offset.
+pub const ContentWindow = struct {
+    bytes: [protocol.content_window_bytes]u8 = undefined,
+    len: usize = 0,
+
+    pub fn slice(self: *const ContentWindow) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+const ContentWindowSink = struct {
+    start: u64,
+    seen: u64 = 0,
+    window: ContentWindow = .{},
+
+    pub fn feed(self: *@This(), bytes: []const u8) !void {
+        const end = self.seen + bytes.len;
+        if (end > self.start and self.window.len < self.window.bytes.len) {
+            const from: usize = @intCast(self.start -| self.seen);
+            const count = @min(bytes.len - from, self.window.bytes.len - self.window.len);
+            @memcpy(self.window.bytes[self.window.len..][0..count], bytes[from..][0..count]);
+            self.window.len += count;
+        }
+        self.seen = end;
+    }
+};
+
+test "native verified activity window stages only selected exact bytes" {
+    var sink: ContentWindowSink = .{ .start = 3 };
+    try sink.feed("ab");
+    try sink.feed("cdef");
+    try sink.feed("ghij");
+    try std.testing.expectEqualStrings("defghij", sink.window.slice());
+    try std.testing.expectEqual(@as(u64, 10), sink.seen);
+    var bounded: ContentWindowSink = .{ .start = 1 };
+    const source = [_]u8{'x'} ** (protocol.content_window_bytes + 20);
+    try bounded.feed(&source);
+    try std.testing.expectEqual(@as(usize, protocol.content_window_bytes), bounded.window.len);
+    try std.testing.expectEqualSlices(u8, source[1 .. 1 + protocol.content_window_bytes], bounded.window.slice());
+}
 
 /// Returns at the first line break, or once `buffer` is full, without reading
 /// the rest of the content.

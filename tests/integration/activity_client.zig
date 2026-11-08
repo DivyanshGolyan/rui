@@ -31,6 +31,11 @@ pub fn main(init: std.process.Init) !void {
         try out.interface.flush();
     } else if (args.len == 6 and std.mem.eql(u8, args[1], "content")) {
         if (try requests.readActivityContent(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), null, std.Io.File.stdout()) != null) return error.ActivityUnavailable;
+    } else if (args.len == 9 and std.mem.eql(u8, args[1], "verified-window")) {
+        var digest: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&digest, args[7]);
+        const window = try requests.readVerifiedActivityWindow(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), .{ .bytes = try std.fmt.parseInt(u64, args[6], 10), .digest = digest }, try std.fmt.parseInt(u64, args[8], 10));
+        try std.Io.File.stdout().writeStreamingAll(init.io, window.slice());
     } else if (args.len == 5 and std.mem.eql(u8, args[1], "prefix")) {
         var buffer: [4096]u8 = undefined;
         switch (try requests.readActivityPrefix(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), &buffer)) {

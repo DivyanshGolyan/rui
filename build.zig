@@ -383,6 +383,7 @@ pub fn build(b: *std.Build) void {
     });
     activity_client.root_module.link_libc = true;
     activity_client.root_module.addImport("rui_client", read_client);
+    b.step("activity-window-actor", "Build the scoped activity window integration actor").dependOn(&b.addInstallArtifact(activity_client, .{}).step);
     const activity_integration = b.addSystemCommand(&.{"python3"});
     activity_integration.addFileArg(b.path("tests/integration/activity_integration.py"));
     activity_integration.addFileArg(ci.path(release_safe));
