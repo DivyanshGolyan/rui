@@ -404,6 +404,14 @@ test "native frame fences kernel backlog and fails closed when unavailable" {
     try std.testing.expect(ctx.frame_input_watermark < std.math.maxInt(u64));
 }
 
+test "native repeated false readiness fails closed without consuming input" {
+    var guard: vaxis.Loop(fw.Event).ReadinessGuard = .{};
+    for (0..7) |_| try guard.emptyRead();
+    guard.noReadiness();
+    for (0..7) |_| try guard.emptyRead();
+    try std.testing.expectError(error.InputReadinessUnavailable, guard.emptyRead());
+}
+
 test "native input batch keeps split parser events older than a presented frame" {
     const io = std.testing.io;
     var tty: vaxis.Tty = undefined;
