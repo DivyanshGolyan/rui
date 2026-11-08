@@ -550,7 +550,7 @@ test "native observed decision requires a fresh retry after ambiguous join" {
         fn lost(raw: *anyopaque, _: *Task) !void {
             const owner: *Self = @ptrCast(@alignCast(raw));
             const deadline = std.Io.Clock.awake.now(owner.io).nanoseconds + 6_000_000_000;
-            while (!release.load(.acquire)) {
+            while (!@This().release.load(.acquire)) {
                 if (std.Io.Clock.awake.now(owner.io).nanoseconds >= deadline) return error.TestCompletionDeadline;
                 std.Thread.yield() catch {};
             }
