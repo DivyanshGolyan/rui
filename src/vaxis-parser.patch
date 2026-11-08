@@ -1270,13 +1270,13 @@ index 1c569eb..e7c757b 100644
  fn insertChildren(
      self: *ScrollView,
 diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
-index fe46d2b..80afec1 100644
 --- a/src/vxfw/Text.zig
 +++ b/src/vxfw/Text.zig
-@@ -3,6 +3,52 @@ const vaxis = @import("../main.zig");
+@@ -2,6 +2,52 @@
+ const vaxis = @import("../main.zig");
  
  const Allocator = std.mem.Allocator;
- 
++
 +/// A reusable extent index over native Text wrapping. The ScrollView draws
 +/// only indexed rows it can see; source slices remain owned by the caller.
 +/// Rebuilding the index uses memory proportional to visual row count, not
@@ -1322,11 +1322,26 @@ index fe46d2b..80afec1 100644
 +        return self.lines.items[index].widget();
 +    }
 +};
-+
+ 
  const vxfw = @import("vxfw.zig");
  
- const Text = @This();
-@@ -204,6 +250,10 @@ pub const SoftwrapIterator = struct {
+@@ -76,6 +122,7 @@
+                     continue;
+                 }
+                 const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
++                if (@as(usize, col) + grapheme_width > container_size.width) break;
+                 surface.writeCell(col, row, .{
+                     .char = .{ .grapheme = grapheme, .width = grapheme_width },
+                     .style = self.style,
+@@ -102,6 +149,7 @@
+                 const grapheme = char.bytes(line);
+                 const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
+ 
++                if (@as(usize, col) + grapheme_width > container_size.width and self.overflow == .clip) break;
+                 if (col + grapheme_width >= container_size.width and
+                     line_width > container_size.width and
+                     self.overflow == .ellipsis)
+@@ -204,6 +252,10 @@
      line: []const u8 = "",
      index: usize = 0,
      hard_iter: LineIterator,
@@ -1337,7 +1352,7 @@ index fe46d2b..80afec1 100644
  
      pub const Line = struct {
          width: u16,
-@@ -225,14 +275,15 @@ pub const SoftwrapIterator = struct {
+@@ -225,14 +277,15 @@
              self.line = self.hard_iter.next() orelse return null;
              self.line = std.mem.trimEnd(u8, self.line, " \t");
              self.index = 0;
@@ -1355,7 +1370,7 @@ index fe46d2b..80afec1 100644
  
              if (self.ctx.max.width) |max| {
                  if (cur_width + next_width > max) {
-@@ -244,17 +295,21 @@ pub const SoftwrapIterator = struct {
+@@ -244,17 +297,30 @@
                      if (trimmed_width > max) {
                          // Won't fit on line by itself, so fit as much on this line as we can
                          var iter = self.ctx.graphemeIterator(word);
@@ -1364,6 +1379,15 @@ index fe46d2b..80afec1 100644
                              const grapheme = item.bytes(word);
                              const w = self.ctx.stringWidth(grapheme);
                              if (cur_width + w > max) {
++                                // A wide grapheme cannot fit in this viewport. Consume
++                                // it as one clipped row so a later resize can display
++                                // the original bytes and wrapping always progresses.
++                                if (self.index == start) {
++                                    self.index += grapheme.len;
++                                    remaining_width -= w;
++                                    self.long_word = if (self.index < idx) .{ .end = idx, .remaining_width = remaining_width } else null;
++                                    return .{ .width = max, .bytes = self.line[start..self.index] };
++                                }
 +                                self.long_word = .{ .end = idx, .remaining_width = remaining_width };
                                  const end = self.index;
                                  return .{ .width = cur_width, .bytes = self.line[start..end] };
@@ -1377,7 +1401,7 @@ index fe46d2b..80afec1 100644
                      // We are softwrapping, advance index to the start of the next word
                      const end = self.index;
                      self.index = std.mem.indexOfNonePos(u8, self.line, self.index, soft_breaks) orelse self.line.len;
-@@ -263,11 +318,21 @@ pub const SoftwrapIterator = struct {
+@@ -263,11 +329,21 @@
              }
  
              self.index = idx;

@@ -66,3 +66,29 @@ test "native text extent indexes long output without full-height cell surfaces" 
     try std.testing.expectEqualStrings("界", last.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("!", last.readCell(2, 0).char.grapheme);
 }
+
+test "native wrapping advances across a grapheme wider than its viewport" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const narrow: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{ .width = 1 }, .max = .{ .width = 1, .height = null }, .cell_size = .{} };
+    const wide = narrow.withConstraints(.{ .width = 4 }, .{ .width = 4, .height = null });
+    const original = "A界Z";
+    const input = [_]fw.Text{.{ .text = original }};
+    var index: fw.Text.LineIndex = .{};
+    defer index.deinit(std.testing.allocator);
+    try index.reflow(std.testing.allocator, &input, narrow);
+    try std.testing.expectEqual(@as(usize, 3), index.lines.items.len);
+    try std.testing.expectEqualStrings("A", index.lines.items[0].text);
+    try std.testing.expectEqualStrings("界", index.lines.items[1].text);
+    try std.testing.expectEqualStrings("Z", index.lines.items[2].text);
+    const clipped = try index.builder().itemAtIdx(1, 0).?.draw(narrow);
+    try std.testing.expectEqual(@as(u16, 1), clipped.size.height);
+    try std.testing.expect(!std.mem.eql(u8, "界", clipped.readCell(0, 0).char.grapheme));
+    try index.reflow(std.testing.allocator, &input, wide);
+    try std.testing.expectEqual(@as(usize, 1), index.lines.items.len);
+    try std.testing.expectEqualStrings(original, index.lines.items[0].text);
+    const restored = try index.builder().itemAtIdx(0, 0).?.draw(wide);
+    try std.testing.expectEqualStrings("界", restored.readCell(1, 0).char.grapheme);
+    try std.testing.expectEqualStrings("Z", restored.readCell(3, 0).char.grapheme);
+}
