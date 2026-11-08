@@ -9,7 +9,14 @@ import sys
 import subprocess
 import termios
 import tempfile
+import time
 from types import SimpleNamespace
+
+# The spawned launcher inherits the supervisor's blocked acquisition signal.
+# Unblock it in the single-threaded child before replacing it with Rui.
+if sys.argv[1:2] == ["--ui-exec"]:
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+    os.execv(sys.argv[2], sys.argv[2:])
 
 # Keep the controlling-session leader alive until the parent has inspected
 # termios. Rui is its child; no preexec_fn runs in the threaded fixture parent.
@@ -23,7 +30,21 @@ if sys.argv[1:2] == ["--tty-supervisor"]:
         raise SystemExit(0)
     signal.signal(signal.SIGTERM, stop_supervisor)
     try:
-        child = subprocess.Popen(sys.argv[2:])
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        try:
+            child = subprocess.Popen([sys.executable, str(pathlib.Path(__file__).resolve()),
+                                      "--ui-exec", *sys.argv[2:]])
+            gate = os.environ.get("RUI_FIXTURE_SUPERVISOR_GATE")
+            if gate:
+                gate = pathlib.Path(gate)
+                (gate / "spawned").write_text(str(child.pid))
+                deadline = time.monotonic() + 10
+                while not (gate / "release").exists():
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("supervisor acquisition gate")
+                    time.sleep(0.01)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         code = child.wait()
         print(f"UI_EXIT={code}", file=sys.stderr, flush=True)
         while True:
@@ -49,19 +70,20 @@ from scenarios import Fixture
 
 class SupervisedPty(DirectPty):
     def close(self):
-        if self.process is not None and self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=7)
-            except subprocess.TimeoutExpired:
-                # This supervisor owns its session and group; never signal the
-                # parent process group if startup failed before setsid.
-                if os.getpgid(self.process.pid) == self.process.pid:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                else:
-                    self.process.kill()
-                self.process.wait(timeout=5)
-        super().close()
+        try:
+            if self.process is not None and self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=7)
+                except subprocess.TimeoutExpired:
+                    # Never signal the parent's group if setsid did not finish.
+                    if os.getpgid(self.process.pid) == self.process.pid:
+                        os.killpg(self.process.pid, signal.SIGKILL)
+                    else:
+                        self.process.kill()
+                    self.process.wait(timeout=5)
+        finally:
+            super().close()
 
 
 def finish_supervised(tty):
@@ -148,6 +170,52 @@ def check_supervisor():
             assert tty.process.poll() is not None, "supervisor not reaped"
 
 
+def check_supervisor_interruption():
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as directory:
+        gate = pathlib.Path(directory) / "gate"
+        gate.mkdir()
+        env = dict(os.environ, RUI_FIXTURE_SUPERVISOR_GATE=str(gate))
+        tty = SupervisedPty([sys.executable, str(pathlib.Path(__file__).resolve()),
+                             "--tty-supervisor", sys.executable, "-c", "import time; time.sleep(30)"],
+                            env=env, cwd=directory, output=pathlib.Path(directory) / "evidence")
+        try:
+            deadline = time.monotonic() + 10
+            while not (gate / "spawned").exists():
+                assert tty.process.poll() is None, "supervisor exited before child registration"
+                assert time.monotonic() < deadline, "supervisor acquisition timeout"
+                time.sleep(0.01)
+            child_pid = int((gate / "spawned").read_text())
+            tty.process.terminate()
+            (gate / "release").touch()
+            assert tty.process.wait(timeout=7) == 0
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise AssertionError("spawned child survived or was not reaped")
+        finally:
+            (gate / "release").touch()
+            tty.close()
+
+    calls = []
+    def fail_terminate():
+        raise OSError("synthetic terminate failure")
+    fake = SimpleNamespace(poll=lambda: None, terminate=fail_terminate)
+    tty = object.__new__(SupervisedPty)
+    tty.process = fake
+    with patch.object(DirectPty, "close", lambda _self: calls.append("base-close")):
+        try:
+            tty.close()
+        except OSError as error:
+            assert str(error) == "synthetic terminate failure"
+        else:
+            raise AssertionError("cleanup error was swallowed")
+    assert calls == ["base-close"], "base close skipped on supervisor error"
+
+
 def main():
     check_oracle()
     if sys.argv[1:] == ["--oracle-self-test"]:
@@ -155,7 +223,8 @@ def main():
         return
     if sys.argv[1:] == ["--supervisor-self-test"]:
         check_supervisor()
-        print("supervisor restoration and negative control passed")
+        check_supervisor_interruption()
+        print("supervisor restoration, negative and interruption controls passed")
         return
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
     output = pathlib.Path(sys.argv[2]).resolve()
