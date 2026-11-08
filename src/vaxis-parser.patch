@@ -2478,7 +2478,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          }
  
          /// blocks until an event is available. Useful when your application is
-@@ -109,17 +111,34 @@
+@@ -109,17 +111,53 @@
  
          /// returns an event if one is available, otherwise null. Non-blocking.
          pub fn tryEvent(self: *Self) !?T {
@@ -2490,16 +2490,35 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
 +        /// frame was presented. A failed push may leave a harmless serial gap.
 +        pub fn tryStampedEvent(self: *Self) !?Stamped {
              return try self.queue.tryPop();
-         }
- 
++        }
++
 +        pub fn inputWatermark(self: *Self) u64 {
 +            return self.issued_sequence.load(.acquire);
 +        }
 +
-+        fn stamp(self: *Self, event: T) Stamped {
++        fn issueSequence(self: *Self) u64 {
 +            const previous = self.issued_sequence.fetchAdd(1, .acq_rel);
 +            if (previous == std.math.maxInt(u64)) @panic("input sequence exhausted");
-+            return .{ .event = event, .sequence = previous + 1 };
++            return previous + 1;
++        }
++
++        pub const InputBatch = struct {
++            owner: *Self,
++            sequence: u64,
++
++            pub fn postEvent(self: *InputBatch, event: T) !void {
++                try self.owner.queue.push(.{ .event = event, .sequence = self.sequence });
++            }
++        };
++
++        /// Reserve before reading or parsing bytes, and retain across partial
++        /// sequences. Every event from that input batch has the same age.
++        pub fn beginInputBatch(self: *Self) InputBatch {
++            return .{ .owner = self, .sequence = self.issueSequence() };
+         }
+ 
++        fn stamp(self: *Self, event: T) Stamped {
++            return .{ .event = event, .sequence = self.issueSequence() };
 +        }
 +
          /// posts an event into the event queue. Will block if there is not
@@ -2515,6 +2534,78 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          }
  
          pub fn winsizeCallback(ptr: *anyopaque) void {
+@@ -150,13 +188,14 @@
+             var retry: ReadRetry = .{};
+             while (true) {
+                 try self.io.checkCancel();
++                var batch = self.beginInputBatch();
+                 const event = reader.nextEvent(&parser, paste_allocator) catch |err| {
+                     if (malformedInput(err)) continue;
+                     try retry.wait(self.io, err);
+                     continue;
+                 };
+                 retry = .{};
+-                try handleEventGeneric(self, self.vaxis, &self.cache, Event, event, paste_allocator);
++                try handleEventGeneric(&batch, self.vaxis, &self.cache, Event, event, paste_allocator);
+             }
+         }
+ 
+@@ -181,10 +220,21 @@
+                     // initialize the read buffer
+                     var buf: [1024]u8 = undefined;
+                     var read_start: usize = 0;
++                    var pending_batch: ?InputBatch = null;
+                     var retry: ReadRetry = .{};
+                     // read loop
+                     read_loop: while (true) {
+                         try self.io.checkCancel();
++                        // Avoid reserving a batch across an idle blocking read:
++                        // ordinary post-frame input can then be fresh on its
++                        // first key, while parser-held bytes retain their age.
++                        var ready = [1]std.posix.pollfd{.{
++                            .fd = self.tty.fd.handle,
++                            .events = std.posix.POLL.IN,
++                            .revents = 0,
++                        }};
++                        if (try std.posix.poll(&ready, 16) == 0) continue;
++                        var batch = pending_batch orelse self.beginInputBatch();
+                         const bytes_read = self.tty.read(buf[read_start..]) catch |err| {
+                             try retry.wait(self.io, err);
+                             continue;
+@@ -205,6 +255,7 @@
+                                 if (poll_fds[0].revents & std.posix.POLL.IN != 0) {
+                                     buf[0] = buf[seq_start];
+                                     read_start = 1;
++                                    pending_batch = batch;
+                                     continue :read_loop;
+                                 }
+                             }
+@@ -214,6 +265,7 @@
+                                 // There is no consumed length on parse errors. Discard
+                                 // this batch rather than retrying the same bad bytes.
+                                 read_start = 0;
++                                pending_batch = null;
+                                 continue :read_loop;
+                             };
+                             if (result.n == 0) {
+@@ -224,14 +276,16 @@
+                                     buf[seq_start - initial_start] = buf[seq_start];
+                                 }
+                                 read_start = seq_start - initial_start;
++                                pending_batch = batch;
+                                 continue :read_loop;
+                             }
+                             read_start = 0;
+                             seq_start += result.n;
+ 
+                             const event = result.event orelse continue;
+-                            try handleEventGeneric(self, self.vaxis, &self.cache, Event, event, paste_allocator);
++                            try handleEventGeneric(&batch, self.vaxis, &self.cache, Event, event, paste_allocator);
+                         }
++                        pending_batch = null;
+                     }
+                 },
+             }
 --- a/src/vxfw/App.zig
 +++ b/src/vxfw/App.zig
 @@ -166,8 +166,15 @@

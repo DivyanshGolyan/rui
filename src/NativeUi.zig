@@ -380,7 +380,7 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
     if (self.worker.thread == null or !self.worker.completed()) return;
     const relevant = self.read_kind.isCurrent(self.destination, self.navigation_epoch);
     self.worker.join() catch |err| {
-        if (relevant and !(err == error.Cancelled and self.pending_page != null)) {
+        if (relevant) {
             if (self.read_kind == .action) {
                 const ticket = self.read_kind.action.ticket;
                 if (self.action.ticket()) |current| if (sameActionTicket(ticket, current)) {
@@ -389,6 +389,8 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
                     self.action_details_open = false;
                     self.notice = @errorName(err);
                 };
+            } else if (err == error.Cancelled and self.pending_page != null) {
+                // A superseded history read is not an Action failure.
             } else if (self.read_kind == .conversation) {
                 self.feed_stale = true;
                 self.notice = @errorName(err);
@@ -544,6 +546,13 @@ fn showOriginal(self: *Self) void {
     self.notice = std.fmt.bufPrint(&self.notice_buffer, "{s} {s}", .{ original.key, action }) catch unreachable;
 }
 
+fn invalidateAction(self: *Self) void {
+    self.action.navigate(self.destination);
+    self.action_frame = null;
+    self.action_details_open = false;
+    self.action_next = true;
+}
+
 fn submit(self: *Self) !void {
     if (self.submission.view() != null) {
         self.showOriginal();
@@ -569,11 +578,49 @@ fn submit(self: *Self) !void {
         self.submission.configuration = .{ .store = self.options.store, .session = .create, .require_model = true, .workspace = .{ .present = true, .value = self.options.workspace }, .provider = .{ .present = true, .value = provider }, .model = .{ .present = true, .value = model }, .tools = defaults.tools, .permission_mode = .{ .present = true, .value = defaults.permission_mode }, .compaction_trigger = .{ .present = true, .value = compaction }, .reasoning_effort = client.defaultStartEffort(model, null) };
         self.submission.captured_hook = self.hooks.captured;
     }
+    self.invalidateAction();
     self.submission.begin(.{ .message = text }) catch |err| {
         if (self.submission.view() != null) self.showOriginal() else self.notice = @errorName(err);
         return;
     };
     self.notice = "Sending…";
+}
+
+fn submitDenialReason(self: *Self, offer: NativeAction.Offer) !void {
+    if (self.submission.view() != null or self.submission.task.thread != null) {
+        self.showOriginal();
+        return;
+    }
+    const destination = self.destination orelse return;
+    if (!std.mem.eql(u8, &destination, &offer.ticket.session)) return;
+    const draft = self.activeDraft();
+    const text = try draft.field.snapshot();
+    defer self.init.gpa.free(text);
+    if (text.len == 0) {
+        self.notice = "Type a reason, or Alt-Y to deny without one";
+        return;
+    }
+    if (text.len > self.submission.message_bytes.len) {
+        self.notice = "Reason too long; draft retained";
+        return;
+    }
+    self.submitted_session = destination;
+    self.submission.session = &self.submitted_session;
+    self.submitted_destination = destination;
+    self.submitted_draft = draft;
+    self.submitted_revision = draft.revision;
+    self.submission.configuration = null;
+    self.submission.captured_hook = null;
+    if (self.action.choice == null and !self.action.choose(offer.ticket, offer.action, .deny, false)) return;
+    const decision = self.action.confirm(offer.ticket, offer.action, false) orelse return;
+    std.debug.assert(decision.decision == .deny);
+    self.submission.beginObservedDenialReason(text, decision.action, decision.observed_instance) catch |err| {
+        if (self.submission.view() != null) self.showOriginal() else self.notice = @errorName(err);
+        return;
+    };
+    self.action_frame = null;
+    self.action_next = true;
+    self.notice = "Sending reason before denial…";
 }
 
 fn finishSubmission(self: *Self, ctx: *fw.EventContext) !void {
@@ -590,9 +637,18 @@ fn finishSubmission(self: *Self, ctx: *fw.EventContext) !void {
                 draft_.revision +%= 1;
             };
             self.notice = if (accepted.kind == .decision) "Action decision accepted" else "Message accepted";
-            if (accepted.kind == .decision) self.action_next = true;
+            self.invalidateAction();
             if (self.submitted_destination == null and accepted.kind == .message and self.destination == null) if (accepted.session) |id| try self.open(id, ctx);
             self.submitted_draft = null;
+            if (accepted.denies) |action| {
+                const instance = accepted.observed_instance orelse return error.MissingActionHostInstance;
+                self.submission.beginObservedDecision(.{ .action = action, .decision = .deny, .observed_instance = instance }) catch |err| {
+                    if (self.submission.view() != null) self.showOriginal() else self.notice = @errorName(err);
+                    ctx.redraw = true;
+                    return;
+                };
+                self.notice = "Reason sent; sending denial…";
+            }
             ctx.redraw = true;
         },
         .rejected => {
@@ -705,7 +761,7 @@ fn sameActionTicket(a: NativeAction.Ticket, b: NativeAction.Ticket) bool {
 }
 
 fn actionGesture(self: *Self, ctx: *const fw.EventContext) ?NativeAction.Offer {
-    if (self.pasting or self.export_open or self.action_details_open or ctx.input_sequence == 0 or ctx.input_sequence <= ctx.frame_input_watermark) return null;
+    if (self.submission.view() != null or self.submission.task.thread != null or self.pasting or self.export_open or self.action_details_open or ctx.input_sequence == 0 or ctx.input_sequence <= ctx.frame_input_watermark) return null;
     const offer = self.action.offer orelse return null;
     const frame = self.action_frame orelse return null;
     const destination = self.destination orelse return null;
@@ -837,7 +893,9 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
                 return;
             }
             if (!self.pasting and (key.matches('a', .{ .alt = true }) or key.matches('d', .{ .alt = true }) or key.matches('y', .{ .alt = true }) or key.matches('i', .{ .alt = true }))) {
-                if (self.actionGesture(ctx)) |offer| {
+                if (self.submission.view() != null or self.submission.task.thread != null) {
+                    self.showOriginal();
+                } else if (self.actionGesture(ctx)) |offer| {
                     if (key.matches('i', .{ .alt = true })) {
                         try self.openActionDetails(offer);
                     } else if (key.matches('y', .{ .alt = true })) {
@@ -868,6 +926,7 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
                 if (self.submission.view()) |original| {
                     if (original.state == .rejected or original.state == .not_started) {
                         try self.submission.discardUnsentOrRejected();
+                        self.invalidateAction();
                         self.submitted_draft = null;
                         self.notice = "Original released; draft retained";
                         ctx.consumeAndRedraw();
@@ -911,7 +970,13 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
                 return;
             }
             if (!self.pasting and key.matches(vaxis.Key.enter, .{})) {
-                try self.submit();
+                if (self.action.offer != null) {
+                    if (self.action.choice == .allow_once) {
+                        self.notice = "Alt-Y confirms; draft retained";
+                    } else if (self.actionGesture(ctx)) |offer| {
+                        try self.submitDenialReason(offer);
+                    } else self.notice = "Action pending; draft retained";
+                } else try self.submit();
                 ctx.consumeAndRedraw();
                 return;
             }
@@ -971,7 +1036,7 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
     else
         try self.activeDraft().field.draw(ctx.withConstraints(.{}, .{ .width = width, .height = composer_max }));
     const body_height = height -| 2 -| composer.size.height;
-    self.status.text = if (self.action_details_open) "Action preview · Page scroll · Esc close" else if (self.export_open) "Alt-↑/↓ select from page at opening · Wheel/Page scroll · Esc close" else if (self.notice.len != 0) self.notice else if (self.action.offer != null and self.destination != null) (if (width < 28 or body_height < 4) "Action pending · enlarge window" else "Preview may be clipped · Alt-I details · Ctrl-Q quit") else "Enter send · Alt-E export · Shift-Enter/Ctrl-J newline · Ctrl-Q quit";
+    self.status.text = if (self.action_details_open) "Action preview · Page scroll · Esc close" else if (self.export_open) "Alt-↑/↓ select from page at opening · Wheel/Page scroll · Esc close" else if (self.notice.len != 0) self.notice else if (self.action.offer != null and self.destination != null) (if (width < 28 or body_height < 5) "Action pending · enlarge window" else "Preview may be clipped · Alt-I details · Ctrl-Q quit") else "Enter send · Alt-E export · Shift-Enter/Ctrl-J newline · Ctrl-Q quit";
     const status = try self.status.draw(ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 }));
     self.body_width = width;
     self.body_bottom = 1 + body_height;
@@ -988,31 +1053,36 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
             self.export_view.estimated_content_height = @intCast(self.export_index.len);
         }
         break :body try self.export_view.draw(body_ctx);
-    } else if (self.action.offer != null and width >= 28 and body_height >= 4) body: {
+    } else if (self.action.offer != null and width >= 28 and body_height >= 5) body: {
         const offer = self.action.offer.?;
         const title = try std.fmt.allocPrint(ctx.arena, "Action {d}", .{offer.action});
         const controls = if (self.action.choice) |choice|
-            (if (choice == .allow_once) "ALLOW: Alt-Y confirm" else "DENY: Alt-Y confirm")
+            (if (choice == .allow_once) "ALLOW: Alt-Y confirm" else "DENY: Enter reason Alt-Y")
         else
             "Alt-A allow  Alt-D deny";
+        const enter_action = if (self.action.choice == .allow_once) "Enter keeps draft" else "Enter sends reason + denies";
         var title_widget: fw.Text = .{ .text = title, .softwrap = false };
         var controls_widget: fw.Text = .{ .text = controls, .softwrap = false };
+        var enter_widget: fw.Text = .{ .text = enter_action, .softwrap = false };
         const preview = try std.fmt.allocPrint(ctx.arena, "Preview: {s}", .{std.mem.trimStart(u8, self.action_preview.slice(), "\n")});
         var preview_widget: fw.Text = .{ .text = preview, .softwrap = false };
         const row_ctx = body_ctx.withConstraints(.{ .width = width, .height = 1 }, .{ .width = width, .height = 1 });
         var title_surface = try title_widget.draw(row_ctx);
         var controls_surface = try controls_widget.draw(row_ctx);
         var preview_surface = try preview_widget.draw(row_ctx);
+        var enter_surface = try enter_widget.draw(row_ctx);
         title_surface.widget = self.widget();
         controls_surface.widget = self.widget();
         preview_surface.widget = self.widget();
-        const feed_height = body_height - 3;
+        enter_surface.widget = self.widget();
+        const feed_height = body_height - 4;
         const feed_surface = try self.feed.draw(body_ctx.withConstraints(.{ .width = width, .height = feed_height }, .{ .width = width, .height = feed_height }));
-        const content = try ctx.arena.alloc(fw.SubSurface, 4);
+        const content = try ctx.arena.alloc(fw.SubSurface, 5);
         content[0] = .{ .origin = .{ .col = 0, .row = 0 }, .surface = title_surface, .z_index = 0 };
         content[1] = .{ .origin = .{ .col = 0, .row = 1 }, .surface = controls_surface, .z_index = 0 };
-        content[2] = .{ .origin = .{ .col = 0, .row = 2 }, .surface = preview_surface, .z_index = 0 };
-        content[3] = .{ .origin = .{ .col = 0, .row = 3 }, .surface = feed_surface, .z_index = 0 };
+        content[2] = .{ .origin = .{ .col = 0, .row = 2 }, .surface = enter_surface, .z_index = 0 };
+        content[3] = .{ .origin = .{ .col = 0, .row = 3 }, .surface = preview_surface, .z_index = 0 };
+        content[4] = .{ .origin = .{ .col = 0, .row = 4 }, .surface = feed_surface, .z_index = 0 };
         self.action_frame = .{ .ticket = offer.ticket, .action = offer.action, .choice = self.action.choice };
         break :body try fw.Surface.initWithChildren(ctx.arena, self.widget(), .{ .width = width, .height = body_height }, content);
     } else try self.feed.draw(body_ctx);
@@ -1089,6 +1159,7 @@ test "native pending navigation survives worker start failure" {
 test "native Action gesture requires matching shown choice and newer input" {
     var self: Self = undefined;
     self.destination = "abc123".*;
+    self.submission = .{ .io = std.testing.io, .store = "unused", .session = "abc123", .directory = "unused", .environment = .empty };
     self.action = .{};
     self.action.navigate(self.destination);
     const ticket = self.action.ticket().?;
@@ -1135,6 +1206,7 @@ test "native Action preview remains bounded and ends at UTF-8 boundary" {
 test "native Action capture rejects pasted and pre-frame choices" {
     var self: Self = undefined;
     self.destination = "abc123".*;
+    self.submission = .{ .io = std.testing.io, .store = "unused", .session = "abc123", .directory = "unused", .environment = .empty };
     self.action = .{};
     self.action.navigate(self.destination);
     const ticket = self.action.ticket().?;
@@ -1160,4 +1232,78 @@ test "native Action capture rejects pasted and pre-frame choices" {
     ctx.input_sequence = 6;
     try capture(&self, &ctx, .{ .key_press = .{ .codepoint = 'y', .mods = .{ .alt = true } } });
     try std.testing.expect(self.action.offer != null);
+}
+
+test "native Action choice is blocked while original custody is occupied" {
+    var self: Self = undefined;
+    self.destination = "abc123".*;
+    self.action = .{};
+    self.action.navigate(self.destination);
+    const ticket = self.action.ticket().?;
+    const instance: protocol.InstanceId = @splat(4);
+    try std.testing.expect(self.action.install(.{ .ticket = ticket, .instance = instance, .offer = .{ .ticket = ticket, .instance = instance, .action = 19, .summary = .{} } }));
+    const offer = self.action.offer.?;
+    self.export_open = false;
+    self.action_details_open = false;
+    self.pasting = false;
+    self.action_next = false;
+    self.action_frame = .{ .ticket = offer.ticket, .action = offer.action, .choice = null };
+    self.submission = .{ .io = std.testing.io, .store = "unused", .session = "abc123", .directory = "unused", .environment = .empty };
+    self.submission.intent = .{ .decision = .{ .action = 19, .decision = .allow_once } };
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty, .input_sequence = 3, .frame_input_watermark = 2 };
+    try std.testing.expect(self.actionGesture(&ctx) == null);
+    self.submission.intent = null;
+    self.invalidateAction();
+    try std.testing.expect(self.actionGesture(&ctx) == null);
+    try std.testing.expect(self.action.offer == null and self.action.choice == null);
+}
+
+test "native scroll cancellation revokes matching in-flight Action read" {
+    const Worker = struct {
+        fn run(_: *anyopaque, task: *Task) !void {
+            const deadline = std.Io.Clock.awake.now(task.io).nanoseconds + 5_000_000_000;
+            while (!task.cancellation.stopped.load(.acquire)) {
+                if (std.Io.Clock.awake.now(task.io).nanoseconds >= deadline) return error.TestCompletionDeadline;
+                std.Thread.yield() catch {};
+            }
+            return error.Cancelled;
+        }
+    };
+    var self: Self = undefined;
+    self.init = undefined;
+    self.init.gpa = std.testing.allocator;
+    self.init.io = std.testing.io;
+    self.destination = "abc123".*;
+    self.navigation_epoch = 1;
+    self.action = .{};
+    self.action.navigate(self.destination);
+    const initial = self.action.ticket().?;
+    const instance: protocol.InstanceId = @splat(5);
+    try std.testing.expect(self.action.install(.{ .ticket = initial, .instance = instance, .offer = .{ .ticket = initial, .instance = instance, .action = 19, .summary = .{} } }));
+    const offer = self.action.offer.?;
+    try std.testing.expect(self.action.choose(offer.ticket, offer.action, .deny, false));
+    self.action_frame = .{ .ticket = offer.ticket, .action = offer.action, .choice = .deny };
+    self.action_details_open = false;
+    self.worker = .{};
+    self.read_kind = .{ .action = .{ .ticket = offer.ticket, .epoch = 1 } };
+    self.read_result = null;
+    self.read_arena = try std.testing.allocator.create(std.heap.ArenaAllocator);
+    self.read_arena.?.* = std.heap.ArenaAllocator.init(std.testing.allocator);
+    self.pending_page = null;
+    self.notice = "";
+    try self.worker.start(std.testing.io, &self, Worker.run);
+    defer {
+        self.worker.cancel();
+        self.worker.join() catch {};
+    }
+    self.queuePage(tailRequest());
+    const deadline = std.Io.Clock.awake.now(std.testing.io).nanoseconds + 5_000_000_000;
+    while (!self.worker.completed()) {
+        if (std.Io.Clock.awake.now(std.testing.io).nanoseconds >= deadline) return error.TestCompletionDeadline;
+        std.Thread.yield() catch {};
+    }
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    try self.completeRead(&ctx);
+    try std.testing.expect(self.action.offer == null and self.action.choice == null and self.action_frame == null);
+    try std.testing.expect(self.pending_page != null and self.worker.thread == null and self.read_arena == null);
 }

@@ -57,7 +57,7 @@ pub const End = union(enum) {
     absent,
     // A Message's admission orders it among delivered ones. An accepted
     // reason names the Action whose denial the caller begins next.
-    accepted: struct { kind: Kind, confirmed: bool, admission: ?u64 = null, denies: ?u64 = null, session: ?[protocol.session_id_bytes]u8 = null },
+    accepted: struct { kind: Kind, confirmed: bool, admission: ?u64 = null, denies: ?u64 = null, observed_instance: ?protocol.InstanceId = null, session: ?[protocol.session_id_bytes]u8 = null },
     rejected: struct { kind: Kind, code: protocol.Bounded(protocol.max_code_bytes) },
     failed: struct { err: anyerror },
 
@@ -120,6 +120,10 @@ pub fn begin(self: *Self, intent: Intent) !void {
 
 pub fn beginObservedDecision(self: *Self, decision: ObservedDecision) !void {
     return self.beginWithFence(.{ .decision = .{ .action = decision.action, .decision = decision.decision } }, decision.observed_instance);
+}
+
+pub fn beginObservedDenialReason(self: *Self, text: []const u8, action: u64, instance: protocol.InstanceId) !void {
+    return self.beginWithFence(.{ .message_then_deny = .{ .text = text, .action = action } }, instance);
 }
 
 fn beginWithFence(self: *Self, intent: Intent, instance: ?protocol.InstanceId) !void {
@@ -402,6 +406,7 @@ fn apply(self: *Self, result: anyerror!void) !End {
     if (answer.result == .accepted) {
         const confirmed = self.state == .unconfirmed;
         self.accepted = .{ .kind = kind, .key = self.key };
+        const observed_instance = if (intent == .message_then_deny) self.observed_instance else null;
         self.release();
         const admission: ?u64 = switch (answer.result.accepted) {
             .message => |message| message.admission,
@@ -410,7 +415,7 @@ fn apply(self: *Self, result: anyerror!void) !End {
         const denies: ?u64 = if (intent == .message_then_deny) intent.message_then_deny.action else null;
         const resolved = self.reply.?.context.session.slice();
         const session: ?[protocol.session_id_bytes]u8 = if (resolved.len == protocol.session_id_bytes) resolved[0..protocol.session_id_bytes].* else null;
-        return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission, .denies = denies, .session = session } };
+        return .{ .accepted = .{ .kind = kind, .confirmed = confirmed, .admission = admission, .denies = denies, .observed_instance = observed_instance, .session = session } };
     }
     self.state = .rejected;
     var code: protocol.Bounded(protocol.max_code_bytes) = .{};
@@ -972,4 +977,35 @@ test "admission freezes original bytes before reservation failure" {
     @memset(&draft, 'x');
     try std.testing.expectEqualStrings("first\nMessage é", self.intent.?.text().?);
     try std.testing.expect(self.recovery() == .not_sent);
+}
+
+test "native denial reason retains captured Action Host through accepted Message" {
+    const instance: protocol.InstanceId = @splat(0xd3);
+    var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .environment = .empty };
+    self.intent = .{ .message_then_deny = .{ .text = "reason", .action = 19 } };
+    self.observed_instance = instance;
+    self.reply = .{ .status = 200, .context = .{ .kind = .message }, .target = .{ .message = .{ .bytes = 6, .digest = protocol.contentDigest("reason") } }, .answer = .{ .replayed = false, .result = .{ .accepted = .{ .message = .{ .admission = 37 } } } } };
+    const end = try self.apply({});
+    try std.testing.expectEqual(@as(?u64, 19), end.accepted.denies);
+    try std.testing.expectEqualSlices(u8, &instance, &end.accepted.observed_instance.?);
+    try std.testing.expect(self.view() == null);
+}
+
+test "native denial reason freezes bytes and Host before reservation failure" {
+    const Failing = struct {
+        fn random(_: ?*anyopaque, _: []u8) std.Io.RandomSecureError!void {
+            return error.EntropyUnavailable;
+        }
+    };
+    var table = std.testing.io.vtable.*;
+    table.randomSecure = Failing.random;
+    var self: Self = .{ .io = .{ .userdata = std.testing.io.userdata, .vtable = &table }, .store = "unused", .session = "k7m2qx", .directory = "unused", .environment = .empty };
+    var text = "reason café".*;
+    const instance: protocol.InstanceId = @splat(0xa9);
+    try std.testing.expectError(error.EntropyUnavailable, self.beginObservedDenialReason(&text, 19, instance));
+    @memset(&text, 'x');
+    try std.testing.expectEqualStrings("reason café", self.intent.?.message_then_deny.text);
+    try std.testing.expectEqual(@as(u64, 19), self.intent.?.message_then_deny.action);
+    try std.testing.expectEqualSlices(u8, &instance, self.firstTransmissionFence().?);
+    try std.testing.expectEqual(Kind.message, self.recovery().not_sent);
 }

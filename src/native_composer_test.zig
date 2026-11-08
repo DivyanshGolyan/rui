@@ -388,3 +388,45 @@ test "native frame watermark excludes queued input until successful flush" {
     const fresh = (try loop.tryStampedEvent()).?;
     try std.testing.expect(fresh.sequence > ctx.frame_input_watermark);
 }
+
+test "native input batch keeps split parser events older than a presented frame" {
+    const io = std.testing.io;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    var loop: vaxis.Loop(fw.Event) = .init(io, &tty, &vx);
+    var ctx: fw.EventContext = .{ .io = io, .alloc = std.testing.allocator, .cmds = .empty };
+    var parser: vaxis.Parser = .{};
+    const input = "\x1ba\x1by";
+    var batch = loop.beginInputBatch();
+    const first = try parser.parse(input, null);
+    try std.testing.expect(first.n != 0 and first.event != null);
+    try batch.postEvent(.{ .key_press = first.event.?.key_press });
+    _ = (try loop.tryStampedEvent()).?;
+    // Parser is paused with the rest of this already-read buffer in custody.
+    try fw.App.commitInputFrame(&ctx, &loop, {});
+    const second = try parser.parse(input[first.n..], null);
+    try std.testing.expect(second.n != 0 and second.event != null);
+    try batch.postEvent(.{ .key_press = second.event.?.key_press });
+    const held = (try loop.tryStampedEvent()).?;
+    try std.testing.expect(held.sequence <= ctx.frame_input_watermark);
+    var next = loop.beginInputBatch();
+    try next.postEvent(.{ .key_press = .{ .codepoint = 'y' } });
+    try std.testing.expect((try loop.tryStampedEvent()).?.sequence > ctx.frame_input_watermark);
+}
+
+test "native partial terminal sequence keeps its pre-frame batch" {
+    const io = std.testing.io;
+    var tty: vaxis.Tty = undefined;
+    var vx: vaxis.Vaxis = undefined;
+    var loop: vaxis.Loop(fw.Event) = .init(io, &tty, &vx);
+    var ctx: fw.EventContext = .{ .io = io, .alloc = std.testing.allocator, .cmds = .empty };
+    var parser: vaxis.Parser = .{};
+    var batch = loop.beginInputBatch();
+    const partial = try parser.parse("\x1b[", null);
+    try std.testing.expectEqual(@as(usize, 0), partial.n);
+    try fw.App.commitInputFrame(&ctx, &loop, {});
+    const complete = try parser.parse("\x1b[1;3A", null);
+    try std.testing.expect(complete.n != 0 and complete.event != null);
+    try batch.postEvent(.{ .key_press = complete.event.?.key_press });
+    try std.testing.expect((try loop.tryStampedEvent()).?.sequence <= ctx.frame_input_watermark);
+}
