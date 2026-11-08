@@ -21,6 +21,7 @@ const model_picker = @import("model_picker.zig");
 const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const view = @import("overview_view.zig");
+const OverviewModelPicker = @import("OverviewModelPicker.zig");
 const OverviewPaint = @import("OverviewPaint.zig");
 const ClientTask = @import("ClientTask.zig");
 const UpgradePanel = @import("UpgradePanel.zig");
@@ -300,6 +301,7 @@ options: Options,
 hooks: Hooks,
 ops: Operations,
 state: view.State,
+model_list: OverviewModelPicker = .{},
 caps: view.Caps,
 terminal: *SessionTerminal,
 interrupted: *client.Cancellation,
@@ -635,7 +637,7 @@ fn drain(fd: c_int) void {
 /// Session and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
     self.state.upgrade_busy = self.upgrade_requested or self.upgrade_cancel_draining;
-    const effects = try view.step(&self.state, value);
+    const effects = try self.model_list.step(&self.state, value);
     // An older read may settle after cancellation; its view event cannot
     // release admission before that borrower is drained and a fresh list runs.
     if (self.upgrade_requested or self.upgrade_cancel_draining) self.state.upgrade_pending = true;
@@ -657,6 +659,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         },
         .archive => |request| self.queue(.{ .archive = request }),
         .list_models => self.queue(.models),
+        .model_move => unreachable, // consumed by the native list owner
         .save_default => |binding| self.queue(.{ .save = binding }),
         .command => |command| self.queue(.{ .command = .{ .name = command.name, .session = command.session, .line = try self.init.gpa.dupe(u8, command.text) } }),
         .open => |reference| next = .{ .open = reference },
@@ -1185,7 +1188,7 @@ fn drawFrame(self: *Self, frame: u64, size: std.posix.winsize) !?Next {
     errdefer backend.poison();
     // Waiting reports go first, while this is still only allocating memory.
     self.terminal.writeWaiting(backend.prefixWriter()) catch return error.OutOfMemory;
-    const drawn = try OverviewPaint.draw(backend.window(), backend.scratch(), &self.state, self.composerDraft(), self.caps, frame);
+    const drawn = try OverviewPaint.draw(backend.window(), backend.scratch(), &self.state, &self.model_list, self.composerDraft(), self.caps, frame);
     const notice_revision = self.upgrade_note_revision;
     self.draft_anchor = drawn.draft_anchor;
     self.state.commands = drawn.commands;

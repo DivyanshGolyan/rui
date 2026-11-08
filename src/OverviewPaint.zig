@@ -1,5 +1,6 @@
 //! Direct overview cells in the invocation RenderBackend; no retained projection or ANSI encoder.
 const view = @import("overview_view.zig");
+const OverviewModelPicker = @import("OverviewModelPicker.zig");
 const vaxis = @import("vaxis");
 const std = @import("std");
 const session_line = @import("session_line.zig");
@@ -74,7 +75,7 @@ pub const Drawn = struct {
 
 /// Paint directly into the invocation backend's current grid. No I/O, output
 /// receipts, selection offset, second screen, or diff cache lives here.
-pub fn draw(window: vaxis.Window, scratch: Allocator, state: *State, draft: Draft, caps: Caps, frame: u64) error{OutOfMemory}!Drawn {
+pub fn draw(window: vaxis.Window, scratch: Allocator, state: *State, model_list: *OverviewModelPicker, draft: Draft, caps: Caps, frame: u64) error{OutOfMemory}!Drawn {
     const width = state.size.width;
     const height = state.size.height;
     std.debug.assert(width <= window.width and height <= window.height);
@@ -126,7 +127,7 @@ pub fn draw(window: vaxis.Window, scratch: Allocator, state: *State, draft: Draf
         try ruleLine(&painter, input.view);
         if (at.commands.len() != 0) try commandLines(&painter, &result.commands.?, at.commands);
         const hinted = height - hintRows(state);
-        try composer(&painter, state, draft, &input, .{ .start = at.commands.end, .end = hinted });
+        try composer(&painter, state, model_list, draft, &input, .{ .start = at.commands.end, .end = hinted });
         painter.at(hinted);
         try hints(&painter, state, draft, at.commands.len() != 0);
         if (state.notice) |*notice| {
@@ -148,7 +149,7 @@ pub fn draw(window: vaxis.Window, scratch: Allocator, state: *State, draft: Draf
         result.draft_anchor = input.lines[0].start;
         if (state.inputMode() == .compose) window.showCursor(@intCast(@min(width - 1, 3 + input.shape.caret_column)), @intCast(at.commands.end + input.shape.caret_line - input.view.first));
     }
-    if (at.picker.len() != 0) try pickerLines(&painter, state, at.picker);
+    if (at.picker.len() != 0) try pickerLines(&painter, state, model_list, at.picker);
     if (at.list.len() != 0) {
         if (state.panel) |*panel| try panelLines(&painter, panel, at.list) else try list(&painter, state, at.list);
     }
@@ -560,12 +561,12 @@ const DraftPieces = struct {
 };
 
 /// The draft's shown lines, one per row of `rows`, the prompt on its first.
-fn composer(painter: *RowPaint, state: *const State, draft: Draft, input: *const ComposerLayout, rows: view.Layout.Rows) error{OutOfMemory}!void {
+fn composer(painter: *RowPaint, state: *const State, model_list: *const OverviewModelPicker, draft: Draft, input: *const ComposerLayout, rows: view.Layout.Rows) error{OutOfMemory}!void {
     std.debug.assert(rows.len() == input.view.rows);
     const room = painter.width -| 4;
     painter.at(rows.start);
     if (state.inputMode() == .choice) {
-        try signInChoice(painter, state.menu.entries[state.highlighted().?].providers, state.picker.?.step.sign_in);
+        try signInChoice(painter, state.menu.entries[state.menu.find(model_list.selected(state).?).?].providers, state.picker.?.step.sign_in);
         return;
     }
     if (draft.bytes.len == 0) {
@@ -641,14 +642,14 @@ fn hints(painter: *RowPaint, state: *const State, draft: Draft, listed: bool) er
 }
 
 /// Fills `lines`, the rows `layout` gave the picker, as `pickerFit` says.
-fn pickerLines(painter: *RowPaint, state: *State, lines: view.Layout.Rows) error{OutOfMemory}!void {
+fn pickerLines(painter: *RowPaint, state: *State, model_list: *OverviewModelPicker, lines: view.Layout.Rows) error{OutOfMemory}!void {
     const menu = &state.menu;
     const fit = pickerFit(state, lines.len());
     std.debug.assert(fit.used() == lines.len());
     if (state.picker.?.step == .sign_in) {
         painter.at(lines.start);
         painter.begin(false);
-        _ = try painter.put(4, state.menu.entries[state.highlighted().?].id, painter.width -| 5, .{ .colour = .strong });
+        _ = try painter.put(4, model_list.selected(state).?, painter.width -| 5, .{ .colour = .strong });
         try painter.finish();
         return;
     }
@@ -668,7 +669,7 @@ fn pickerLines(painter: *RowPaint, state: *State, lines: view.Layout.Rows) error
     }
     if (fit.shown != 0) {
         var builder: ModelRows = .{ .state = state, .painter = painter };
-        const list = &state.picker.?.list;
+        const list = &model_list.list;
         list.children = .{ .builder = .{ .userdata = &builder, .buildFn = ModelRows.build } };
         defer list.children = .{ .slice = &.{} };
         const width = painter.width;
@@ -984,6 +985,9 @@ fn ageText(buffer: *[8]u8, seconds: u64) []const u8 {
 const Backend = @import("RenderBackend.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
+const model_list = @import("model_list.zig");
+const ReasoningEffort = model_capability.ReasoningEffort;
+const max_late_save_bytes = view.max_late_save_bytes;
 const session_work = @import("session_work.zig");
 const Kind = view.Kind;
 const WorkState = view.WorkState;
@@ -998,7 +1002,6 @@ const Reads = view.Reads;
 const Rgb = view.Rgb;
 const Saved = view.Saved;
 const StartSettings = view.StartSettings;
-const answerModels = view.Test.answerModels;
 const both = view.Test.both;
 const bounded = view.Test.bounded;
 const chatgpt = view.Test.chatgpt;
@@ -1009,14 +1012,12 @@ const expectLines = view.Test.expectLines;
 const expectSaid = view.Test.expectSaid;
 const expectSelected = view.Test.expectSelected;
 const failedRow = view.Test.failedRow;
-const highlightModel = view.Test.highlightModel;
 const list_interval_ms = view.list_interval_ms;
 const markOf = view.Test.markOf;
 const max_picker_rows = view.max_picker_rows;
 const max_prompt_bytes = view.max_prompt_bytes;
 const max_requests = view.max_requests;
 const mixed = view.Test.mixed;
-const openPicker = view.Test.openPicker;
 const opened = view.Test.opened;
 const pickerMore = view.Test.pickerMore;
 const pickerState = view.Test.pickerState;
@@ -1125,7 +1126,12 @@ fn testBackend(caps: Caps) !*Backend {
 }
 
 fn sizedRender(state: *State, draft: Draft, width: u16, height: u16, caps: Caps, frame: u64) !Rendered {
-    try expectEffects(&.{}, try step(state, .{ .resized = .{ .width = width, .height = height } }));
+    var owner: OverviewModelPicker = .{};
+    return sizedModelRender(&owner, state, draft, width, height, caps, frame);
+}
+
+fn sizedModelRender(owner: *OverviewModelPicker, state: *State, draft: Draft, width: u16, height: u16, caps: Caps, frame: u64) !Rendered {
+    try expectEffects(&.{}, try owner.step(state, .{ .resized = .{ .width = width, .height = height } }));
     const backend = try testBackend(caps);
     errdefer {
         backend.deinit();
@@ -1133,7 +1139,7 @@ fn sizedRender(state: *State, draft: Draft, width: u16, height: u16, caps: Caps,
     }
     try backend.begin(.{ .cols = @max(width, 8), .rows = @max(height, 2), .x_pixel = 0, .y_pixel = 0 });
     const window = backend.window().child(.{ .width = width, .height = height });
-    const facts = try draw(window, backend.scratch(), state, draft, caps, frame);
+    const facts = try draw(window, backend.scratch(), state, owner, draft, caps, frame);
     const vx = &backend.storage.?.vx;
     return .{ .backend = backend, .width = width, .height = height, .caps = caps, .draft_anchor = facts.draft_anchor, .commands = facts.commands, .spins = facts.spins, .notice_visible = facts.notice_visible, .cursor = if (vx.screen.cursor_vis) .{ .row = vx.screen.cursor.row, .column = vx.screen.cursor.col } else null };
 }
@@ -1388,7 +1394,8 @@ fn encoded(backend: *Backend, state: *State, draft: Draft, caps: Caps, frame: u6
     try backend.begin(.{ .cols = state.size.width, .rows = state.size.height, .x_pixel = 0, .y_pixel = 0 });
     defer backend.end();
     errdefer backend.poison();
-    _ = try draw(backend.window(), backend.scratch(), state, draft, caps, frame);
+    var owner: OverviewModelPicker = .{};
+    _ = try draw(backend.window(), backend.scratch(), state, &owner, draft, caps, frame);
     return std.testing.allocator.dupe(u8, try backend.encode());
 }
 
@@ -3182,44 +3189,81 @@ test "the Host-stopped band comes first, over the provider bands and the faded r
     try expectStyle(&state, 9, 4, .{ .colour = .quiet });
 }
 
-fn pickerScreen(state: *State) ![]u8 {
-    return screenText(state, 60, 24, .{ .unicode = true });
+// Picker tests use the same shell controller as Overview, never a shadow cursor.
+fn modelPress(owner: *OverviewModelPicker, state: *State, draft: Draft, action: Action) !view.Effects {
+    const input: view.Input = if (state.inputMode() == .choice) .{ .choice = .{ .action = action } } else .{ .composer = .{ .action = action } };
+    return owner.step(state, .{ .composed = .{ .input = input, .draft = draft } });
 }
-
-fn onScreen(state: *State, text: []const u8) !bool {
-    const screen = try pickerScreen(state);
+fn modelSubmit(owner: *OverviewModelPicker, state: *State, draft: Draft) !view.Effects {
+    const input: view.Input = if (state.inputMode() == .choice) .{ .choice = .enter } else .{ .composer = .submit };
+    return owner.step(state, .{ .composed = .{ .input = input, .draft = draft } });
+}
+fn modelChoose(owner: *OverviewModelPicker, state: *State, side: enum { left, right }) !view.Effects {
+    std.debug.assert(state.inputMode() == .choice);
+    return owner.step(state, .{ .composed = .{ .input = .{ .choice = if (side == .left) .left else .right }, .draft = .{} } });
+}
+fn modelAnswer(owner: *OverviewModelPicker, state: *State, lists: []const model_list.Entry) !void {
+    try expectEffects(&.{}, try owner.step(state, .{ .models = .{ .menu = try model_picker.testMenu(lists) } }));
+}
+fn modelOpen(owner: *OverviewModelPicker, state: *State, lists: []const model_list.Entry) !void {
+    const draft = try typeText(state, "/model");
+    try expectEffects(&.{ .clear_draft, .list_models }, try modelSubmit(owner, state, draft));
+    try modelAnswer(owner, state, lists);
+}
+fn modelHighlight(owner: *OverviewModelPicker, state: *State, draft: Draft, id: []const u8) !void {
+    try expectEffects(&.{}, try modelPress(owner, state, draft, .first));
+    for (0..state.menu.entries.len) |_| {
+        if (owner.selected(state)) |selected| if (std.mem.eql(u8, selected, id)) return;
+        try expectEffects(&.{}, try modelPress(owner, state, draft, .next));
+    }
+    return error.TestModelNotOffered;
+}
+fn modelScreenText(owner: *OverviewModelPicker, state: *State, width: u16, height: u16, caps: Caps) ![]u8 {
+    var frame = try sizedModelRender(owner, state, .{}, width, height, caps, 0);
+    defer frame.deinit();
+    var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    errdefer text.deinit();
+    try frame.write(&text.writer);
+    return text.toOwnedSlice();
+}
+fn modelScreen(owner: *OverviewModelPicker, state: *State) ![]u8 {
+    return modelScreenText(owner, state, 60, 24, .{ .unicode = true });
+}
+fn modelOnScreen(owner: *OverviewModelPicker, state: *State, text: []const u8) !bool {
+    const screen = try modelScreen(owner, state);
     defer std.testing.allocator.free(screen);
     return std.mem.indexOf(u8, screen, text) != null;
 }
 
 test "/model lists the models, default first, and a model one sign-in offers is the whole pick" {
     var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
-    try openPicker(&state, &.{chatgpt});
+    try modelOpen(&owner, &state, &.{chatgpt});
     try std.testing.expectEqualStrings("gpt-6.1-sol", shownRow(&state, 0));
     // The default leads, and the sign-in the Host does not serve says how to add it.
-    try std.testing.expect(try onScreen(&state, "› gpt-6.1-sol"));
-    try std.testing.expect(try onScreen(&state, Provider.openai.login()));
-    try std.testing.expect(!try onScreen(&state, Provider.codex.login()));
+    try std.testing.expect(try modelOnScreen(&owner, &state, "› gpt-6.1-sol"));
+    try std.testing.expect(try modelOnScreen(&owner, &state, Provider.openai.login()));
+    try std.testing.expect(!try modelOnScreen(&owner, &state, Provider.codex.login()));
     // Select gpt-6-luna with ChatGPT, the only sign-in.
     var draft = try typeText(&state, "");
-    try highlightModel(&state, draft, "gpt-6-luna");
-    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6-luna").? }}, try submit(&state, draft));
+    try modelHighlight(&owner, &state, draft, "gpt-6-luna");
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6-luna").? }}, try modelSubmit(&owner, &state, draft));
     // Closing the picker frees its menu.
     try std.testing.expect(state.picker == null and state.menu.entries.len == 0);
     // The pick is the default at once, before its save ends.
     try std.testing.expectEqualStrings("gpt-6-luna", state.default.?.model.slice());
     try std.testing.expectEqual(Provider.codex, state.default.?.provider);
-    try expectEffects(&.{}, try step(&state, saveEnded("codex", "gpt-6-luna", .done)));
+    try expectEffects(&.{}, try owner.step(&state, saveEnded("codex", "gpt-6-luna", .done)));
     try std.testing.expect(state.notice.?.colour == .quiet);
     // A save the file holds but may not keep says so; a failed one says so
     // quietly, and the pick stays this overview's default.
     for ([_]struct { Saved, []const u8, Colour }{ .{ .unconfirmed, "gpt-5.5", .attention }, .{ .{ .failed = "disk full" }, "gpt-5.6-luna", .quiet } }) |case| {
-        try openPicker(&state, &.{chatgpt});
+        try modelOpen(&owner, &state, &.{chatgpt});
         draft = try typeText(&state, "");
-        try highlightModel(&state, draft, case[1]);
-        try expectEffects(&.{.{ .save_default = Default.of("codex", case[1]).? }}, try submit(&state, draft));
-        try expectEffects(&.{}, try step(&state, saveEnded("codex", case[1], case[0])));
+        try modelHighlight(&owner, &state, draft, case[1]);
+        try expectEffects(&.{.{ .save_default = Default.of("codex", case[1]).? }}, try modelSubmit(&owner, &state, draft));
+        try expectEffects(&.{}, try owner.step(&state, saveEnded("codex", case[1], case[0])));
         try std.testing.expectEqualStrings(case[1], state.default.?.model.slice());
         try std.testing.expect(state.notice.?.colour == case[2]);
     }
@@ -3228,106 +3272,110 @@ test "/model lists the models, default first, and a model one sign-in offers is 
 
 test "with both sign-ins, Enter turns the input row into the sign-in choice at the default's sign-in; Esc steps back" {
     var state = try pickerState(Default.of("openai", "gpt-6-luna"));
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
-    try openPicker(&state, &both);
+    try modelOpen(&owner, &state, &both);
     const draft = try typeText(&state, "");
-    try expectEffects(&.{}, try submit(&state, draft));
+    try expectEffects(&.{}, try modelSubmit(&owner, &state, draft));
     try std.testing.expect(state.inputMode() == .choice);
     try std.testing.expectEqual(Provider.openai, state.picker.?.step.sign_in);
-    try std.testing.expect(try onScreen(&state, "Use    ChatGPT   › API key"));
+    try std.testing.expect(try modelOnScreen(&owner, &state, "Use    ChatGPT   › API key"));
     // Left moves to ChatGPT and stops there.
-    try expectEffects(&.{}, try choose(&state, .left));
-    try expectEffects(&.{}, try choose(&state, .left));
+    try expectEffects(&.{}, try modelChoose(&owner, &state, .left));
+    try expectEffects(&.{}, try modelChoose(&owner, &state, .left));
     try std.testing.expectEqual(Provider.codex, state.picker.?.step.sign_in);
     // A refused key's notice leaves the choice's keys in view.
-    try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .choice = .refused }, .draft = draft } }));
+    try expectEffects(&.{}, try owner.step(&state, .{ .composed = .{ .input = .{ .choice = .refused }, .draft = draft } }));
     {
-        const screen = try pickerScreen(&state);
+        const screen = try modelScreen(&owner, &state);
         defer std.testing.allocator.free(screen);
         const hint_row = screen[std.mem.lastIndexOfScalar(u8, screen[0 .. screen.len - 1], '\n').? + 1 ..];
         try std.testing.expect(std.mem.indexOf(u8, hint_row, state.notice.?.text()) != null);
         try std.testing.expect(std.mem.indexOf(u8, hint_row, "←→") != null);
     }
     // Esc goes back to the models, then closes the picker.
-    try expectEffects(&.{}, try press(&state, draft, .clear));
+    try expectEffects(&.{}, try modelPress(&owner, &state, draft, .clear));
     try std.testing.expect(state.picker != null and state.inputMode() == .compose);
-    try expectEffects(&.{}, try press(&state, draft, .clear));
+    try expectEffects(&.{}, try modelPress(&owner, &state, draft, .clear));
     try std.testing.expect(state.picker == null and state.menu.entries.len == 0);
     // gpt-6.1-sol only ChatGPT offers: Enter saves it without a choice.
-    try openPicker(&state, &both);
-    try highlightModel(&state, draft, "gpt-6.1-sol");
-    try std.testing.expectEqualStrings("gpt-6.1-sol", state.menu.entries[state.highlighted().?].id);
-    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6.1-sol").? }}, try submit(&state, draft));
+    try modelOpen(&owner, &state, &both);
+    try modelHighlight(&owner, &state, draft, "gpt-6.1-sol");
+    try std.testing.expectEqualStrings("gpt-6.1-sol", owner.selected(&state).?);
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6.1-sol").? }}, try modelSubmit(&owner, &state, draft));
     // Typing leaves the picker for the draft.
-    try openPicker(&state, &both);
+    try modelOpen(&owner, &state, &both);
     _ = try typeText(&state, "h");
     try std.testing.expect(state.picker == null and state.menu.entries.len == 0);
 }
 
 test "a model Rui does not list shows its default limits and is picked like any other" {
     var state = try pickerState(Default.of("openai", "gpt-6-luna"));
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
-    try openPicker(&state, &both);
+    try modelOpen(&owner, &state, &both);
     const draft = try typeText(&state, "");
-    try expectEffects(&.{}, try press(&state, draft, .last));
-    try std.testing.expect(try onScreen(&state, "default limits"));
-    try std.testing.expectEqualStrings("unlisted-z", state.menu.entries[state.highlighted().?].id);
-    try expectEffects(&.{.{ .save_default = Default.of("openai", "unlisted-z").? }}, try submit(&state, draft));
-    try expectEffects(&.{}, try step(&state, saveEnded("openai", "unlisted-z", .done)));
+    try expectEffects(&.{}, try modelPress(&owner, &state, draft, .last));
+    try std.testing.expect(try modelOnScreen(&owner, &state, "default limits"));
+    try std.testing.expectEqualStrings("unlisted-z", owner.selected(&state).?);
+    try expectEffects(&.{.{ .save_default = Default.of("openai", "unlisted-z").? }}, try modelSubmit(&owner, &state, draft));
+    try expectEffects(&.{}, try owner.step(&state, saveEnded("openai", "unlisted-z", .done)));
     // Saved, it leads the next menu; the remaining models keep their order.
-    try openPicker(&state, &both);
+    try modelOpen(&owner, &state, &both);
     try std.testing.expectEqualStrings("unlisted-z", shownRow(&state, 0));
     try std.testing.expectEqualStrings("unlisted-a", shownRow(&state, state.menu.entries.len - 1));
-    try std.testing.expect(try onScreen(&state, "› unlisted-z"));
+    try std.testing.expect(try modelOnScreen(&owner, &state, "› unlisted-z"));
 }
 
 test "a pick leads the next menu before its save ends, and a re-read that reorders the list keeps the highlight on its model" {
     var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
-    try openPicker(&state, &.{chatgpt});
+    try modelOpen(&owner, &state, &.{chatgpt});
     const draft = try typeText(&state, "");
-    try highlightModel(&state, draft, "gpt-5.5");
-    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-5.5").? }}, try submit(&state, draft));
-    try openPicker(&state, &.{chatgpt});
+    try modelHighlight(&owner, &state, draft, "gpt-5.5");
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-5.5").? }}, try modelSubmit(&owner, &state, draft));
+    try modelOpen(&owner, &state, &.{chatgpt});
     try std.testing.expectEqualStrings("gpt-5.5", shownRow(&state, 0));
     try std.testing.expectEqualStrings("gpt-5.6-luna", shownRow(&state, 1));
-    try std.testing.expect(try onScreen(&state, "› gpt-5.5"));
+    try std.testing.expect(try modelOnScreen(&owner, &state, "› gpt-5.5"));
     // Select gpt-6.1-sol; its save ending moves nothing.
-    try highlightModel(&state, draft, "gpt-6.1-sol");
-    try expectEffects(&.{}, try step(&state, saveEnded("codex", "gpt-5.5", .done)));
-    try std.testing.expectEqualStrings("gpt-6.1-sol", state.menu.entries[state.highlighted().?].id);
-    try std.testing.expect(try onScreen(&state, "› gpt-6.1-sol"));
+    try modelHighlight(&owner, &state, draft, "gpt-6.1-sol");
+    try expectEffects(&.{}, try owner.step(&state, saveEnded("codex", "gpt-5.5", .done)));
+    try std.testing.expectEqualStrings("gpt-6.1-sol", owner.selected(&state).?);
+    try std.testing.expect(try modelOnScreen(&owner, &state, "› gpt-6.1-sol"));
     // A re-read without gpt-5.5 or gpt-6-luna reorders the rows; the
     // highlight goes with it.
-    try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-sol\ngpt-6.1-sol\n" } } }});
+    try modelAnswer(&owner, &state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-sol\ngpt-6.1-sol\n" } } }});
     try std.testing.expectEqualStrings("gpt-6-sol", shownRow(&state, 0));
-    try std.testing.expect(try onScreen(&state, "› gpt-6.1-sol"));
-    try expectEffects(&.{}, try press(&state, draft, .first));
-    try std.testing.expect(try onScreen(&state, "› gpt-6-sol"));
+    try std.testing.expect(try modelOnScreen(&owner, &state, "› gpt-6.1-sol"));
+    try expectEffects(&.{}, try modelPress(&owner, &state, draft, .first));
+    try std.testing.expect(try modelOnScreen(&owner, &state, "› gpt-6-sol"));
     // A re-read without the highlighted model highlights the first row.
-    try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6.1-sol\n" } } }});
-    try std.testing.expectEqualStrings("gpt-5.5", state.menu.entries[state.highlighted().?].id);
-    try std.testing.expect(try onScreen(&state, "› gpt-5.5"));
+    try modelAnswer(&owner, &state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6.1-sol\n" } } }});
+    try std.testing.expectEqualStrings("gpt-5.5", owner.selected(&state).?);
+    try std.testing.expect(try modelOnScreen(&owner, &state, "› gpt-5.5"));
 }
 
 test "a loading list is read again with the next listing, and a failed read keeps the list under a note" {
     var state = try pickerState(Default.of("openai", "gpt-6-luna"));
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
-    try openPicker(&state, &.{.{ .provider = .openai, .list = .pending }});
-    try std.testing.expect(try onScreen(&state, "loading"));
+    try modelOpen(&owner, &state, &.{.{ .provider = .openai, .list = .pending }});
+    try std.testing.expect(try modelOnScreen(&owner, &state, "loading"));
     // The next listing asks for the lists again, once.
-    const asked = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+    const asked = try owner.step(&state, .{ .tick = state.now_ms + list_interval_ms });
     try expectEffects(&.{ .{ .list = testToken(1) }, .list_models }, asked);
-    try answerModels(&state, &.{.{ .provider = .openai, .list = .catalog_fallback }});
-    try std.testing.expect(!try onScreen(&state, "loading"));
-    const fallback = try pickerScreen(&state);
+    try modelAnswer(&owner, &state, &.{.{ .provider = .openai, .list = .catalog_fallback }});
+    try std.testing.expect(!try modelOnScreen(&owner, &state, "loading"));
+    const fallback = try modelScreen(&owner, &state);
     defer std.testing.allocator.free(fallback);
     // No answer and an answer Rui cannot read each keep the list, and each
     // puts its own note right above the first model.
     var notes: [2][]u8 = undefined;
     for ([_]ModelsRead{ .unanswered, .invalid }, &notes) |read, *note| {
-        try expectEffects(&.{}, try step(&state, .{ .models = read }));
-        const screen = try pickerScreen(&state);
+        try expectEffects(&.{}, try owner.step(&state, .{ .models = read }));
+        const screen = try modelScreen(&owner, &state);
         defer std.testing.allocator.free(screen);
         const first = std.mem.indexOf(u8, screen, "› gpt-6-luna").?;
         const above = screen[0..std.mem.lastIndexOfScalar(u8, screen[0..first], '\n').?];
@@ -3340,12 +3388,13 @@ test "a loading list is read again with the next listing, and a failed read keep
     // Before any list, a failure replaces the loading line, with no models.
     var first = try pickerState(null);
     defer first.deinit();
+    var first_owner: OverviewModelPicker = .{};
     const draft = try typeText(&first, "/model");
-    _ = try submit(&first, draft);
-    const loading = try pickerScreen(&first);
+    _ = try modelSubmit(&first_owner, &first, draft);
+    const loading = try modelScreen(&first_owner, &first);
     defer std.testing.allocator.free(loading);
-    try expectEffects(&.{}, try step(&first, .{ .models = .unanswered }));
-    const unanswered = try pickerScreen(&first);
+    try expectEffects(&.{}, try first_owner.step(&first, .{ .models = .unanswered }));
+    const unanswered = try modelScreen(&first_owner, &first);
     defer std.testing.allocator.free(unanswered);
     try std.testing.expect(!std.mem.eql(u8, loading, unanswered));
     try std.testing.expect(std.mem.indexOf(u8, unanswered, "gpt-") == null);
@@ -3354,40 +3403,43 @@ test "a loading list is read again with the next listing, and a failed read keep
 test "picker tag columns admit ids at and beyond the 24-column cap" {
     for ([_]usize{ 24, model_capability.max_model_bytes }) |length| {
         var state = try pickerState(null);
+        var owner: OverviewModelPicker = .{};
         defer state.deinit();
         const id: [model_capability.max_model_bytes]u8 = @splat('m');
         var bytes: [model_capability.max_model_bytes + 1]u8 = undefined;
         @memcpy(bytes[0..length], id[0..length]);
         bytes[length] = '\n';
-        try openPicker(&state, &.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = bytes[0 .. length + 1] } } }});
+        try modelOpen(&owner, &state, &.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = bytes[0 .. length + 1] } } }});
         try std.testing.expectEqual(length, state.menu.widest);
-        try std.testing.expect(try onScreen(&state, "› mmmm"));
-        try std.testing.expectEqualStrings(id[0..length], state.menu.entries[state.highlighted().?].id);
+        try std.testing.expect(try modelOnScreen(&owner, &state, "› mmmm"));
+        try std.testing.expectEqualStrings(id[0..length], owner.selected(&state).?);
     }
 }
 
 test "a long list shows a window around the highlight and counts the rest" {
     var state = try pickerState(null);
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
-    try openPicker(&state, &.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6-luna\ngpt-6.1-sol\ngpt-6-sol\ngpt-6-astra\ngpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\no1\no2\no3\no4\n" } } }});
+    try modelOpen(&owner, &state, &.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6-luna\ngpt-6.1-sol\ngpt-6-sol\ngpt-6-astra\ngpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna\ngpt-5.5\no1\no2\no3\no4\n" } } }});
     const draft = try typeText(&state, "");
-    try expectEffects(&.{}, try press(&state, draft, .last));
-    try std.testing.expect(try onScreen(&state, "› o4"));
-    try std.testing.expect(!try onScreen(&state, "gpt-5.5"));
-    const screen = try pickerScreen(&state);
+    try expectEffects(&.{}, try modelPress(&owner, &state, draft, .last));
+    try std.testing.expect(try modelOnScreen(&owner, &state, "› o4"));
+    try std.testing.expect(!try modelOnScreen(&owner, &state, "gpt-5.5"));
+    const screen = try modelScreen(&owner, &state);
     defer std.testing.allocator.free(screen);
     try std.testing.expect(pickerMore(screen));
 }
 
 test "on a short screen the highlighted model always shows, and \"N more\" takes only spare rows" {
     var state = try pickerState(null);
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
-    try openPicker(&state, &both);
+    try modelOpen(&owner, &state, &both);
     const draft = try typeText(&state, "");
-    try expectEffects(&.{}, try press(&state, draft, .last));
+    try expectEffects(&.{}, try modelPress(&owner, &state, draft, .last));
     var counted = false;
     for (5..24) |height| {
-        const screen = try screenText(&state, 60, @intCast(height), .{ .unicode = true });
+        const screen = try modelScreenText(&owner, &state, 60, @intCast(height), .{ .unicode = true });
         defer std.testing.allocator.free(screen);
         var rows: usize = 0;
         var lines = std.mem.splitScalar(u8, screen, '\n');
@@ -3405,11 +3457,12 @@ test "on a short screen the highlighted model always shows, and \"N more\" takes
 
 test "the Session row's highlight stays in view while the picker is open, even on a short screen" {
     var state = try pickerState(null);
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
     // ChatGPT's models and the API-key login note fill a short screen.
-    try openPicker(&state, &.{chatgpt});
+    try modelOpen(&owner, &state, &.{chatgpt});
     for (8..25) |height| {
-        var screen = try sizedRender(&state, .{}, 60, @intCast(height), .{ .unicode = true }, 0);
+        var screen = try sizedModelRender(&owner, &state, .{}, 60, @intCast(height), .{ .unicode = true }, 0);
         defer screen.deinit();
         var highlighted: usize = 0;
         for (0..screen.height) |row| {
@@ -3427,46 +3480,49 @@ test "the Session row's highlight stays in view while the picker is open, even o
 
 test "with no sign-in served, the picker shows each login line instead of models" {
     var state = try pickerState(null);
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
-    try openPicker(&state, &.{});
-    try std.testing.expect(try onScreen(&state, Provider.codex.login()));
-    try std.testing.expect(try onScreen(&state, Provider.openai.login()));
+    try modelOpen(&owner, &state, &.{});
+    try std.testing.expect(try modelOnScreen(&owner, &state, Provider.codex.login()));
+    try std.testing.expect(try modelOnScreen(&owner, &state, Provider.openai.login()));
     const draft = try typeText(&state, "");
-    try expectEffects(&.{}, try submit(&state, draft));
+    try expectEffects(&.{}, try modelSubmit(&owner, &state, draft));
     try std.testing.expect(state.default == null);
 }
 
 test "the unknown-command notice fits a 40-column screen" {
     var state = try pickerState(null);
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
     const draft = try typeText(&state, "/status");
-    _ = try submit(&state, draft);
-    const screen = try screenText(&state, 40, 24, .{ .unicode = true });
+    _ = try modelSubmit(&owner, &state, draft);
+    const screen = try modelScreenText(&owner, &state, 40, 24, .{ .unicode = true });
     defer std.testing.allocator.free(screen);
     try std.testing.expect(std.mem.indexOf(u8, screen, state.notice.?.text()) != null);
 }
 
 test "a picker the screen cannot show never acts: /model says so, and keys on a hidden picker pick nothing" {
     var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
     // At 8 rows the top, the selected Session and the input leave the
     // picker none.
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 8 } }));
+    try expectEffects(&.{}, try owner.step(&state, .{ .resized = .{ .width = 60, .height = 8 } }));
     var draft = try typeText(&state, "/model");
-    try expectEffects(&.{}, try submit(&state, draft));
+    try expectEffects(&.{}, try modelSubmit(&owner, &state, draft));
     try std.testing.expect(state.picker == null);
     try std.testing.expectEqual(Colour.attention, state.notice.?.colour);
     // Opened on a taller screen, then shrunk: Down and Enter act on what
     // the screen shows, which holds no model.
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
-    try openPicker(&state, &.{chatgpt});
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 8 } }));
+    try expectEffects(&.{}, try owner.step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
+    try modelOpen(&owner, &state, &.{chatgpt});
+    try expectEffects(&.{}, try owner.step(&state, .{ .resized = .{ .width = 60, .height = 8 } }));
     try std.testing.expect(state.shownPicker() == null);
     draft = try typeText(&state, "");
-    _ = try press(&state, draft, .next);
-    for ((try submit(&state, draft)).slice()) |effect| try std.testing.expect(effect != .save_default);
+    _ = try modelPress(&owner, &state, draft, .next);
+    for ((try modelSubmit(&owner, &state, draft)).slice()) |effect| try std.testing.expect(effect != .save_default);
     try std.testing.expectEqualStrings("gpt-6.1-sol", state.default.?.model.slice());
-    const screen = try screenText(&state, 60, 8, .{ .unicode = true });
+    const screen = try modelScreenText(&owner, &state, 60, 8, .{ .unicode = true });
     defer std.testing.allocator.free(screen);
     try std.testing.expect(std.mem.indexOf(u8, screen, "gpt-") == null);
 }
@@ -3650,7 +3706,8 @@ test "direct overview max-cell frames charge scratch grids prefix and encoding t
         }
         try backend.begin(.{ .cols = size[0], .rows = size[1], .x_pixel = 0, .y_pixel = 0 });
         try backend.prefixWriter().splatByteAll('p', 32 * 1024);
-        _ = try draw(backend.window(), backend.scratch(), &state, draft, caps, 1);
+        var owner: OverviewModelPicker = .{};
+        _ = try draw(backend.window(), backend.scratch(), &state, &owner, draft, caps, 1);
         const bytes = try backend.encode();
         try std.testing.expect(std.mem.startsWith(u8, bytes, "pppp"));
         try std.testing.expect(std.mem.indexOf(u8, bytes, "e\u{301}") != null);
@@ -3675,7 +3732,8 @@ test "direct overview scratch refusal cannot publish or preserve a partial paint
     }
     try backend.begin(.{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 });
     backend.memory.fault = .{ .after = 0 };
-    try std.testing.expectError(error.OutOfMemory, draw(backend.window(), backend.scratch(), &state, .{}, .{}, 0));
+    var owner: OverviewModelPicker = .{};
+    try std.testing.expectError(error.OutOfMemory, draw(backend.window(), backend.scratch(), &state, &owner, .{}, .{}, 0));
     backend.end();
     try std.testing.expectError(error.RenderBackendPoisoned, backend.begin(.{ .cols = 80, .rows = 24, .x_pixel = 0, .y_pixel = 0 }));
 }
@@ -3764,19 +3822,20 @@ test "archive state and confirmation paint through the actual shared backend" {
 
 test "native model list keeps identity and physical selection through queued input and resize" {
     var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    var owner: OverviewModelPicker = .{};
     defer state.deinit();
-    try openPicker(&state, &both);
+    try modelOpen(&owner, &state, &both);
     const draft = try typeText(&state, "");
     // One frame followed by many keys without an intervening paint exercises
     // the ListView's pending seek, not a second overview-owned cursor.
     {
-        var frame = try sizedRender(&state, .{}, 60, 24, .{ .unicode = true, .depth = .none }, 0);
+        var frame = try sizedModelRender(&owner, &state, .{}, 60, 24, .{ .unicode = true, .depth = .none }, 0);
         defer frame.deinit();
     }
-    for (0..40) |_| try expectEffects(&.{}, try press(&state, draft, .next));
-    try std.testing.expectEqualStrings("unlisted-z", state.menu.entries[state.highlighted().?].id);
+    for (0..40) |_| try expectEffects(&.{}, try modelPress(&owner, &state, draft, .next));
+    try std.testing.expectEqualStrings("unlisted-z", owner.selected(&state).?);
     for ([_]u16{ 24, 10, 20 }) |height| {
-        var frame = try sizedRender(&state, .{}, 60, height, .{ .unicode = true, .depth = .none }, 0);
+        var frame = try sizedModelRender(&owner, &state, .{}, 60, height, .{ .unicode = true, .depth = .none }, 0);
         defer frame.deinit();
         const region = layout(&state, 1, 0).picker;
         var selected: usize = 0;
@@ -3790,25 +3849,176 @@ test "native model list keeps identity and physical selection through queued inp
         }
         try std.testing.expectEqual(@as(usize, 1), selected);
     }
-    // A single-column or zero-height frame cannot show the input or offer a
+    // A zero-width, single-column or zero-height frame cannot show the input or offer a
     // picker choice; restoring the frame keeps the selected model.
-    for ([_]view.Size{ .{ .width = 1, .height = 24 }, .{ .width = 60, .height = 0 } }) |size| {
-        try expectEffects(&.{}, try step(&state, .{ .resized = size }));
+    for ([_]view.Size{ .{ .width = 0, .height = 24 }, .{ .width = 1, .height = 24 }, .{ .width = 60, .height = 0 } }) |size| {
+        try expectEffects(&.{}, try owner.step(&state, .{ .resized = size }));
         try std.testing.expect(state.shownPicker() == null);
-        const selected = state.picker.?.list.cursor;
-        try expectEffects(&.{}, try press(&state, draft, .next));
-        try std.testing.expectEqual(selected, state.picker.?.list.cursor);
+        const selected = owner.list.cursor;
+        try expectEffects(&.{}, try modelPress(&owner, &state, draft, .next));
+        try std.testing.expectEqual(selected, owner.list.cursor);
     }
-    try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
-    try std.testing.expectEqualStrings("unlisted-z", state.menu.entries[state.highlighted().?].id);
+    try expectEffects(&.{}, try owner.step(&state, .{ .resized = .{ .width = 60, .height = 24 } }));
+    try std.testing.expectEqualStrings("unlisted-z", owner.selected(&state).?);
     // Reordering keeps the same ID; removing it resets to the first row.
-    try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "unlisted-z\na-other\n" } } }});
-    try std.testing.expectEqualStrings("unlisted-z", state.menu.entries[state.highlighted().?].id);
-    try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "a-other\n" } } }});
-    try std.testing.expectEqualStrings("a-other", state.menu.entries[state.highlighted().?].id);
-    try answerModels(&state, &.{});
-    try std.testing.expect(state.highlighted() == null);
-    try expectEffects(&.{}, try press(&state, draft, .next));
-    try expectEffects(&.{}, try submit(&state, draft));
+    try modelAnswer(&owner, &state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "unlisted-z\na-other\n" } } }});
+    try std.testing.expectEqualStrings("unlisted-z", owner.selected(&state).?);
+    try modelAnswer(&owner, &state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "a-other\n" } } }});
+    try std.testing.expectEqualStrings("a-other", owner.selected(&state).?);
+    try modelAnswer(&owner, &state, &.{});
+    try std.testing.expect(owner.selected(&state) == null);
+    try expectEffects(&.{}, try modelPress(&owner, &state, draft, .next));
+    try expectEffects(&.{}, try modelSubmit(&owner, &state, draft));
     try std.testing.expectEqualStrings("gpt-6-luna", state.default.?.model.slice());
+}
+
+test "a start submitted before the pick's save ends runs on the pick" {
+    var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
+    var owner: OverviewModelPicker = .{};
+    defer state.deinit();
+    try modelOpen(&owner, &state, &.{chatgpt});
+    var draft = try typeText(&state, "");
+    try modelHighlight(&owner, &state, draft, "gpt-6-luna");
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6-luna").? }}, try modelSubmit(&owner, &state, draft));
+    // The save is left unanswered.
+    draft = try typeText(&state, "Try");
+    const effects = try modelSubmit(&owner, &state, draft);
+    try std.testing.expectEqual(@as(usize, 1), effects.len);
+    const binding = effects.slice()[0].start.binding;
+    try std.testing.expectEqualStrings("codex", binding.provider.?);
+    try std.testing.expectEqualStrings("gpt-6-luna", binding.model.?);
+}
+
+test "picks made during one save are saved after it, only the newest" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    var owner: OverviewModelPicker = .{};
+    defer state.deinit();
+    const draft = try typeText(&state, "");
+    try modelOpen(&owner, &state, &.{chatgpt});
+    try modelHighlight(&owner, &state, draft, "gpt-5.5");
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-5.5").? }}, try modelSubmit(&owner, &state, draft));
+    // Two more picks while it runs: neither is refused, and neither saves yet.
+    for ([_][]const u8{ "gpt-6-luna", "gpt-6.1-sol" }) |model| {
+        try modelOpen(&owner, &state, &.{chatgpt});
+        while (!std.mem.eql(u8, owner.selected(&state).?, model)) try expectEffects(&.{}, try modelPress(&owner, &state, draft, .next));
+        try expectEffects(&.{}, try modelSubmit(&owner, &state, draft));
+        try std.testing.expectEqualStrings(model, state.default.?.model.slice());
+        try std.testing.expect(state.notice == null);
+    }
+    // The first save ends: the newest pick is saved next, and the overview
+    // does not claim the first one stands.
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6.1-sol").? }}, try owner.step(&state, saveEnded("codex", "gpt-5.5", .done)));
+    try std.testing.expect(state.notice == null);
+    try expectEffects(&.{}, try owner.step(&state, saveEnded("codex", "gpt-6.1-sol", .done)));
+    try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "gpt-6.1-sol") != null);
+}
+
+test "every pick is saved, even of the default the overview opened on, and an untouched overview saves nothing" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    var owner: OverviewModelPicker = .{};
+    defer state.deinit();
+    try std.testing.expect(state.save.wanted == null and state.save.running == null);
+    const draft = try typeText(&state, "");
+    try modelOpen(&owner, &state, &.{chatgpt});
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6-luna").? }}, try modelSubmit(&owner, &state, draft));
+    try expectEffects(&.{}, try owner.step(&state, saveEnded("codex", "gpt-6-luna", .done)));
+    try modelOpen(&owner, &state, &.{chatgpt});
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-6-luna").? }}, try modelSubmit(&owner, &state, draft));
+}
+
+test "a failed save is not retried, but picking the same model again saves it" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    var owner: OverviewModelPicker = .{};
+    defer state.deinit();
+    const draft = try typeText(&state, "");
+    try modelOpen(&owner, &state, &.{chatgpt});
+    try modelHighlight(&owner, &state, draft, "gpt-5.5");
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-5.5").? }}, try modelSubmit(&owner, &state, draft));
+    try expectEffects(&.{}, try owner.step(&state, saveEnded("codex", "gpt-5.5", .{ .failed = null })));
+    try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "not saved") != null);
+    try modelOpen(&owner, &state, &.{chatgpt});
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "gpt-5.5").? }}, try modelSubmit(&owner, &state, draft));
+    try expectEffects(&.{}, try owner.step(&state, saveEnded("codex", "gpt-5.5", .done)));
+    try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), "New Sessions use gpt-5.5") != null);
+}
+
+test "the lines that name the next Session's model name the saved effort its start applies" {
+    // gpt-6-luna offers max and gpt-5.5 does not. An effort /configure
+    // holds, `default` included, keeps the saved one from the next start,
+    // but not from launches after this overview.
+    const Case = struct { model: []const u8, held: ?[]const u8 = null, saved: ?ReasoningEffort, next: []const u8, later: []const u8 };
+    const cases = [_]Case{
+        .{ .model = "gpt-6-luna", .saved = .max, .next = " · max", .later = " · max" },
+        .{ .model = "gpt-6-luna", .saved = null, .next = "", .later = "" },
+        .{ .model = "gpt-5.5", .saved = .max, .next = "", .later = "" },
+        .{ .model = "gpt-6-luna", .held = "low", .saved = .max, .next = "", .later = " · max" },
+        .{ .model = "gpt-6-luna", .held = "default", .saved = .max, .next = "", .later = " · max" },
+    };
+    for (cases) |case| for ([_]Saved{ .done, .{ .failed = null }, .unconfirmed }) |outcome| {
+        var state = try pickerState(Default.of("codex", case.model));
+        var owner: OverviewModelPicker = .{};
+        defer state.deinit();
+        var line: [64]u8 = undefined;
+        if (case.held) |held| try expectEffects(&.{.clear_draft}, try modelSubmit(&owner, &state, try typeText(&state, try std.fmt.bufPrint(&line, "/configure --reasoning-effort {s}", .{held}))));
+        const draft = try typeText(&state, "");
+        try modelOpen(&owner, &state, &.{chatgpt});
+        try expectEffects(&.{.{ .save_default = Default.of("codex", case.model).? }}, try modelSubmit(&owner, &state, draft));
+        var ended = saveEnded("codex", case.model, outcome);
+        ended.saved.saved_effort = case.saved;
+        // Each outcome but `unconfirmed` is said on screen, the one after
+        // leaving on the way out.
+        if (outcome == .unconfirmed) _ = try owner.step(&state, .leave);
+        try expectEffects(&.{}, try owner.step(&state, ended));
+        var expected: [160]u8 = undefined;
+        switch (outcome) {
+            .done => try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "New Sessions use {s}{s} · ChatGPT", .{ case.model, case.next }), state.notice.?.text()),
+            .failed => try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Default not saved (check ~/.config/rui/preferences); new Sessions here still use {s}{s} · ChatGPT", .{ case.model, case.next }), state.notice.?.text()),
+            .unconfirmed => {
+                var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
+                defer departure.deinit();
+                try writeDeparture(&state, case.saved, &departure.writer);
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "rui: New Sessions use {s}{s} · ChatGPT; durability unconfirmed, inspect ~/.config/rui/preferences.\n", .{ case.model, case.later }), departure.written());
+            },
+        }
+    };
+}
+
+test "Shift-Up and Shift-Down choose a Session in both picker steps, and leave the picker as it was" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    var owner: OverviewModelPicker = .{};
+    defer state.deinit();
+    const draft = try typeText(&state, "");
+    try modelOpen(&owner, &state, &both);
+    for (0..2) |_| {
+        const chosen = state.selected.?;
+        const highlight = owner.list.cursor;
+        const picker_step = state.picker.?.step;
+        try expectEffects(&.{}, try modelPress(&owner, &state, draft, .select_next));
+        try std.testing.expect(!std.mem.eql(u8, &chosen, &state.selected.?));
+        try expectEffects(&.{}, try modelPress(&owner, &state, draft, .select_previous));
+        try std.testing.expectEqualSlices(u8, &chosen, &state.selected.?);
+        try std.testing.expectEqual(highlight, owner.list.cursor);
+        try std.testing.expectEqual(std.meta.activeTag(picker_step), std.meta.activeTag(state.picker.?.step));
+        // gpt-6-luna is offered by both sign-ins: Enter asks which.
+        if (state.picker.?.step == .models) try expectEffects(&.{}, try modelSubmit(&owner, &state, draft));
+    }
+    try std.testing.expect(state.inputMode() == .choice);
+}
+
+test "a save that ends after the person left is told on the way out" {
+    for ([_]Saved{ .done, .unconfirmed, .{ .failed = null } }) |saved| {
+        var state = try pickerState(null);
+        var owner: OverviewModelPicker = .{};
+        defer state.deinit();
+        try modelOpen(&owner, &state, &.{chatgpt});
+        const draft = try typeText(&state, "");
+        try modelHighlight(&owner, &state, draft, "gpt-6-luna");
+        _ = try modelSubmit(&owner, &state, draft);
+        try expectEffects(&.{}, try owner.step(&state, .leave));
+        try expectEffects(&.{}, try owner.step(&state, saveEnded("codex", "gpt-6-luna", saved)));
+        var bytes: [max_late_save_bytes]u8 = undefined;
+        var departure = std.Io.Writer.fixed(&bytes);
+        try writeDeparture(&state, null, &departure);
+        try std.testing.expect(std.mem.indexOf(u8, departure.buffered(), "gpt-6-luna") != null);
+    }
 }
