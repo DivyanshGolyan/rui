@@ -71,7 +71,7 @@ pub fn load(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io
         item.source = try feed.VerifiedSource.open(allocator, requests, dir, store, &self.page, page_index);
         errdefer item.source.close();
         item.reader = .{ .source = try item.source.pagedSource() };
-        item.rich = try RichLines.build(requests.io, dir, item.reader.source, requests.cancellation);
+        item.rich = try RichLines.buildRaw(requests.io, dir, try item.source.rawSource(), item.reader.source, requests.cancellation);
         errdefer item.rich.close();
         item.index = try fw.PagedText.Index.initStyled(&item.reader, ctx, width, item.rich.provider());
         const added = try std.math.add(usize, item.index.len, 1);

@@ -15,6 +15,8 @@ pub const Line = extern struct {
     start: u64,
     end: u64,
     next: u64,
+    raw_start: u64,
+    raw_end: u64,
     table_group: u64 = 0,
     mode: Mode,
     quote_depth: u8,
@@ -22,7 +24,56 @@ pub const Line = extern struct {
     table_role: TableRole = .none,
     reserved: [4]u8 = @splat(0),
 };
+const checkpoint_lines = 256;
+const Checkpoint = extern struct {
+    raw: u64,
+    display: u64,
+    mode: u8 = 0,
+    run: u8 = 0,
+    quote_bytes: u8 = 0,
+    quote_depth: u8 = 0,
+    quote_indent: u8 = 0,
+    reserved: [3]u8 = @splat(0),
+
+    fn encode(raw: usize, display: usize, context: markdown.Context) Checkpoint {
+        var result: Checkpoint = .{ .raw = raw, .display = display };
+        switch (context) {
+            .plain => {},
+            .fence => |fence| {
+                result.mode = switch (fence.marker) {
+                    .backtick => 1,
+                    .tilde => 2,
+                };
+                result.run = fence.run orelse 0;
+                if (fence.outer) |quote| {
+                    result.quote_bytes = quote.bytes;
+                    result.quote_depth = quote.depth;
+                    result.quote_indent = quote.indent;
+                }
+            },
+        }
+        return result;
+    }
+
+    fn context(self: Checkpoint) !markdown.Context {
+        if (self.mode == 0) return .plain;
+        const marker: markdown.Fence.Marker = switch (self.mode) {
+            1 => .backtick,
+            2 => .tilde,
+            else => return error.InvalidSourceRead,
+        };
+        const outer: ?markdown.Quote = if (self.quote_depth == 0) null else .{
+            .bytes = self.quote_bytes,
+            .depth = std.math.cast(u4, self.quote_depth) orelse return error.InvalidSourceRead,
+            .indent = std.math.cast(u2, self.quote_indent) orelse return error.InvalidSourceRead,
+        };
+        return .{ .fence = .{ .marker = marker, .run = if (self.run == 0) null else self.run, .outer = outer } };
+    }
+};
+
 pub const Table = extern struct {
+    first: u64,
+    end: u64,
     widths: [table.max_columns]u64 = @splat(0),
     alignment: [table.max_columns]u8 = @splat(0),
     count: u8,
@@ -31,31 +82,55 @@ pub const Table = extern struct {
 
 io: std.Io,
 source: vaxis.unicode.PagedSource,
+raw_source: vaxis.unicode.PagedSource,
 file: std.Io.File,
 tables: std.Io.File,
 count: u64 = 0,
 table_count: u64 = 0,
+cancellation: ?*const client.Cancellation = null,
+cache_base: u64 = 0,
+cache_count: usize = 0,
+cache_raw: usize = 0,
+cache_display: usize = 0,
+cache_context: markdown.Context = .plain,
+cache: [checkpoint_lines]Line = undefined,
 
 /// The source and its authenticated owner must outlive this disposable index.
 /// Scanning is linear in source bytes and retains one bounded head and page.
 pub fn build(io: std.Io, dir: std.Io.Dir, source: vaxis.unicode.PagedSource, cancellation: ?*const client.Cancellation) !Self {
+    return buildRaw(io, dir, source, source, cancellation);
+}
+
+/// Syntax always comes from authenticated bytes; geometry addresses their
+/// independently sanitized display projection. LF positions synchronize the
+/// two streams without interpreting escaped control spellings as syntax.
+pub fn buildRaw(io: std.Io, dir: std.Io.Dir, raw_source: vaxis.unicode.PagedSource, source: vaxis.unicode.PagedSource, cancellation: ?*const client.Cancellation) !Self {
     const file = try scratch(io, dir);
     errdefer file.close(io);
     const tables = try scratch(io, dir);
     errdefer tables.close(io);
-    var self: Self = .{ .io = io, .source = source, .file = file, .tables = tables };
+    var self: Self = .{ .io = io, .source = source, .raw_source = raw_source, .file = file, .tables = tables, .cancellation = cancellation };
+    var raw_reader: vaxis.unicode.PagedReader = .{ .source = raw_source };
     var reader: vaxis.unicode.PagedReader = .{ .source = source };
     var context: markdown.Context = .plain;
     var head: [markdown.head_limit]u8 = undefined;
     var head_len: usize = 0;
+    var raw_start: usize = 0;
     var start: usize = 0;
     var at: usize = 0;
-    while (at < source.length) : (at += 1) {
+    var projected: usize = 0;
+    while (at < raw_source.length) : (at += 1) {
         if (at % 4096 == 0) if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
-        const byte = (try reader.readByte(at)) orelse return error.InvalidSourceRead;
+        const byte = (try raw_reader.readByte(at)) orelse return error.InvalidSourceRead;
         if (byte == '\n') {
-            try self.append(&context, head[0..head_len], start, at, at + 1, .line_feed);
-            start = at + 1;
+            while (projected < source.length and (try reader.readByte(projected)).? != '\n') : (projected += 1) {
+                if (projected % 4096 == 0) if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
+            }
+            if (projected == source.length) return error.InvalidSourceRead;
+            try self.append(&context, head[0..head_len], start, projected, projected + 1, raw_start, at, .line_feed);
+            start = projected + 1;
+            projected = start;
+            raw_start = at + 1;
             head_len = 0;
         } else if (head_len < head.len) {
             head[head_len] = byte;
@@ -63,8 +138,15 @@ pub fn build(io: std.Io, dir: std.Io.Dir, source: vaxis.unicode.PagedSource, can
         }
     }
     if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
-    if (start < source.length) try self.append(&context, head[0..head_len], start, source.length, source.length, .canonical_eof);
-    try self.indexTables(source, cancellation);
+    if (raw_start < raw_source.length) {
+        while (projected < source.length) : (projected += 1) {
+            if ((try reader.readByte(projected)).? == '\n') return error.InvalidSourceRead;
+            if (projected % 4096 == 0) if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
+        }
+        try self.append(&context, head[0..head_len], start, source.length, source.length, raw_start, raw_source.length, .canonical_eof);
+    } else if (start != source.length) return error.InvalidSourceRead;
+    try self.indexTables(raw_source, cancellation);
+    self.cancellation = null;
     return self;
 }
 
@@ -79,30 +161,99 @@ fn scratch(io: std.Io, dir: std.Io.Dir) !std.Io.File {
     return file;
 }
 
-fn append(self: *Self, context: *markdown.Context, head: []const u8, start: usize, end: usize, next: usize, ending: markdown.HeadEnding) !void {
+fn append(self: *Self, context: *markdown.Context, head: []const u8, start: usize, _: usize, _: usize, raw_start: usize, _: usize, ending: markdown.HeadEnding) !void {
+    if (self.count % checkpoint_lines == 0) {
+        const point = Checkpoint.encode(raw_start, start, context.*);
+        try self.file.writeStreamingAll(self.io, std.mem.asBytes(&point));
+    }
     const decision = switch (context.step(head, if (head.len == markdown.head_limit) .limit_cut else ending)) {
         .resolved => |value| value,
         .need_more => return error.InvalidSourceRead,
     };
     context.* = decision.next;
-    const quote = if (decision.projection.mode == .prose) decision.projection.quote else null;
-    const record: Line = .{
-        .start = start,
-        .end = end,
-        .next = next,
-        .mode = if (decision.projection.mode == .prose) .prose else .@"opaque",
-        .quote_depth = if (quote) |value| value.depth else 0,
-        .quote_prefix = if (quote) |value| value.bytes else 0,
-    };
-    try self.file.writeStreamingAll(self.io, std.mem.asBytes(&record));
     self.count = try std.math.add(u64, self.count, 1);
 }
 
-pub fn lineAt(self: *const Self, index: u64) !?Line {
+/// Reconstruct at most one bounded checkpoint block from immutable raw and
+/// projection files. A table interval adds presentation facts afterward.
+pub fn lineAt(self_const: *const Self, index: u64) !?Line {
+    const self = @constCast(self_const);
     if (index >= self.count) return null;
-    var line: Line = undefined;
-    const offset = try std.math.mul(u64, index, @sizeOf(Line));
-    if (try self.file.readPositionalAll(self.io, std.mem.asBytes(&line), offset) != @sizeOf(Line)) return error.TruncatedResponse;
+    const base = index / checkpoint_lines * checkpoint_lines;
+    if (self.cache_count == 0 or self.cache_base != base) {
+        var point: Checkpoint = undefined;
+        const offset = try std.math.mul(u64, index / checkpoint_lines, @sizeOf(Checkpoint));
+        if (try self.file.readPositionalAll(self.io, std.mem.asBytes(&point), offset) != @sizeOf(Checkpoint)) return error.TruncatedResponse;
+        self.cache_base = base;
+        self.cache_count = 0;
+        self.cache_raw = std.math.cast(usize, point.raw) orelse return error.SourceTooLarge;
+        self.cache_display = std.math.cast(usize, point.display) orelse return error.SourceTooLarge;
+        self.cache_context = try point.context();
+    }
+    var raw_reader: vaxis.unicode.PagedReader = .{ .source = self.raw_source };
+    var display_reader: vaxis.unicode.PagedReader = .{ .source = self.source };
+    const wanted: usize = @intCast(index - base);
+    while (self.cache_count <= wanted) {
+        const raw_start = self.cache_raw;
+        const start = self.cache_display;
+        var head: [markdown.head_limit]u8 = undefined;
+        var head_len: usize = 0;
+        var raw_at = raw_start;
+        while (raw_at < self.raw_source.length) : (raw_at += 1) {
+            if (raw_at % 4096 == 0) if (self.cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
+            const byte = (try raw_reader.readByte(raw_at)) orelse return error.InvalidSourceRead;
+            if (byte == '\n') break;
+            if (head_len < head.len) {
+                head[head_len] = byte;
+                head_len += 1;
+            }
+        }
+        var end = start;
+        while (end < self.source.length) : (end += 1) {
+            if (end % 4096 == 0) if (self.cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
+            if (((try display_reader.readByte(end)) orelse return error.InvalidSourceRead) == '\n') break;
+        }
+        const lf = raw_at < self.raw_source.length;
+        if (lf != (end < self.source.length)) return error.InvalidSourceRead;
+        const ending: markdown.HeadEnding = if (head_len == head.len) .limit_cut else if (lf) .line_feed else .canonical_eof;
+        const decision = switch (self.cache_context.step(head[0..head_len], ending)) {
+            .resolved => |value| value,
+            .need_more => return error.InvalidSourceRead,
+        };
+        const quote = if (decision.projection.mode == .prose) decision.projection.quote else null;
+        self.cache[self.cache_count] = .{
+            .start = start,
+            .end = end,
+            .next = end + @intFromBool(lf),
+            .raw_start = raw_start,
+            .raw_end = raw_at,
+            .mode = if (decision.projection.mode == .prose) .prose else .@"opaque",
+            .quote_depth = if (quote) |value| value.depth else 0,
+            .quote_prefix = if (quote) |value| value.bytes else 0,
+        };
+        self.cache_count += 1;
+        self.cache_raw = raw_at + @intFromBool(lf);
+        self.cache_display = end + @intFromBool(lf);
+        self.cache_context = decision.next;
+    }
+    var line = self.cache[wanted];
+    var low: u64 = 0;
+    var high = self.table_count;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        const group = (try self.tableAt(middle)) orelse return error.InvalidSourceRead;
+        if (index < group.first) {
+            high = middle;
+            continue;
+        }
+        if (index >= group.end) {
+            low = middle + 1;
+            continue;
+        }
+        line.table_group = middle;
+        line.table_role = if (index == group.first) .header else if (index == group.first + 1) .rule else .body;
+        break;
+    }
     return line;
 }
 
@@ -140,14 +291,15 @@ fn drawTable(raw: *const anyopaque, index: usize, ctx: fw.DrawContext, left: u64
         }
     } else {
         var line_buffer: [table.max_source_bytes]u8 = undefined;
-        const bytes = (try readLine(self.source, line, &line_buffer)) orelse return error.InvalidSourceRead;
+        const bytes = (try readLine(self.raw_source, line, &line_buffer)) orelse return error.InvalidSourceRead;
         const parsed = switch (table.parse(bytes, lineEnding(line), @intCast(group.count))) {
             .row => |value| value,
             else => return error.InvalidSourceRead,
         };
         for (parsed.cells[0..parsed.count], 0..) |cell, col| {
             if (col != 0) try painter.text(" │ ");
-            const value = bytes[cell.start..cell.end];
+            var safe_buffer: [table.max_source_bytes * @import("TerminalText.zig").max_bytes_per_byte + 16]u8 = undefined;
+            const value = try safeCell(bytes[cell.start..cell.end], &safe_buffer);
             const content_width = ctx.hardLineWidth(value);
             const padding = group.widths[col] - content_width;
             const leading: u64 = switch (group.alignment[col]) {
@@ -216,8 +368,8 @@ fn indexTables(self: *Self, source: vaxis.unicode.PagedSource, cancellation: ?*c
     var i: u64 = 0;
     while (i + 1 < self.count) {
         if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
-        var first = (try self.lineAt(i)).?;
-        var delimiter = (try self.lineAt(i + 1)).?;
+        const first = (try self.lineAt(i)).?;
+        const delimiter = (try self.lineAt(i + 1)).?;
         if (!eligible(first) or !eligible(delimiter) or first.next == first.end) {
             i += 1;
             continue;
@@ -241,19 +393,13 @@ fn indexTables(self: *Self, source: vaxis.unicode.PagedSource, cancellation: ?*c
             .row => |value| value,
             else => return error.InvalidSourceRead,
         };
-        var group: Table = .{ .count = columns.count };
+        var group: Table = .{ .first = i, .end = undefined, .count = columns.count };
         for (columns.alignment[0..columns.count], 0..) |alignment, col| group.alignment[col] = @backingInt(alignment);
-        measure(&group, header, first_row);
-        first.table_group = self.table_count;
-        first.table_role = .header;
-        delimiter.table_group = self.table_count;
-        delimiter.table_role = .rule;
-        try self.writeLine(i, first);
-        try self.writeLine(i + 1, delimiter);
+        try measure(&group, header, first_row);
         var next = i + 2;
         while (next < self.count) : (next += 1) {
             if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
-            var line = (try self.lineAt(next)).?;
+            const line = (try self.lineAt(next)).?;
             if (!eligible(line)) break;
             const raw = (try readLine(source, line, &first_buf)) orelse break;
             const parsed = switch (table.parse(raw, lineEnding(line), columns.count)) {
@@ -261,11 +407,9 @@ fn indexTables(self: *Self, source: vaxis.unicode.PagedSource, cancellation: ?*c
                 else => break,
             };
             if (!parsed.has_pipe) break;
-            measure(&group, raw, parsed);
-            line.table_group = self.table_count;
-            line.table_role = .body;
-            try self.writeLine(next, line);
+            try measure(&group, raw, parsed);
         }
+        group.end = next;
         try self.tables.writeStreamingAll(self.io, std.mem.asBytes(&group));
         self.table_count = try std.math.add(u64, self.table_count, 1);
         i = next;
@@ -281,25 +425,32 @@ fn lineEnding(line: Line) table.Ending {
 }
 
 fn readLine(source: vaxis.unicode.PagedSource, line: Line, buffer: *[table.max_source_bytes]u8) !?[]const u8 {
-    const len = line.end - line.start;
+    const len = line.raw_end - line.raw_start;
     if (len > buffer.len) return null;
     var filled: usize = 0;
     while (filled < len) {
-        const n = try source.readFn(source.userdata, line.start + filled, buffer[filled..@intCast(len)]);
+        const n = try source.readFn(source.userdata, line.raw_start + filled, buffer[filled..@intCast(len)]);
         if (n == 0 or n > len - filled) return error.InvalidSourceRead;
         filled += n;
     }
     return buffer[0..@intCast(len)];
 }
 
-fn measure(group: *Table, raw: []const u8, row: table.Row) void {
-    const ctx: fw.DrawContext = .{ .arena = std.heap.page_allocator, .min = .{}, .max = .{}, .cell_size = .{} };
-    for (row.cells[0..row.count], 0..) |cell, col| group.widths[col] = @max(group.widths[col], ctx.hardLineWidth(raw[cell.start..cell.end]));
+fn safeCell(raw: []const u8, buffer: []u8) ![]const u8 {
+    var terminal: @import("TerminalText.zig") = .{ .mode = .multiline };
+    var writer: std.Io.Writer = .fixed(buffer);
+    try terminal.feed(&writer, raw);
+    try terminal.finish(&writer);
+    return writer.buffered();
 }
 
-fn writeLine(self: *Self, index: u64, line: Line) !void {
-    const offset = try std.math.mul(u64, index, @sizeOf(Line));
-    try self.file.writePositionalAll(self.io, std.mem.asBytes(&line), offset);
+fn measure(group: *Table, raw: []const u8, row: table.Row) !void {
+    const ctx: fw.DrawContext = .{ .arena = std.heap.page_allocator, .min = .{}, .max = .{}, .cell_size = .{} };
+    var buffer: [table.max_source_bytes * @import("TerminalText.zig").max_bytes_per_byte + 16]u8 = undefined;
+    for (row.cells[0..row.count], 0..) |cell, col| {
+        const safe = try safeCell(raw[cell.start..cell.end], &buffer);
+        group.widths[col] = @max(group.widths[col], ctx.hardLineWidth(safe));
+    }
 }
 
 pub fn tableAt(self: *const Self, index: u64) !?Table {
@@ -387,7 +538,7 @@ test "native rich table index retains column facts without padded rows" {
     try std.testing.expect((try index.tableAt(1)) == null);
     try std.testing.expectEqual(Mode.@"opaque", (try index.lineAt(5005)).?.mode);
     try std.testing.expectEqual(TableRole.none, (try index.lineAt(5006)).?.table_role);
-    try std.testing.expectEqual(index.count * @sizeOf(Line), try index.file.length(io));
+    try std.testing.expectEqual((try std.math.divCeil(u64, index.count, checkpoint_lines)) * @sizeOf(Checkpoint), try index.file.length(io));
     try std.testing.expectEqual(@as(u64, @sizeOf(Table)), try index.tables.length(io));
     std.debug.print("rich-index source_bytes={d} lines={d} line_disk_bytes={d} table_disk_bytes={d}\n", .{ source_length, index.count, try index.file.length(io), try index.tables.length(io) });
 }
@@ -522,4 +673,113 @@ test "native rich source windows cross both directions and preserve resize ancho
     var original: [bytes.len]u8 = undefined;
     try std.testing.expectEqual(bytes.len, try file.readPositionalAll(io, &original, 0));
     try std.testing.expectEqualSlices(u8, bytes, &original);
+}
+
+test "native rich syntax uses exact raw CRLF not literal escape spelling" {
+    fw.DrawContext.init(.unicode);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const raw_file = try tmp.dir.createFile(io, "raw", .{ .read = true });
+    defer raw_file.close(io);
+    const display_file = try tmp.dir.createFile(io, "display", .{ .read = true });
+    defer display_file.close(io);
+    const raw = "```zig\r\ncode\r\n```\r\nafter long prose\r\na | b\r\n--- | ---\r\nx | y\r\n```\n```\\x0d\nnot closed\n```\nafter real close\n";
+    const display = "```zig\\x0d\ncode\\x0d\n```\\x0d\nafter long prose\\x0d\na | b\\x0d\n--- | ---\\x0d\nx | y\\x0d\n```\n```\\x0d\nnot closed\n```\nafter real close\n";
+    try raw_file.writeStreamingAll(io, raw);
+    try display_file.writeStreamingAll(io, display);
+    const raw_backing: TestSource = .{ .io = io, .file = raw_file };
+    const display_backing: TestSource = .{ .io = io, .file = display_file };
+    const raw_source: vaxis.unicode.PagedSource = .{ .userdata = &raw_backing, .length = raw.len, .readFn = TestSource.read };
+    const source: vaxis.unicode.PagedSource = .{ .userdata = &display_backing, .length = display.len, .readFn = TestSource.read };
+    var rich = try Self.buildRaw(io, tmp.dir, raw_source, source, null);
+    defer rich.close();
+    try std.testing.expectEqual(Mode.@"opaque", (try rich.lineAt(2)).?.mode);
+    try std.testing.expectEqual(Mode.prose, (try rich.lineAt(3)).?.mode);
+    try std.testing.expectEqual(TableRole.header, (try rich.lineAt(4)).?.table_role);
+    try std.testing.expectEqual(TableRole.rule, (try rich.lineAt(5)).?.table_role);
+    try std.testing.expectEqual(TableRole.body, (try rich.lineAt(6)).?.table_role);
+    // A literal backslash-x sequence is not a real CRLF closer.
+    try std.testing.expectEqual(Mode.@"opaque", (try rich.lineAt(9)).?.mode);
+    try std.testing.expectEqual(Mode.prose, (try rich.lineAt(11)).?.mode);
+    var original: [raw.len]u8 = undefined;
+    try std.testing.expectEqual(raw.len, try raw_file.readPositionalAll(io, &original, 0));
+    try std.testing.expectEqualSlices(u8, raw, &original);
+}
+
+test "native rich checkpoints bound newline sidecar and recover both ends" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "raw", .{ .read = true });
+    defer file.close(io);
+    const chunk: [1000]u8 = @splat('\n');
+    for (0..100) |_| try file.writeStreamingAll(io, &chunk);
+    const backing: TestSource = .{ .io = io, .file = file };
+    const source: vaxis.unicode.PagedSource = .{ .userdata = &backing, .length = 100_000, .readFn = TestSource.read };
+    var rich = try Self.build(io, tmp.dir, source, null);
+    defer rich.close();
+    try std.testing.expectEqual(@as(u64, 100_000), rich.count);
+    const bytes = try rich.file.length(io);
+    try std.testing.expectEqual((try std.math.divCeil(u64, rich.count, checkpoint_lines)) * @sizeOf(Checkpoint), bytes);
+    try std.testing.expect(bytes < 10_000);
+    try std.testing.expectEqual(@as(u64, 99_999), (try rich.lineAt(99_999)).?.raw_start);
+    try std.testing.expectEqual(@as(u64, 0), (try rich.lineAt(0)).?.raw_start);
+    try std.testing.expectEqual(@as(u64, 50_001), (try rich.lineAt(50_001)).?.start);
+    try std.testing.expectEqual(@as(u64, 0), try rich.tables.length(io));
+    std.debug.print("newline-sidecar source=100000 checkpoints={d} cache_bytes={d}\n", .{ bytes, @sizeOf(@TypeOf(rich.cache)) });
+}
+
+test "native rich checkpoint restores fenced quote context" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "raw", .{ .read = true });
+    defer file.close(io);
+    for (0..255) |_| try file.writeStreamingAll(io, "line\n");
+    try file.writeStreamingAll(io, "> ```zig\n> code\n> ```\nafter\n");
+    const length = try file.length(io);
+    const backing: TestSource = .{ .io = io, .file = file };
+    const source: vaxis.unicode.PagedSource = .{ .userdata = &backing, .length = @intCast(length), .readFn = TestSource.read };
+    var rich = try Self.build(io, tmp.dir, source, null);
+    defer rich.close();
+    try std.testing.expectEqual(Mode.@"opaque", (try rich.lineAt(256)).?.mode);
+    try std.testing.expectEqual(Mode.@"opaque", (try rich.lineAt(257)).?.mode);
+    try std.testing.expectEqual(Mode.prose, (try rich.lineAt(258)).?.mode);
+    try std.testing.expectEqual(Mode.prose, (try rich.lineAt(0)).?.mode);
+    try std.testing.expectEqual(Mode.@"opaque", (try rich.lineAt(256)).?.mode);
+}
+
+test "native raw table cells display escaped controls without changing source" {
+    fw.DrawContext.init(.unicode);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const raw_file = try tmp.dir.createFile(io, "raw", .{ .read = true });
+    defer raw_file.close(io);
+    const display_file = try tmp.dir.createFile(io, "display", .{ .read = true });
+    defer display_file.close(io);
+    const raw = "a\x1b | b\r\n--- | ---\r\nx | y\r\n";
+    const display = "a\\x1b | b\\x0d\n--- | ---\\x0d\nx | y\\x0d\n";
+    try raw_file.writeStreamingAll(io, raw);
+    try display_file.writeStreamingAll(io, display);
+    const raw_backing: TestSource = .{ .io = io, .file = raw_file };
+    const display_backing: TestSource = .{ .io = io, .file = display_file };
+    const raw_source: vaxis.unicode.PagedSource = .{ .userdata = &raw_backing, .length = raw.len, .readFn = TestSource.read };
+    const source: vaxis.unicode.PagedSource = .{ .userdata = &display_backing, .length = display.len, .readFn = TestSource.read };
+    var rich = try Self.buildRaw(io, tmp.dir, raw_source, source, null);
+    defer rich.close();
+    try std.testing.expectEqual(TableRole.header, (try rich.lineAt(0)).?.table_role);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 1 }, .cell_size = .{} };
+    const surface = try drawTable(&rich, 0, ctx, 0, 20);
+    try std.testing.expectEqualStrings("a", surface.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("\\", surface.readCell(1, 0).char.grapheme);
+    try std.testing.expectEqualStrings("x", surface.readCell(2, 0).char.grapheme);
+    try std.testing.expectEqualStrings("1", surface.readCell(3, 0).char.grapheme);
+    try std.testing.expectEqualStrings("b", surface.readCell(4, 0).char.grapheme);
+    var original: [raw.len]u8 = undefined;
+    try std.testing.expectEqual(raw.len, try raw_file.readPositionalAll(io, &original, 0));
+    try std.testing.expectEqualSlices(u8, raw, &original);
 }

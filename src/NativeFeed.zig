@@ -730,6 +730,16 @@ pub const VerifiedSource = struct {
         return .{ .userdata = self, .length = std.math.cast(usize, self.display.len()) orelse return error.SourceTooLarge, .readFn = read };
     }
 
+    pub fn rawSource(self: *const VerifiedSource) !@import("vaxis").unicode.PagedSource {
+        return .{ .userdata = self, .length = std.math.cast(usize, self.item.reference.length) orelse return error.SourceTooLarge, .readFn = readRaw };
+    }
+
+    fn readRaw(raw: *const anyopaque, offset: u64, buffer: []u8) !usize {
+        const self: *const VerifiedSource = @ptrCast(@alignCast(raw));
+        if (self.cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
+        return self.scratch.readAt(offset, buffer);
+    }
+
     fn read(raw: *const anyopaque, offset: u64, buffer: []u8) !usize {
         const self: *const VerifiedSource = @ptrCast(@alignCast(raw));
         if (self.cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
