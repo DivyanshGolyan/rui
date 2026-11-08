@@ -1471,9 +1471,14 @@ test "the running call's row carries the clock, in its place, and other work end
     // A narrow line cuts the words and keeps the clock, under the
     // conversation and calls that now wrap.
     _ = try Test.render(screen, &out.writer, .{ .row = 12, .col = 14, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .live = work_line.of(&test_words, &waiting, 7, 142_000) }, &calls);
-    try std.testing.expectEqualStrings("    build", rowText(screen, 7, &buffer));
-    try std.testing.expectEqualStrings("• Waiti… · 12s", rowText(screen, 8, &buffer));
-    try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 9).?.char.grapheme);
+    try std.testing.expectEqualStrings("  • Run zig", rowText(screen, 4, &buffer));
+    try std.testing.expectEqualStrings("    build", rowText(screen, 5, &buffer));
+    try std.testing.expectEqualStrings("+1 · /status", rowText(screen, 6, &buffer));
+    try std.testing.expectEqualStrings("• Waiti… · 12s", rowText(screen, 7, &buffer));
+    try std.testing.expectEqualStrings("s", Test.window(screen).readCell(13, 7).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 8).?.char.grapheme);
+    try std.testing.expectEqualStrings("›", Test.window(screen).readCell(0, 9).?.char.grapheme);
+    try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 10).?.char.grapheme);
     // Stopping says so quietly, with no clock.
     const stopping: protocol.WorkState = .{ .stopping = .{ .since = 130 } };
     screen.colour = true;
@@ -1568,10 +1573,14 @@ test "a queued Message keeps its row and status while looking back" {
     try std.testing.expect(!screenHas(screen, "queued", &buffer));
     try std.testing.expect(screenHas(screen, "Sent", &buffer));
     try std.testing.expect(screenHas(screen, "Run zig build", &buffer));
-    // With a one-line draft it has the row, and Sent goes.
+    // At this compact size the confirmation remains visible even with a
+    // one-line draft; this does not prescribe a queue's contents or policy.
     _ = try Test.render(screen, &out.writer, short, "one", 3, working, &running);
-    try std.testing.expect(screenHas(screen, "queued", &buffer));
-    try std.testing.expect(!screenHas(screen, "Sent", &buffer));
+    try std.testing.expectEqualStrings("  • Run zig build", rowText(screen, 0, &buffer));
+    try std.testing.expectEqualStrings("• Waiting · 42s", rowText(screen, 1, &buffer));
+    try std.testing.expectEqualStrings("Sent", rowText(screen, 2, &buffer));
+    try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 3).?.char.grapheme);
+    try std.testing.expectEqualStrings("› one", rowText(screen, 4, &buffer));
     // A transcript keeps the same queued row and confirming status.
     try screen.beginTranscript(0);
     _ = screen.browse(false, true);
