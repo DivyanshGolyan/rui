@@ -37,7 +37,9 @@ if sys.argv[1:2] == ["--tty-supervisor"]:
             gate = os.environ.get("RUI_FIXTURE_SUPERVISOR_GATE")
             if gate:
                 gate = pathlib.Path(gate)
-                (gate / "spawned").write_text(str(child.pid))
+                pending = gate / "spawned.tmp"
+                pending.write_text(str(child.pid))
+                pending.replace(gate / "spawned")
                 deadline = time.monotonic() + 10
                 while not (gate / "release").exists():
                     if time.monotonic() >= deadline:
