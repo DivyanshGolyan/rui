@@ -3836,7 +3836,14 @@ test "narrow model picks refuse clipped physical IDs until the full selected ID 
         try expectEffects(&.{}, try modelSubmit(&owner, &state, draft));
         try std.testing.expect(state.default == null);
         try std.testing.expect(state.picker != null);
-        try std.testing.expectEqualStrings("Widen for /model", state.notice.?.text());
+        try std.testing.expectEqualStrings("Wide", state.notice.?.text());
+        // The compact recovery instruction itself fits in physical cells,
+        // with and without terminal colour; no ellipsis hides its meaning.
+        for ([_]Caps{ .{ .unicode = true, .depth = .none }, .{ .unicode = true, .depth = .direct } }) |caps| {
+            var notice_frame = try sizedModelRender(&owner, &state, draft, 6, 24, caps, 0);
+            defer notice_frame.deinit();
+            for ("Wide", 0..) |byte, column| try std.testing.expectEqual(byte, notice_frame.cell(1 + column, 23).char.grapheme[0]);
+        }
         if (index == 0) try expectEffects(&.{}, try modelPress(&owner, &state, draft, .next));
     }
     try std.testing.expectEqualStrings("alpine", owner.selected(&state).?);
@@ -3924,7 +3931,8 @@ test "provider navigation refuses an ID clipped after choosing a shared model" {
         var frame = try sizedModelRender(&owner, &state, .{}, 31, 24, .{ .unicode = true, .depth = .none }, 0);
         defer frame.deinit();
         const model_row = layout(&state, 1, 0).picker.start;
-        try std.testing.expectEqualStrings("…", frame.cell(4, model_row).char.grapheme);
+        for (4..29) |column| try std.testing.expectEqualStrings("m", frame.cell(column, model_row).char.grapheme);
+        try std.testing.expectEqualStrings("…", frame.cell(29, model_row).char.grapheme);
         const choice_row = layout(&state, 1, 0).commands.end;
         for ("API key", 0..) |byte, index| try std.testing.expectEqual(byte, frame.cell(22 + index, choice_row).char.grapheme[0]);
     }

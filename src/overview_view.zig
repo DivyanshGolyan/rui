@@ -2036,7 +2036,7 @@ fn compose(state: *State, value: Composed, model: ?[]const u8, effects: *Effects
                 .refused => .{ .refused = .unbound },
                 .left, .right => {
                     const entry = state.menu.entries[state.menu.find(model orelse return) orelse return];
-                    if (!pickFits(state.size.width, entry)) return state.say(.attention, "Widen for /model", .{});
+                    if (!pickFits(state.size.width, entry)) return modelWidenNotice(state);
                     picker.step = .{ .sign_in = nextSignIn(entry.providers, picker.step.sign_in, if (choice == .left) .left else .right) };
                     return;
                 },
@@ -2456,6 +2456,12 @@ fn signInsFit(width: usize, providers: model_picker.Providers) bool {
     return true;
 }
 
+/// The hint has width minus two cells, even on the narrowest picker.
+fn modelWidenNotice(state: *State) void {
+    const text: []const u8 = if (state.size.width < 7) "Wide" else if (state.size.width < 18) "Widen" else "Widen for /model";
+    state.say(.attention, "{s}", .{text});
+}
+
 /// IDs are validated printable ASCII. Both model and sign-ins must be
 /// legible before the picker changes or commits a provider choice.
 fn pickFits(width: usize, entry: model_picker.Entry) bool {
@@ -2472,7 +2478,7 @@ fn pick(state: *State, model: ?[]const u8, effects: *Effects) void {
     // IDs have validated printable ASCII syntax. The physical row starts at
     // column 4 and reserves the last column; never pick an ellipsized ID.
     // For a shared model both provider choices must also fit in full.
-    if (!pickFits(state.size.width, entry)) return state.say(.attention, "Widen for /model", .{});
+    if (!pickFits(state.size.width, entry)) return modelWidenNotice(state);
     const provider = switch (picker.step) {
         .sign_in => |chosen| chosen,
         .models => choice: {
