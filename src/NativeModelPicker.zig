@@ -145,10 +145,10 @@ pub fn input(self: *Self, value: Input, default: ?view.Default, width: u16) Resu
                 return .none;
             }
             const provider = self.choice() orelse first;
-            var selected: view.Default = .{ .provider = provider, .model = .{} };
-            selected.model.set(entry.id) catch unreachable;
+            var binding: view.Default = .{ .provider = provider, .model = .{} };
+            binding.model.set(entry.id) catch unreachable;
             self.reset();
-            return .{ .selected = selected };
+            return .{ .selected = binding };
         },
     }
     return .none;
