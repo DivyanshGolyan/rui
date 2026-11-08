@@ -170,6 +170,75 @@ test "single-row transcript continuation retains every canonical row" {
     try std.testing.expectEqual(@as(u64, 20), page.continuation().?.before_position);
 }
 
+/// Retain one bounded interval while authenticating the complete canonical
+/// source. No caller may expose the scratch interval until this returns.
+fn stageUserInterval(io: std.Io, scratch: std.Io.File, source: anytype, item: protocol_reply.ConversationPage.Item, index: usize, start: u64, length: u64) !Span {
+    if (start > item.content.bytes or length > item.content.bytes - start or length > max_scratch_bytes) return error.InvalidContentInterval;
+    try scratch.setLength(io, 0);
+    const Sink = struct {
+        io: std.Io,
+        file: std.Io.File,
+        total: u64,
+        start: u64,
+        length: u64,
+        received: u64 = 0,
+        written: u64 = 0,
+        source_hash: std.crypto.hash.sha2.Sha256 = protocol.contentHasher(),
+        retained_hash: std.crypto.hash.sha2.Sha256 = protocol.contentHasher(),
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            if (bytes.len > self.total - self.received) return error.ContentBindingMismatch;
+            self.source_hash.update(bytes);
+            const first = @max(self.received, self.start);
+            const last = @min(self.received + bytes.len, self.start + self.length);
+            if (first < last) {
+                const part = bytes[@intCast(first - self.received)..@intCast(last - self.received)];
+                self.retained_hash.update(part);
+                try self.file.writePositionalAll(self.io, part, self.written);
+                self.written += part.len;
+            }
+            self.received += bytes.len;
+        }
+    };
+    var sink: Sink = .{ .io = io, .file = scratch, .total = item.content.bytes, .start = start, .length = length };
+    try source.read(item, index, &sink);
+    if (sink.received != item.content.bytes or sink.written != length or !std.mem.eql(u8, &sink.source_hash.finalResult(), &item.content.digest)) return error.ContentBindingMismatch;
+    var retained = protocol.contentHasher();
+    var window: [protocol.content_window_bytes]u8 = undefined;
+    var offset: u64 = 0;
+    while (offset < length) {
+        const count: usize = @intCast(@min(window.len, length - offset));
+        if (try scratch.readPositionalAll(io, window[0..count], offset) != count) return error.ContentBindingMismatch;
+        retained.update(window[0..count]);
+        offset += count;
+    }
+    if (!std.mem.eql(u8, &retained.finalResult(), &sink.retained_hash.finalResult())) return error.ContentBindingMismatch;
+    return .{ .offset = 0, .length = length };
+}
+
+test "bounded user interval authenticates complete source before exposing scratch" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const scratch = try tmp.dir.createFile(io, "interval", .{ .read = true });
+    defer scratch.close(io);
+    const Source = struct {
+        bytes: []const u8,
+        fn read(self: @This(), _: protocol_reply.ConversationPage.Item, _: usize, sink: anytype) !void {
+            for (self.bytes) |byte| try sink.feed(&.{byte});
+        }
+    };
+    const bytes = "before > quoted\ninside \x1b after";
+    var item: protocol_reply.ConversationPage.Item = .{ .position = 1, .ordinal = 0, .kind = .user, .admitted_at = 1, .content = .{ .bytes = bytes.len, .digest = protocol.contentDigest(bytes) } };
+    const span = try stageUserInterval(io, scratch, Source{ .bytes = bytes }, item, 0, 7, 8);
+    try std.testing.expectEqual(@as(u64, 8), span.length);
+    var retained: [8]u8 = undefined;
+    try std.testing.expectEqual(retained.len, try scratch.readPositionalAll(io, &retained, 0));
+    try std.testing.expectEqualSlices(u8, bytes[7..15], &retained);
+    item.content.digest = protocol.contentDigest("wrong");
+    try std.testing.expectError(error.ContentBindingMismatch, stageUserInterval(io, scratch, Source{ .bytes = bytes }, item, 0, 7, 8));
+    try std.testing.expectError(error.InvalidContentInterval, stageUserInterval(io, scratch, Source{ .bytes = bytes }, item, 0, bytes.len, 1));
+}
+
 // The source authenticates the complete result, including discarded prefixes.
 // After all writes, scratch is checked against independently received retained bytes.
 fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.File, source: anytype) !Prepared {
@@ -202,6 +271,12 @@ fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.
     for (page.items[0..page.count], 0..) |item, index| {
         if (item.kind == .hosted_call or item.sender != null) continue;
         const tool = item.kind == .tool_result;
+        // The one-row user path uses the same bounded authenticated interval
+        // owner needed to resume within an oversized canonical body.
+        if (item.kind == .user and page.count == 1 and item.content.bytes <= max_scratch_bytes) {
+            prepared.bodies[index] = .{ .whole = try stageUserInterval(io, scratch, source, item, index, 0, item.content.bytes) };
+            return prepared;
+        }
         const budget: u64 = if (item.kind == .user and page.count == 1) max_scratch_bytes else item_bytes;
         if (!tool and item.content.bytes > budget) {
             prepared.bodies[index] = .omitted;
