@@ -1,6 +1,7 @@
 """Owner/classifier controls only; these never execute the native witness."""
 
 import json
+import hashlib
 import os
 import pathlib
 import signal
@@ -39,7 +40,7 @@ def metadata(names):
             bytes(4 * len(names)) + bytes(strings))
 
 
-def server_stub(parent, names, descendant=False):
+def server_stub(parent, names, descendant=False, oversized_stderr=False):
     binary = parent / "test-server-stub"
     binary.write_text(f"#!{sys.executable}\n" + r'''import os, struct, sys
 assert sys.argv[1:] == ["--listen=-"]
@@ -59,7 +60,7 @@ assert tag == 5 and len(body) == 4
 index, = struct.unpack("<I", body)
 print(f"STUB-SELECTED {index}", file=sys.stderr, flush=True)
 send(5)
-send(4)
+''' + ("for _ in range(2048):\n    os.write(2, b'x' * 4096)\n" if oversized_stderr else "") + r'''send(4)
 assert receive() == (0, b"")
 ''' + ("import subprocess\nsubprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n" if descendant else ""))
     binary.chmod(0o700)
@@ -131,7 +132,7 @@ class OccupiedProbeTest(unittest.TestCase):
                 return real_popen(argv, **options)
 
             with mock.patch.object(probe.subprocess, "Popen", launch):
-                result = probe.run(binary, evidence, 2)
+                result = probe.run(binary, evidence, 2, hashlib.sha256(binary.read_bytes()).hexdigest())
             self.assertFalse(result["red_control_observed"])
             self.assertNotIn("error", result)
             self.assertEqual(result["cleanup"], "complete", result)
@@ -147,12 +148,39 @@ class OccupiedProbeTest(unittest.TestCase):
             parent = pathlib.Path(directory)
             binary = server_stub(parent, ["unrelated.destructive", "wrong.test"])
             evidence = parent / "evidence"
-            result = probe.run(binary, evidence, 2)
+            result = probe.run(binary, evidence, 2, hashlib.sha256(binary.read_bytes()).hexdigest())
             self.assertFalse(result["red_control_observed"])
             self.assertIn("exactly one matching", result["error"])
             self.assertEqual((evidence / "stderr.log").read_text(), "")
             self.assertFalse((evidence / "selection.json").exists())
             self.assertEqual(result["cleanup"], "complete", result)
+
+    def test_mismatched_registered_binary_digest_never_launches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = pathlib.Path(directory)
+            binary = server_stub(parent, [probe.FULL_TEST_NAME])
+            evidence = parent / "evidence"
+            with mock.patch.object(probe.subprocess, "Popen", side_effect=AssertionError("must not launch")):
+                result = probe.run(binary, evidence, 1, "0" * 64)
+            self.assertIn("registered build artifact", result["error"])
+            self.assertEqual(result["cleanup"], "complete", result)
+            self.assertFalse((evidence / "stdout.log").exists())
+
+    def test_native_stderr_cannot_exceed_inherited_file_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = pathlib.Path(directory)
+            binary = server_stub(parent, [probe.FULL_TEST_NAME], oversized_stderr=True)
+            evidence = parent / "evidence"
+            result = probe.run(binary, evidence, 3, hashlib.sha256(binary.read_bytes()).hexdigest())
+            self.assertFalse(result["red_control_observed"])
+            self.assertEqual(result["cleanup"], "complete", result)
+            diagnostic = (evidence / "stderr.log").read_bytes()
+            self.assertNotIn("error", result)
+            self.assertNotEqual(result["returncode"], 0)
+            self.assertGreater(len(diagnostic), probe.LOG_LIMIT // 2)
+            self.assertLessEqual(len(diagnostic), probe.LOG_LIMIT)
+            self.assertIn(b"x" * 4096, diagnostic)
+            self.assertFalse(pathlib.Path(result["owned_paths"]["root"]).exists())
 
     def test_root_setup_failure_still_releases_owned_directory(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -160,7 +188,7 @@ class OccupiedProbeTest(unittest.TestCase):
             binary = parent / "not-executed"
             binary.write_bytes(b"not a native binary")
             with mock.patch.object(probe, "canonical_fixture_root", side_effect=OSError("resolve failed")):
-                result = probe.run(binary, parent / "evidence", 1)
+                result = probe.run(binary, parent / "evidence", 1, hashlib.sha256(binary.read_bytes()).hexdigest())
             self.assertIn("resolve failed", result["error"])
             self.assertEqual(result["cleanup"], "complete", result)
             self.assertFalse(pathlib.Path(result["owned_paths"]["root"]).exists())

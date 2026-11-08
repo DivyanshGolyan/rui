@@ -5,6 +5,8 @@ Pass a safe-build unit binary compiled with the filter
 "occupied submission fresh Action confirmation subprocess control".
 The stock 0.17 test-server protocol selects only that exact test, even
 when the artifact contains unrelated tests.
+Use only a provenance-verified stock test artifact from the scheduled build;
+executable startup is trusted, not sandboxed by metadata selection.
 This is a synthetic-peer RED control, not Host acceptance qualification.
 """
 
@@ -14,6 +16,7 @@ import json
 import os
 import pathlib
 import re
+import resource
 import select
 import shutil
 import signal
@@ -180,6 +183,11 @@ def supervise(binary, status_fd, lifetime):
         raise RuntimeError("supervisor must own its new session")
     deadline = time.monotonic() + lifetime
     try:
+        # Bound native regular-file diagnostics during execution, not only
+        # after exit. Protocol pipes are unaffected and cannot deadlock here.
+        soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+        cap = min([LOG_LIMIT] + [value for value in (soft, hard) if value != resource.RLIM_INFINITY])
+        resource.setrlimit(resource.RLIMIT_FSIZE, (cap, cap))
         child = subprocess.Popen([binary, "--listen=-"], stdin=0, stdout=1, stderr=2)
         os.close(0)
         os.close(1)  # Native/descendant lifetime, not this supervisor, owns EOF.
@@ -219,7 +227,7 @@ def cleanup(process, root, registered_socket):
     shutil.rmtree(root)
 
 
-def run(binary, evidence, timeout):
+def run(binary, evidence, timeout, expected_binary_sha256):
     binary = binary.resolve(strict=True)
     evidence.mkdir(mode=0o700, parents=True, exist_ok=False)
     root = pathlib.Path(tempfile.mkdtemp(prefix="rui-oc-", dir="/tmp"))
@@ -241,6 +249,9 @@ def run(binary, evidence, timeout):
                     "timeout_seconds": timeout, "socket_absent_before_launch": True}
         with binary.open("rb") as source:
             manifest["binary_sha256"] = hashlib.file_digest(source, "sha256").hexdigest()
+        if manifest["binary_sha256"] != expected_binary_sha256:
+            raise ValueError("binary digest does not match the registered build artifact")
+        manifest["expected_binary_sha256"] = expected_binary_sha256
         with (evidence / "manifest.json").open("x") as target:
             json.dump(manifest, target, indent=2)
             target.write("\n")
@@ -289,12 +300,16 @@ def run(binary, evidence, timeout):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True, type=pathlib.Path)
+    parser.add_argument("--binary-sha256", required=True,
+                        help="digest registered from the provenance-verified scheduled build artifact")
     parser.add_argument("--evidence-dir", required=True, type=pathlib.Path,
                         help="new directory for manifest, native logs, and classified result")
     parser.add_argument("--timeout-seconds", type=int, default=30, choices=range(1, 61))
     args = parser.parse_args()
+    if re.fullmatch(r"[0-9a-f]{64}", args.binary_sha256) is None:
+        parser.error("--binary-sha256 must be 64 lowercase hexadecimal digits")
     enter()
-    result = run(args.binary, args.evidence_dir.resolve(), args.timeout_seconds)
+    result = run(args.binary, args.evidence_dir.resolve(), args.timeout_seconds, args.binary_sha256)
     print(json.dumps(result, sort_keys=True))
     # Exit 1 is deliberately RED: the exact original-custody bug was seen.
     # Exit 2 is inconclusive, including arbitrary crashes and cleanup failures.
