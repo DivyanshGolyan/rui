@@ -178,20 +178,22 @@ test "native scroll end realizes only viewport across a far seek and tall last i
 
 test "native scrollbar retains bottom thumb when horizontal row is reserved" {
     fw.DrawContext.init(.unicode);
-    var storage: [512 * 1024]u8 = undefined;
-    var fixed = std.heap.FixedBufferAllocator.init(&storage);
-    var fixture: SeekFixture = .{};
-    var bars: fw.ScrollBars = .{
-        .scroll_view = .{
-            .children = .{ .builder = .{ .userdata = &fixture, .hasFn = SeekFixture.has, .buildFrameFn = SeekFixture.build } },
-            .item_count = @intCast(fixture.count),
-        },
-        .draw_horizontal_scrollbar = true,
+    for ([_]u16{ 3, 9 }) |height| for ([_]bool{ false, true }) |tall| {
+        var storage: [512 * 1024]u8 = undefined;
+        var fixed = std.heap.FixedBufferAllocator.init(&storage);
+        var fixture: SeekFixture = .{ .tall_last = tall };
+        var bars: fw.ScrollBars = .{
+            .scroll_view = .{
+                .children = .{ .builder = .{ .userdata = &fixture, .hasFn = SeekFixture.has, .buildFrameFn = SeekFixture.build } },
+                .item_count = @intCast(fixture.count),
+            },
+            .draw_horizontal_scrollbar = true,
+        };
+        const ctx: fw.DrawContext = .{ .arena = fixed.allocator(), .min = .{}, .max = .{ .width = 16, .height = height }, .cell_size = .{} };
+        bars.scroll_view.jumpToEnd();
+        const surface = try bars.draw(ctx);
+        const vertical = surface.children[1].surface;
+        try std.testing.expectEqual(height - 1, vertical.size.height);
+        try std.testing.expectEqualStrings("▐", vertical.readCell(0, height - 2).char.grapheme);
     };
-    const ctx: fw.DrawContext = .{ .arena = fixed.allocator(), .min = .{}, .max = .{ .width = 16, .height = 9 }, .cell_size = .{} };
-    bars.scroll_view.jumpToEnd();
-    const surface = try bars.draw(ctx);
-    const vertical = surface.children[1].surface;
-    try std.testing.expectEqual(@as(u16, 8), vertical.size.height);
-    try std.testing.expectEqualStrings("▐", vertical.readCell(0, 7).char.grapheme);
 }
