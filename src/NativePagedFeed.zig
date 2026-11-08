@@ -249,19 +249,20 @@ test "native paged feed declarations retain one bounded page owner" {
 
 test "native queued preview clips UTF8 boundary and marks viewport overflow" {
     const Source = struct {
+        bytes: []const u8,
         fn read(raw: *const anyopaque, offset: u64, out: []u8) !usize {
-            const bytes: *[]const u8 = @ptrCast(@alignCast(raw));
+            const self: *const @This() = @ptrCast(@alignCast(raw));
             const start: usize = @intCast(offset);
-            const count = @min(out.len, bytes.len - start);
-            @memcpy(out[0..count], bytes.*[start..][0..count]);
+            const count = @min(out.len, self.bytes.len - start);
+            @memcpy(out[0..count], self.bytes[start..][0..count]);
             return count;
         }
     };
     var bytes: [4100]u8 = @splat('x');
     @memcpy(bytes[4094..4098], "😀");
     bytes[4098] = '\n';
-    const source: []const u8 = &bytes;
-    var reader: vaxis.unicode.PagedReader = .{ .source = .{ .userdata = &source, .length = source.len, .readFn = Source.read } };
+    const source: Source = .{ .bytes = &bytes };
+    var reader: vaxis.unicode.PagedReader = .{ .source = .{ .userdata = &source, .length = source.bytes.len, .readFn = Source.read } };
     var preview: [4096 + 16]u8 = undefined;
     const len = try queuedPreview(&reader, &preview);
     const text = preview[0..len];
