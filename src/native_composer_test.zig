@@ -57,9 +57,14 @@ test "native text extent indexes long output without full-height cell surfaces" 
     defer index.deinit(std.testing.allocator);
     const inputs = [_]fw.Text{.{ .text = source.written() }};
     try index.reflow(std.testing.allocator, &inputs, ctx);
-    try std.testing.expectEqual(@as(usize, 12_501), index.lines.items.len);
-    const first = try index.builder().itemAtIdx(0, 0).?.draw(ctx);
-    const last = try index.builder().itemAtIdx(index.lines.items.len - 1, 0).?.draw(ctx);
+    try std.testing.expectEqual(@as(usize, 12_501), index.len);
+    try std.testing.expect(index.checkpoint_count <= 256);
+    try std.testing.expect(index.stride > 1);
+    const first_widget = (try index.builder().itemAtIdxForDraw(0, 0, ctx.arena)).?;
+    const last = try (try index.builder().itemAtIdxForDraw(index.len - 1, 0, ctx.arena)).?.draw(ctx);
+    // Seeking outside the window must not alter a widget already retained
+    // by the same native frame.
+    const first = try first_widget.draw(ctx);
     try std.testing.expectEqual(@as(u16, 1), first.size.height);
     try std.testing.expectEqual(@as(u16, 1), last.size.height);
     try std.testing.expectEqualStrings("x", first.readCell(0, 0).char.grapheme);
@@ -78,17 +83,42 @@ test "native wrapping advances across a grapheme wider than its viewport" {
     var index: fw.Text.LineIndex = .{};
     defer index.deinit(std.testing.allocator);
     try index.reflow(std.testing.allocator, &input, narrow);
-    try std.testing.expectEqual(@as(usize, 3), index.lines.items.len);
-    try std.testing.expectEqualStrings("A", index.lines.items[0].text);
-    try std.testing.expectEqualStrings("界", index.lines.items[1].text);
-    try std.testing.expectEqualStrings("Z", index.lines.items[2].text);
-    const clipped = try index.builder().itemAtIdx(1, 0).?.draw(narrow);
+    try std.testing.expectEqual(@as(usize, 3), index.len);
+    try std.testing.expectEqualStrings("A", index.line(0).?.text);
+    try std.testing.expectEqualStrings("界", index.line(1).?.text);
+    try std.testing.expectEqualStrings("Z", index.line(2).?.text);
+    const clipped = try (try index.builder().itemAtIdxForDraw(1, 0, narrow.arena)).?.draw(narrow);
     try std.testing.expectEqual(@as(u16, 1), clipped.size.height);
     try std.testing.expect(!std.mem.eql(u8, "界", clipped.readCell(0, 0).char.grapheme));
     try index.reflow(std.testing.allocator, &input, wide);
-    try std.testing.expectEqual(@as(usize, 1), index.lines.items.len);
-    try std.testing.expectEqualStrings(original, index.lines.items[0].text);
-    const restored = try index.builder().itemAtIdx(0, 0).?.draw(wide);
+    try std.testing.expectEqual(@as(usize, 1), index.len);
+    try std.testing.expectEqualStrings(original, index.line(0).?.text);
+    const restored = try (try index.builder().itemAtIdxForDraw(0, 0, wide.arena)).?.draw(wide);
     try std.testing.expectEqualStrings("界", restored.readCell(1, 0).char.grapheme);
     try std.testing.expectEqualStrings("Z", restored.readCell(3, 0).char.grapheme);
+}
+
+test "native text checkpoints preserve source boundaries and frame widgets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{ .width = 16 }, .max = .{ .width = 16, .height = null }, .cell_size = .{} };
+    const sources = try arena.allocator().alloc(fw.Text, 1_000);
+    for (sources, 0..) |*source, i| {
+        source.* = .{ .text = try std.fmt.allocPrint(arena.allocator(), "row-{d:0>4}", .{i}), .softwrap = i % 2 == 0 };
+    }
+    var index: fw.Text.LineIndex = .{};
+    defer index.deinit(std.testing.allocator);
+    try index.reflow(std.testing.allocator, sources, ctx);
+    try std.testing.expectEqual(@as(usize, 1_000), index.len);
+    try std.testing.expect(index.checkpoint_count <= 256);
+    for ([_]usize{ 999, 0, 512, 127, 128, 255, 256, 998 }) |i| {
+        const expected = try std.fmt.allocPrint(arena.allocator(), "row-{d:0>4}", .{i});
+        try std.testing.expectEqualStrings(expected, index.line(i).?.text);
+    }
+    const old = (try index.builder().itemAtIdxForDraw(0, 0, ctx.arena)).?;
+    _ = index.line(999).?;
+    const restored = try old.draw(ctx);
+    try std.testing.expectEqualStrings("r", restored.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("0", restored.readCell(7, 0).char.grapheme);
 }

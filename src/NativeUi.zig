@@ -594,8 +594,8 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
             try self.feed_index.reflow(self.init.gpa, self.content.widgets.items, body_ctx.withConstraints(.{ .width = content_width }, .{ .width = content_width, .height = null }));
             self.feed_index_dirty = false;
             self.feed.scroll_view.children = .{ .builder = self.feed_index.builder() };
-            self.feed.scroll_view.item_count = @intCast(self.feed_index.lines.items.len);
-            self.feed.estimated_content_height = @intCast(self.feed_index.lines.items.len);
+            self.feed.scroll_view.item_count = @intCast(self.feed_index.len);
+            self.feed.estimated_content_height = @intCast(self.feed_index.len);
         }
         if (self.following) self.feed.scroll_view.jumpToEnd();
     }

@@ -1248,13 +1248,32 @@ index 2c6edb6..81acf55 100644
 +    try std.testing.expectEqualStrings("ab\n界c", value);
 +}
 diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
-index 1c569eb..e7c757b 100644
 --- a/src/vxfw/ScrollView.zig
 +++ b/src/vxfw/ScrollView.zig
-@@ -267,6 +267,17 @@ pub fn ensureScroll(self: *ScrollView) void {
-     }
- }
+@@ -12,10 +12,17 @@
+ pub const Builder = struct {
+     userdata: *const anyopaque,
+     buildFn: *const fn (*const anyopaque, idx: usize, cursor: usize) ?vxfw.Widget,
++    /// Optional frame-owned widget construction for virtualized sources.
++    buildFrameFn: ?*const fn (*const anyopaque, idx: usize, cursor: usize, Allocator) Allocator.Error!?vxfw.Widget = null,
  
+     pub inline fn itemAtIdx(self: Builder, idx: usize, cursor: usize) ?vxfw.Widget {
+         return self.buildFn(self.userdata, idx, cursor);
+     }
++
++    pub fn itemAtIdxForDraw(self: Builder, idx: usize, cursor: usize, arena: Allocator) Allocator.Error!?vxfw.Widget {
++        if (self.buildFrameFn) |build| return build(self.userdata, idx, cursor, arena);
++        return self.itemAtIdx(idx, cursor);
++    }
+ };
+ 
+ pub const Source = union(enum) {
+@@ -265,6 +272,17 @@
+     } else {
+         self.scroll.wants_cursor = true;
+     }
++}
++
 +/// Anchor the last item at the bottom, including when it exceeds the viewport.
 +pub fn jumpToEnd(self: *ScrollView) void {
 +    const count = self.item_count orelse return;
@@ -1264,68 +1283,155 @@ index 1c569eb..e7c757b 100644
 +    self.scroll.vertical_offset = 0;
 +    self.scroll.pending_lines = 0;
 +    self.scroll.wants_cursor = true;
-+}
-+
+ }
+ 
  /// Inserts children until add_height is < 0
- fn insertChildren(
-     self: *ScrollView,
+@@ -280,7 +298,7 @@
+     var upheight = add_height;
+     while (self.scroll.top >= 0) : (self.scroll.top -= 1) {
+         // Get the child
+-        const child = builder.itemAtIdx(self.scroll.top, self.cursor) orelse break;
++        const child = (try builder.itemAtIdxForDraw(self.scroll.top, self.cursor, ctx.arena)) orelse break;
+ 
+         const child_offset: u16 = if (self.draw_cursor) 2 else 0;
+         const max_size = ctx.max.size();
+@@ -399,7 +417,7 @@
+ 
+     const child_offset: u16 = if (self.draw_cursor) 2 else 0;
+ 
+-    while (builder.itemAtIdx(i, self.cursor)) |child| {
++    while (try builder.itemAtIdxForDraw(i, self.cursor, ctx.arena)) |child| {
+         // Defer the increment
+         defer i += 1;
+ 
 diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
 --- a/src/vxfw/Text.zig
 +++ b/src/vxfw/Text.zig
-@@ -2,6 +2,52 @@
- const vaxis = @import("../main.zig");
+@@ -3,6 +3,123 @@
  
  const Allocator = std.mem.Allocator;
-+
-+/// A reusable extent index over native Text wrapping. The ScrollView draws
-+/// only indexed rows it can see; source slices remain owned by the caller.
-+/// Rebuilding the index uses memory proportional to visual row count, not
-+/// the number of cells in the entire document.
+ 
++/// A bounded checkpoint index over the native Text wrapping iterator. Source
++/// slices remain caller-owned. Reflow scans all source once; random access may
++/// replay up to the adaptive checkpoint interval. Only a fixed row window and
++/// frame-owned visible Text widgets are retained, not one widget per row.
 +pub const LineIndex = struct {
-+    lines: std.ArrayList(Text) = .empty,
-+    width: ?u16 = null,
++    const checkpoint_limit = 256;
++    const window_limit = 128;
++    const Iter = union(enum) { fresh, soft: SoftwrapIterator, hard: LineIterator };
++    const Cursor = struct {
++        sources: []const Text,
++        ctx: vxfw.DrawContext,
++        source_index: usize = 0,
++        iter: Iter = .fresh,
 +
-+    pub fn deinit(self: *LineIndex, allocator: Allocator) void {
-+        self.lines.deinit(allocator);
++        fn next(self: *Cursor) ?Text {
++            while (self.source_index < self.sources.len) {
++                const source = self.sources[self.source_index];
++                if (self.iter == .fresh) {
++                    self.iter = if (source.softwrap)
++                        .{ .soft = SoftwrapIterator.init(source.text, self.ctx) }
++                    else
++                        .{ .hard = .{ .buf = source.text } };
++                }
++                const bytes: ?[]const u8 = switch (self.iter) {
++                    .fresh => unreachable,
++                    .soft => |*iter| if (iter.next()) |line| line.bytes else null,
++                    .hard => |*iter| iter.next(),
++                };
++                if (bytes) |line| return .{ .text = line, .style = source.style, .softwrap = false, .overflow = .clip };
++                self.source_index += 1;
++                self.iter = .fresh;
++            }
++            return null;
++        }
++    };
++    const Checkpoint = struct { row: usize, cursor: Cursor };
++
++    width: ?u16 = null,
++    len: usize = 0,
++    checkpoints: [checkpoint_limit]Checkpoint = undefined,
++    checkpoint_count: usize = 0,
++    stride: usize = 1,
++    window: [window_limit]Text = undefined,
++    window_start: usize = 0,
++    window_count: usize = 0,
++
++    pub fn deinit(self: *LineIndex, _: Allocator) void {
 +        self.* = .{};
 +    }
 +
-+    pub fn reflow(self: *LineIndex, allocator: Allocator, sources: []const Text, ctx: vxfw.DrawContext) Allocator.Error!void {
++    pub fn reflow(self: *LineIndex, _: Allocator, sources: []const Text, ctx: vxfw.DrawContext) Allocator.Error!void {
 +        const width = ctx.max.width orelse ctx.min.width;
-+        var lines: std.ArrayList(Text) = .empty;
-+        errdefer lines.deinit(allocator);
-+        if (width != 0) {
-+            const line_ctx = ctx.withConstraints(.{ .width = width }, .{ .width = width, .height = null });
-+            for (sources) |source| {
-+                if (source.softwrap) {
-+                    var iter = SoftwrapIterator.init(source.text, line_ctx);
-+                    while (iter.next()) |line| try lines.append(allocator, .{ .text = line.bytes, .style = source.style, .softwrap = false, .overflow = .clip });
-+                } else {
-+                    var iter: LineIterator = .{ .buf = source.text };
-+                    while (iter.next()) |line| try lines.append(allocator, .{ .text = line, .style = source.style, .softwrap = false, .overflow = .clip });
++        self.width = width;
++        self.len = 0;
++        self.checkpoint_count = 0;
++        self.stride = 1;
++        self.window_count = 0;
++        if (width == 0) return;
++        const line_ctx = ctx.withConstraints(.{ .width = width }, .{ .width = width, .height = null });
++        var cursor: Cursor = .{ .sources = sources, .ctx = line_ctx };
++        while (true) {
++            const before = cursor;
++            _ = cursor.next() orelse break;
++            if (self.len == std.math.maxInt(u32)) return error.OutOfMemory;
++            if (self.len % self.stride == 0) {
++                if (self.checkpoint_count == checkpoint_limit) {
++                    for (0..checkpoint_limit / 2) |i| self.checkpoints[i] = self.checkpoints[i * 2];
++                    self.checkpoint_count = checkpoint_limit / 2;
++                    self.stride *= 2;
++                }
++                if (self.len % self.stride == 0) {
++                    self.checkpoints[self.checkpoint_count] = .{ .row = self.len, .cursor = before };
++                    self.checkpoint_count += 1;
 +                }
 +            }
++            self.len += 1;
 +        }
-+        if (lines.items.len > std.math.maxInt(u32)) return error.OutOfMemory;
-+        self.lines.deinit(allocator);
-+        self.lines = lines;
-+        self.width = width;
++    }
++
++    /// Borrowed only until another row outside the current window is requested.
++    pub fn line(self: *LineIndex, index: usize) ?*const Text {
++        if (index >= self.len) return null;
++        if (index < self.window_start or index - self.window_start >= self.window_count) {
++            const first = (index / window_limit) * window_limit;
++            var checkpoint: usize = 0;
++            while (checkpoint + 1 < self.checkpoint_count and self.checkpoints[checkpoint + 1].row <= first) : (checkpoint += 1) {}
++            var cursor = self.checkpoints[checkpoint].cursor;
++            var row = self.checkpoints[checkpoint].row;
++            while (row < first) : (row += 1) _ = cursor.next().?;
++            self.window_start = first;
++            self.window_count = 0;
++            while (self.window_count < window_limit and first + self.window_count < self.len) {
++                self.window[self.window_count] = cursor.next().?;
++                self.window_count += 1;
++            }
++        }
++        return &self.window[index - self.window_start];
 +    }
 +
 +    pub fn builder(self: *LineIndex) vxfw.ScrollView.Builder {
-+        return .{ .userdata = self, .buildFn = lineAt };
++        return .{ .userdata = self, .buildFn = lineAt, .buildFrameFn = lineAtForDraw };
 +    }
 +
 +    fn lineAt(raw: *const anyopaque, index: usize, _: usize) ?vxfw.Widget {
-+        const self: *const LineIndex = @ptrCast(@alignCast(raw));
-+        if (index >= self.lines.items.len) return null;
-+        return self.lines.items[index].widget();
++        const self: *LineIndex = @ptrCast(@alignCast(@constCast(raw)));
++        return if (self.line(index)) |value| value.widget() else null;
++    }
++
++    fn lineAtForDraw(raw: *const anyopaque, index: usize, _: usize, arena: Allocator) Allocator.Error!?vxfw.Widget {
++        const self: *LineIndex = @ptrCast(@alignCast(@constCast(raw)));
++        const value = self.line(index) orelse return null;
++        const copy = try arena.create(Text);
++        copy.* = value.*;
++        return copy.widget();
 +    }
 +};
- 
++
  const vxfw = @import("vxfw.zig");
  
-@@ -76,6 +122,7 @@
+ const Text = @This();
+@@ -76,6 +193,7 @@
                      continue;
                  }
                  const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
@@ -1333,7 +1439,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
                  surface.writeCell(col, row, .{
                      .char = .{ .grapheme = grapheme, .width = grapheme_width },
                      .style = self.style,
-@@ -102,6 +149,7 @@
+@@ -102,6 +220,7 @@
                  const grapheme = char.bytes(line);
                  const grapheme_width: u8 = @intCast(ctx.stringWidth(grapheme));
  
@@ -1341,7 +1447,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
                  if (col + grapheme_width >= container_size.width and
                      line_width > container_size.width and
                      self.overflow == .ellipsis)
-@@ -204,6 +252,10 @@
+@@ -204,6 +323,10 @@
      line: []const u8 = "",
      index: usize = 0,
      hard_iter: LineIterator,
@@ -1352,7 +1458,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
  
      pub const Line = struct {
          width: u16,
-@@ -225,14 +277,15 @@
+@@ -225,14 +348,15 @@
              self.line = self.hard_iter.next() orelse return null;
              self.line = std.mem.trimEnd(u8, self.line, " \t");
              self.index = 0;
@@ -1370,7 +1476,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
  
              if (self.ctx.max.width) |max| {
                  if (cur_width + next_width > max) {
-@@ -244,17 +297,30 @@
+@@ -244,17 +368,30 @@
                      if (trimmed_width > max) {
                          // Won't fit on line by itself, so fit as much on this line as we can
                          var iter = self.ctx.graphemeIterator(word);
@@ -1401,7 +1507,7 @@ diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
                      // We are softwrapping, advance index to the start of the next word
                      const end = self.index;
                      self.index = std.mem.indexOfNonePos(u8, self.line, self.index, soft_breaks) orelse self.line.len;
-@@ -263,11 +329,21 @@
+@@ -263,11 +400,21 @@
              }
  
              self.index = idx;
