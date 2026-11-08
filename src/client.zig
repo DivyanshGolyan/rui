@@ -377,6 +377,52 @@ pub const VerifiedContentScratch = opaque {
         const state: *ScratchState = @ptrCast(@alignCast(self));
         state.close();
     }
+
+    /// Produce a terminal-safe, unlinked display projection only after the
+    /// original source has been completely authenticated. Both copies are
+    /// temporary; the caller owns and must close each one.
+    pub fn projectMultiline(self: *const VerifiedContentScratch, allocator: std.mem.Allocator, dir: std.Io.Dir) !*DisplayScratch {
+        const source: *const ScratchState = @ptrCast(@alignCast(self));
+        const display = try ScratchState.create(allocator, source.io, dir);
+        errdefer display.close();
+        var terminal: @import("TerminalText.zig") = .{ .mode = .multiline };
+        var input: [protocol.content_window_bytes]u8 = undefined;
+        var output: [protocol.content_window_bytes * @import("TerminalText.zig").max_bytes_per_byte + 16]u8 = undefined;
+        var offset: u64 = 0;
+        while (offset < source.length) {
+            const count = try self.readAt(offset, &input);
+            if (count == 0) return error.TruncatedResponse;
+            var writer: std.Io.Writer = .fixed(&output);
+            try terminal.feed(&writer, input[0..count]);
+            try display.file.writeStreamingAll(display.io, writer.buffered());
+            display.length = try std.math.add(u64, display.length, writer.buffered().len);
+            offset += count;
+        }
+        var writer: std.Io.Writer = .fixed(&output);
+        try terminal.finish(&writer);
+        try display.file.writeStreamingAll(display.io, writer.buffered());
+        display.length = try std.math.add(u64, display.length, writer.buffered().len);
+        return @ptrCast(display);
+    }
+};
+
+/// Terminal-safe display bytes derived from, but not identical to, an
+/// authenticated source. Offsets here address the projection, not source.
+pub const DisplayScratch = opaque {
+    pub fn len(self: *const DisplayScratch) u64 {
+        const state: *const ScratchState = @ptrCast(@alignCast(self));
+        return state.length;
+    }
+
+    pub fn readAt(self: *const DisplayScratch, start: u64, buffer: []u8) !usize {
+        const source: *const VerifiedContentScratch = @ptrCast(self);
+        return source.readAt(start, buffer);
+    }
+
+    pub fn close(self: *DisplayScratch) void {
+        const state: *ScratchState = @ptrCast(@alignCast(self));
+        state.close();
+    }
 };
 
 const ScratchState = struct {
@@ -4920,4 +4966,42 @@ test "skills typed captures preserve invocation and invalid mixed reload intent"
     parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
     try std.testing.expect(parsed.value.object.get("reload_skills").?.bool);
     try std.testing.expect(parsed.value.object.get("require_model").?.bool);
+}
+
+test "native verified scratch streams terminal safe projection without changing source" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const state = try ScratchState.create(std.testing.allocator, io, tmp.dir);
+    const source: *VerifiedContentScratch = @ptrCast(state);
+    defer source.close();
+    var input: [4101]u8 = @splat('a');
+    @memcpy(input[4095..], "🙂\x1b\xff");
+    try state.file.writeStreamingAll(io, &input);
+    state.length = input.len;
+    const display = try source.projectMultiline(std.testing.allocator, tmp.dir);
+    defer display.close();
+    var expected = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer expected.deinit();
+    var encoder: @import("TerminalText.zig") = .{ .mode = .multiline };
+    try encoder.feed(&expected.writer, &input);
+    try encoder.finish(&expected.writer);
+    try std.testing.expectEqual(@as(u64, expected.written().len), display.len());
+    const actual = try std.testing.allocator.alloc(u8, expected.written().len);
+    defer std.testing.allocator.free(actual);
+    var at: usize = 0;
+    while (at < actual.len) {
+        const end = @min(actual.len, at + protocol.content_window_bytes);
+        const read = try display.readAt(at, actual[at..end]);
+        try std.testing.expect(read != 0);
+        at += read;
+    }
+    try std.testing.expectEqualStrings(expected.written(), actual);
+    var original: [protocol.content_window_bytes]u8 = undefined;
+    const count = try source.readAt(4094, &original);
+    try std.testing.expectEqualSlices(u8, input[4094..], original[0..count]);
+    var directory = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer directory.close(io);
+    var entries = directory.iterate();
+    try std.testing.expect((try entries.next(io)) == null);
 }

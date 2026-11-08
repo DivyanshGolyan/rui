@@ -709,25 +709,29 @@ test "native paged checkpoints seek source offsets without per-row storage" {
 pub const VerifiedSource = struct {
     item: observations.SourcePage.Item,
     scratch: *@import("client.zig").VerifiedContentScratch,
+    display: *@import("client.zig").DisplayScratch,
 
     pub fn open(allocator: std.mem.Allocator, requests: @import("client.zig").Requests, dir: std.Io.Dir, store: []const u8, page: *const observations.SourcePage, item_index: usize) !VerifiedSource {
         if (item_index >= page.count) return error.InvalidTarget;
         const scratch = try observations.openPageSource(allocator, requests, dir, store, page, item_index);
-        return .{ .item = page.items[item_index], .scratch = scratch };
+        errdefer scratch.close();
+        const display = try scratch.projectMultiline(allocator, dir);
+        return .{ .item = page.items[item_index], .scratch = scratch, .display = display };
     }
 
     pub fn close(self: *VerifiedSource) void {
+        self.display.close();
         self.scratch.close();
         self.* = undefined;
     }
 
     pub fn pagedSource(self: *const VerifiedSource) !@import("vaxis").unicode.PagedSource {
-        return .{ .userdata = self, .length = std.math.cast(usize, self.item.reference.length) orelse return error.SourceTooLarge, .readFn = read };
+        return .{ .userdata = self, .length = std.math.cast(usize, self.display.len()) orelse return error.SourceTooLarge, .readFn = read };
     }
 
     fn read(raw: *const anyopaque, offset: u64, buffer: []u8) !usize {
         const self: *const VerifiedSource = @ptrCast(@alignCast(raw));
-        return self.scratch.readAt(offset, buffer);
+        return self.display.readAt(offset, buffer);
     }
 };
 
