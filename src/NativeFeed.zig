@@ -524,3 +524,45 @@ test "native terminal cell currently requires the entire large grapheme" {
     try std.testing.expectError(error.OutOfMemory, screen.writeCell(0, 0, .{ .char = .{ .grapheme = source, .width = 1 } }));
     std.debug.print("native terminal single_grapheme_bytes={d} screen_allocator_capacity={d} result=OutOfMemory\n", .{ source.len, storage.len });
 }
+
+test "native last-frame cache redraws an oversized grapheme without copying it" {
+    const vaxis = @import("vaxis");
+    const allocator = std.testing.allocator;
+    const source = try allocator.alloc(u8, 1 + 2 * 65_536);
+    defer allocator.free(source);
+    source[0] = 'a';
+    for (0..65_536) |i| {
+        source[1 + 2 * i] = 0xcc;
+        source[2 + 2 * i] = 0x81;
+    }
+    const cell: vaxis.Cell = .{ .char = .{ .grapheme = source, .width = 1 } };
+    var storage: [64 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var screen = try vaxis.AllocatingScreen.init(fixed.allocator(), 1, 1);
+    defer screen.deinit(fixed.allocator());
+    try screen.writeLastCell(0, 0, cell);
+    try std.testing.expect(!screen.buf[0].eql(cell));
+    const oversized_link: vaxis.Cell = .{ .link = .{ .uri = source } };
+    try screen.writeLastCell(0, 0, oversized_link);
+    try std.testing.expect(!screen.buf[0].eql(oversized_link));
+    try std.testing.expect(fixed.end_index < storage.len);
+    const normal: vaxis.Cell = .{ .char = .{ .grapheme = "normal", .width = 1 } };
+    try screen.writeCell(0, 0, normal);
+    try std.testing.expect(screen.buf[0].eql(normal));
+
+    var environment = try std.testing.environ.createMap(allocator);
+    defer environment.deinit();
+    var vx = try vaxis.Vaxis.init(std.testing.io, allocator, &environment, .{});
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    defer vx.deinit(allocator, &output.writer);
+    try vx.resize(allocator, &output.writer, .{ .rows = 1, .cols = 1, .x_pixel = 0, .y_pixel = 0 });
+    vx.screen.writeCell(0, 0, cell);
+    var start = output.written().len;
+    try vx.render(&output.writer);
+    try std.testing.expect(std.mem.indexOf(u8, output.written()[start..], source) != null);
+    start = output.written().len;
+    try vx.render(&output.writer);
+    try std.testing.expect(std.mem.indexOf(u8, output.written()[start..], source) != null);
+    std.debug.print("native last-frame cache source_bytes={d} fixed_bytes={d} redraws=2 exact_source=true\n", .{ source.len, fixed.end_index });
+}
