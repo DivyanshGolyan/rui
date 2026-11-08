@@ -783,6 +783,18 @@ test "ListView bounds queued model movement and handles empty and tiny viewports
     const empty = try list.draw(draw_ctx);
     try testing.expectEqual(@as(usize, 0), empty.children.len);
     try testing.expectEqual(@as(u32, 0), list.cursor);
+    // A zero-width frame does not build a row or consume selection.
+    rows.count = 2;
+    list.item_count = 2;
+    list.jumpToItem(1);
+    rows.builds = 0;
+    draw_ctx.max.width = 0;
+    arena.reset();
+    const zero_width = try list.draw(draw_ctx);
+    try testing.expectEqual(@as(u16, 0), zero_width.size.width);
+    try testing.expectEqual(@as(usize, 0), zero_width.children.len);
+    try testing.expectEqual(@as(usize, 0), rows.builds);
+    try testing.expectEqual(@as(u32, 1), list.cursor);
     // The library's cursor gutter must fit even a one-column viewport.
     rows.count = 1;
     list.item_count = 1;

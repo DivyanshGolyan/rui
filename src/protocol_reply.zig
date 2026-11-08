@@ -396,7 +396,9 @@ test "a model list reply reads as what the Host writes" {
     try std.testing.expectEqual(@import("model_catalog.zig").openai_ids.len + 1, menu.entries.len);
     try std.testing.expectEqual(@as(?model_list.Source, .catalog), menu.sources.get(.codex));
     try std.testing.expectEqual(@as(?model_list.Source, .live), menu.sources.get(.openai));
-    try std.testing.expectEqualStrings("unlisted-model", menu.entries[menu.others].id);
+    const other = menu.entries[@import("model_catalog.zig").openai_ids.len];
+    try std.testing.expectEqualStrings("unlisted-model", other.id);
+    try std.testing.expect(!other.known);
     for ([_][]const u8{ "", protocol.model_list_reply.head, "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"providers\":[]}" }) |body|
         try std.testing.expectError(error.InvalidModelList, modelListProviders(body));
 }
