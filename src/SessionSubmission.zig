@@ -159,6 +159,9 @@ fn freezeMessage(self: *Self, text: []const u8) ![]const u8 {
 pub fn requestRecovery(self: *Self, key: ?[]const u8) !void {
     if (self.intent == null) return;
     if (key) |requested| if (!std.mem.eql(u8, requested, &self.key)) return error.OriginalBindingMismatch;
+    // A gesture made before the prior Action send joins cannot authorize an
+    // unpinned recovery after that send becomes ambiguous.
+    if (self.observed_instance != null and self.task.thread != null) return error.SubmissionInFlight;
     self.retry = if (self.canRetry(self.key)) self.key else null;
 }
 
@@ -539,6 +542,50 @@ test "native observed decision retains fence until transmission may reach Host" 
     self.state = .unconfirmed;
     try std.testing.expectError(error.SubmissionUnresolved, self.discardUnsentOrRejected());
     try std.testing.expect(self.recovery() == .saved);
+}
+
+test "native observed decision requires a fresh retry after ambiguous join" {
+    const Worker = struct {
+        var release: std.atomic.Value(bool) = .init(false);
+        fn lost(raw: *anyopaque, _: *Task) !void {
+            const owner: *Self = @ptrCast(@alignCast(raw));
+            const deadline = std.Io.Clock.awake.now(owner.io).nanoseconds + 6_000_000_000;
+            while (!release.load(.acquire)) {
+                if (std.Io.Clock.awake.now(owner.io).nanoseconds >= deadline) return error.TestCompletionDeadline;
+                std.Thread.yield() catch {};
+            }
+            owner.noteSendFailure(.admission_response);
+            return error.ConnectionResetByPeer;
+        }
+        fn reject(_: *Self) !void {
+            return error.ExplicitRetryReached;
+        }
+    };
+    Worker.release.store(false, .release);
+    var self: Self = .{ .io = std.testing.io, .store = "unused", .session = "k7m2qx", .directory = "unused", .environment = .empty };
+    self.intent = .{ .decision = .{ .action = 19, .decision = .allow_once } };
+    self.observed_instance = @splat(0xa7);
+    self.key = @splat('B');
+    self.publication = .published;
+    self.state = .submitting;
+    try self.task.start(self.io, &self, Worker.lost);
+    defer {
+        Worker.release.store(true, .release);
+        self.cancel();
+        _ = self.join();
+        self.close();
+    }
+    try std.testing.expectError(error.SubmissionInFlight, self.requestRecovery(&self.key));
+    try std.testing.expect(self.retry == null);
+    Worker.release.store(true, .release);
+    const end = self.join();
+    try std.testing.expectEqual(error.ConnectionResetByPeer, end.failed.err);
+    try std.testing.expect(self.firstTransmissionFence() == null);
+    try std.testing.expect(self.retry == null);
+    try std.testing.expect(try self.advanceWithLaunch(Worker.reject) == .absent);
+    try self.requestRecovery(&self.key);
+    try std.testing.expectError(error.ExplicitRetryReached, self.advanceWithLaunch(Worker.reject));
+    try std.testing.expect(self.retry == null);
 }
 
 test "submission reservation failure retains unsent intent ahead of accepted history" {

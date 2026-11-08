@@ -694,7 +694,11 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             if (!self.pasting and key.matches('r', .{ .ctrl = true })) {
                 if (self.submission.view()) |original| {
                     if (original.state != .rejected) {
-                        try self.submission.requestRecovery(null);
+                        self.submission.requestRecovery(null) catch |err| {
+                            self.notice = if (err == error.SubmissionInFlight) "Wait for the original result before retrying" else @errorName(err);
+                            ctx.consumeAndRedraw();
+                            return;
+                        };
                         self.notice = "Retrying original; draft retained";
                     } else self.showOriginal();
                 }
