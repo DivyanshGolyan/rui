@@ -17,8 +17,14 @@ const Self = @This();
 const Item = struct {
     source: feed.VerifiedSource,
     reader: vaxis.unicode.PagedReader,
-    rich: RichLines,
-    index: fw.PagedText.Index,
+    rich: ?RichLines = null,
+    index: ?fw.PagedText.Index = null,
+    preview: [4096 + 16]u8 = undefined,
+    preview_len: usize = 0,
+
+    fn rows(self: *const Item) usize {
+        return 1 + if (self.index) |*index| index.len else @as(usize, 0);
+    }
 };
 
 pub const Anchor = struct {
@@ -72,11 +78,31 @@ pub fn load(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io
         item.source = try feed.VerifiedSource.open(allocator, requests, dir, store, &self.page, page_index);
         errdefer item.source.close();
         item.reader = .{ .source = try item.source.pagedSource() };
-        item.rich = try RichLines.buildRaw(requests.io, dir, try item.source.rawSource(), item.reader.source, requests.cancellation);
-        errdefer item.rich.close();
-        item.index = try fw.PagedText.Index.initStyled(&item.reader, ctx, width, item.rich.provider());
-        const added = try std.math.add(usize, item.index.len, 1);
-        self.row_count = try std.math.add(usize, self.row_count, added);
+        item.rich = null;
+        item.index = null;
+        errdefer if (item.rich) |*rich| rich.close();
+        item.preview_len = 0;
+        if (item.source.item.queued) {
+            const prefix = "Queued · ";
+            @memcpy(item.preview[0..prefix.len], prefix);
+            var used: usize = 0;
+            while (used < 4096) : (used += 1) {
+                const byte = (try item.reader.readByte(used)) orelse break;
+                if (byte == '\n') break;
+                item.preview[prefix.len + used] = byte;
+            }
+            const truncated = used == 4096 and used < item.reader.source.length;
+            while (used != 0 and !std.unicode.utf8ValidateSlice(item.preview[prefix.len .. prefix.len + used])) used -= 1;
+            item.preview_len = prefix.len + used;
+            if (truncated) {
+                @memcpy(item.preview[item.preview_len..][0..3], "…");
+                item.preview_len += 3;
+            }
+        } else {
+            item.rich = try RichLines.buildRaw(requests.io, dir, try item.source.rawSource(), item.reader.source, requests.cancellation);
+            item.index = try fw.PagedText.Index.initStyled(&item.reader, ctx, width, item.rich.?.provider());
+        }
+        self.row_count = try std.math.add(usize, self.row_count, item.rows());
         self.items[self.count] = item;
         self.count += 1;
     }
@@ -91,14 +117,14 @@ pub fn prepareForPublication(self: *Self, cancellation: ?*const client.Cancellat
     if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
     for (self.items[0..self.count]) |item| {
         item.source.cancellation = null;
-        item.rich.releaseCancellation();
+        if (item.rich) |*rich| rich.releaseCancellation();
     }
 }
 
 pub fn destroy(self: *Self) void {
     const allocator = self.allocator;
     for (self.items[0..self.count]) |item| {
-        item.rich.close();
+        if (item.rich) |*rich| rich.close();
         item.source.close();
         allocator.destroy(item);
     }
@@ -106,7 +132,9 @@ pub fn destroy(self: *Self) void {
 }
 
 pub fn fault(self: *const Self) ?anyerror {
-    for (self.items[0..self.count]) |item| if (item.index.fault) |err| return err;
+    for (self.items[0..self.count]) |item| if (item.index) |*index| {
+        if (index.fault) |err| return err;
+    };
     return null;
 }
 
@@ -129,7 +157,7 @@ pub fn sources(self: *const Self, out: *[protocol.ActivityPage.items]observation
 pub fn sourceIndexAt(self: *const Self, row: usize) ?usize {
     var remaining = self.window.global(row) orelse return null;
     for (self.items[0..self.count], 0..) |item, i| {
-        const rows = 1 + item.index.len;
+        const rows = item.rows();
         if (remaining < rows) return i;
         remaining -= rows;
     }
@@ -143,8 +171,10 @@ fn locate(self: *const Self, row: usize) ?Location {
     for (self.items[0..self.count]) |item| {
         if (remaining == 0) return .{ .item = item, .row = null };
         remaining -= 1;
-        if (remaining < item.index.len) return .{ .item = item, .row = remaining };
-        remaining -= item.index.len;
+        if (item.index) |*index| {
+            if (remaining < index.len) return .{ .item = item, .row = remaining };
+            remaining -= index.len;
+        }
     }
     return null;
 }
@@ -153,9 +183,9 @@ fn drawRow(raw: *const anyopaque, row: usize, cursor: usize, arena: std.mem.Allo
     const self: *Self = @ptrCast(@alignCast(@constCast(raw)));
     const global_row = self.window.global(row) orelse return null;
     const location = self.locate(global_row) orelse return null;
-    if (location.row) |line| return location.item.index.builder().itemAtIdxForDraw(line, cursor, arena);
+    if (location.row) |line| return location.item.index.?.builder().itemAtIdxForDraw(line, cursor, arena);
     const label = try arena.create(fw.Text);
-    label.* = .{ .text = if (location.item.source.item.kind == .user) "You" else "Assistant", .softwrap = false, .pinned_horizontal = true };
+    label.* = .{ .text = if (location.item.source.item.queued) location.item.preview[0..location.item.preview_len] else if (location.item.source.item.kind == .user) "You" else "Assistant", .softwrap = false, .pinned_horizontal = true };
     return label.widget();
 }
 
@@ -165,7 +195,7 @@ pub fn prepareAnchor(self: *const Self, row: usize) !?AnchorInput {
     const global_row = self.window.global(row) orelse return null;
     const location = self.locate(global_row) orelse return null;
     const item = location.item;
-    const span = if (location.row) |line| (try item.index.rowAt(line)) orelse return error.InvalidTarget else null;
+    const span = if (location.row) |line| (try item.index.?.rowAt(line)) orelse return error.InvalidTarget else null;
     return .{
         .anchor = .{ .instance = self.page.instance, .session = self.page.session, .position = item.source.item.position, .ordinal = item.source.item.ordinal, .reference = item.source.item.reference, .source = null },
         .scratch = if (span == null) null else item.source.scratch,
@@ -183,12 +213,12 @@ pub fn rowForAnchor(self: *Self, anchor: Anchor, cancellation: ?*const client.Ca
             const row = if (anchor.source) |source| blk: {
                 const projection = try item.source.scratch.projectionOffsetCancelable(source, cancellation);
                 const offset = std.math.cast(usize, projection) orelse return error.InvalidTarget;
-                const line = (try item.index.rowForOffset(offset)) orelse return error.InvalidTarget;
+                const line = (try item.index.?.rowForOffset(offset)) orelse return error.InvalidTarget;
                 break :blk base + 1 + line;
             } else base;
             return self.window.select(row) orelse error.HistoryAnchorUnavailable;
         }
-        base += 1 + item.index.len;
+        base += item.rows();
     }
     return null;
 }

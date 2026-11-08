@@ -184,6 +184,7 @@ fn conversationOnHost(allocator: std.mem.Allocator, requests: client.Requests, s
 pub const SourcePage = struct {
     pub const Item = struct {
         kind: @FieldType(Block, "kind"),
+        queued: bool = false,
         position: u64,
         ordinal: u64,
         reference: protocol.ActivityItem.Content,
@@ -219,18 +220,41 @@ pub fn sourcePage(requests: client.Requests, store: []const u8, id: *const [prot
     result.before = bounds.before;
     result.after = bounds.after;
     for (page.facts.items[0..page.facts.count]) |item| {
-        const selected: ?struct { kind: @FieldType(Block, "kind"), content: protocol.ActivityItem.Content } = switch (item.value) {
-            .user => |message| .{ .kind = .user, .content = message.content },
-            .assistant => |answer| .{ .kind = .assistant, .content = answer.content },
-            else => null,
-        };
-        const value = selected orelse continue;
-        result.items[result.count] = .{ .kind = value.kind, .position = item.position, .ordinal = item.ordinal, .reference = value.content };
+        const selected = sourceItem(item) orelse continue;
+        result.items[result.count] = selected;
         result.count += 1;
     }
     const still_serving = try servingInstance(requests.io, store);
     if (!std.mem.eql(u8, &instance, &still_serving)) return error.HostInstanceChanged;
     return result;
+}
+
+fn sourceItem(item: protocol.ActivityItem) ?SourcePage.Item {
+    const selected: ?struct { kind: @FieldType(Block, "kind"), queued: bool = false, content: protocol.ActivityItem.Content } = switch (item.value) {
+        .admission => |message| if (message.state == .queued) .{ .kind = .user, .queued = true, .content = message.content } else null,
+        .user => |message| .{ .kind = .user, .content = message.content },
+        .assistant => |answer| .{ .kind = .assistant, .content = answer.content },
+        else => null,
+    };
+    const value = selected orelse return null;
+    return .{ .kind = value.kind, .queued = value.queued, .position = item.position, .ordinal = item.ordinal, .reference = value.content };
+}
+
+test "native queued admissions retain distinct identities and exclude applied admissions" {
+    const content: protocol.ActivityItem.Content = .{ .length = 5, .digest = @splat(7) };
+    var message: protocol.ActivityItem.Message = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1 };
+    const first: protocol.ActivityItem = .{ .position = 2, .ordinal = 0, .at = 1, .value = .{ .admission = message } };
+    message.admission = 2;
+    const second: protocol.ActivityItem = .{ .position = 3, .ordinal = 0, .at = 1, .value = .{ .admission = message } };
+    const a = sourceItem(first).?;
+    const b = sourceItem(second).?;
+    try std.testing.expect(a.queued and b.queued);
+    try std.testing.expectEqual(@as(u64, 2), a.position);
+    try std.testing.expectEqual(@as(u64, 3), b.position);
+    try std.testing.expect(std.meta.eql(a.reference, b.reference));
+    message.state = .applied;
+    try std.testing.expect(sourceItem(.{ .position = 3, .ordinal = 0, .at = 1, .value = .{ .admission = message } }) == null);
+    try std.testing.expect(!sourceItem(.{ .position = 4, .ordinal = 0, .at = 1, .value = .{ .user = message } }).?.queued);
 }
 
 const PageBounds = struct { before: ?replies.ActivityCursor = null, after: ?replies.ActivityCursor = null };

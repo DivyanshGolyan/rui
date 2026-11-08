@@ -539,7 +539,7 @@ fn makeExportCommand(allocator: std.mem.Allocator, store: []const u8, session: I
     }
     const digest = std.fmt.bytesToHex(source.reference.digest, .lower);
     return std.fmt.allocPrint(allocator, "Item {d} of {d} from page at opening · {s}\nposition {d}, ordinal {d} · {d} bytes\nRui content digest v1: {s}\nVerified export: rui session export-activity --store-hex {s} --content-bytes {d} --content-digest {s} --session {s} --position {d} --ordinal {d}\nAppend --output PATH for a new file. Source may contain terminal controls.", .{
-        selected + 1, count, if (source.kind == .user) "You" else "Assistant", source.position, source.ordinal, source.reference.length, &digest, hex, source.reference.length, &digest, &session, source.position, source.ordinal,
+        selected + 1, count, if (source.queued) "Queued" else if (source.kind == .user) "You" else "Assistant", source.position, source.ordinal, source.reference.length, &digest, hex, source.reference.length, &digest, &session, source.position, source.ordinal,
     });
 }
 
