@@ -2148,6 +2148,16 @@ test "queue snapshot uses the activity page boundary" {
     try std.testing.expectEqualDeep(QueueSnapshot{ .boundary = 100, .queued = page.facts.queued }, QueueSnapshot.fromActivity(&page));
 }
 
+test "an empty queue does not ask the Host for rows or content" {
+    var host: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0, .queue_read = .{ .boundary = 0, .queue = .{} } };
+    var job: Job = .{ .session = "k7m2qx" };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(usize, 0), host.queue_result.len);
+    try std.testing.expect(!host.queue_result.older and !host.queue_result.newer);
+    try std.testing.expectEqual(@as(usize, 0), host.pages);
+    try std.testing.expectEqual(@as(usize, 0), host.contents);
+}
+
 test "bounded queue windows retain equal admissions across a later stop" {
     var tail: [67]FakeHost.Tail = undefined;
     for (tail[0..66], 1..) |*row, id| row.* = .{ .value = FakeHost.message(id), .excluded_at = 67 };
