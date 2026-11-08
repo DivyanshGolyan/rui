@@ -1436,10 +1436,10 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
 }
 
 /// The model ID borrows the shell's current list until this call returns.
-pub fn stepSelected(state: *State, event: Event, model: ?[]const u8) error{OutOfMemory}!Effects {
+pub fn stepSelected(state: *State, event: Event, selected_model: ?[]const u8) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
-        .composed => |value| try compose(state, value, model, &effects),
+        .composed => |value| try compose(state, value, selected_model, &effects),
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| switch (reply) {
             .page => |page| try listPage(state, page, &effects),
@@ -1547,7 +1547,7 @@ pub fn stepSelected(state: *State, event: Event, model: ?[]const u8) error{OutOf
             effects.add(.{ .open = ref });
         },
         .host => |facts| state.host = facts,
-        .models => |read| readModels(state, read, model),
+        .models => |read| readModels(state, read, selected_model),
         .ran => |ran| try ranCommand(state, ran),
         .saved => |answer| {
             const ended = answer.ended;
