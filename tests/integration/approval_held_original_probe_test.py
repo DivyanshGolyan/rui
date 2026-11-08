@@ -45,13 +45,23 @@ class HeldOriginalProbeTest(unittest.TestCase):
 
     def test_omission_requires_clean_behavior_failure_not_arbitrary_crash(self):
         text = self.log(approval="choice", offered="true", complete=False)
-        text += "try std.testing.expect(screen.offered() == null);\n"
+        predicate = (f"HELD-WIRE-PREDICATE screen.offered()==null failed frame=3 key={self.key} "
+                     "actual=10:allow_once before_enter=true\n")
+        text += predicate
         result = self.classify(text, flags=1)
         self.assertTrue(result["red_control_observed"])
         self.assertFalse(result["native_test_pass"])
         for status, flags in ((-6, None), (-9, None), (0, 0), (0, 2), (0, 5), (0, 1 | (1 << 33))):
             self.assertFalse(self.classify(text, status=status, flags=flags)["red_control_observed"])
-        self.assertFalse(self.classify(text.replace("screen.offered() == null", "unrelated assertion"), flags=1)["red_control_observed"])
+        self.assertFalse(self.classify(text.replace("screen.offered()==null", "unrelated_assertion"), flags=1)["red_control_observed"])
+        self.assertFalse(self.classify(text.replace(predicate, ""), flags=1)["red_control_observed"])
+        self.assertFalse(self.classify(predicate + text.replace(predicate, ""), flags=1)["red_control_observed"])
+        completion = "HELD-ORIGINAL fixture-only Message requests=1 explicit_retry=false decision=10:allow_once count=1\n"
+        self.assertFalse(self.classify(text + completion, flags=1)["red_control_observed"])
+        for old, changed in (("frame=3", "frame=4"), (self.key, "22345678-1234-4234-8234-123456789abc"),
+                             ("actual=10:allow_once", "actual=11:allow_once"),
+                             ("before_enter=true", "before_enter=false")):
+            self.assertFalse(self.classify(text.replace(predicate, predicate.replace(old, changed)), flags=1)["red_control_observed"])
         self.assertFalse(self.classify(text.replace("approval=choice", "approval=held"), flags=1)["red_control_observed"])
         self.assertFalse(self.classify(text.replace("peer=held", "peer=answered"), flags=1)["red_control_observed"])
         for old, changed in (("frame=3", "frame=0"), ("delivered=true", "delivered=false"),

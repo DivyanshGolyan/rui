@@ -53,22 +53,29 @@ def test_result(wire, selection):
 def classify(case, returncode, stderr, root, registered_socket, flags):
     setup = f"HELD-WIRE-SETUP store={root} socket={registered_socket}\n"
     delivered = re.search(
-        r"HELD-WIRE-DELIVERED session=k7m2qx action=10 key=([0-9a-f-]{36}) "
-        r"task_live=true wire=exact peer=held frame=[1-9][0-9]* delivered=true geometry=80x24 "
-        r"input=empty approval=(held|choice) offered=(true|false)\n", stderr)
+        r"HELD-WIRE-DELIVERED session=k7m2qx action=10 key=(?P<key>[0-9a-f-]{36}) "
+        r"task_live=true wire=exact peer=held frame=(?P<frame>[1-9][0-9]*) delivered=true geometry=80x24 "
+        r"input=empty approval=(?P<approval>held|choice) offered=(?P<offered>true|false)\n", stderr)
+    failed = re.search(
+        r"HELD-WIRE-PREDICATE screen\.offered\(\)==null failed "
+        r"frame=(?P<frame>[1-9][0-9]*) key=(?P<key>[0-9a-f-]{36}) "
+        r"actual=10:allow_once before_enter=true\n", stderr)
     ordered = setup in stderr and delivered is not None and stderr.find(setup) < delivered.start()
     requests = 2 if case == "retry" else 1
     recovered = "true" if case == "retry" else "false"
     complete = f"HELD-ORIGINAL fixture-only Message requests={requests} explicit_retry={recovered} decision=10:allow_once count=1\n"
     passed = (returncode == 0 and flags == 0 and ordered and
-              delivered.group(2, 3) == ("held", "false") and
-              stderr.find(complete) >= delivered.end())
+              delivered.group("approval", "offered") == ("held", "false") and
+              failed is None and stderr.find(complete) >= delivered.end())
     # A whole original-capacity omission restores a choice while the genuine
     # exact Message request is held. The native test must fail its no-offer
     # assertion, not fail compilation, skip, leak, time out or merely crash.
+    # The marker is emitted only for the same non-null value immediately
+    # asserted false, before any new Enter; outer expectError hides its trace.
     omitted = (returncode == 0 and flags == 1 and ordered and
-               delivered.group(2, 3) == ("choice", "true") and
-               "try std.testing.expect(screen.offered() == null);" in stderr and
+               delivered.group("approval", "offered") == ("choice", "true") and
+               failed is not None and delivered.end() <= failed.start() and
+               delivered.group("key", "frame") == failed.group("key", "frame") and
                complete not in stderr)
     return {
         "classification": "pass" if passed else "omission_detected" if omitted else "inconclusive",
@@ -78,7 +85,7 @@ def classify(case, returncode, stderr, root, registered_socket, flags):
         "returncode": returncode,
         "host_accepted": False,
         "case": case,
-        "message_key": delivered.group(1) if delivered else None,
+        "message_key": delivered.group("key") if delivered else None,
     }
 
 

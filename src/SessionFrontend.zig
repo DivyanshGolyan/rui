@@ -6344,7 +6344,9 @@ fn testHeldOriginalWire(retry_unconfirmed: bool) !void {
                     std.debug.print("HELD-WIRE-DELIVERED session=k7m2qx action=10 key={s} task_live=true wire=exact peer=held frame={d} delivered=true geometry=80x24 input=empty approval={s} offered={}\n", .{ gate.message_key.?, screen.ticket.?.frame, @tagName(screen.selected.approval), screen.offered() != null });
                     // The omission must fail here, before any new Enter can
                     // consume an incorrectly offered occupied-slot decision.
-                    try std.testing.expect(screen.offered() == null);
+                    const delivered_offer = screen.offered();
+                    if (delivered_offer) |unexpected| std.debug.print("HELD-WIRE-PREDICATE screen.offered()==null failed frame={d} key={s} actual={d}:{s} before_enter=true\n", .{ screen.ticket.?.frame, gate.message_key.?, unexpected.action, @tagName(unexpected.choice) });
+                    try std.testing.expect(delivered_offer == null);
                     try gate.original();
                     try gate.noRequest();
                     gate.held_frame = screen.ticket.?.frame;
