@@ -416,7 +416,7 @@ test "native table realizes visible rows without multiplying widest cell by hist
     counted.calls = 0;
     scroll.jumpToEnd();
     const actual_frame = try scroll.draw(frame_ctx);
-    std.debug.print("[DEBUG-quote-red] actual-scroll calls={d} children={d} frame_bytes={d}\n", .{ counted.calls, actual_frame.children.len, frame_fixed.end_index });
+    std.debug.print("lazy-table actual-scroll calls={d} children={d} frame_bytes={d}\n", .{ counted.calls, actual_frame.children.len, frame_fixed.end_index });
     try std.testing.expect(counted.calls > 0 and counted.calls <= 10);
     try std.testing.expect(actual_frame.children.len <= 10);
     const wide_row = actual_frame.children[actual_frame.children.len - 2].surface;
@@ -489,7 +489,7 @@ test "native quoted fence retains opaque text and original control bytes" {
     try std.testing.expectEqualStrings(source, feed.sourceAt(9, 0).?.source);
 }
 
-test "diagnose native line index blank source row height" {
+test "native line index realizes a blank source row at one cell height" {
     fw.DrawContext.init(.unicode);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -500,6 +500,5 @@ test "diagnose native line index blank source row height" {
     try index.reflow(std.testing.allocator, &input, ctx);
     try std.testing.expectEqual(@as(usize, 1), index.len);
     const row = try (try index.builder().itemAtIdxForDraw(0, 0, ctx.arena)).?.draw(ctx);
-    std.debug.print("[DEBUG-quote-red] blank_row_height={d}\n", .{row.size.height});
-    try std.testing.expectEqual(@as(u16, 0), row.size.height);
+    try std.testing.expectEqual(@as(u16, 1), row.size.height);
 }

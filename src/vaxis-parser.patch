@@ -1590,7 +1590,7 @@ index fe46d2b..064ade1 100644
 +                    .soft => |*iter| if (iter.next()) |wrapped| wrapped.bytes else null,
 +                    .hard => |*iter| iter.next(),
 +                };
-+                if (bytes) |row_bytes| return .{ .text = if (has_rail and row_bytes.len == 0) " " else row_bytes, .style = source.style, .softwrap = false, .overflow = .clip, .virtual_horizontal = !source.softwrap, .pinned_horizontal = source.softwrap, .quote_depth = if (has_rail) source.quote_depth else 0, .lazy_line = source.lazy_line };
++                if (bytes) |row_bytes| return .{ .text = if (row_bytes.len == 0) " " else row_bytes, .style = source.style, .softwrap = false, .overflow = .clip, .virtual_horizontal = !source.softwrap, .pinned_horizontal = source.softwrap, .quote_depth = if (has_rail) source.quote_depth else 0, .lazy_line = source.lazy_line };
 +                self.source_index += 1;
 +                self.iter = .fresh;
 +            }
