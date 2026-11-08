@@ -301,7 +301,7 @@ options: Options,
 hooks: Hooks,
 ops: Operations,
 state: view.State,
-model_list: OverviewModelPicker = .{},
+model_list_owner: OverviewModelPicker = .{},
 caps: view.Caps,
 terminal: *SessionTerminal,
 interrupted: *client.Cancellation,
@@ -637,7 +637,7 @@ fn drain(fd: c_int) void {
 /// Session and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
     self.state.upgrade_busy = self.upgrade_requested or self.upgrade_cancel_draining;
-    const effects = try self.model_list.step(&self.state, value);
+    const effects = try self.model_list_owner.step(&self.state, value);
     // An older read may settle after cancellation; its view event cannot
     // release admission before that borrower is drained and a fresh list runs.
     if (self.upgrade_requested or self.upgrade_cancel_draining) self.state.upgrade_pending = true;
@@ -1188,7 +1188,7 @@ fn drawFrame(self: *Self, frame: u64, size: std.posix.winsize) !?Next {
     errdefer backend.poison();
     // Waiting reports go first, while this is still only allocating memory.
     self.terminal.writeWaiting(backend.prefixWriter()) catch return error.OutOfMemory;
-    const drawn = try OverviewPaint.draw(backend.window(), backend.scratch(), &self.state, &self.model_list, self.composerDraft(), self.caps, frame);
+    const drawn = try OverviewPaint.draw(backend.window(), backend.scratch(), &self.state, &self.model_list_owner, self.composerDraft(), self.caps, frame);
     const notice_revision = self.upgrade_note_revision;
     self.draft_anchor = drawn.draft_anchor;
     self.state.commands = drawn.commands;

@@ -669,19 +669,19 @@ fn pickerLines(painter: *RowPaint, state: *State, model_list: *OverviewModelPick
     }
     if (fit.shown != 0) {
         var builder: ModelRows = .{ .state = state, .painter = painter };
-        const list = &model_list.list;
-        list.children = .{ .builder = .{ .userdata = &builder, .buildFn = ModelRows.build } };
-        defer list.children = .{ .slice = &.{} };
+        const native_list = &model_list.list;
+        native_list.children = .{ .builder = .{ .userdata = &builder, .buildFn = ModelRows.build } };
+        defer native_list.children = .{ .slice = &.{} };
         const width = painter.width;
         const height: u16 = @intCast(fit.shown);
-        const surface = try list.draw(.{
+        const surface = try native_list.draw(.{
             .arena = painter.arena,
             .min = .{},
             .max = .{ .width = width, .height = height },
             .cell_size = .{},
         });
         const window = painter.window.child(.{ .y_off = @intCast(lines.start + line), .width = width, .height = height });
-        surface.render(window, list.widget());
+        surface.render(window, native_list.widget());
         line += fit.shown;
     }
     const listed = fit.shown;
@@ -720,13 +720,13 @@ const ModelRows = struct {
         if (index >= self.state.menu.entries.len) return null;
         self.index = index;
         self.selected = index == cursor;
-        return .{ .userdata = self, .drawFn = draw };
+        return .{ .userdata = self, .drawFn = ModelRows.draw };
     }
 
     fn draw(raw: *anyopaque, context: vaxis.vxfw.DrawContext) Allocator.Error!vaxis.vxfw.Surface {
         const self: *ModelRows = @ptrCast(@alignCast(raw));
         const width = context.max.width.?;
-        const widget: vaxis.vxfw.Widget = .{ .userdata = self, .drawFn = draw };
+        const widget: vaxis.vxfw.Widget = .{ .userdata = self, .drawFn = ModelRows.draw };
         const surface = try vaxis.vxfw.Surface.init(context.arena, widget, .{ .width = width, .height = 1 });
         var screen: vaxis.Screen = .{ .width = width, .height = 1, .width_method = self.painter.caps.width, .buf = surface.buffer };
         const window: vaxis.Window = .{ .screen = &screen, .width = width, .height = 1, .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0 };
@@ -756,7 +756,8 @@ fn modelLine(painter: *RowPaint, state: *const State, entry: model_picker.Entry,
         (if (is_default) try std.fmt.allocPrint(painter.arena, "default {s} default limits", .{painter.glyphs.dot}) else "default limits")
     else if (is_default) "default" else "";
     const tag_cells = painter.measure(tag);
-    const fits = tag.len != 0 and tag_column + tag_cells + 1 <= painter.width;
+    // An optional tag may never clip the identity when the row can show it.
+    const fits = tag.len != 0 and tag_column + tag_cells + 1 <= painter.width and entry.id.len <= tag_column -| 6;
     const id_room = (if (fits) tag_column -| 2 else painter.width -| 1) -| 4;
     _ = try painter.put(4, entry.id, id_room, .{ .colour = if (highlighted) .strong else if (entry.known) .ink else .normal });
     if (fits) _ = try painter.put(tag_column, tag, tag_cells, .{ .colour = .quiet });
@@ -985,7 +986,7 @@ fn ageText(buffer: *[8]u8, seconds: u64) []const u8 {
 const Backend = @import("RenderBackend.zig");
 const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
-const model_list = @import("model_list.zig");
+const model_list_data = @import("model_list.zig");
 const ReasoningEffort = model_capability.ReasoningEffort;
 const max_late_save_bytes = view.max_late_save_bytes;
 const session_work = @import("session_work.zig");
@@ -3202,10 +3203,10 @@ fn modelChoose(owner: *OverviewModelPicker, state: *State, side: enum { left, ri
     std.debug.assert(state.inputMode() == .choice);
     return owner.step(state, .{ .composed = .{ .input = .{ .choice = if (side == .left) .left else .right }, .draft = .{} } });
 }
-fn modelAnswer(owner: *OverviewModelPicker, state: *State, lists: []const model_list.Entry) !void {
+fn modelAnswer(owner: *OverviewModelPicker, state: *State, lists: []const model_list_data.Entry) !void {
     try expectEffects(&.{}, try owner.step(state, .{ .models = .{ .menu = try model_picker.testMenu(lists) } }));
 }
-fn modelOpen(owner: *OverviewModelPicker, state: *State, lists: []const model_list.Entry) !void {
+fn modelOpen(owner: *OverviewModelPicker, state: *State, lists: []const model_list_data.Entry) !void {
     const draft = try typeText(state, "/model");
     try expectEffects(&.{ .clear_draft, .list_models }, try modelSubmit(owner, state, draft));
     try modelAnswer(owner, state, lists);
@@ -3818,6 +3819,135 @@ test "archive state and confirmation paint through the actual shared backend" {
     try std.testing.expect(std.mem.indexOf(u8, pending, "[Archiving] second") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "Stopping and archiving") != null);
     try std.testing.expect(std.mem.indexOf(u8, pending, "Stop and archive bbbbbb?") != null);
+}
+
+test "narrow model picks refuse clipped physical IDs until the full selected ID fits" {
+    var state = try pickerState(null);
+    var owner: OverviewModelPicker = .{};
+    defer state.deinit();
+    try modelOpen(&owner, &state, &.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "alpha\nalpine\n" } } }});
+    const draft = Draft{};
+    for (0..2) |index| {
+        var frame = try sizedModelRender(&owner, &state, draft, 6, 24, .{ .unicode = true, .depth = .none }, 0);
+        defer frame.deinit();
+        const row = layout(&state, 1, 0).picker.start + index;
+        try std.testing.expectEqualStrings("›", frame.cell(2, row).char.grapheme);
+        try std.testing.expectEqualStrings("…", frame.cell(4, row).char.grapheme);
+        try expectEffects(&.{}, try modelSubmit(&owner, &state, draft));
+        try std.testing.expect(state.default == null);
+        try std.testing.expect(state.picker != null);
+        try std.testing.expectEqualStrings("Wide", state.notice.?.text());
+        // The compact recovery instruction itself fits in physical cells,
+        // with and without terminal colour; no ellipsis hides its meaning.
+        for ([_]Caps{ .{ .unicode = true, .depth = .none }, .{ .unicode = true, .depth = .direct } }) |caps| {
+            var notice_frame = try sizedModelRender(&owner, &state, draft, 6, 24, caps, 0);
+            defer notice_frame.deinit();
+            for ("Wide", 0..) |byte, column| try std.testing.expectEqual(byte, notice_frame.cell(1 + column, 23).char.grapheme[0]);
+        }
+        if (index == 0) try expectEffects(&.{}, try modelPress(&owner, &state, draft, .next));
+    }
+    try std.testing.expectEqualStrings("alpine", owner.selected(&state).?);
+    {
+        var frame = try sizedModelRender(&owner, &state, draft, 11, 24, .{ .unicode = true, .depth = .none }, 0);
+        defer frame.deinit();
+        const row = layout(&state, 1, 0).picker.start + 1;
+        for ("alpine", 0..) |byte, index| try std.testing.expectEqual(byte, frame.cell(4 + index, row).char.grapheme[0]);
+    }
+    try expectEffects(&.{.{ .save_default = Default.of("codex", "alpine").? }}, try modelSubmit(&owner, &state, draft));
+}
+
+test "shared model choice refuses obscured physical sign-ins through resize" {
+    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+    var owner: OverviewModelPicker = .{};
+    defer state.deinit();
+    try modelOpen(&owner, &state, &both);
+    const draft = Draft{};
+    {
+        var frame = try sizedModelRender(&owner, &state, draft, 20, 24, .{ .unicode = true, .depth = .none }, 0);
+        defer frame.deinit();
+        const row = layout(&state, 1, 0).picker.start;
+        for ("gpt-6-luna", 0..) |byte, index| try std.testing.expectEqual(byte, frame.cell(4 + index, row).char.grapheme[0]);
+    }
+    // The ID fits, but both provider labels would not: do not enter choice.
+    try expectEffects(&.{}, try modelSubmit(&owner, &state, draft));
+    try std.testing.expect(state.picker.?.step == .models);
+    try std.testing.expectEqual(Provider.codex, state.default.?.provider);
+    {
+        var frame = try sizedModelRender(&owner, &state, draft, 31, 24, .{ .unicode = true, .depth = .none }, 0);
+        defer frame.deinit();
+    }
+    try expectEffects(&.{}, try modelSubmit(&owner, &state, draft));
+    try std.testing.expect(state.picker.?.step == .sign_in);
+    {
+        var frame = try sizedModelRender(&owner, &state, draft, 20, 24, .{ .unicode = true, .depth = .none }, 0);
+        defer frame.deinit();
+        const row = layout(&state, 1, 0).commands.end;
+        try std.testing.expectEqualStrings("C", frame.cell(10, row).char.grapheme);
+    }
+    try expectEffects(&.{}, try modelChoose(&owner, &state, .right));
+    try std.testing.expectEqual(Provider.codex, state.picker.?.step.sign_in);
+    try expectEffects(&.{}, try modelSubmit(&owner, &state, draft));
+    try std.testing.expectEqual(Provider.codex, state.default.?.provider);
+    try std.testing.expect(state.picker.?.step == .sign_in);
+    {
+        var frame = try sizedModelRender(&owner, &state, draft, 31, 24, .{ .unicode = true, .depth = .none }, 0);
+        defer frame.deinit();
+        const row = layout(&state, 1, 0).commands.end;
+        for ("ChatGPT", 0..) |byte, index| try std.testing.expectEqual(byte, frame.cell(10 + index, row).char.grapheme[0]);
+        for ("API key", 0..) |byte, index| try std.testing.expectEqual(byte, frame.cell(22 + index, row).char.grapheme[0]);
+    }
+    try expectEffects(&.{}, try modelChoose(&owner, &state, .right));
+    try expectEffects(&.{.{ .save_default = Default.of("openai", "gpt-6-luna").? }}, try modelSubmit(&owner, &state, draft));
+}
+
+test "an optional default tag cannot truncate a model ID that physically fits" {
+    const id = "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm";
+    var state = try pickerState(Default.of("codex", id));
+    var owner: OverviewModelPicker = .{};
+    defer state.deinit();
+    try modelOpen(&owner, &state, &.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = id ++ "\n" } } }});
+    {
+        var frame = try sizedModelRender(&owner, &state, .{}, 80, 24, .{ .unicode = true, .depth = .none }, 0);
+        defer frame.deinit();
+        const row = layout(&state, 1, 0).picker.start;
+        for (id, 0..) |byte, index| try std.testing.expectEqual(byte, frame.cell(4 + index, row).char.grapheme[0]);
+    }
+    try expectEffects(&.{.{ .save_default = Default.of("codex", id).? }}, try modelSubmit(&owner, &state, .{}));
+}
+
+test "provider navigation refuses an ID clipped after choosing a shared model" {
+    const id = "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm";
+    const lists = [_]model_list_data.Entry{
+        .{ .provider = .codex, .list = .{ .live = .{ .bytes = id ++ "\n" } } },
+        .{ .provider = .openai, .list = .{ .live = .{ .bytes = id ++ "\n" } } },
+    };
+    var state = try pickerState(Default.of("codex", id));
+    var owner: OverviewModelPicker = .{};
+    defer state.deinit();
+    try modelOpen(&owner, &state, &lists);
+    try expectEffects(&.{}, try modelSubmit(&owner, &state, .{}));
+    try std.testing.expect(state.picker.?.step == .sign_in);
+    {
+        var frame = try sizedModelRender(&owner, &state, .{}, 31, 24, .{ .unicode = true, .depth = .none }, 0);
+        defer frame.deinit();
+        const model_row = layout(&state, 1, 0).picker.start;
+        for (4..29) |column| try std.testing.expectEqualStrings("m", frame.cell(column, model_row).char.grapheme);
+        try std.testing.expectEqualStrings("…", frame.cell(29, model_row).char.grapheme);
+        const choice_row = layout(&state, 1, 0).commands.end;
+        for ("API key", 0..) |byte, index| try std.testing.expectEqual(byte, frame.cell(22 + index, choice_row).char.grapheme[0]);
+    }
+    try expectEffects(&.{}, try modelChoose(&owner, &state, .right));
+    try std.testing.expectEqual(Provider.codex, state.picker.?.step.sign_in);
+    try expectEffects(&.{}, try modelSubmit(&owner, &state, .{}));
+    try std.testing.expectEqual(Provider.codex, state.default.?.provider);
+    {
+        var frame = try sizedModelRender(&owner, &state, .{}, 80, 24, .{ .unicode = true, .depth = .none }, 0);
+        defer frame.deinit();
+        const row = layout(&state, 1, 0).picker.start;
+        for (id, 0..) |byte, index| try std.testing.expectEqual(byte, frame.cell(4 + index, row).char.grapheme[0]);
+    }
+    try expectEffects(&.{}, try modelChoose(&owner, &state, .right));
+    try expectEffects(&.{.{ .save_default = Default.of("openai", id).? }}, try modelSubmit(&owner, &state, .{}));
 }
 
 test "native model list keeps identity and physical selection through queued input and resize" {

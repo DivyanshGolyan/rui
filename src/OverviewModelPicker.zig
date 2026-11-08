@@ -19,16 +19,16 @@ pub fn selected(self: *const Self, state: *const view.State) ?[]const u8 {
 /// A copied ID bridges a menu replacement without a second retained cursor.
 pub fn step(self: *Self, state: *view.State, event: view.Event) error{OutOfMemory}!view.Effects {
     var id: [model_capability.max_model_bytes]u8 = undefined;
-    const selected_id = if (self.selected(state)) |selected| blk: {
-        @memcpy(id[0..selected.len], selected);
-        break :blk id[0..selected.len];
+    const selected_id = if (self.selected(state)) |model_id| blk: {
+        @memcpy(id[0..model_id.len], model_id);
+        break :blk id[0..model_id.len];
     } else null;
     var effects = try view.stepSelected(state, event, selected_id);
     if (state.picker == null) {
         self.list = .{ .children = .{ .slice = &.{} }, .item_count = 0, .draw_cursor = false };
     } else {
         self.list.item_count = @intCast(state.menu.entries.len);
-        const at = if (selected_id) |selected| state.menu.find(selected) else null;
+        const at = if (selected_id) |model_id| state.menu.find(model_id) else null;
         const row: usize = if (at) |index| state.shownMenu().row(index) else 0;
         if (self.list.cursor != row or at == null) self.list.jumpToItem(@intCast(row));
     }

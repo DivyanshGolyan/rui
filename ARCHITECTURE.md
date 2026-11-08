@@ -2304,7 +2304,7 @@ The overview's worker reads the list and builds the menu, so the screen never wa
 A list still loading says so and is read again with the next listing, a fallback list says the live one is unavailable, and each sign-in the Host does not serve shows one line naming its login command.
 A later read that gets no answer, or an answer Rui cannot read, keeps the list under a note that says which.
 The native ListView owns model cursor and scrolling over fixed-height selectable rows. On a short screen the highlighted model always shows, and the notes and `N more` take only the rows the models leave.
-When the screen leaves the picker no row, `/model` says the screen is too small instead of opening it, and a picker a resize hides takes no key until it shows again: the keys act as they would without it.
+When the screen leaves the picker no row, `/model` says the screen is too small instead of opening it, and a picker a resize hides takes no key until it shows again: the keys act as they would without it. A visible but truncated model ID cannot be picked; a shared model also needs both sign-in labels visible before entering or moving the choice or saving it. The picker asks to widen the screen rather than act on a hidden identity.
 The sign-ins are named "ChatGPT" (`codex`) and "API key" (`openai`).
 Up, Down, Home and End move the highlight; Enter on a model one sign-in offers is the whole pick, and on one both offer it turns the input row into the `Use ChatGPT / API key` choice, the shape of an Action's Allow once / Deny, at the next Session's sign-in, where Left and Right move and Enter picks.
 Esc steps back from the choice to the models, then closes the picker, and typing or a paste leaves it for the draft.
