@@ -965,7 +965,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     };
     try out.writeAll(encoded);
     try out.flush();
-    return .{ .frame = self.frames, .notice = layout.notice.length != 0, .queue = layout.queued_height >= (if (footer.queued != null and footer.queued.?.list != null and footer.queued.?.list.?.page.len != 0) @as(u16, 2) else 1) and size.col >= 5 and self.consent == null and layout.list_height == 0 and footer.queued != null and footer.queued.?.list != null };
+    return .{ .frame = self.frames, .notice = layout.notice.length != 0, .queue = layout.queued_height >= (if (footer.queued != null and footer.queued.?.list != null and footer.queued.?.list.?.page.len != 0) @as(u16, 2) else 1) and size.col >= 5 and self.consent == null and layout.list_height == 0 and footer.queued != null and footer.queued.?.list != null and footer.queued.?.list.?.identifiable(size.col) };
 }
 
 fn drawChoice(self: *const Self, window: vaxis.Window, width: u16, original: ?Footer.Original, compact_archive: ?Footer.CompactArchive) void {
@@ -3670,5 +3670,50 @@ test "pending section yields at minimum geometry and returns with a legible narr
         try std.testing.expect(wide.queue);
         try std.testing.expect(screenHas(screen, "Pending: Alt-Q", &buffer));
         try std.testing.expect(screenHas(screen, "中文", &buffer));
+    }
+}
+
+test "pending identity is never silently clipped and returns after widening" {
+    for ([_]bool{ false, true }) |colour| {
+        var environ = try std.testing.environ.createMap(std.testing.allocator);
+        defer environ.deinit();
+        const screen = try std.testing.allocator.create(Self);
+        defer std.testing.allocator.destroy(screen);
+        try Test.init(screen, std.testing.io, &environ, colour);
+        defer Test.deinit(screen);
+        var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer out.deinit();
+        var queue: SessionQueue = .{};
+        queue.observe(.{ .boundary = 12, .queued = .{ .count = 2, .oldest_position = 2, .newest_position = 3, .newest_admission = std.math.maxInt(u64) } });
+        const request = queue.wanted.?;
+        queue.wanted = null;
+        var page: @import("session_reads.zig").QueuePage = .{ .len = 2 };
+        page.entries[0] = .{ .admission = std.math.maxInt(u64) - 1, .position = 2, .line = .{} };
+        page.entries[1] = .{ .admission = std.math.maxInt(u64), .position = 3, .line = .{} };
+        try page.entries[0].line.set("duplicate");
+        try page.entries[1].line.set("duplicate");
+        try std.testing.expect(queue.publish(request, page));
+        queue.focused = true;
+        const footer: Footer = .{ .queued = .{ .waiting = .{ .line = "", .count = 2 }, .status = "", .list = &queue } };
+        const calls: View.Live = .{};
+        var buffer: [256]u8 = undefined;
+        for ([_]u16{ 8, 23 }) |columns| {
+            const delivered = try Test.render(screen, &out.writer, .{ .row = 12, .col = columns, .xpixel = 0, .ypixel = 0 }, "draft", 5, footer, &calls);
+            try std.testing.expect(!delivered.queue);
+            try std.testing.expect(screenHas(screen, "Widen", &buffer));
+            try std.testing.expect(!screenHas(screen, "184467", &buffer));
+            try std.testing.expect(screenHas(screen, "draft", &buffer));
+        }
+        const wide = try Test.render(screen, &out.writer, .{ .row = 12, .col = 32, .xpixel = 0, .ypixel = 0 }, "draft", 5, footer, &calls);
+        try std.testing.expect(wide.queue);
+        try std.testing.expect(screenHas(screen, "18446744073709551614 duplicate", &buffer));
+        try std.testing.expect(screenHas(screen, "18446744073709551615 duplicate", &buffer));
+        try std.testing.expect(screenHas(screen, "draft", &buffer));
+        // Moving the native cursor identifies the other otherwise-equal row.
+        queue.move(std.testing.allocator, .forward);
+        const moved = try Test.render(screen, &out.writer, .{ .row = 12, .col = 32, .xpixel = 0, .ypixel = 0 }, "draft", 5, footer, &calls);
+        try std.testing.expect(moved.queue);
+        try std.testing.expectEqual(@as(usize, 1), queue.list.cursor);
+        try std.testing.expect(screenHas(screen, "› 18446744073709551615", &buffer));
     }
 }

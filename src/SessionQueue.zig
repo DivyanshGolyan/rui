@@ -98,12 +98,22 @@ test "queue edge requests a bounded page at the native cursor" {
     try std.testing.expectEqual(Direction.forward, self.wanted.?.direction);
 }
 
+/// A page is inspectable only when every admission identity and at least one
+/// preview cell fit. Never paint two truncated identities as if distinct.
+pub fn identifiable(self: *const Self, width: u16) bool {
+    for (self.page.entries[0..self.page.len]) |entry| {
+        if (std.fmt.count("{d}", .{entry.admission}) + 4 > width) return false;
+    }
+    return true;
+}
+
 /// Paint only the allocated inline region. The first row is the focus hint;
 /// the native ListView builds fixed-height children in the charged frame arena.
 pub fn draw(self: *Self, window: vaxis.Window, arena: std.mem.Allocator, method: vaxis.gwidth.Method, quiet: vaxis.Style, available: bool) !void {
     const header = window.child(.{ .height = 1 });
-    _ = header.printSegment(.{ .text = if (!available) "Pending" else if (self.focused) (if (window.width >= 13) "↑↓ move · Esc" else "↑↓ Esc") else if (window.width >= 14) "Pending: Alt-Q" else "Alt-Q", .style = quiet }, .{ .wrap = .none });
-    if (window.height < 2 or self.page.len == 0) return;
+    const fits = self.identifiable(window.width);
+    _ = header.printSegment(.{ .text = if (!available) "Pending" else if (!fits) "Widen" else if (self.focused) (if (window.width >= 13) "↑↓ move · Esc" else "↑↓ Esc") else if (window.width >= 14) "Pending: Alt-Q" else "Alt-Q", .style = quiet }, .{ .wrap = .none });
+    if (!fits or window.height < 2 or self.page.len == 0) return;
     var rows: Rows = .{ .owner = self, .method = method, .quiet = quiet, .available = available };
     self.list.children = .{ .builder = .{ .userdata = &rows, .buildFn = Rows.build } };
     defer self.list.children = .{ .slice = &.{} };

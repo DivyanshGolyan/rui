@@ -2145,13 +2145,13 @@ const FakeHost = struct {
         job.store = root;
         job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
         var task: Task = .{ .io = io };
-        if (self.queue_read) |step| {
-            const snapshot: QueueSnapshot = .{ .boundary = step.boundary, .queued = step.queue };
-            if (step.ui) {
-                job.queue_request = .{ .snapshot = snapshot, .position = step.position, .direction = step.direction };
+        if (self.queue_read) |queue_step| {
+            const snapshot: QueueSnapshot = .{ .boundary = queue_step.boundary, .queued = queue_step.queue };
+            if (queue_step.ui) {
+                job.queue_request = .{ .snapshot = snapshot, .position = queue_step.position, .direction = queue_step.direction };
                 try queuePage(job, &task);
                 self.queue_result = job.result.queue_page.?;
-            } else self.queue_result = try readQueuePage(task.requests(), job, snapshot, step.position, step.direction);
+            } else self.queue_result = try readQueuePage(task.requests(), job, snapshot, queue_step.position, queue_step.direction);
         } else if (self.listing) try list(job, &task, job.target.listing) else try scan(job, &task);
         self.shown = self.output[0..try inspection.readPositionalAll(io, &self.output, 0)];
     }
