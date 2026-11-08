@@ -669,19 +669,19 @@ fn pickerLines(painter: *RowPaint, state: *State, model_list: *OverviewModelPick
     }
     if (fit.shown != 0) {
         var builder: ModelRows = .{ .state = state, .painter = painter };
-        const list = &model_list.list;
-        list.children = .{ .builder = .{ .userdata = &builder, .buildFn = ModelRows.build } };
-        defer list.children = .{ .slice = &.{} };
+        const native_list = &model_list.list;
+        native_list.children = .{ .builder = .{ .userdata = &builder, .buildFn = ModelRows.build } };
+        defer native_list.children = .{ .slice = &.{} };
         const width = painter.width;
         const height: u16 = @intCast(fit.shown);
-        const surface = try list.draw(.{
+        const surface = try native_list.draw(.{
             .arena = painter.arena,
             .min = .{},
             .max = .{ .width = width, .height = height },
             .cell_size = .{},
         });
         const window = painter.window.child(.{ .y_off = @intCast(lines.start + line), .width = width, .height = height });
-        surface.render(window, list.widget());
+        surface.render(window, native_list.widget());
         line += fit.shown;
     }
     const listed = fit.shown;
