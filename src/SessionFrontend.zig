@@ -1300,7 +1300,7 @@ fn draw(self: *Self) !bool {
 /// The post-write consent observation: input serviced after a delivered
 /// decision prompt offers it only when nothing arrived or remains.
 fn consentReceipt(self: *Self, service: ConsentPolicy.Service) bool {
-    return self.terminal.screen.promptCompleted(service, self.input.pending() != .none, self.commandActive() or self.dirty);
+    return self.terminal.screen.promptCompleted(service, self.input.pending() != .none, self.approvalBlocked() or self.dirty);
 }
 
 /// Writes one frame and applies its receipt.
@@ -1311,12 +1311,12 @@ fn drawFrame(self: *Self) !void {
     // A waiting Action says how to decide it under the input, not here. A
     // sent Message reads Sent until live output shows it: as its row, at
     // its stop, or in the queued row, which the frame may drop.
-    const submission_status: ?[]const u8 = if (self.reading.opening) "Opening…" else if (waiting) "" else if (self.submission.view()) |submission| switch (submission.state) {
+    const submission_status: ?[]const u8 = if (self.reading.opening) "Opening…" else if (self.submission.view()) |submission| switch (submission.state) {
         .not_started => "Not sent · Ctrl-R retries original",
         .submitting => "Sending…",
         .unconfirmed => if (submission.kind == .decision) "! Decision not confirmed · Ctrl-R retries original" else "! Not confirmed · Ctrl-R retries original",
         .rejected => "Rejected · /discard",
-    } else null;
+    } else if (waiting) "" else null;
     const base_status = submission_status orelse if (self.admission.echo != null) "Sent" else "";
     // A waiting Action speaks for itself; elsewhere the work says what it is
     // doing now, on every view.
@@ -1344,7 +1344,7 @@ fn drawFrame(self: *Self) !void {
     self.dirty = false;
     const notice_revision = self.upgrade_note_revision;
     const rendered_upgrade = said.text == null and self.notice == null and !screen.actionVisible() and self.upgrade_note_len != 0;
-    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .status = status, .status_essential = self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
+    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .original_pending = self.submissionOccupied(), .status = status, .status_essential = self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
     _ = screen.presented(delivered);
     if (delivered.notice and rendered_upgrade and notice_revision == self.upgrade_note_revision) self.upgrade_note_shown = true;
 }
@@ -1377,17 +1377,15 @@ fn requestList(self: *Self) ?slash_commands_shared.List {
 }
 
 /// The original a /recover row retries: a plain unconfirmed Message,
-/// nothing in flight, and no Action waiting, at which Ctrl-R and /recover
-/// retry nothing.
+/// nothing in flight, at which Ctrl-R and /recover retry nothing.
 fn recoverable(self: *const Self) ?*const [36]u8 {
-    if (self.terminal.screen.consent != null) return null;
     return self.submission.unconfirmedMessage();
 }
 
-/// Ctrl-R, or /recover with the original's key: retries the original,
-/// except while an Action waits, which only its choice decides.
+/// Ctrl-R, or /recover with the original's key, retries that original. An
+/// Action with no occupied submission still has nothing to recover.
 fn recover(self: *Self, key: ?[]const u8) !void {
-    if (self.terminal.screen.consent != null) {
+    if (self.terminal.screen.consent != null and !self.submissionOccupied()) {
         self.notice = self.decisionNotice();
         return;
     }
@@ -1551,6 +1549,15 @@ fn beginMessage(self: *Self, intent: Submission.Intent) !void {
 /// A queued or running command holds the choice until it completes.
 fn commandActive(self: *const Self) bool {
     return self.upgradeHeld() or self.input.queuedCommand() != null or self.inspection.command_running;
+}
+
+/// Decision and denial both require the single original-submission slot.
+fn submissionOccupied(self: *const Self) bool {
+    return self.submission.intent != null or self.submission.task.thread != null;
+}
+
+fn approvalBlocked(self: *const Self) bool {
+    return self.commandActive() or self.submissionOccupied();
 }
 
 /// What a key does in a conversation, beside the draft or an Action's choice.
@@ -1929,9 +1936,11 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer
     const screen = self.terminal.screen;
     switch (Editor.select(conversation_keys, decoded)) {
         .none => {},
-        // While an Action waits there is no original to retry.
+        // An earlier original may still occupy the single submission slot.
         .action => |action| switch (action) {
-            .recover => self.notice = "! Action needs a decision; nothing to retry.",
+            .recover => if (self.submissionOccupied()) try self.recover(null) else {
+                self.notice = "! Action needs a decision; nothing to retry.";
+            },
             // The draft is not the choice's; its sent Messages wait.
             .older, .newer => {},
             else => try self.perform(action),
@@ -1941,7 +1950,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer
         .enter => try self.choose(.enter, offer),
         // The draft takes this key and those after it, beside the Action;
         // while a command runs, neither a Message nor a command could go.
-        .text => if (screen.selected.approval == .held) {
+        .text => if (screen.selected.approval == .held and self.commandActive()) {
             self.notice = "! Command still running. Input ignored.";
         } else {
             screen.moveRow(.draft);
@@ -1956,7 +1965,7 @@ fn choiceEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer
 /// command and the offer; one that cannot act says why.
 fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?Screen.Offer) !void {
     const screen = self.terminal.screen;
-    switch (screen.choose(key, offer, self.terminal.geometry(), self.commandActive())) {
+    switch (screen.choose(key, offer, self.terminal.geometry(), self.approvalBlocked())) {
         .picked => {},
         .decision => |selected| {
             // Consumption precedes fallible submission.
@@ -1967,7 +1976,7 @@ fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?Screen.Offer) !void {
             } } });
         },
         .blocked => |why| self.notice = switch (why) {
-            .command => "! Command still running. Nothing authorized.",
+            .command => if (self.submissionOccupied()) "! Original pending. Nothing authorized." else "! Command still running. Nothing authorized.",
             .not_ready, .layout => "! Not ready; nothing authorized.",
         },
     }
@@ -1985,7 +1994,7 @@ const reason_not_ready = "! Not ready; nothing denied · " ++ Screen.deny_words;
 
 /// Why Enter in the draft beside an Action sent nothing.
 fn reasonNotice(self: *const Self, letter: bool) []const u8 {
-    if (self.terminal.screen.liveApproval(self.commandActive()) != .reason) return self.decisionNotice();
+    if (self.terminal.screen.liveApproval(self.approvalBlocked()) != .reason) return self.decisionNotice();
     return if (letter) "! Use ←→ and Enter to choose; a message denies the call." else reason_not_ready;
 }
 
@@ -1997,7 +2006,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
     const submission = self.submission.view();
     // Only the first key after an offered frame carries an offer, so the
     // geometry probe runs at most once per frame.
-    const reason = if (screen.consent == null or offer == null) null else screen.reasonOffered(offer, self.terminal.geometry(), self.commandActive());
+    const reason = if (screen.consent == null or offer == null) null else screen.reasonOffered(offer, self.terminal.geometry(), self.approvalBlocked());
     const letter = screen.consent != null and ConsentPolicy.choiceLetter(self.input.composition().bytes);
     // A Message waits for a pending command, which may change its configuration.
     // A live probe immediately before sealing, with no effect between them.
@@ -2017,7 +2026,7 @@ fn draftEvent(self: *Self, decoded: TerminalInput.Decoded, offer: ?Screen.Offer)
             try self.beginMessage(.{ .message_then_deny = .{ .ticket = ticket, .action = denial.action } });
         } else try self.beginMessage(.{ .message = ticket }),
         .command => try self.commandLine(),
-        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (screen.consent != null) self.reasonNotice(letter) else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
+        .busy => self.notice = if (self.commandActive()) "! Command still running. Draft retained." else if (submission != null and submission.?.state == .rejected) "! Original rejected. Keep editing; /discard releases it. Draft retained." else if (self.reading.phase == .permission) "! Action needs a decision. Draft retained." else if (screen.consent != null and self.submissionOccupied()) "! Original pending. Draft retained; Ctrl-R retries the original." else if (screen.consent != null) self.reasonNotice(letter) else if (submission != null and submission.?.kind == .decision) "! Decision pending. Keep editing; Ctrl-R retries that decision." else "! Input still pending. Keep editing; Ctrl-R retries the original.",
         .editor => |outcome| switch (outcome) {
             .action => |action| try self.perform(action),
             .refused => |why| self.notice = refusedNotice(why),
@@ -3478,6 +3487,65 @@ test "Ctrl-R beside an offered Action spends the offer in every encoding, so the
     }
 }
 
+test "occupied original blocks stale and drawn Action decisions and retained reasons" {
+    for ([_]Submission.State{ .not_started, .submitting, .unconfirmed, .rejected }) |state| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        try held.settle();
+        try std.testing.expect(held.screen.offered() != null);
+        const original = self.input.submitText("original message");
+        self.submission.intent = .{ .message = original };
+        self.submission.state = state;
+        self.submission.key = @splat('K');
+        // Capacity changes after the old prompt: the live check must stop
+        // this Enter before decide or release, even before the next frame.
+        try std.testing.expectEqual(ConsentPolicy.Approval.held, held.screen.liveApproval(self.approvalBlocked()));
+        try sendKeys(self, "\r");
+        try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+        try std.testing.expect(held.screen.actionVisible());
+        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        try std.testing.expectEqual(@as([36]u8, @splat('K')), self.submission.key);
+        try std.testing.expectEqualStrings("! Original pending. Nothing authorized.", self.notice.?);
+        self.dirty = true;
+        try held.settle();
+        try std.testing.expectEqual(ConsentPolicy.Approval.held, held.screen.selected.approval);
+        try std.testing.expect(held.screen.offered() == null);
+        // A held output attempt pumps input before delivery; it cannot
+        // decide or turn its own receipt into an offer.
+        try held.hold("\r");
+        try self.drawFrame();
+        try std.testing.expect(held.pumps != 0);
+        try std.testing.expect(held.screen.offered() == null);
+        try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        // The draft remains editable, but Enter cannot consume the Action as
+        // a denial reason while this original still occupies the slot.
+        try sendKeys(self, "keep draft");
+        self.dirty = true;
+        try held.settle();
+        try std.testing.expectEqual(ConsentPolicy.Approval.paused, held.screen.selected.approval);
+        try std.testing.expect(held.screen.offered() == null);
+        try sendKeys(self, "\r");
+        try std.testing.expectEqualStrings("keep draft", self.input.composition().bytes);
+        try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+        try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+        try std.testing.expectEqual(@as([36]u8, @splat('K')), self.submission.key);
+        if (state == .rejected) {
+            try self.slashCommand("/discard");
+            try std.testing.expect(self.submission.view() == null);
+            try std.testing.expectEqualStrings("keep draft", self.input.composition().bytes);
+            try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+            try std.testing.expect(held.screen.offered() == null);
+            self.dirty = true;
+            try held.settle();
+            try std.testing.expectEqual(ConsentPolicy.Approval.reason, held.screen.selected.approval);
+        } else self.submission.intent = null;
+    }
+}
+
 test "arrows move the choice only once input is fresh, and Enter decides the option shown" {
     for ([_]ConsentPolicy.Choice{ .allow_once, .deny }) |choice| {
         errdefer std.debug.print("choice={s}\n", .{@tagName(choice)});
@@ -4247,21 +4315,30 @@ test "a pending decision, or a Message that carries one, has no /recover row, an
     }
 }
 
-test "/recover typed beside a waiting Action retries nothing, as Ctrl-R does" {
+test "recovery beside a waiting Action binds the retained original only" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
     const original = "01234567-89ab-4cde-8012-0123456789ab";
+    const wrong = "33333333-89ab-4cde-8012-0123456789ab";
     self.submission.intent = .{ .message = self.input.submitText("unconfirmed original") };
     self.submission.state = .unconfirmed;
     self.submission.key = original.*;
     const file = try held.adopt(3);
     defer file.close(std.testing.io);
     try held.settle();
-    try std.testing.expect(held.screen.consent != null);
-    try stepKeys(held, "x\x7f/recover " ++ original ++ "\r");
+    try std.testing.expect(held.screen.consent != null and held.screen.offered() == null);
+    try self.slashCommand("/recover " ++ wrong);
     try std.testing.expect(self.submission.retry == null);
-    try std.testing.expect(std.mem.startsWith(u8, self.notice.?, "! Action needs a decision"));
+    try std.testing.expect(held.screen.consent.?.action == 0xa);
+    try self.slashCommand("/recover " ++ original);
+    try std.testing.expectEqualStrings(original, &self.submission.retry.?);
+    try std.testing.expect(held.screen.consent.?.action == 0xa);
+    self.submission.retry = null;
+    try sendKeys(self, "\x12");
+    try std.testing.expectEqualStrings(original, &self.submission.retry.?);
+    try std.testing.expect(held.screen.consent.?.action == 0xa);
+    self.submission.retry = null;
     self.submission.intent = null;
 }
 
@@ -5863,7 +5940,6 @@ test "upgrade reobservation retains a refused archive command from the completio
     }
 }
 
-
 test "conversation duplicate Escape joins cancelled task through real decoder" {
     const Gate = struct {
         observed: std.atomic.Value(bool) = .init(false),
@@ -5875,13 +5951,18 @@ test "conversation duplicate Escape joins cancelled task through real decoder" {
             try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &gate.release, test_poll.isSet);
             return error.Cancelled;
         }
-        fn completed(job: *UpgradePanel) bool { return job.task.completed(); }
+        fn completed(job: *UpgradePanel) bool {
+            return job.task.completed();
+        }
     };
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
     var gate: Gate = .{};
-    defer { gate.release.store(true, .release); self.upgrade_job.deinit(); }
+    defer {
+        gate.release.store(true, .release);
+        self.upgrade_job.deinit();
+    }
     try stepKeys(held, "/upgrade\r");
     try std.testing.expect(self.upgrade_requested);
     self.upgrade_job.started = true;
