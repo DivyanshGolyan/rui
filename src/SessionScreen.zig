@@ -12,6 +12,7 @@ const session_line = @import("session_line.zig");
 const work_line = @import("work_line.zig");
 const slash_commands = @import("slash_commands.zig");
 const queued_line = @import("queued_line.zig");
+const SessionQueue = @import("SessionQueue.zig");
 const View = @import("session_view.zig");
 const protocol = @import("protocol.zig");
 const ConsentPolicy = @import("session_consent.zig");
@@ -50,7 +51,7 @@ pub const Ticket = struct {
 
 /// Proof that every byte of one frame was written and flushed. Only `renderPrepared`
 /// returns it, after its final flush; `presented` applies it once.
-pub const Delivered = struct { frame: u64, notice: bool = false };
+pub const Delivered = struct { frame: u64, notice: bool = false, queue: bool = false };
 
 backend: *Backend,
 // Live text and its transcript copy keep a right margin for user Messages'
@@ -732,7 +733,7 @@ pub const Footer = struct {
 
     /// While its row draws, the frame shows `status` in place of the
     /// footer's: the row confirms a send that status says `Sent` of.
-    pub const Queued = struct { waiting: queued_line.Waiting, status: []const u8 };
+    pub const Queued = struct { waiting: queued_line.Waiting, status: []const u8, list: ?*SessionQueue = null };
 };
 
 /// The Session line's facts, and the caller's copy of the line it last
@@ -833,6 +834,8 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
         .live = footer.live != null,
         .clock_call = clock_call,
         .queued = if (selected) null else if (footer.queued) |queued| queued.status else null,
+        .queued_rows = if (footer.queued != null and footer.queued.?.list != null) @intCast(1 + @min(footer.queued.?.list.?.page.len, 3)) else 1,
+        .queued_min = if (footer.queued != null and footer.queued.?.list != null and footer.queued.?.list.?.page.len != 0) 2 else 1,
         .selected = selected,
         .action_visible = self.actionVisible(),
         .action_pending = self.action_view != null,
@@ -888,11 +891,15 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     const queued_text = try scratch.create([queued_line.text_capacity]u8);
     const queued_label = try scratch.create([queued_line.label_capacity]u8);
     if (layout.queued_height != 0) {
-        const queued = footer.queued.?.waiting;
-        const row = queued_line.row(queued_text, queued_label, queued.line, queued.count, size.col, self.backend.widthMethod());
-        const cells = window.child(.{ .y_off = layout.queued_row, .height = 1 });
-        _ = cells.printSegment(.{ .text = row.text, .style = self.style(.quiet) }, .{ .wrap = .none });
-        _ = cells.child(.{ .x_off = @intCast(row.column) }).printSegment(.{ .text = row.label, .style = self.style(.quiet) }, .{ .wrap = .none });
+        if (footer.queued.?.list) |queue| {
+            try queue.draw(window.child(.{ .y_off = layout.queued_row, .height = layout.queued_height }), scratch, self.backend.widthMethod(), self.style(.quiet), self.consent == null and layout.list_height == 0);
+        } else {
+            const queued = footer.queued.?.waiting;
+            const row = queued_line.row(queued_text, queued_label, queued.line, queued.count, size.col, self.backend.widthMethod());
+            const cells = window.child(.{ .y_off = layout.queued_row, .height = 1 });
+            _ = cells.printSegment(.{ .text = row.text, .style = self.style(.quiet) }, .{ .wrap = .none });
+            _ = cells.child(.{ .x_off = @intCast(row.column) }).printSegment(.{ .text = row.label, .style = self.style(.quiet) }, .{ .wrap = .none });
+        }
     }
     // Cells borrow the rule's label until the frame is rendered too.
     const rule_label = try scratch.create([64]u8);
@@ -931,7 +938,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
         // While an Action waits, the line under the input says how to decide it.
         const text = if (self.selected.approval != .absent)
             approvalHint(self.selected.approval, self.actionVisible(), size.col, self.backend.widthMethod())
-        else if (self.view == .transcript) self.lookbackLabel(size.col, layout.list_height != 0) else if (footer.session) |line| line.shown.text(line.facts, size.col, self.backend.widthMethod()) else "";
+        else if (self.view == .transcript) self.lookbackLabel(size.col, layout.list_height != 0) else if (layout.queued_height == 0 and footer.session == null and footer.queued != null and footer.queued.?.list != null) (if (size.col >= 15) "Pending · widen" else "Widen") else if (footer.session) |line| line.shown.text(line.facts, size.col, self.backend.widthMethod()) else "";
         _ = window.child(.{ .y_off = line_row, .height = 1 }).printSegment(.{ .text = text, .style = self.style(.quiet) }, .{ .wrap = .none });
         says_deny = self.selected.approval == .reason and text.len != 0;
     }
@@ -958,7 +965,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     };
     try out.writeAll(encoded);
     try out.flush();
-    return .{ .frame = self.frames, .notice = layout.notice.length != 0 };
+    return .{ .frame = self.frames, .notice = layout.notice.length != 0, .queue = layout.queued_height >= (if (footer.queued != null and footer.queued.?.list != null and footer.queued.?.list.?.page.len != 0) @as(u16, 2) else 1) and size.col >= 5 and self.consent == null and layout.list_height == 0 and footer.queued != null and footer.queued.?.list != null };
 }
 
 fn drawChoice(self: *const Self, window: vaxis.Window, width: u16, original: ?Footer.Original, compact_archive: ?Footer.CompactArchive) void {
@@ -3627,5 +3634,41 @@ test "borrowed layouts retain wrapped rows unless their own wrapping layout chan
             if (overlay) try screen.leaveMessage();
             try std.testing.expectEqual(expected_transcript, screen.browsing.anchor(screen.textLayout()));
         }
+    }
+}
+
+test "pending section yields at minimum geometry and returns with a legible narrow cue" {
+    for ([_]bool{ false, true }) |colour| {
+        var environ = try std.testing.environ.createMap(std.testing.allocator);
+        defer environ.deinit();
+        const screen = try std.testing.allocator.create(Self);
+        defer std.testing.allocator.destroy(screen);
+        try Test.init(screen, std.testing.io, &environ, colour);
+        defer Test.deinit(screen);
+        var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer out.deinit();
+        var queue: SessionQueue = .{};
+        queue.observe(.{ .boundary = 9, .queued = .{ .count = 1, .oldest_position = 3, .newest_position = 3, .newest_admission = 5 } });
+        const request = queue.wanted.?;
+        queue.wanted = null;
+        var page: @import("session_reads.zig").QueuePage = .{ .len = 1 };
+        page.entries[0] = .{ .admission = 5, .position = 3, .line = .{} };
+        try page.entries[0].line.set("中文");
+        try std.testing.expect(queue.publish(request, page));
+        const footer: Footer = .{ .status = "Sent", .queued = .{ .waiting = .{ .line = "", .count = 1 }, .status = "Sent", .list = &queue } };
+        const calls: View.Live = .{};
+        var buffer: [256]u8 = undefined;
+        const tiny = try Test.render(screen, &out.writer, .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 }, "x", 1, footer, &calls);
+        try std.testing.expect(!tiny.queue);
+        try std.testing.expect(screenHas(screen, "Sent", &buffer));
+        try std.testing.expect(screenHas(screen, "x", &buffer));
+        const narrow = try Test.render(screen, &out.writer, .{ .row = 12, .col = 8, .xpixel = 0, .ypixel = 0 }, "x", 1, footer, &calls);
+        try std.testing.expect(narrow.queue);
+        try std.testing.expect(screenHas(screen, "Alt-Q", &buffer));
+        try std.testing.expect(screenHas(screen, "中文", &buffer));
+        const wide = try Test.render(screen, &out.writer, .{ .row = 12, .col = 40, .xpixel = 0, .ypixel = 0 }, "x", 1, footer, &calls);
+        try std.testing.expect(wide.queue);
+        try std.testing.expect(screenHas(screen, "Pending: Alt-Q", &buffer));
+        try std.testing.expect(screenHas(screen, "中文", &buffer));
     }
 }

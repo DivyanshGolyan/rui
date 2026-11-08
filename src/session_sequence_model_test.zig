@@ -7,6 +7,8 @@ const Terminal = @import("SessionTerminal.zig");
 const Task = @import("ClientTask.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
+const reads = @import("session_reads.zig");
+const SessionQueue = @import("SessionQueue.zig");
 const Consent = @import("session_consent.zig");
 const Viewport = @import("ConversationViewport.zig");
 const status_page = @import("status_page.zig");
@@ -659,26 +661,44 @@ fn historyReachability(front: anytype, comptime ops: anytype, prefix: usize) !vo
 }
 
 fn queuedAbove(front: anytype, requests: client.Requests, length: usize, digest: [32]u8) !bool {
-    var cursor: protocol_reply.ActivityCursor = .{};
+    const snapshot = front.queue.snapshot orelse return false;
+    if (snapshot.queued.count == 0) return false;
+    // Identify the Message by the independent content digest at the exact
+    // Activity boundary whose queue the UI owns, not a later Host snapshot.
+    var cursor: protocol_reply.ActivityCursor = .{ .end = snapshot.boundary };
+    var target: ?struct { admission: u64, position: u64 } = null;
     for (0..64) |_| {
         const page = switch (try requests.activityPage(front.store, front.session, cursor)) {
             .page => |page| page,
             .failure => |failure| return requests.failRead(failure),
         };
         for (page.facts.items[0..page.facts.count]) |item| switch (item.value) {
-            .admission => |message| if (message.sender == null and message.content.length == length and std.mem.eql(u8, &message.content.digest, &digest)) {
-                // The row shows the Messages the Host reports waiting, past
-                // those shown while they waited. This Message is among
-                // those it counts: admitted at or after the oldest, and not
-                // shown while it waited.
-                const row = front.queuedRow() orelse return false;
-                return message.state == .queued and front.live.drawn.admission < message.admission and
-                    message.admission <= row.newest and item.position >= front.live.queued.oldest_position;
+            .admission => |message| if (message.sender == null and message.state == .queued and message.content.length == length and std.mem.eql(u8, &message.content.digest, &digest)) {
+                target = .{ .admission = message.admission, .position = item.position };
+                break;
             },
             else => {},
         };
+        if (target != null) break;
         cursor = page.continuation() orelse return false;
     } else return error.ActivityDidNotDrain;
+    const wanted = target orelse return false;
+    // Walk exactly the owner's bounded pages and native cursor, including
+    // duplicate text. Matching either a line or a range/count is insufficient.
+    var request: SessionQueue.Request = .{ .snapshot = snapshot };
+    front.queue.wanted = null;
+    try std.testing.expect(!front.queue.busy);
+    for (0..64) |_| {
+        const page = try reads.readQueuePage(requests, &front.job, request.snapshot, request.position, request.direction);
+        if (page.len == 0 or !front.queue.publish(request, page)) return false;
+        for (0..page.len) |_| {
+            const entry = front.queue.page.entries[front.queue.list.cursor];
+            if (entry.admission == wanted.admission and entry.position == wanted.position) return true;
+            front.queue.move(std.testing.allocator, .forward);
+        }
+        request = front.queue.wanted orelse return false;
+        front.queue.wanted = null;
+    } else return error.QueueDidNotDrain;
 }
 
 fn publication(comptime Frontend: type, comptime ops: anytype) !void {
