@@ -207,7 +207,7 @@ fn stageUserInterval(io: std.Io, scratch: std.Io.File, source: anytype, item: pr
     var offset: u64 = 0;
     while (offset < length) {
         const count: usize = @intCast(@min(window.len, length - offset));
-        if (try scratch.readPositionalAll(io, window[0..count], offset) != count) return error.ContentBindingMismatch;
+        if (try scratch.readPositionalAll(io, window[0..count], offset) != count) return error.TruncatedHistoryScratch;
         retained.update(window[0..count]);
         offset += count;
     }
@@ -252,7 +252,13 @@ test "bounded user intervals reject external changes and scratch corruption" {
         }
     };
     const Fault = struct {
+        var drop = false;
         fn stage(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
+            if (drop) {
+                var count = header.len;
+                for (data[0 .. data.len - 1]) |bytes| count += bytes.len;
+                return count + data[data.len - 1].len * splat;
+            }
             const count = try std.testing.io.vtable.fileWritePositional(userdata, file, header, data, splat, offset);
             if (count != 0) _ = try std.testing.io.vtable.fileWritePositional(userdata, file, "", &.{"!"}, 1, offset);
             return count;
@@ -270,6 +276,9 @@ test "bounded user intervals reject external changes and scratch corruption" {
     vtable.fileWritePositional = Fault.stage;
     const faulty: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
     try std.testing.expectError(error.ContentBindingMismatch, stageUserInterval(faulty, scratch, Source{ .bytes = original }, item, 0, 7, 4));
+    Fault.drop = true;
+    defer Fault.drop = false;
+    try std.testing.expectError(error.TruncatedHistoryScratch, stageUserInterval(faulty, scratch, Source{ .bytes = original }, item, 0, 7, 4));
 
     const full = try std.testing.allocator.alloc(u8, max_scratch_bytes);
     defer std.testing.allocator.free(full);
