@@ -510,6 +510,7 @@ test "native observed decision retains fence until transmission may reach Host" 
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var self: Self = .{ .io = io, .store = root, .session = "k7m2qx", .directory = root, .environment = .empty };
