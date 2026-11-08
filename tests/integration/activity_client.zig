@@ -48,6 +48,39 @@ pub fn main(init: std.process.Init) !void {
         const scoped: client.Requests = .{ .io = init.io, .cancellation = if (stopper != null) &token else null };
         const window = try scoped.readVerifiedActivityWindow(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), .{ .bytes = try std.fmt.parseInt(u64, args[6], 10), .digest = digest }, try std.fmt.parseInt(u64, args[8], 10));
         try std.Io.File.stdout().writeStreamingAll(init.io, window.slice());
+    } else if (args.len >= 9 and std.mem.eql(u8, args[1], "verified-scratch")) {
+        var digest: [32]u8 = undefined;
+        if (args[7].len != digest.len * 2) return error.InvalidArguments;
+        if ((try std.fmt.hexToBytes(&digest, args[7])).len != digest.len) return error.InvalidArguments;
+        const before = switch (client.hostStatus(init.io, args[2])) {
+            .ready => |ready| ready.instance,
+            else => return error.HostUnavailable,
+        };
+        const scoped: client.Requests = .{ .io = init.io, .host_instance = &before };
+        const path = init.environ_map.get("TMPDIR") orelse return error.InvalidTemporaryDirectory;
+        var dir = try std.Io.Dir.cwd().openDir(init.io, path, .{});
+        defer dir.close(init.io);
+        var random: [16]u8 = undefined;
+        try std.Io.randomSecure(init.io, &random);
+        var name_buffer: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buffer, "rui-window-test-{s}.tmp", .{std.fmt.bytesToHex(random, .lower)});
+        const scratch = try dir.createFile(init.io, name, .{ .read = true, .exclusive = true, .permissions = .fromMode(0o600) });
+        dir.deleteFile(init.io, name) catch |err| {
+            scratch.close(init.io);
+            return err;
+        };
+        var content = try scoped.readVerifiedActivityScratch(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), try std.fmt.parseInt(u64, args[5], 10), .{ .bytes = try std.fmt.parseInt(u64, args[6], 10), .digest = digest }, scratch);
+        defer content.close();
+        const after = switch (client.hostStatus(init.io, args[2])) {
+            .ready => |ready| ready.instance,
+            else => return error.HostUnavailable,
+        };
+        if (!std.mem.eql(u8, &before, &after)) return error.HostInstanceChanged;
+        var buffer: [4096]u8 = undefined;
+        for (args[8..]) |offset| {
+            const count = try content.readAt(try std.fmt.parseInt(u64, offset, 10), &buffer);
+            try std.Io.File.stdout().writeStreamingAll(init.io, buffer[0..count]);
+        }
     } else if (args.len == 5 and std.mem.eql(u8, args[1], "prefix")) {
         var buffer: [4096]u8 = undefined;
         switch (try requests.readActivityPrefix(args[2], args[3], try std.fmt.parseInt(u64, args[4], 10), &buffer)) {

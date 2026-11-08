@@ -331,6 +331,16 @@ pub const Requests = struct {
         return sink.window;
     }
 
+    /// Consume a fresh, unlinked, exclusively owned scratch file. The file is
+    /// closed on failure and is returned only after complete authentication.
+    /// Temporary disk cost is the complete content length; closing the result
+    /// releases it. The caller must fence the Host and retain the source identity.
+    pub fn readVerifiedActivityScratch(self: Requests, store_path: []const u8, session: []const u8, position: u64, ordinal: u64, expected: protocol_reply.CommandObservation.ContentReference, scratch: std.Io.File) !VerifiedContentScratch {
+        errdefer scratch.close(self.io);
+        if (try self.readActivityContent(store_path, session, position, ordinal, expected, scratch)) |failure| return self.failRead(failure);
+        return .{ .io = self.io, .file = scratch, .length = expected.bytes };
+    }
+
     /// The first line of a Message admission row (ordinal 0), read into
     /// `buffer`, whose length is the limit. Closing the connection early ends
     /// the Host's exchange as an ordinary disconnect. The bytes are
@@ -348,6 +358,44 @@ pub const Requests = struct {
         return readFirstLine(self, fd, buffer);
     }
 };
+
+/// An exclusively owned, authenticated temporary copy. This is not a Store
+/// replacement: close it when the bounded working set evicts its source.
+pub const VerifiedContentScratch = struct {
+    io: std.Io,
+    file: std.Io.File,
+    length: u64,
+
+    pub fn readAt(self: *const VerifiedContentScratch, start: u64, buffer: []u8) !usize {
+        if (start > self.length) return error.InvalidTarget;
+        if (buffer.len > protocol.content_window_bytes) return error.WindowTooLarge;
+        const wanted: usize = @intCast(@min(self.length - start, buffer.len));
+        if (try self.file.readPositionalAll(self.io, buffer[0..wanted], start) != wanted) return error.TruncatedResponse;
+        return wanted;
+    }
+
+    pub fn close(self: *VerifiedContentScratch) void {
+        self.file.close(self.io);
+        self.* = undefined;
+    }
+};
+
+test "native verified scratch reads exact bounded source ranges" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "content", .{ .read = true });
+    try file.writeStreamingAll(io, "first-é-last");
+    var content: VerifiedContentScratch = .{ .io = io, .file = file, .length = "first-é-last".len };
+    defer content.close();
+    var buffer: [protocol.content_window_bytes]u8 = undefined;
+    const count = try content.readAt(6, &buffer);
+    try std.testing.expectEqualStrings("é-last", buffer[0..count]);
+    try std.testing.expectEqual(@as(usize, 0), try content.readAt(content.length, &buffer));
+    try std.testing.expectError(error.InvalidTarget, content.readAt(content.length + 1, &buffer));
+    var too_large: [protocol.content_window_bytes + 1]u8 = undefined;
+    try std.testing.expectError(error.WindowTooLarge, content.readAt(0, &too_large));
+}
 
 /// Exact authenticated bytes beginning at the requested source offset.
 pub const ContentWindow = struct {
