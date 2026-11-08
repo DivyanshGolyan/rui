@@ -6081,13 +6081,25 @@ fn testHeldOriginalWire(retry_unconfirmed: bool) !void {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
-    var directory = try @import("socket_fixture.zig").Directory.init();
-    defer directory.cleanup();
-    const root = directory.root[0..directory.root_len];
+    // The ordinary test owns its private fixture. A supervised omission run
+    // instead borrows only the root/socket already registered by its parent;
+    // cwd is inside that root, so HeldFrontend's tmpDir is parent-owned too.
+    const supervised_root = std.process.Environ.getPosix(std.testing.environ, "RUI_APPROVAL_OCCUPIED_ROOT");
+    const registered_socket = std.process.Environ.getPosix(std.testing.environ, "RUI_APPROVAL_OCCUPIED_SOCKET");
+    if ((supervised_root == null) != (registered_socket == null)) return error.IncompleteFixtureRegistration;
+    var directory: ?@import("socket_fixture.zig").Directory = null;
+    defer if (directory) |*owned| owned.cleanup();
+    const root: []const u8 = if (supervised_root) |external| external else block: {
+        directory = try @import("socket_fixture.zig").Directory.init();
+        const owned = &directory.?;
+        break :block owned.root[0..owned.root_len];
+    };
     var lease = try @import("platform.zig").StoreLease.acquire(io, root);
     defer lease.release();
-    try lease.prepareForServing(false);
     const paths = lease.paths;
+    if (registered_socket) |registered| try std.testing.expectEqualStrings(registered, paths.socket.slice());
+    try lease.prepareForServing(false);
+    std.debug.print("HELD-WIRE-SETUP store={s} socket={s}\n", .{ root, paths.socket.slice() });
     var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
     defer {
         listener.deinit(io);
@@ -6306,8 +6318,9 @@ fn testHeldOriginalWire(retry_unconfirmed: bool) !void {
                     gate.message_peer = received.peer;
                     try gate.messageBody(received.request);
                     gate.messages += 1;
-                    try gate.original();
                     try std.testing.expect(frontend.submission.task.thread != null and !frontend.submission.task.completed());
+                    std.debug.print("HELD-WIRE-DELIVERED session=k7m2qx action=10 key={s} task_live=true wire=exact peer=held approval={s} offered={}\n", .{ gate.message_key.?, @tagName(screen.selected.approval), screen.offered() != null });
+                    try gate.original();
                     try gate.noRequest();
                     gate.held_frame = screen.ticket.?.frame;
                     gate.held_inputs = screen.inputs;
