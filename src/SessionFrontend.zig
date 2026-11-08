@@ -1303,6 +1303,21 @@ fn consentReceipt(self: *Self, service: ConsentPolicy.Service) bool {
     return self.terminal.screen.promptCompleted(service, self.input.pending() != .none, self.approvalBlocked() or self.dirty);
 }
 
+// These are this owner's own refusal notices: the compact original state
+// and its recovery key already express them. Other failure notices retain
+// their independent delivery requirement.
+fn originalGuidance(text: []const u8) bool {
+    for ([_][]const u8{
+        "! Original rejected. /discard clears it; nothing authorized.",
+        "! Original not sent. Ctrl-R retries; nothing authorized.",
+        "! Original not confirmed. Ctrl-R retries; nothing authorized.",
+        "! Original pending. Nothing authorized.",
+        "! Original rejected. Keep editing; /discard releases it. Draft retained.",
+        "! Original pending. Draft retained; Ctrl-R retries the original.",
+    }) |known| if (std.mem.eql(u8, text, known)) return true;
+    return false;
+}
+
 /// Writes one frame and applies its receipt.
 fn drawFrame(self: *Self) !void {
     const screen = self.terminal.screen;
@@ -1364,7 +1379,7 @@ fn drawFrame(self: *Self) !void {
     self.dirty = false;
     const notice_revision = self.upgrade_note_revision;
     const rendered_upgrade = said.text == null and self.notice == null and !screen.actionVisible() and self.upgrade_note_len != 0;
-    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .original = self.originalDisplay(), .compact_archive = compact_archive, .status = status, .status_essential = (compact_original and self.originalDisplay().? != .sending) or self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .notice_essential = waiting and self.submissionOccupied() and notice != null and std.mem.startsWith(u8, notice.?, "!"), .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
+    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .original = self.originalDisplay(), .compact_archive = compact_archive, .status = status, .status_essential = (compact_original and self.originalDisplay().? != .sending) or self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .notice_essential = waiting and self.submissionOccupied() and notice != null and std.mem.startsWith(u8, notice.?, "!") and !(said.text == null and self.notice != null and originalGuidance(self.notice.?)), .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
     _ = screen.presented(delivered);
     if (delivered.notice and rendered_upgrade and notice_revision == self.upgrade_note_revision) self.upgrade_note_shown = true;
 }
@@ -3659,9 +3674,28 @@ test "real tiny frontend preserves archive and original recovery custody" {
         try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
         try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
         pty.drain();
+        // An ordinary refused Enter is redundant with the visible held state;
+        // its next frame must remain usable, not turn that notice into a fatal
+        // geometry error or grant authority.
+        try stepKeys(held, "\r");
+        try self.drawFrame();
+        try std.testing.expect(held.screen.ticket.?.delivered and held.screen.offered() == null);
+        try std.testing.expectEqualStrings(if (archive == .archived) (if (state == .rejected) "Arch Rej" else "Archived") else if (state == .rejected) "Stop Rej" else "Stopping", CapacityTestPty.row(held.screen, 0, &row));
+        try std.testing.expectEqualStrings(if (state == .rejected) "/discard" else "Ctrl-R", CapacityTestPty.row(held.screen, 1, &row));
+        pty.drain();
         if (state == .rejected) {
-            // This is actual typed admission through the frontend stream.
-            try stepKeys(held, "/discard\r");
+            // Actual typed admission with a frame between every character.
+            for ("/discard") |byte| {
+                try stepKeys(held, &.{byte});
+                try self.drawFrame();
+                try std.testing.expectEqualStrings(if (archive == .archived) "Arch Rej" else "Stop Rej", CapacityTestPty.row(held.screen, 0, &row));
+                try std.testing.expect(held.screen.ticket.?.delivered and held.screen.offered() == null);
+                try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+                try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+                pty.drain();
+            }
+            try std.testing.expectEqualStrings("/discard", self.input.composition().bytes);
+            try stepKeys(held, "\r");
             try std.testing.expect(self.submission.view() == null);
             try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
             try std.testing.expect(held.screen.offered() == null);
@@ -3686,6 +3720,38 @@ test "real tiny frontend preserves archive and original recovery custody" {
         }
         pty.drain();
     };
+}
+
+test "tiny paused Action fails closed rather than hide archived original recovery" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const pty = try CapacityTestPty.init();
+    const previous_output = held.terminal.output;
+    held.terminal.output = pty.slave;
+    defer {
+        held.terminal.output = previous_output;
+        pty.close();
+    }
+    try pty.resize(2, 8);
+    try std.testing.expectEqual(@as(u16, 8), held.terminal.geometry().col);
+    try std.testing.expectEqual(@as(u16, 2), held.terminal.geometry().row);
+    const action = try held.adopt(3);
+    defer action.close(std.testing.io);
+    const page = try held.tmp.dir.createFile(std.testing.io, "paused-page", .{ .read = true });
+    defer page.close(std.testing.io);
+    try page.writePositionalAll(std.testing.io, "Inspection\n", 0);
+    try held.screen.showFile(std.testing.io, page, false);
+    const self = &held.self;
+    self.line.archive_state = .archived;
+    self.submission.intent = .{ .message = self.input.submitText("original message") };
+    self.submission.state = .rejected;
+    try std.testing.expectError(error.TerminalTooSmall, self.drawFrame());
+    var bytes: [64]u8 = undefined;
+    try std.testing.expect(std.c.read(pty.master, &bytes, bytes.len) < 0);
+    try std.testing.expect(held.screen.offered() == null);
+    try std.testing.expectEqual(@as(u64, 0xa), held.screen.consent.?.action);
+    try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
+    self.submission.intent = null;
 }
 
 test "real tiny frontend fails closed rather than lose critical notice" {
