@@ -128,7 +128,14 @@ pub fn draw(window: vaxis.Window, scratch: Allocator, state: *const State, draft
         try ruleLine(&painter, input.view);
         if (at.commands.len() != 0) try commandLines(&painter, &result.commands.?, at.commands);
         const hinted = height - hintRows(state);
-        try composer(&painter, state, draft, &input, .{ .start = at.commands.end, .end = hinted });
+        const bottom = view.bottomRuleRows(state, @intCast(input.view.rows));
+        try composer(&painter, state, draft, &input, .{ .start = at.commands.end, .end = hinted - bottom });
+        if (bottom != 0) {
+            painter.at(hinted - 1);
+            painter.begin(false);
+            try ruleRun(&painter, width);
+            try painter.finish();
+        }
         painter.at(hinted);
         try hints(&painter, state, draft, at.commands.len() != 0);
         if (state.notice) |*notice| {
@@ -1863,7 +1870,7 @@ test "a draft past its cap scrolls inside the composer and the rule counts what 
             defer written.deinit();
             try screen.write(&written.writer);
             var lines = std.mem.splitScalar(u8, written.written(), '\n');
-            for (0..28) |_| _ = lines.next();
+            for (0..27) |_| _ = lines.next();
             // Ten rows of draft under the rule, the hints on the last row.
             try std.testing.expectEqualStrings(rule, lines.next().?);
             try std.testing.expectEqualStrings(top, lines.next().?);
@@ -2837,10 +2844,23 @@ test "the composer needs six rows and six columns, and shows nothing smaller" {
         const fits = width >= 6 and height >= 6;
         try std.testing.expectEqual(fits, screen.cursor != null);
         if (screen.cursor) |cursor| {
-            try std.testing.expectEqual(height - 2, cursor.row);
+            try std.testing.expectEqual(height - 2 - @as(u16, @intFromBool(std.mem.eql(u8, screen.cell(0, height - 2).char.grapheme, "─"))), cursor.row);
             try std.testing.expect(cursor.column < width);
         }
     };
+}
+
+test "the bottom edge separates the composer from its hints in both scripts" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    for ([_]Caps{ .{}, .{ .unicode = false } }, [_][]const u8{ "─", "-" }) |caps, glyph| {
+        var screen = try sizedRender(&state, .{ .bytes = "draft", .cursor = 5 }, 40, 24, caps, 0);
+        defer screen.deinit();
+        try std.testing.expectEqualStrings(glyph, screen.cell(0, 22).char.grapheme);
+        try std.testing.expectEqualStrings(glyph, screen.cell(39, 22).char.grapheme);
+        try std.testing.expectEqual(@as(u16, 21), screen.cursor.?.row);
+        try std.testing.expect(!std.mem.eql(u8, glyph, screen.cell(0, 23).char.grapheme));
+    }
 }
 
 test "a full-capacity draft of spaces keeps the composer's caret on screen" {

@@ -64,6 +64,8 @@ live_height: u16,
 /// The rule above the input and its list; its row is `list_row - 1` when
 /// this is one.
 rule_height: u16,
+/// A bottom edge between the draft and the line, when space permits.
+bottom_rule_height: u16,
 /// The rows under the input, from `height - line_height`: the notice's rows
 /// when there is one, else one row for the Session line, or how to decide a
 /// waiting Action, once three rows remain under the status.
@@ -174,6 +176,7 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
         .live_row = 0,
         .live_height = 0,
         .rule_height = 0,
+        .bottom_rule_height = 0,
         .line_height = 0,
         .list_height = 0,
         .list_row = 0,
@@ -209,9 +212,10 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
     const footer = self.status_height + self.line_height;
     // A rule separates the input once the terminal has room for one.
     self.rule_height = @intFromBool(input.height - footer >= 4);
+    self.bottom_rule_height = @intFromBool(input.height - footer >= 5);
     // Fit required footer and navigation rows with one draft row first;
     // the draft can then grow up to its cap.
-    var available: u16 = input.height - 1 - self.rule_height - footer;
+    var available: u16 = input.height - 1 - self.rule_height - self.bottom_rule_height - footer;
     try document.prepare();
     const total = input.document_total orelse document.rowCount(text_layout);
     for (input.calls, 0..) |line, index| {
@@ -263,14 +267,14 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
     const budget = available - self.live_height;
     // A selected page needs a readable row so browsing can still advance.
     const document_reserve: u16 = @intFromBool(input.selected and document.text().len != 0 and budget > heading_height + call_rows);
-    const room = input.height - self.rule_height - footer - heading_height - call_rows - self.live_height - document_reserve;
+    const room = input.height - self.rule_height - self.bottom_rule_height - footer - heading_height - call_rows - self.live_height - document_reserve;
     const input_rows = @min(draft_layout.cap(input.height), room);
     self.draft = draft_layout.fit(input.draft_source, pieces, input.width - 2, input.cursor, shape, input_rows, &self.draft_lines);
     self.list_height = @intCast(@min(input.command_rows, input_rows - self.draft.rows));
     // A queued Message's row takes only a row the conversation's text would
     // have: it is dropped before any draft or command list row.
     self.queued_height = @intFromBool(input.queued != null and room > self.draft.rows + self.list_height);
-    const unreserved = input.height - self.draft.rows - self.list_height - self.rule_height - footer;
+    const unreserved = input.height - self.draft.rows - self.list_height - self.rule_height - self.bottom_rule_height - footer;
     available = unreserved - self.live_height - self.queued_height;
     self.height = available - heading_height - call_rows;
     // This is a value-only preview for callers measuring chrome. The screen
@@ -284,7 +288,7 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
     // status and the rule above it. The shown text starts at the top and the
     // calls and live line follow it, so short text leaves the gap under its
     // last line; only a whole Action is pushed down to the input.
-    self.draft_top = input.height - self.line_height - self.draft.rows;
+    self.draft_top = input.height - self.line_height - self.bottom_rule_height - self.draft.rows;
     self.list_row = self.draft_top - self.list_height;
     self.status_row = self.list_row - self.rule_height - self.status_height;
     self.queued_row = self.status_row - self.queued_height;
@@ -326,8 +330,8 @@ test "the draft keeps the bottom rows under a rule and over the Session line, an
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 1), frame.rule_height);
     try std.testing.expectEqual(@as(u16, 1), frame.line_height);
-    try std.testing.expectEqual(@as(u16, 21), frame.draft_top);
-    try std.testing.expectEqual(@as(u16, 22), frame.caret_row);
+    try std.testing.expectEqual(@as(u16, 20), frame.draft_top);
+    try std.testing.expectEqual(@as(u16, 21), frame.caret_row);
     try std.testing.expectEqual(@as(u16, 6), frame.caret_column);
     // Twenty-one rows sit above the rule, a one-row draft and the line.
     document.clear();
@@ -336,18 +340,18 @@ test "the draft keeps the bottom rows under a rule and over the Session line, an
     input.draft_source = "";
     input.cursor = 0;
     try frame.plan(&document, input);
-    try std.testing.expectEqual(Position{ .offset = 12 }, frame.first);
-    try std.testing.expectEqual(@as(u16, 21), frame.height);
-    try std.testing.expectEqual(@as(u16, 22), frame.draft_top);
+    try std.testing.expectEqual(Position{ .offset = 16 }, frame.first);
+    try std.testing.expectEqual(@as(u16, 20), frame.height);
+    try std.testing.expectEqual(@as(u16, 21), frame.draft_top);
     input.notice = "! Unknown command /x · /help";
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 1), frame.line_height);
-    try std.testing.expectEqual(@as(u16, 22), frame.draft_top);
+    try std.testing.expectEqual(@as(u16, 21), frame.draft_top);
     input.width = 20;
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 2), frame.line_height);
-    try std.testing.expectEqual(@as(u16, 21), frame.draft_top);
-    try std.testing.expectEqual(@as(u16, 20), frame.height);
+    try std.testing.expectEqual(@as(u16, 20), frame.draft_top);
+    try std.testing.expectEqual(@as(u16, 19), frame.height);
 }
 
 test "the command list takes rows the draft could grow into, under the rule, and never the input's row" {
@@ -566,13 +570,15 @@ test "the Session line shows once three rows remain under the status, then the r
         const line: u16 = if (shown) 1 else @intFromBool(height - status_rows >= 3);
         try std.testing.expectEqual(line, frame.line_height);
         try std.testing.expectEqual(@as(u16, @intFromBool(height - status_rows - line >= 4)), frame.rule_height);
-        try std.testing.expectEqual(height - line - 1, frame.draft_top);
-        try std.testing.expectEqual(height - line - 1, frame.caret_row);
+        const bottom: u16 = @intFromBool(height - status_rows - line >= 5);
+        try std.testing.expectEqual(bottom, frame.bottom_rule_height);
+        try std.testing.expectEqual(height - line - bottom - 1, frame.draft_top);
+        try std.testing.expectEqual(height - line - bottom - 1, frame.caret_row);
         // The list never moves the input: it takes rows a third of the
         // screen would give a growing draft.
         const list: u16 = @intCast(@min(commands, @max(1, height / 3) - 1));
         try std.testing.expectEqual(list, frame.list_height);
-        try std.testing.expectEqual(height - line - 1 - list - frame.rule_height - status_rows, frame.status_row);
+        try std.testing.expectEqual(height - line - bottom - 1 - list - frame.rule_height - status_rows, frame.status_row);
     };
 }
 
