@@ -6838,6 +6838,70 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
     try std.testing.expectEqual(steps[0], steps[1]);
 }
 
+test "filtered admission pages preserve a queue snapshot across a stop" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try configureTestSession(&storage, "queue-snapshot-config");
+    try submitTestMessage(&storage, &tmp, "queue-running-file", "queue-running", session.slice(), "running");
+    _ = (try storage.admitNextModelAttempt(.{})).?;
+    for (0..66) |index| {
+        var file: [48]u8 = undefined;
+        var key: [48]u8 = undefined;
+        try submitTestMessage(&storage, &tmp, try std.fmt.bufPrint(&file, "queue-file-{d}", .{index}), try std.fmt.bufPrint(&key, "queue-key-{d}", .{index}), session.slice(), "equal\nsecond line");
+    }
+    var request: protocol.ActivityPage = .{ .kinds = .initOne(.admission), .limit = 7 };
+    try request.session.set(session.slice());
+    const first = try store_core.activityPageForTesting(&storage, request);
+    request.end = first.end;
+    var stop = try completeSessionStop("queue-snapshot-stop", session.slice());
+    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+
+    var seen: usize = 0;
+    var previous_id: u64 = 0;
+    while (true) {
+        const page = try store_core.activityPageForTesting(&storage, request);
+        for (page.items[0..page.count]) |item| {
+            const message = item.value.admission;
+            try std.testing.expect(message.admission > previous_id);
+            previous_id = message.admission;
+            if (seen == 0) {
+                try std.testing.expect(message.state == .applied);
+            } else {
+                try std.testing.expect(message.state == .queued);
+                try std.testing.expectEqual(protocol.contentDigest("equal\nsecond line"), message.content.digest);
+                try std.testing.expectEqual(@as(u64, 17), message.content.length);
+            }
+            seen += 1;
+        }
+        if (!page.more) break;
+        const last = page.items[page.count - 1];
+        request.position = last.position;
+        request.ordinal = last.ordinal;
+    }
+    try std.testing.expectEqual(@as(usize, 67), seen);
+
+    request.end = null;
+    request.position = 0;
+    request.ordinal = null;
+    seen = 0;
+    while (true) {
+        const page = try store_core.activityPageForTesting(&storage, request);
+        request.end = page.end;
+        for (page.items[0..page.count]) |item| {
+            try std.testing.expect(item.value.admission.state == if (seen == 0) .applied else .excluded);
+            seen += 1;
+        }
+        if (!page.more) break;
+        const last = page.items[page.count - 1];
+        request.position = last.position;
+        request.ordinal = last.ordinal;
+    }
+    try std.testing.expectEqual(@as(usize, 67), seen);
+}
+
 test "a one-row page of a person's Messages costs the same steps past 100 or 10,000 waiting ones" {
     // Ctrl-P from the end reads the newest Message, with every other one
     // still waiting. The page is filtered, so it reads no queue footer.
