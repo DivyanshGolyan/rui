@@ -2458,7 +2458,7 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
          return .{
 --- a/src/Loop.zig
 +++ b/src/Loop.zig
-@@ -9,6 +9,7 @@
+@@ -9,18 +9,24 @@
  const Vaxis = @import("Vaxis.zig");
  
  const log = std.log.scoped(.vaxis);
@@ -2466,12 +2466,16 @@ diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
  
  pub fn Loop(comptime T: type) type {
      return struct {
-@@ -20,7 +21,12 @@
+         const Self = @This();
+ 
+         const Event = T;
++        pub const Stamped = struct { event: T, sequence: u64 };
+ 
+         io: std.Io,
          tty: *Tty,
          vaxis: *Vaxis,
  
 -        queue: Queue(T, 512),
-+        pub const Stamped = struct { event: T, sequence: u64 };
 +        queue: Queue(Stamped, 512),
 +        issued_sequence: std.atomic.Value(u64) = .init(0),
 +        input_lock: std.Io.Mutex = .init,

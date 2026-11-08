@@ -154,21 +154,21 @@ test "confirmation requires a fresh choice and preserves its Host" {
     owner.navigate("k7m2qx".*);
     const initial = owner.ticket().?;
     try std.testing.expect(owner.install(.{ .ticket = initial, .instance = test_instance, .offer = .{ .ticket = initial, .instance = test_instance, .action = 19, .summary = .{} } }));
-    const ticket = owner.ticket().?;
-    try std.testing.expect(owner.confirm(ticket, 19, false) == null);
-    try std.testing.expect(owner.choose(ticket, 19, .deny, false));
-    try std.testing.expect(owner.confirm(ticket, 19, true) == null);
-    try std.testing.expect(owner.confirm(ticket, 20, false) == null);
-    const decision = owner.confirm(ticket, 19, false).?;
+    const selected_ticket = owner.ticket().?;
+    try std.testing.expect(owner.confirm(selected_ticket, 19, false) == null);
+    try std.testing.expect(owner.choose(selected_ticket, 19, .deny, false));
+    try std.testing.expect(owner.confirm(selected_ticket, 19, true) == null);
+    try std.testing.expect(owner.confirm(selected_ticket, 20, false) == null);
+    const decision = owner.confirm(selected_ticket, 19, false).?;
     try std.testing.expectEqual(@as(u64, 19), decision.action);
     try std.testing.expectEqual(protocol.PermissionDecision.deny, decision.decision);
     try std.testing.expectEqualSlices(u8, &test_instance, &decision.observed_instance);
-    try std.testing.expect(owner.confirm(ticket, 19, false) == null);
-    const late: Observation = .{ .ticket = ticket, .instance = test_instance, .offer = .{ .ticket = ticket, .instance = test_instance, .action = 19, .summary = .{} } };
+    try std.testing.expect(owner.confirm(selected_ticket, 19, false) == null);
+    const late: Observation = .{ .ticket = selected_ticket, .instance = test_instance, .offer = .{ .ticket = selected_ticket, .instance = test_instance, .action = 19, .summary = .{} } };
     try std.testing.expect(!owner.install(late));
     const fresh = owner.ticket().?;
     try std.testing.expect(owner.install(.{ .ticket = fresh, .instance = test_instance, .offer = .{ .ticket = fresh, .instance = test_instance, .action = 19, .summary = .{} } }));
-    try std.testing.expect(!owner.choose(ticket, 19, .allow_once, false));
+    try std.testing.expect(!owner.choose(selected_ticket, 19, .allow_once, false));
     try std.testing.expect(owner.choose(owner.ticket().?, 19, .allow_once, false));
 }
 
