@@ -9,11 +9,13 @@ const observations = @import("NativeObservations.zig");
 const protocol = @import("protocol.zig");
 const replies = @import("protocol_reply.zig");
 const feed = @import("NativeFeed.zig");
+const RichLines = @import("NativeRichLines.zig");
 const Self = @This();
 
 const Item = struct {
     source: feed.VerifiedSource,
     reader: vaxis.unicode.PagedReader,
+    rich: RichLines,
     index: fw.PagedText.Index,
 };
 
@@ -51,6 +53,8 @@ pub fn load(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io
         item.source = try feed.VerifiedSource.open(allocator, requests, dir, store, &self.page, page_index);
         errdefer item.source.close();
         item.reader = .{ .source = try item.source.pagedSource() };
+        item.rich = try RichLines.build(requests.io, dir, item.reader.source, requests.cancellation);
+        errdefer item.rich.close();
         item.index = try fw.PagedText.Index.init(&item.reader, ctx, width);
         const added = try std.math.add(usize, item.index.len, 1);
         const total = try std.math.add(usize, self.row_count, added);
@@ -67,6 +71,7 @@ pub fn load(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io
 pub fn destroy(self: *Self) void {
     const allocator = self.allocator;
     for (self.items[0..self.count]) |item| {
+        item.rich.close();
         item.source.close();
         allocator.destroy(item);
     }

@@ -1752,10 +1752,9 @@ index eff49f1..2ab691e 100644
                  @floatFromInt(max_content_width);
  
 diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
-index 1c569eb..5842e4f 100644
 --- a/src/vxfw/ScrollView.zig
 +++ b/src/vxfw/ScrollView.zig
-@@ -11,10 +11,22 @@ const ScrollView = @This();
+@@ -11,11 +11,23 @@
  
  pub const Builder = struct {
      userdata: *const anyopaque,
@@ -1764,24 +1763,25 @@ index 1c569eb..5842e4f 100644
 +    hasFn: ?*const fn (*const anyopaque, idx: usize, cursor: usize) bool = null,
 +    /// Optional frame-owned widget construction for virtualized sources.
 +    buildFrameFn: ?*const fn (*const anyopaque, idx: usize, cursor: usize, Allocator) Allocator.Error!?vxfw.Widget = null,
-+
+ 
+-    pub inline fn itemAtIdx(self: Builder, idx: usize, cursor: usize) ?vxfw.Widget {
+-        return self.buildFn(self.userdata, idx, cursor);
 +    /// Probe without exposing a widget with a transient backing store.
 +    pub fn hasItemAtIdx(self: Builder, idx: usize, cursor: usize) bool {
 +        if (self.hasFn) |has| return has(self.userdata, idx, cursor);
 +        return self.buildFn.?(self.userdata, idx, cursor) != null;
-+    }
- 
--    pub inline fn itemAtIdx(self: Builder, idx: usize, cursor: usize) ?vxfw.Widget {
--        return self.buildFn(self.userdata, idx, cursor);
+     }
++
 +    /// The returned widget is valid until arena reset; its source must also
 +    /// remain alive until then. Frame builders must not return window borrows.
 +    pub fn itemAtIdxForDraw(self: Builder, idx: usize, cursor: usize, arena: Allocator) Allocator.Error!?vxfw.Widget {
 +        if (self.buildFrameFn) |build| return build(self.userdata, idx, cursor, arena);
 +        return self.buildFn.?(self.userdata, idx, cursor);
-     }
++    }
  };
  
-@@ -33,11 +45,12 @@ const Scroll = struct {
+ pub const Source = union(enum) {
+@@ -33,11 +45,12 @@
      /// If there is more room to scroll down.
      has_more_vertical: bool = true,
      /// The column of the first in-view column.
@@ -1795,7 +1795,7 @@ index 1c569eb..5842e4f 100644
  
      pub fn linesDown(self: *Scroll, n: u8) bool {
          if (!self.has_more_vertical) return false;
-@@ -206,7 +219,7 @@ pub fn nextItem(self: *ScrollView, ctx: *vxfw.EventContext) void {
+@@ -206,7 +219,7 @@
                  // Advance the cursor
                  self.cursor += 1;
                  // Check the bounds, reversing until we get the last item
@@ -1804,7 +1804,7 @@ index 1c569eb..5842e4f 100644
                      self.cursor -|= 1;
                  }
                  // If we didn't change state, we don't redraw
-@@ -241,7 +254,7 @@ pub fn prevItem(self: *ScrollView, ctx: *vxfw.EventContext) void {
+@@ -241,7 +254,7 @@
                  // Decrement the cursor
                  self.cursor -= 1;
                  // Check the bounds, reversing until we get the last item
@@ -1813,10 +1813,36 @@ index 1c569eb..5842e4f 100644
                      self.cursor -|= 1;
                  }
                  // If we didn't change state, we don't redraw
-@@ -267,6 +280,29 @@ pub fn ensureScroll(self: *ScrollView) void {
+@@ -267,6 +280,55 @@
      }
  }
  
++/// The first fully visible item, for source-identity viewport anchors.
++pub fn firstVisibleIndex(self: *const ScrollView) u32 {
++    return self.scroll.top;
++}
++
++/// True after a frame has reached either end of the current item source.
++pub fn atStart(self: *const ScrollView) bool {
++    return self.scroll.top == 0 and self.scroll.vertical_offset == 0;
++}
++
++pub fn atEnd(self: *const ScrollView) bool {
++    return !self.scroll.has_more_vertical;
++}
++
++/// Place an item at the top without materializing intervening items.
++pub fn jumpToItem(self: *ScrollView, requested: u32) void {
++    const count = self.item_count orelse return;
++    if (count == 0) return;
++    self.cursor = @min(requested, count - 1);
++    self.scroll.top = self.cursor;
++    self.scroll.vertical_offset = 0;
++    self.scroll.pending_lines = 0;
++    self.scroll.wants_cursor = false;
++    self.scroll.anchor_end = false;
++}
++
 +/// Anchor the last item at the bottom, including when it exceeds the viewport.
 +pub fn jumpToEnd(self: *ScrollView) void {
 +    const count = self.item_count orelse return;
@@ -1843,7 +1869,7 @@ index 1c569eb..5842e4f 100644
  /// Inserts children until add_height is < 0
  fn insertChildren(
      self: *ScrollView,
-@@ -280,7 +316,7 @@ fn insertChildren(
+@@ -280,7 +342,7 @@
      var upheight = add_height;
      while (self.scroll.top >= 0) : (self.scroll.top -= 1) {
          // Get the child
@@ -1852,7 +1878,7 @@ index 1c569eb..5842e4f 100644
  
          const child_offset: u16 = if (self.draw_cursor) 2 else 0;
          const max_size = ctx.max.size();
-@@ -292,15 +328,15 @@ fn insertChildren(
+@@ -292,15 +354,15 @@
          );
  
          // Draw the child
@@ -1871,7 +1897,7 @@ index 1c569eb..5842e4f 100644
              .surface = surf,
              .z_index = 0,
          });
-@@ -375,6 +411,22 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+@@ -375,6 +437,22 @@
      //      will check for this at the end and only include visible children
      var accumulated_height: i17 = -(self.scroll.vertical_offset + self.scroll.pending_lines);
  
@@ -1894,7 +1920,7 @@ index 1c569eb..5842e4f 100644
      // We handled the pending scroll by assigning accumulated_height. Reset it's state
      self.scroll.pending_lines = 0;
  
-@@ -399,7 +451,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+@@ -399,7 +477,7 @@
  
      const child_offset: u16 = if (self.draw_cursor) 2 else 0;
  
@@ -1903,7 +1929,7 @@ index 1c569eb..5842e4f 100644
          // Defer the increment
          defer i += 1;
  
-@@ -410,11 +462,12 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+@@ -410,11 +488,12 @@
          );
  
          // Draw the child
@@ -1918,7 +1944,7 @@ index 1c569eb..5842e4f 100644
              .surface = surf,
              .z_index = 0,
          });
-@@ -435,7 +488,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+@@ -435,7 +514,7 @@
      // see if we just drew the last item on the bottom of the screen. If we just drew the last item
      // we can set `scroll.has_more` to false.
      if (self.scroll.has_more_vertical and accumulated_height <= max_size.height) {
@@ -1927,7 +1953,7 @@ index 1c569eb..5842e4f 100644
      }
  
      var total_height: usize = totalHeight(&child_list);
-@@ -457,7 +510,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+@@ -457,7 +536,7 @@
          const sub = try ctx.arena.alloc(vxfw.SubSurface, 1);
          const child = child_list.items[cursored_idx];
          sub[0] = .{
@@ -1936,7 +1962,7 @@ index 1c569eb..5842e4f 100644
              .surface = child.surface,
              .z_index = 0,
          };
-@@ -503,7 +556,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+@@ -503,7 +582,7 @@
              self.scroll.vertical_offset = 0;
              child_list.deinit(ctx.arena);
              try child_list.append(ctx.arena, .{
@@ -1945,10 +1971,12 @@ index 1c569eb..5842e4f 100644
                  .surface = sub.surface,
                  .z_index = 0,
              });
-@@ -535,10 +588,22 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+@@ -533,12 +612,24 @@
+             child.origin.row = origin;
+             child_list.items[idx - 1] = child;
          }
-     }
- 
++    }
++
 +    // A resize or a shorter visible child can move the final valid start.
 +    // Redraw once at the clamped offset rather than leaving a partial or
 +    // entirely blank viewport beyond the content.
@@ -1959,8 +1987,8 @@ index 1c569eb..5842e4f 100644
 +    if (self.scroll.left > last_start) {
 +        self.scroll.left = last_start;
 +        return self.drawBuilder(ctx, builder);
-+    }
-+
+     }
+ 
      // Reset horizontal scroll info.
      self.scroll.has_more_horizontal = false;
      for (child_list.items) |child| {

@@ -194,6 +194,10 @@ pub const SourcePage = struct {
     items: [protocol.ActivityPage.items]Item = undefined,
     count: usize = 0,
     next: ?replies.ActivityCursor,
+    /// Directional boundaries include non-message Activity items, so page
+    /// changes cannot skip identities that were not selected for display.
+    before: ?replies.ActivityCursor,
+    after: ?replies.ActivityCursor,
     end: u64,
     token: ?replies.SessionToken,
     direction: @FieldType(replies.ActivityCursor, "direction"),
@@ -210,7 +214,10 @@ pub fn sourcePage(requests: client.Requests, store: []const u8, id: *const [prot
         .page => |value| value,
         .failure => |failure| return fenced.failRead(failure),
     };
-    var result: SourcePage = .{ .instance = instance, .session = id.*, .next = page.continuation(), .end = page.facts.end, .token = page.facts.token, .direction = cursor.direction };
+    var result: SourcePage = .{ .instance = instance, .session = id.*, .next = page.continuation(), .before = null, .after = null, .end = page.facts.end, .token = page.facts.token, .direction = cursor.direction };
+    const bounds = pageBounds(page.facts.items[0..page.facts.count], page.facts.end, cursor);
+    result.before = bounds.before;
+    result.after = bounds.after;
     for (page.facts.items[0..page.facts.count]) |item| {
         const selected: ?struct { kind: @FieldType(Block, "kind"), content: protocol.ActivityItem.Content } = switch (item.value) {
             .user => |message| .{ .kind = .user, .content = message.content },
@@ -224,6 +231,41 @@ pub fn sourcePage(requests: client.Requests, store: []const u8, id: *const [prot
     const still_serving = try servingInstance(requests.io, store);
     if (!std.mem.eql(u8, &instance, &still_serving)) return error.HostInstanceChanged;
     return result;
+}
+
+const PageBounds = struct { before: ?replies.ActivityCursor = null, after: ?replies.ActivityCursor = null };
+
+fn pageBounds(items: []const protocol.ActivityItem, end: u64, cursor: replies.ActivityCursor) PageBounds {
+    if (items.len == 0) return .{};
+    const first = items[0];
+    const last = items[items.len - 1];
+    const earliest = if (cursor.direction == .forward) first else last;
+    const latest = if (cursor.direction == .forward) last else first;
+    return .{
+        .before = .{ .end = end, .position = earliest.position, .ordinal = earliest.ordinal, .direction = .backward, .kinds = cursor.kinds, .limit = cursor.limit },
+        .after = .{ .end = end, .position = latest.position, .ordinal = latest.ordinal, .direction = .forward, .kinds = cursor.kinds, .limit = cursor.limit },
+    };
+}
+
+test "native Activity page boundaries include undisplayed identities in both directions" {
+    const ascending = [_]protocol.ActivityItem{
+        .{ .position = 3, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = .{ .length = 0, .digest = @splat(0) } } } },
+        .{ .position = 4, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = .{ .length = 0, .digest = @splat(0) } } } },
+        .{ .position = 4, .ordinal = 1, .at = 1, .value = .{ .assistant = .{ .content = .{ .length = 0, .digest = @splat(0) } } } },
+    };
+    const descending = [_]protocol.ActivityItem{ ascending[2], ascending[1], ascending[0] };
+    const forward = pageBounds(&ascending, 10, .{ .direction = .forward, .limit = 3 });
+    const backward = pageBounds(&descending, 10, .{ .direction = .backward, .limit = 3 });
+    for ([_]PageBounds{ forward, backward }) |bounds| {
+        try std.testing.expectEqual(@as(u64, 3), bounds.before.?.position);
+        try std.testing.expectEqual(@as(?u64, 0), bounds.before.?.ordinal);
+        try std.testing.expectEqual(@as(u64, 4), bounds.after.?.position);
+        try std.testing.expectEqual(@as(?u64, 1), bounds.after.?.ordinal);
+        try std.testing.expectEqual(@as(?u64, 10), bounds.before.?.end);
+        try std.testing.expectEqual(@as(?u64, 10), bounds.after.?.end);
+    }
+    const empty = pageBounds(&.{}, 0, .{});
+    try std.testing.expect(empty.before == null and empty.after == null);
 }
 
 /// Load one identified item into exclusively owned temporary custody. Its
