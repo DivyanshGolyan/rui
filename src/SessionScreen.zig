@@ -1699,18 +1699,19 @@ test "prepared Action preserves selected inspection until explicit return" {
             try std.testing.expectEqualStrings("› clean the build cache", rowText(screen, 0, &storage));
             try std.testing.expectEqualStrings("", rowText(screen, 6, &storage));
             try std.testing.expectEqualStrings("Run Bash: exact command", rowText(screen, 7, &storage));
-            try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 9).?.char.grapheme);
+            try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 8).?.char.grapheme);
             // The choice takes the input's row, Allow once highlighted; the
             // draft stays hidden, and the line under it says how to choose.
             try std.testing.expectEqualStrings("  › Allow once      Deny", rowText(screen, 9, &storage));
-            try std.testing.expect(Test.window(screen).readCell(2, 10).?.style.reverse);
-            try std.testing.expect(!Test.window(screen).readCell(18, 10).?.style.reverse);
+            try std.testing.expect(Test.window(screen).readCell(2, 9).?.style.reverse);
+            try std.testing.expect(!Test.window(screen).readCell(18, 9).?.style.reverse);
+            try std.testing.expectEqualStrings("─", Test.window(screen).readCell(0, 10).?.char.grapheme);
             try std.testing.expect(!screen.backend.storage.?.vx.screen.cursor_vis);
             try std.testing.expectEqualStrings("←→ choose · enter confirms", rowText(screen, 11, &storage));
             try std.testing.expect(press(screen, .{ .pick = .deny }, size, false) == .picked);
             _ = try Test.render(screen, &out.writer, size, "kept draft", 10, .{}, &.{});
             try std.testing.expectEqualStrings("    Allow once    › Deny", rowText(screen, 9, &storage));
-            try std.testing.expect(Test.window(screen).readCell(18, 10).?.style.reverse);
+            try std.testing.expect(Test.window(screen).readCell(18, 9).?.style.reverse);
         }
         if (oversized) {
             const tiny: std.posix.winsize = .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 };
