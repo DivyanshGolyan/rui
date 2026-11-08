@@ -73,6 +73,15 @@ const RowWidget = struct {
 
 const FeedWidget = struct {
     text: fw.Text,
+
+    fn widget(self: *FeedWidget) fw.Widget {
+        return .{ .userdata = self, .drawFn = draw };
+    }
+
+    fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface {
+        const self: *FeedWidget = @ptrCast(@alignCast(raw));
+        return self.text.draw(ctx.withConstraints(ctx.min, .{ .width = ctx.min.width, .height = null }));
+    }
 };
 
 const ReadKind = union(enum) { list, conversation: Id };
@@ -187,7 +196,7 @@ fn rowAt(raw: *const anyopaque, index: usize, _: usize) ?fw.Widget {
 fn blockAt(raw: *const anyopaque, index: usize, _: usize) ?fw.Widget {
     const self: *Self = @ptrCast(@alignCast(@constCast(raw)));
     if (index >= self.blocks.len) return null;
-    return self.blocks[index].text.widget();
+    return self.blocks[index].widget();
 }
 
 fn startRead(self: *Self) !void {
