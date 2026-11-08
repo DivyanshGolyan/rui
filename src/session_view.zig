@@ -13,7 +13,6 @@ const tools = @import("tools.zig");
 const failure_class = @import("failure_class.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
-const unicode = @import("terminal_unicode");
 const mcp_arguments = @import("mcp/arguments.zig");
 const mcp_shape = @import("mcp/shape.zig");
 const mcp_document = @import("mcp/document.zig");
@@ -360,47 +359,27 @@ pub fn noteCollapsed(sink: anytype, value: Collapsed) !void {
     if (comptime std.meta.hasMethod(@TypeOf(sink), "collapsed")) try sink.collapsed(value);
 }
 
-/// A Message longer than any of these shows a preview and a summary row.
-pub const collapse_bytes = 1024;
-const collapse_nonblank = 4;
-const collapse_lines = 12;
-const preview_lines = 2;
-const preview_bytes = 200;
-
-fn blank(byte: u8) bool {
-    return byte == ' ' or byte == '\t' or byte == '\r';
-}
-
-/// A user Message's body, fed its exact bytes after `userPrefix`. The view
-/// draws it dim; a long one keeps its first two non-blank lines and a
-/// `┄ N more lines` row, and trailing blank lines never show. `whole`
-/// (/details) shows every byte. Initialize in final storage.
+/// Streams a user Message's full body, escaping terminal controls and
+/// preserving quote annotations. Initialize in final storage.
 pub fn UserBody(comptime Sink: type) type {
     return struct {
         const Self = @This();
         out: Indented(Sink),
         escaped: Escaped(*Indented(Sink)),
         length: u64,
-        whole: bool,
         received: u64 = 0,
-        small: [collapse_bytes]u8 = undefined,
-        // Collapsed: the current line's prefix and the lines shown and seen.
-        line: [256]u8 = undefined,
-        line_bytes: u64 = 0,
-        line_blank: bool = true,
-        shown: usize = 0,
-        nonblank: u64 = 0,
+        line: [Markdown.head_limit]u8 = undefined,
         blocks: ?OutputBlocks.Sink = null,
         quote_context: Markdown.Context = .plain,
         quote_head: u8 = 0,
         quote_stream: bool = false,
         quote_active: bool = false,
 
-        pub fn init(self: *Self, sink: Sink, length: u64, whole: bool) !void {
-            return self.initBlocks(sink, length, whole, null);
+        pub fn init(self: *Self, sink: Sink, length: u64) !void {
+            return self.initBlocks(sink, length, null);
         }
-        pub fn initBlocks(self: *Self, sink: Sink, length: u64, whole: bool, blocks: ?OutputBlocks.Sink) !void {
-            self.* = .{ .out = .{ .sink = sink }, .escaped = undefined, .length = length, .whole = whole, .blocks = blocks };
+        pub fn initBlocks(self: *Self, sink: Sink, length: u64, blocks: ?OutputBlocks.Sink) !void {
+            self.* = .{ .out = .{ .sink = sink }, .escaped = undefined, .length = length, .blocks = blocks };
             self.escaped = .{ .sink = &self.out, .text = .{ .mode = .multiline } };
             try self.out.feed(Mark.body);
         }
@@ -408,41 +387,14 @@ pub fn UserBody(comptime Sink: type) type {
         pub fn feed(self: *Self, bytes: []const u8) anyerror!void {
             self.received += bytes.len;
             if (self.received > self.length) return error.ContentLengthMismatch;
-            if (self.whole) return self.quoteFeed(bytes);
-            if (self.length <= collapse_bytes) {
-                @memcpy(self.small[self.received - bytes.len ..][0..bytes.len], bytes);
-                return;
-            }
-            try self.scan(bytes);
+            try self.quoteFeed(bytes);
         }
 
-        /// Returns whether the body collapsed.
-        pub fn finish(self: *Self) anyerror!bool {
+        pub fn finish(self: *Self) anyerror!void {
             if (self.received != self.length) return error.ContentLengthMismatch;
-            var collapsed = false;
-            if (self.whole) {
-                try self.quoteFinish(.canonical_eof);
-            } else if (self.length <= collapse_bytes and !collapses(self.small[0..self.length])) {
-                const end = beforeBlankLines(self.small[0..self.length]);
-                try self.quoteFeed(self.small[0..end]);
-                try self.quoteFinish(if (end < self.length and self.small[end] == '\n') .line_feed else .canonical_eof);
-            } else {
-                if (self.length <= collapse_bytes) try self.scan(self.small[0..self.length]);
-                try self.endLine(.canonical_eof);
-                if (self.shown != 0) try self.out.feed("\n");
-                try self.out.feed(Mark.summary);
-                var count: [32]u8 = undefined;
-                const hidden = self.nonblank - self.shown;
-                try self.out.feed(switch (hidden) {
-                    0 => "┄",
-                    1 => "┄ 1 more line",
-                    else => std.fmt.bufPrint(&count, "┄ {d} more lines", .{hidden}) catch unreachable,
-                });
-                collapsed = true;
-            }
+            try self.quoteFinish(.canonical_eof);
             try self.out.feed(Mark.reset);
             try self.out.finish();
-            return collapsed;
         }
 
         fn beginQuote(self: *Self, quote: ?Markdown.Quote) !void {
@@ -499,86 +451,7 @@ pub fn UserBody(comptime Sink: type) type {
             try self.endQuote();
         }
 
-        fn scan(self: *Self, bytes: []const u8) !void {
-            for (bytes) |byte| {
-                if (byte == '\n') {
-                    try self.endLine(.line_feed);
-                    continue;
-                }
-                if (!blank(byte)) self.line_blank = false;
-                if (self.line_bytes < self.line.len) self.line[@intCast(self.line_bytes)] = byte;
-                self.line_bytes += 1;
-            }
-        }
-
-        fn endLine(self: *Self, line_ending: Markdown.HeadEnding) !void {
-            defer {
-                self.line_bytes = 0;
-                self.line_blank = true;
-            }
-            const projection = if (self.blocks != null) self.quote_context.step(self.line[0..@intCast(@min(self.line_bytes, Markdown.head_limit))], if (self.line_bytes >= Markdown.head_limit) .limit_cut else line_ending).resolved else null;
-            if (projection) |value| self.quote_context = value.next;
-            if (self.line_blank) return;
-            self.nonblank += 1;
-            if (self.shown == preview_lines) return;
-            if (self.shown != 0) try self.out.feed("\n");
-            self.shown += 1;
-            const kept = self.line[0..@intCast(@min(self.line_bytes, self.line.len))];
-            const cut = if (self.line_bytes <= preview_bytes) kept.len else graphemeCut(kept, preview_bytes);
-            if (projection) |value| try self.beginQuote(value.projection.quote);
-            try self.escaped.feed(kept[0..cut]);
-            try self.escaped.finish();
-            try self.endQuote();
-            if (cut != kept.len) try self.out.feed(Mark.reset ++ Mark.summary ++ "…" ++ Mark.reset ++ Mark.body);
-        }
     };
-}
-
-/// Whether a Message of at most `collapse_bytes` collapses: more non-blank
-/// lines or lines from its first to last non-blank one than the view keeps.
-fn collapses(bytes: []const u8) bool {
-    var nonblank: usize = 0;
-    var first: ?usize = null;
-    var last: usize = 0;
-    var lines = std.mem.splitScalar(u8, bytes, '\n');
-    var index: usize = 0;
-    while (lines.next()) |line| : (index += 1) {
-        for (line) |byte| {
-            if (blank(byte)) continue;
-            nonblank += 1;
-            if (first == null) first = index;
-            last = index;
-            break;
-        }
-    }
-    return nonblank > collapse_nonblank or (first != null and last - first.? + 1 > collapse_lines);
-}
-
-/// The bytes before trailing blank lines.
-fn beforeBlankLines(bytes: []const u8) usize {
-    var end: usize = 0;
-    var start: usize = 0;
-    while (start <= bytes.len) {
-        const stop = std.mem.indexOfScalarPos(u8, bytes, start, '\n') orelse bytes.len;
-        for (bytes[start..stop]) |byte| if (!blank(byte)) {
-            end = stop;
-            break;
-        };
-        start = stop + 1;
-    }
-    return end;
-}
-
-/// The longest prefix of whole graphemes within `limit` bytes. `bytes` may
-/// end early inside a grapheme; a cluster reaching its end does not fit.
-fn graphemeCut(bytes: []const u8, limit: usize) usize {
-    var cut: usize = 0;
-    var clusters = unicode.graphemeIterator(bytes);
-    while (clusters.next()) |cluster| {
-        if (cluster.start + cluster.len > limit) break;
-        cut = cluster.start + cluster.len;
-    }
-    return cut;
 }
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -620,16 +493,7 @@ test "sizes are thousands of bytes with one decimal below 9.95" {
     }
 }
 
-fn repeat(comptime text: []const u8, comptime count: usize) *const [text.len * count]u8 {
-    comptime {
-        var result: [text.len * count]u8 = undefined;
-        for (0..count) |index| @memcpy(result[index * text.len ..][0..text.len], text);
-        const final = result;
-        return &final;
-    }
-}
-
-test "a long user Message shows two non-blank lines and what it hides" {
+test "user Message streams all lines and validates its source length" {
     const Sink = struct {
         bytes: [4096]u8 = undefined,
         length: usize = 0,
@@ -638,51 +502,19 @@ test "a long user Message shows two non-blank lines and what it hides" {
             self.length += bytes.len;
         }
     };
-    const B = Mark.body;
-    const S = Mark.summary;
-    const R = Mark.reset;
-    const cut = R ++ S ++ "…" ++ R ++ B;
-    const a = @as([255]u8, @splat('a'));
-    const x = @as([1100]u8, @splat('x'));
-    const lines = comptime repeat("line\n", 29) ++ "line";
-    const five = comptime repeat("\n", 5);
-    const six = comptime repeat("\n", 6);
-    const twenty = comptime repeat("\n", 20);
-    const more = comptime repeat("\n  line", 29);
-    const Case = struct { input: []const u8, whole: bool = false, output: []const u8 };
-    for ([_]Case{
-        // At every limit: 4 non-blank lines in exactly 1,024 bytes.
-        .{ .input = a ++ "\n" ++ a ++ "\n" ++ a ++ "\n" ++ a ++ "a", .output = B ++ a ++ "\n  " ++ a ++ "\n  " ++ a ++ "\n  " ++ a ++ "a" ++ R },
-        .{ .input = "1\n2\n3\n4\n5", .output = B ++ "1\n  2\n  " ++ S ++ "┄ 3 more lines" ++ R },
-        // Twelve lines from the first non-blank to the last fit; thirteen do not.
-        .{ .input = "a" ++ six ++ "b" ++ five ++ "c", .output = B ++ "a" ++ six ++ "  b" ++ five ++ "  c" ++ R },
-        .{ .input = "a" ++ six ++ "b" ++ six ++ "c", .output = B ++ "a\n  b\n  " ++ S ++ "┄ 1 more line" ++ R },
-        // Leading and trailing blank lines do not count; trailing ones never show.
-        .{ .input = twenty ++ "a\n \t\r\n", .output = B ++ twenty ++ "  a" ++ R },
-        .{ .input = "a\r\n", .output = B ++ "a\\x0d" ++ R },
-        // Long only by its bytes: a cut line counts as shown.
-        .{ .input = x[0..1025], .output = B ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
-        // Cuts count source bytes and never split a grapheme.
-        .{ .input = "\x01" ++ a[0..197] ++ "😀" ++ x[0..900], .output = B ++ "\\x01" ++ a[0..197] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
-        .{ .input = a[0..199] ++ "e\u{301}" ++ x[0..900], .output = B ++ a[0..199] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
-        .{ .input = a[0..200] ++ "\n" ++ x[0..900], .output = B ++ a[0..200] ++ "\n  " ++ x[0..200] ++ cut ++ "\n  " ++ S ++ "┄" ++ R },
-        // Preview lines skip blank ones; a large Message streams.
-        .{ .input = "\n \nfirst\n\nsecond\nthird\n" ++ x ++ "\n\n", .output = B ++ "first\n  second\n  " ++ S ++ "┄ 2 more lines" ++ R },
-        .{ .input = lines, .whole = true, .output = B ++ "line" ++ more ++ R },
-    }) |case| {
-        for ([_]usize{ 0, 1, case.input.len / 2, case.input.len }) |split| {
-            var sink: Sink = .{};
-            var body: UserBody(*Sink) = undefined;
-            try body.init(&sink, case.input.len, case.whole);
-            try body.feed(case.input[0..split]);
-            try body.feed(case.input[split..]);
-            try std.testing.expectEqual(std.mem.indexOf(u8, case.output, "┄") != null, try body.finish());
-            try std.testing.expectEqualStrings(case.output, sink.bytes[0..sink.length]);
-        }
+    const source = "one\ntwo\nthree\nfour\nfive";
+    for (0..source.len + 1) |split| {
+        var sink: Sink = .{};
+        var body: UserBody(*Sink) = undefined;
+        try body.init(&sink, source.len);
+        try body.feed(source[0..split]);
+        try body.feed(source[split..]);
+        try body.finish();
+        try std.testing.expectEqualStrings(Mark.body ++ "one\n  two\n  three\n  four\n  five" ++ Mark.reset, sink.bytes[0..sink.length]);
     }
     var sink: Sink = .{};
     var body: UserBody(*Sink) = undefined;
-    try body.init(&sink, 3, false);
+    try body.init(&sink, 3);
     try std.testing.expectError(error.ContentLengthMismatch, body.feed("abcd"));
 }
 
@@ -1321,13 +1153,12 @@ pub fn messageBlocks(requests: client.Requests, store: []const u8, session: []co
         try print(sink, "\n{s}", .{text});
     }
     if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at, compact);
-    const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
     compact.* = false;
     try userPrefix(sink, colour, value.admitted_at);
     var body: UserBody(@TypeOf(sink)) = undefined;
-    try body.initBlocks(sink, value.content.length, false, blocks);
+    try body.initBlocks(sink, value.content.length, blocks);
     try content(requests, store, session, item, value.content, &body);
-    if (try body.finish()) try noteCollapsed(sink, block);
+    try body.finish();
     try sink.feed("\n");
 }
 

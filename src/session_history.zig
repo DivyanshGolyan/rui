@@ -104,9 +104,9 @@ pub const Prepared = struct {
                 .user => {
                     try View.userPrefix(sink, colour, item.admitted_at.?);
                     var body: View.UserBody(@TypeOf(sink)) = undefined;
-                    try body.initBlocks(sink, item.content.bytes, mode == .details, if (mode == .transcript) blocks else null);
+                    try body.initBlocks(sink, item.content.bytes, if (mode == .transcript) blocks else null);
                     try staged.read(&body);
-                    if (try body.finish()) try View.noteCollapsed(sink, collapsed(item));
+                    try body.finish();
                 },
                 .assistant => {
                     try sink.feed("\n");

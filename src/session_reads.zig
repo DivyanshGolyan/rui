@@ -2220,10 +2220,10 @@ test "typed submitted quote capture uses original bytes through escaping collaps
         var marks: OutputBlocks.Capture = .{};
         var capture: DisplayCapture = .{ .task = &task, .file = file, .typed = &marks };
         var body: View.UserBody(*DisplayCapture) = undefined;
-        try body.initBlocks(&capture, source.len, true, capture.capability());
+        try body.initBlocks(&capture, source.len, capture.capability());
         try body.feed(source[0..split]);
         try body.feed(source[split..]);
-        try std.testing.expect(!try body.finish());
+        try body.finish();
         const written = bytes[0..try file.readPositionalAll(io, &bytes, 0)];
         try std.testing.expect(std.mem.indexOf(u8, written, "> *literal* \\x1b[31m") != null);
         try std.testing.expect(std.mem.indexOf(u8, written, "\x1b[3m") == null);
@@ -2238,10 +2238,10 @@ test "typed submitted quote capture uses original bytes through escaping collaps
     var capture: DisplayCapture = .{ .task = &task, .file = file, .typed = &marks };
     const preview = "> *first*\n~~~~\n> hidden code\n~~~~\n> hidden quote\n";
     var body: View.UserBody(*DisplayCapture) = undefined;
-    try body.initBlocks(&capture, preview.len, false, capture.capability());
+    try body.initBlocks(&capture, preview.len, capture.capability());
     try body.feed(preview);
-    try std.testing.expect(try body.finish());
-    try std.testing.expectEqual(@as(u6, 1), marks.count);
+    try body.finish();
+    try std.testing.expectEqual(@as(u6, 2), marks.count);
     try std.testing.expect(marks.items[0].data == .quote);
 }
 
