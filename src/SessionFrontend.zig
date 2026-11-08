@@ -5704,3 +5704,178 @@ test "upgrade reobservation retains a refused archive command from the completio
         try std.testing.expectEqual(@as(usize, 0), overview.state.request_count);
     }
 }
+
+
+test "confirmed original clears custody before requests inspection while retaining next draft" {
+    const Host = struct {
+        fn nonblocking(fd: std.posix.fd_t) !void {
+            const flags = std.c.fcntl(fd, std.c.F.GETFL);
+            if (flags < 0) return error.FcntlFailed;
+            const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+            if (std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) < 0) return error.FcntlFailed;
+        }
+
+        fn ready(fd: std.posix.fd_t, events: i16, deadline: std.Io.Clock.Timestamp) !void {
+            const Watch = struct { fd: std.posix.fd_t, events: i16 };
+            try test_poll.waitUntil(std.testing.io, deadline, Watch{ .fd = fd, .events = events }, struct {
+                fn check(watch: Watch) !bool {
+                    var fds = [_]std.posix.pollfd{.{ .fd = watch.fd, .events = watch.events, .revents = 0 }};
+                    return try std.posix.poll(&fds, 0) != 0;
+                }
+            }.check);
+        }
+
+        fn writeAll(fd: std.posix.fd_t, bytes: []const u8, deadline: std.Io.Clock.Timestamp) !void {
+            var written: usize = 0;
+            while (written < bytes.len) {
+                try ready(fd, std.posix.POLL.OUT, deadline);
+                const count = std.c.write(fd, bytes.ptr + written, bytes.len - written);
+                if (count < 0) switch (std.posix.errno(count)) {
+                    .INTR, .AGAIN => continue,
+                    else => return error.FixtureWriteFailed,
+                };
+                if (count == 0) return error.UnexpectedEof;
+                written += @intCast(count);
+            }
+        }
+
+        fn readRequest(fd: std.posix.fd_t, deadline: std.Io.Clock.Timestamp, request: []u8) ![]const u8 {
+            var used: usize = 0;
+            while (true) {
+                if (used == request.len) return error.RequestTooLarge;
+                try ready(fd, std.posix.POLL.IN, deadline);
+                const count = std.c.read(fd, request.ptr + used, request.len - used);
+                if (count < 0) switch (std.posix.errno(count)) {
+                    .INTR, .AGAIN => continue,
+                    else => return error.FixtureReadFailed,
+                };
+                if (count == 0) return error.UnexpectedEof;
+                used += @intCast(count);
+                if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                    const start = (std.mem.indexOf(u8, request[0..end], "Content-Length: ") orelse return error.InvalidRequest) + "Content-Length: ".len;
+                    const finish = (std.mem.indexOf(u8, request[start .. end + 2], "\r\n") orelse return error.InvalidRequest) + start;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) return request[0..used];
+                }
+            }
+        }
+
+    };
+
+    const Fixture = struct {
+        fn requests(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, out: *std.Io.Writer, _: *reads.SavedRequests) !void {
+            try out.writeAll("Rui: fixture recovery handles\n");
+        }
+        fn submissionDone(frontend: *Self) bool {
+            return frontend.submission.task.completed();
+        }
+        fn readerDone(frontend: *Self) bool {
+            return frontend.reader.completed();
+        }
+    };
+    const io = std.testing.io;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    const paths = lease.paths;
+    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    }
+    const scratch = try held.tmp.dir.createFile(io, "custody-scratch", .{ .read = true });
+    defer scratch.close(io);
+    const inspection = try held.tmp.dir.createFile(io, "custody-inspection", .{ .read = true });
+    defer inspection.close(io);
+    const action = try held.tmp.dir.createFile(io, "custody-action", .{ .read = true });
+    defer action.close(io);
+    self.files = .{ .scratch = scratch, .action = action, .inspection = inspection };
+    self.store = root;
+    self.session = "k7m2qx";
+    self.requests = Fixture.requests;
+    self.submission.store = root;
+    self.submission.session = self.session;
+    self.submission.directory = root;
+    defer {
+        self.reader.cancel();
+        self.reader.join() catch {};
+        self.submission.cancel();
+        _ = self.submission.join();
+        self.submission.close();
+    }
+
+    const original = self.input.submitText("original café!");
+    try self.beginMessage(.{ .message = original });
+    const key = self.submission.view().?.key;
+    var first: [16384]u8 = undefined;
+    var first_len: usize = 0;
+    {
+        const deadline = test_poll.after(io, .fromSeconds(5));
+        try Host.ready(listener.socket.handle, std.posix.POLL.IN, deadline);
+        const peer = try listener.accept(io);
+        defer peer.close(io);
+        try Host.nonblocking(peer.socket.handle);
+        const request = try Host.readRequest(peer.socket.handle, deadline, &first);
+        try std.testing.expectStringStartsWith(request, "POST /v1/message HTTP/1.1\r\n");
+        try std.testing.expect(std.mem.indexOf(u8, request, &key) != null);
+        first_len = request.len;
+        // The Host received the original, but its reply is lost.
+    }
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), self, Fixture.submissionDone);
+    try self.admit();
+    try std.testing.expectEqual(Submission.State.unconfirmed, self.submission.view().?.state);
+    try std.testing.expectEqualSlices(u8, &key, &self.submission.view().?.key);
+    try std.testing.expectEqualStrings("original café!", try self.input.message(original));
+    try sendKeys(self, "next café!\x1b[D\x1b[DX");
+    try std.testing.expectEqualStrings("next cafXé!", self.input.composition().bytes);
+    try std.testing.expectEqual("next cafX".len, self.input.composition().cursor);
+    try self.recover(null);
+    try self.admit();
+    {
+        const deadline = test_poll.after(io, .fromSeconds(5));
+        try Host.ready(listener.socket.handle, std.posix.POLL.IN, deadline);
+        const peer = try listener.accept(io);
+        defer peer.close(io);
+        try Host.nonblocking(peer.socket.handle);
+        var second: [16384]u8 = undefined;
+        const request = try Host.readRequest(peer.socket.handle, deadline, &second);
+        try std.testing.expectStringStartsWith(request, "POST /v1/message HTTP/1.1\r\n");
+        const first_body = (std.mem.indexOf(u8, first[0..first_len], "\r\n\r\n") orelse return error.InvalidRequest) + 4;
+        const second_body = (std.mem.indexOf(u8, request, "\r\n\r\n") orelse return error.InvalidRequest) + 4;
+        try std.testing.expectEqualStrings(first[first_body..first_len], request[second_body..]);
+        try std.testing.expect(std.mem.indexOf(u8, request, &key) != null);
+        const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"37\"},\"execution\":{\"status\":\"queued\"},\"input\":{\"type\":\"text\",\"bytes\":\"15\",\"sha256\":\"d02342cf8f590cb32eff9b3d74fffa781a3caa7ea94c4145612c09244fd25d00\"},\"queue\":{\"status\":\"queued\",\"admission\":\"37\"}}";
+        var header: [256]u8 = undefined;
+        const headers = try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{body.len});
+        try Host.writeAll(peer.socket.handle, headers, deadline);
+        try Host.writeAll(peer.socket.handle, body, deadline);
+    }
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), self, Fixture.submissionDone);
+    try self.admit();
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expectEqualSlices(u8, &key, &self.submission.recovery().accepted.key);
+    try std.testing.expectError(error.NoSubmission, self.input.message(original));
+    try std.testing.expectEqualStrings("next cafXé!", self.input.composition().bytes);
+    try std.testing.expectEqual("next cafX".len, self.input.composition().cursor);
+
+    // Admit the command directly: the physical PTY and real listing have their
+    // own tests. This checks the actual reader's frozen submission snapshot.
+    try self.slashCommand("/requests");
+    try self.startQueuedCommand();
+    try std.testing.expect(self.job.inspection_submission == null);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), self, Fixture.readerDone);
+    try self.settleReader();
+    try std.testing.expectEqualStrings("Rui: fixture recovery handles\n", held.screen.browsing.text.text());
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expectEqualStrings("next cafXé!", self.input.composition().bytes);
+    try std.testing.expectEqual("next cafX".len, self.input.composition().cursor);
+    var pending = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+    try std.testing.expectEqual(@as(usize, 0), try std.posix.poll(&pending, 0));
+}
