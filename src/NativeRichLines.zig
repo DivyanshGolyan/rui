@@ -30,6 +30,7 @@ pub const Table = extern struct {
 };
 
 io: std.Io,
+source: vaxis.unicode.PagedSource,
 file: std.Io.File,
 tables: std.Io.File,
 count: u64 = 0,
@@ -42,7 +43,7 @@ pub fn build(io: std.Io, dir: std.Io.Dir, source: vaxis.unicode.PagedSource, can
     errdefer file.close(io);
     const tables = try scratch(io, dir);
     errdefer tables.close(io);
-    var self: Self = .{ .io = io, .file = file, .tables = tables };
+    var self: Self = .{ .io = io, .source = source, .file = file, .tables = tables };
     var reader: vaxis.unicode.PagedReader = .{ .source = source };
     var context: markdown.Context = .plain;
     var head: [markdown.head_limit]u8 = undefined;
@@ -104,6 +105,109 @@ pub fn lineAt(self: *const Self, index: u64) !?Line {
     if (try self.file.readPositionalAll(self.io, std.mem.asBytes(&line), offset) != @sizeOf(Line)) return error.TruncatedResponse;
     return line;
 }
+
+/// The framework owns wrapping and visible row geometry; these callbacks
+/// provide bounded domain style facts and table cell presentation only.
+pub fn provider(self: *Self) fw.PagedText.LineProvider {
+    return .{ .userdata = self, .lineFn = lineStyle, .drawHorizontalFn = drawTable };
+}
+
+fn lineStyle(raw: *const anyopaque, index: usize) !fw.PagedText.LineStyle {
+    const self: *const Self = @ptrCast(@alignCast(raw));
+    const line = (try self.lineAt(index)) orelse return error.InvalidSourceRead;
+    return .{
+        .horizontal = line.mode == .@"opaque" or line.table_role != .none,
+        .quote_depth = @intCast(line.quote_depth),
+        .quote_prefix = line.quote_prefix,
+        .custom = line.table_role != .none,
+    };
+}
+
+fn drawTable(raw: *const anyopaque, index: usize, ctx: fw.DrawContext, left: u64, width: u16) !fw.Surface {
+    const self: *const Self = @ptrCast(@alignCast(raw));
+    const line = (try self.lineAt(index)) orelse return error.InvalidSourceRead;
+    if (line.table_role == .none) return error.InvalidSourceRead;
+    const group = (try self.tableAt(line.table_group)) orelse return error.InvalidSourceRead;
+    const placeholder: fw.Widget = .{ .userdata = @constCast(self), .drawFn = placeholderDraw };
+    var surface = try fw.Surface.init(ctx.arena, placeholder, .{ .width = width, .height = 1 });
+    const slots = try ctx.arena.alloc(?[]u8, width);
+    @memset(slots, null);
+    var painter: TablePainter = .{ .surface = surface, .ctx = ctx, .left = left, .width = width, .slots = slots };
+    if (line.table_role == .rule) {
+        for (group.widths[0..group.count], 0..) |columns, col| {
+            if (col != 0) try painter.text("─┼─");
+            painter.repeated("─", columns);
+        }
+    } else {
+        var line_buffer: [table.max_source_bytes]u8 = undefined;
+        const bytes = (try readLine(self.source, line, &line_buffer)) orelse return error.InvalidSourceRead;
+        const parsed = switch (table.parse(bytes, lineEnding(line), @intCast(group.count))) {
+            .row => |value| value,
+            else => return error.InvalidSourceRead,
+        };
+        for (parsed.cells[0..parsed.count], 0..) |cell, col| {
+            if (col != 0) try painter.text(" │ ");
+            const value = bytes[cell.start..cell.end];
+            const content_width = ctx.hardLineWidth(value);
+            const padding = group.widths[col] - content_width;
+            const leading: u64 = switch (std.meta.intToEnum(table.Alignment, group.alignment[col]) catch return error.InvalidSourceRead) {
+                .left => 0,
+                .right => padding,
+                .center => padding / 2,
+            };
+            painter.repeated(" ", leading);
+            try painter.text(value);
+            painter.repeated(" ", padding - leading);
+        }
+    }
+    surface.scroll_width = painter.column;
+    return surface;
+}
+
+fn placeholderDraw(_: *anyopaque, _: fw.DrawContext) std.mem.Allocator.Error!fw.Surface {
+    unreachable;
+}
+
+const TablePainter = struct {
+    surface: fw.Surface,
+    ctx: fw.DrawContext,
+    left: u64,
+    width: u16,
+    slots: []?[]u8,
+    column: u64 = 0,
+
+    fn repeated(self: *TablePainter, glyph: []const u8, count: u64) void {
+        const end = self.column +| count;
+        var visible = @max(self.column, self.left);
+        const stop = @min(end, self.left +| self.width);
+        while (visible < stop) : (visible += 1) self.surface.writeCell(@intCast(visible - self.left), 0, .{ .char = .{ .grapheme = glyph, .width = 1 } });
+        self.column = end;
+    }
+
+    fn text(self: *TablePainter, value: []const u8) !void {
+        var local: usize = 0;
+        var iter = self.ctx.graphemeIterator(value);
+        while (iter.next()) |item| {
+            const bytes = item.bytes(value);
+            const tab = std.mem.eql(u8, bytes, "\t");
+            const cells: usize = if (tab) fw.DrawContext.tabWidth(local) else self.ctx.stringWidth(bytes);
+            if (tab) {
+                self.repeated(" ", cells);
+            } else {
+                const end = try std.math.add(u64, self.column, cells);
+                if (self.column >= self.left and end <= self.left +| self.width and self.column - self.left < self.width) {
+                    const target: usize = @intCast(self.column - self.left);
+                    if (self.slots[target] == null) self.slots[target] = try self.ctx.arena.alloc(u8, table.max_source_bytes);
+                    const stored = self.slots[target].?[0..bytes.len];
+                    @memcpy(stored, bytes);
+                    self.surface.writeCell(@intCast(target), 0, .{ .char = .{ .grapheme = stored, .width = @intCast(cells) } });
+                }
+                self.column = end;
+            }
+            local += cells;
+        }
+    }
+};
 
 fn indexTables(self: *Self, source: vaxis.unicode.PagedSource, cancellation: ?*const client.Cancellation) !void {
     var first_buf: [table.max_source_bytes]u8 = undefined;
@@ -285,4 +389,49 @@ test "native rich table index retains column facts without padded rows" {
     try std.testing.expectEqual(index.count * @sizeOf(Line), try index.file.length(io));
     try std.testing.expectEqual(@as(u64, @sizeOf(Table)), try index.tables.length(io));
     std.debug.print("rich-index source_bytes={d} lines={d} line_disk_bytes={d} table_disk_bytes={d}\n", .{ source_length, index.count, try index.file.length(io), try index.tables.length(io) });
+}
+
+test "native paged rich rows retain quote rails and horizontal code and table" {
+    fw.DrawContext.init(.unicode);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "display", .{ .read = true });
+    defer file.close(io);
+    const bytes = "before\n> quote words\n```zig\ncode_0123456789界END\n```\na | b\n--- | :---:\nx | 界\nafter\n";
+    try file.writeStreamingAll(io, bytes);
+    const backing: TestSource = .{ .io = io, .file = file };
+    const source: vaxis.unicode.PagedSource = .{ .userdata = &backing, .length = bytes.len, .readFn = TestSource.read };
+    var rich = try Self.build(io, tmp.dir, source, null);
+    defer rich.close();
+    var reader: vaxis.unicode.PagedReader = .{ .source = source };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{ .width = 12 }, .max = .{ .width = 12, .height = null }, .cell_size = .{} };
+    var index = try fw.PagedText.Index.initStyled(&reader, ctx, 12, rich.provider());
+    var quote_row: ?usize = null;
+    var code_row: ?usize = null;
+    var table_row: ?usize = null;
+    for (0..index.len) |row| {
+        const value = (try index.rowAt(row)).?;
+        if (value.line_number == 1 and quote_row == null) quote_row = row;
+        if (value.line_number == 3) code_row = row;
+        if (value.line_number == 5) table_row = row;
+    }
+    const quote = try (try index.builder().itemAtIdxForDraw(quote_row.?, 0, ctx.arena)).?.draw(ctx);
+    try std.testing.expectEqualStrings("│", quote.readCell(0, 0).char.grapheme);
+    try std.testing.expect(quote.readCell(0, 0).style.dim);
+    const code_widget = (try index.builder().itemAtIdxForDraw(code_row.?, 0, ctx.arena)).?;
+    const code = try code_widget.drawHorizontalFn.?(code_widget.userdata, ctx, 15, 5);
+    try std.testing.expectEqualStrings("界", code.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("D", code.readCell(4, 0).char.grapheme);
+    const table_widget = (try index.builder().itemAtIdxForDraw(table_row.?, 0, ctx.arena)).?;
+    const rendered = try table_widget.drawHorizontalFn.?(table_widget.userdata, ctx, 0, 12);
+    try std.testing.expectEqualStrings("a", rendered.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("│", rendered.readCell(2, 0).char.grapheme);
+    try std.testing.expectEqualStrings("b", rendered.readCell(4, 0).char.grapheme);
+    try std.testing.expect(index.fault == null);
+    var original: [bytes.len]u8 = undefined;
+    try std.testing.expectEqual(bytes.len, try file.readPositionalAll(io, &original, 0));
+    try std.testing.expectEqualSlices(u8, bytes, &original);
 }

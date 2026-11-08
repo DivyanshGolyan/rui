@@ -55,7 +55,7 @@ pub fn load(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io
         item.reader = .{ .source = try item.source.pagedSource() };
         item.rich = try RichLines.build(requests.io, dir, item.reader.source, requests.cancellation);
         errdefer item.rich.close();
-        item.index = try fw.PagedText.Index.init(&item.reader, ctx, width);
+        item.index = try fw.PagedText.Index.initStyled(&item.reader, ctx, width, item.rich.provider());
         const added = try std.math.add(usize, item.index.len, 1);
         const total = try std.math.add(usize, self.row_count, added);
         self.row_count = std.math.cast(u32, total) orelse return error.TooManyRows;
@@ -105,7 +105,7 @@ fn drawRow(raw: *const anyopaque, row: usize, cursor: usize, arena: std.mem.Allo
     const location = self.locate(row) orelse return null;
     if (location.row) |line| return location.item.index.builder().itemAtIdxForDraw(line, cursor, arena);
     const label = try arena.create(fw.Text);
-    label.* = .{ .text = if (location.item.source.item.kind == .user) "You" else "Assistant", .softwrap = false };
+    label.* = .{ .text = if (location.item.source.item.kind == .user) "You" else "Assistant", .softwrap = false, .pinned_horizontal = true };
     return label.widget();
 }
 

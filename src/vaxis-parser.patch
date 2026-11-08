@@ -1392,16 +1392,33 @@ diff --git a/src/vxfw/PagedText.zig b/src/vxfw/PagedText.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/vxfw/PagedText.zig
-@@ -0,0 +1,276 @@
+@@ -0,0 +1,358 @@
 +//! Reader-backed native text geometry. Source bytes remain owned by the
 +//! caller; this iterator retains only offsets and a bounded grapheme buffer.
 +const std = @import("std");
 +const vaxis = @import("../main.zig");
 +const fw = @import("vxfw.zig");
 +
++pub const LineStyle = struct {
++    horizontal: bool = false,
++    quote_depth: u4 = 0,
++    quote_prefix: u8 = 0,
++    custom: bool = false,
++};
++
++/// Domain-owned style facts are read by logical line, while all wrapping,
++/// source offsets and viewport geometry remain native framework-owned.
++pub const LineProvider = struct {
++    userdata: *const anyopaque,
++    lineFn: *const fn (*const anyopaque, usize) anyerror!LineStyle,
++    drawHorizontalFn: ?*const fn (*const anyopaque, usize, fw.DrawContext, u64, u16) anyerror!fw.Surface = null,
++};
++
 +pub const Row = struct {
 +    start: usize,
 +    end: usize,
++    line_number: usize = 0,
++    style: LineStyle = .{},
 +    /// The exact source span remains intact, but a later visual realization
 +    /// must mark an individual grapheme too large for its bounded cell.
 +    oversized_grapheme: bool = false,
@@ -1414,6 +1431,10 @@ new file mode 100644
 +    reader: *vaxis.unicode.PagedReader,
 +    ctx: fw.DrawContext,
 +    width: u16,
++    line_width: u16 = 0,
++    provider: ?LineProvider = null,
++    line_number: usize = 0,
++    line_style: LineStyle = .{},
 +    position: usize = 0,
 +    line_end: usize = 0,
 +    next_line: usize = 0,
@@ -1421,7 +1442,13 @@ new file mode 100644
 +
 +    pub fn init(reader: *vaxis.unicode.PagedReader, ctx: fw.DrawContext, width: u16) !WrapIterator {
 +        if (width == 0) return error.InvalidWidth;
-+        return .{ .reader = reader, .ctx = ctx, .width = width };
++        return .{ .reader = reader, .ctx = ctx, .width = width, .line_width = width };
++    }
++
++    pub fn initStyled(reader: *vaxis.unicode.PagedReader, ctx: fw.DrawContext, width: u16, provider: ?LineProvider) !WrapIterator {
++        var result = try init(reader, ctx, width);
++        result.provider = provider;
++        return result;
 +    }
 +
 +    fn loadLine(self: *WrapIterator) !bool {
@@ -1433,7 +1460,19 @@ new file mode 100644
 +            at += 1;
 +            if (byte != ' ' and byte != '\t') last_nonspace = at;
 +        }
-+        self.line_end = last_nonspace;
++        self.line_style = if (self.provider) |provider| try provider.lineFn(provider.userdata, self.line_number) else .{};
++        const rail: u16 = @as(u16, self.line_style.quote_depth) * 2;
++        if (self.line_style.quote_depth != 0 and self.width > rail) {
++            if (self.line_style.quote_prefix > last_nonspace - self.position) {
++                // A quoted blank can contain only the prefix; keep its body empty.
++                self.position = last_nonspace;
++            } else self.position += self.line_style.quote_prefix;
++            self.line_width = self.width - rail;
++        } else {
++            self.line_style.quote_depth = 0;
++            self.line_width = self.width;
++        }
++        self.line_end = if (self.line_style.horizontal) at else last_nonspace;
 +        self.next_line = at;
 +        if ((try self.reader.readByte(self.next_line)) == '\r') self.next_line += 1;
 +        if ((try self.reader.readByte(self.next_line)) == '\n') self.next_line += 1;
@@ -1459,8 +1498,9 @@ new file mode 100644
 +        if (self.position == self.line_end) {
 +            self.position = self.next_line;
 +            self.line_ready = false;
++            self.line_number += 1;
 +        }
-+        return .{ .start = start, .end = end, .oversized_grapheme = oversized };
++        return .{ .start = start, .end = end, .line_number = if (self.line_ready) self.line_number else self.line_number - 1, .style = self.line_style, .oversized_grapheme = oversized };
 +    }
 +
 +    /// Return a single source-backed visual row. The position may advance
@@ -1468,10 +1508,13 @@ new file mode 100644
 +    pub fn next(self: *WrapIterator) !?Row {
 +        if (!self.line_ready and !try self.loadLine()) return null;
 +        const start = self.position;
-+        if (start == self.line_end) {
++        const logical_line = self.line_number;
++        if (self.line_style.horizontal or start == self.line_end) {
++            const end = if (self.line_style.horizontal) self.line_end else start;
 +            self.position = self.next_line;
 +            self.line_ready = false;
-+            return .{ .start = start, .end = start };
++            self.line_number += 1;
++            return .{ .start = start, .end = end, .line_number = logical_line, .style = self.line_style };
 +        }
 +        var row_width: usize = 0;
 +        var oversized = false;
@@ -1488,7 +1531,7 @@ new file mode 100644
 +                if (!space) seen_nonspace = true;
 +                word_width +|= try self.widthOf(span);
 +                word_end = span.start + span.len;
-+                if (word_width > self.width) {
++                if (word_width > self.line_width) {
 +                    long_word = true;
 +                    break;
 +                }
@@ -1498,7 +1541,7 @@ new file mode 100644
 +                while (try split.next()) |span| {
 +                    if (span.start >= self.line_end) break;
 +                    const width = try self.widthOf(span);
-+                    if (row_width + width > self.width) {
++                    if (row_width + width > self.line_width) {
 +                        if (self.position == start) {
 +                            self.position = span.start + span.len;
 +                            oversized = oversized or span.len > 4096;
@@ -1509,7 +1552,7 @@ new file mode 100644
 +                    self.position = span.start + span.len;
 +                    oversized = oversized or span.len > 4096;
 +                }
-+            } else if (row_width + word_width > self.width) {
++            } else if (row_width + word_width > self.line_width) {
 +                const end = self.position;
 +                while (self.position < self.line_end and try self.isSpace(self.position)) self.position += 1;
 +                return self.finishEarly(start, end, oversized);
@@ -1528,7 +1571,8 @@ new file mode 100644
 +        const end = self.line_end;
 +        self.position = self.next_line;
 +        self.line_ready = false;
-+        return .{ .start = start, .end = end, .oversized_grapheme = oversized };
++        self.line_number += 1;
++        return .{ .start = start, .end = end, .line_number = logical_line, .style = self.line_style, .oversized_grapheme = oversized };
 +    }
 +};
 +
@@ -1549,8 +1593,12 @@ new file mode 100644
 +    fault: ?anyerror = null,
 +
 +    pub fn init(reader: *vaxis.unicode.PagedReader, ctx: fw.DrawContext, width: u16) !Index {
++        return initStyled(reader, ctx, width, null);
++    }
++
++    pub fn initStyled(reader: *vaxis.unicode.PagedReader, ctx: fw.DrawContext, width: u16, provider: ?LineProvider) !Index {
 +        var self: Index = .{};
-+        var cursor = try WrapIterator.init(reader, ctx, width);
++        var cursor = try WrapIterator.initStyled(reader, ctx, width, provider);
 +        while (true) {
 +            const before = cursor;
 +            const row = (try cursor.next()) orelse break;
@@ -1633,39 +1681,73 @@ new file mode 100644
 +    row: Row,
 +
 +    fn widget(self: *VisibleRow) fw.Widget {
-+        return .{ .userdata = self, .drawFn = draw };
++        return .{
++            .userdata = self,
++            .drawFn = draw,
++            .drawHorizontalFn = if (self.row.style.horizontal) drawHorizontal else null,
++            .pinnedHorizontal = !self.row.style.horizontal,
++        };
 +    }
 +
 +    fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface {
 +        const self: *VisibleRow = @ptrCast(@alignCast(raw));
-+        return self.drawSource(ctx) catch |err| {
-+            if (err == error.OutOfMemory) return error.OutOfMemory;
-+            self.owner.fault = err;
-+            const text = try Index.faultWidget(ctx.arena);
-+            return text.draw(ctx);
-+        };
++        return self.realize(ctx, 0, ctx.max.width orelse ctx.min.width) catch |err| self.failure(ctx, err);
 +    }
 +
-+    fn drawSource(self: *VisibleRow, ctx: fw.DrawContext) !fw.Surface {
-+        const width = ctx.max.width orelse ctx.min.width;
-+        const surface = try fw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = 1 });
++    fn drawHorizontal(raw: *anyopaque, ctx: fw.DrawContext, left: u64, width: u16) std.mem.Allocator.Error!fw.Surface {
++        const self: *VisibleRow = @ptrCast(@alignCast(raw));
++        return self.realize(ctx, left, width) catch |err| self.failure(ctx, err);
++    }
++
++    fn failure(self: *VisibleRow, ctx: fw.DrawContext, err: anyerror) std.mem.Allocator.Error!fw.Surface {
++        if (err == error.OutOfMemory) return error.OutOfMemory;
++        self.owner.fault = err;
++        const text = try Index.faultWidget(ctx.arena);
++        return text.draw(ctx);
++    }
++
++    fn realize(self: *VisibleRow, ctx: fw.DrawContext, left: u64, width: u16) !fw.Surface {
++        const provider = self.owner.checkpoints[0].cursor.provider;
++        if (self.row.style.custom) {
++            const value = provider orelse return error.InvalidLineStyle;
++            const callback = value.drawHorizontalFn orelse return error.InvalidLineStyle;
++            var surface = try callback(value.userdata, self.row.line_number, ctx, left, width);
++            surface.widget = self.widget();
++            return surface;
++        }
++        var surface = try fw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = 1 });
 +        const slots = try ctx.arena.alloc(?[]u8, width);
 +        @memset(slots, null);
-+        if (self.row.start == self.row.end or width == 0) return surface;
++        const rail: u16 = @as(u16, self.row.style.quote_depth) * 2;
++        for (0..self.row.style.quote_depth) |depth| surface.writeCell(@intCast(depth * 2), 0, .{ .char = .{ .grapheme = "│", .width = 1 }, .style = .{ .dim = true } });
 +        const reader = self.owner.checkpoints[0].cursor.reader;
 +        var graphemes = try vaxis.unicode.PagedGraphemeIterator.init(reader, self.row.start);
-+        var column: usize = 0;
++        var column: u64 = rail;
++        var scratch: [4096]u8 = undefined;
 +        while (try graphemes.next()) |span| {
-+            if (span.start >= self.row.end or column >= width) break;
-+            if (span.len > 4096) return error.GraphemeTooLarge;
-+            if (slots[column] == null) slots[column] = try ctx.arena.alloc(u8, 4096);
-+            const bytes = slots[column].?[0..span.len];
++            if (span.start >= self.row.end) break;
++            if (span.len > scratch.len) return error.GraphemeTooLarge;
++            const bytes = scratch[0..span.len];
 +            for (0..span.len) |i| bytes[i] = (try reader.readByte(span.start + i)) orelse return error.InvalidSourceRead;
-+            const columns = ctx.stringWidth(bytes);
-+            if (column + columns > width) break;
-+            surface.writeCell(@intCast(column), 0, .{ .char = .{ .grapheme = bytes, .width = @intCast(columns) } });
-+            column += columns;
++            const tab = self.row.style.horizontal and std.mem.eql(u8, bytes, "\t");
++            const columns: u64 = if (tab) fw.DrawContext.tabWidth(std.math.cast(usize, column) orelse return error.SourceTooLarge) else ctx.stringWidth(bytes);
++            const next = try std.math.add(u64, column, columns);
++            if (tab) {
++                const start = @max(column, left);
++                const end = @min(next, left +| width);
++                var cell = start;
++                while (cell < end) : (cell += 1) surface.writeCell(@intCast(cell - left), 0, .{ .char = .{ .grapheme = " ", .width = 1 } });
++            } else if (column >= left and next <= left +| width and column - left < width) {
++                const target: usize = @intCast(column - left);
++                if (slots[target] == null) slots[target] = try ctx.arena.alloc(u8, 4096);
++                const stored = slots[target].?[0..span.len];
++                @memcpy(stored, bytes);
++                surface.writeCell(@intCast(target), 0, .{ .char = .{ .grapheme = stored, .width = @intCast(columns) } });
++            }
++            column = next;
++            if (!self.row.style.horizontal and column >= width) break;
 +        }
++        if (self.row.style.horizontal) surface.scroll_width = column;
 +        return surface;
 +    }
 +};
