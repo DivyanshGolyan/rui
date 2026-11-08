@@ -730,3 +730,32 @@ pub const VerifiedSource = struct {
         return self.scratch.readAt(offset, buffer);
     }
 };
+
+test "native paged source scroll view realizes only visible rows" {
+    const vaxis = @import("vaxis");
+    fw.DrawContext.init(.unicode);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "scroll-source", .{ .read = true });
+    defer file.close(io);
+    const chunk: [4096]u8 = @splat('x');
+    for (0..40) |_| try file.writeStreamingAll(io, &chunk);
+    const length = 40 * chunk.len;
+    const backing: GraphemeFile = .{ .io = io, .file = file, .max_read = 4096 };
+    var reader: vaxis.unicode.PagedReader = .{ .source = .{ .userdata = &backing, .length = length, .readFn = GraphemeFile.read } };
+    const geometry: fw.DrawContext = .{ .arena = std.testing.allocator, .min = .{ .width = 32 }, .max = .{ .width = 32, .height = null }, .cell_size = .{} };
+    var index = try fw.PagedText.Index.init(&reader, geometry, 32);
+    try std.testing.expect(index.len > 5000);
+    var storage: [1024 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const frame: fw.DrawContext = .{ .arena = fixed.allocator(), .min = .{}, .max = .{ .width = 32, .height = 4 }, .cell_size = .{} };
+    var scroll: fw.ScrollView = .{ .children = .{ .builder = index.builder() }, .item_count = @intCast(index.len) };
+    scroll.jumpToEnd();
+    const drawn = try scroll.draw(frame);
+    try std.testing.expect(drawn.children.len > 0 and drawn.children.len <= 4);
+    try std.testing.expectEqualStrings("x", drawn.children[drawn.children.len - 1].surface.readCell(0, 0).char.grapheme);
+    try std.testing.expect(index.fault == null);
+    try std.testing.expect(fixed.end_index < storage.len);
+    std.debug.print("paged actual-scroll source={d} rows={d} visible={d} frame_bytes={d}\n", .{ length, index.len, drawn.children.len, fixed.end_index });
+}

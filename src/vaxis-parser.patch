@@ -1392,7 +1392,7 @@ diff --git a/src/vxfw/PagedText.zig b/src/vxfw/PagedText.zig
 new file mode 100644
 --- /dev/null
 +++ b/src/vxfw/PagedText.zig
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,276 @@
 +//! Reader-backed native text geometry. Source bytes remain owned by the
 +//! caller; this iterator retains only offsets and a bounded grapheme buffer.
 +const std = @import("std");
@@ -1544,6 +1544,9 @@ new file mode 100644
 +    checkpoint_count: usize = 0,
 +    stride: usize = 1,
 +    has_oversized_grapheme: bool = false,
++    /// Set when a visible row cannot be read or rendered. The owner must
++    /// surface and clear this when it reloads, rather than hiding the fault.
++    fault: ?anyerror = null,
 +
 +    pub fn init(reader: *vaxis.unicode.PagedReader, ctx: fw.DrawContext, width: u16) !Index {
 +        var self: Index = .{};
@@ -1567,6 +1570,32 @@ new file mode 100644
 +            self.len += 1;
 +        }
 +        return self;
++    }
++
++    pub fn builder(self: *Index) fw.ScrollView.Builder {
++        return .{ .userdata = self, .hasFn = hasRow, .buildFrameFn = buildRow };
++    }
++
++    fn hasRow(raw: *const anyopaque, index: usize, _: usize) bool {
++        const self: *const Index = @ptrCast(@alignCast(raw));
++        return index < self.len;
++    }
++
++    fn buildRow(raw: *const anyopaque, index: usize, _: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!?fw.Widget {
++        const self: *Index = @ptrCast(@alignCast(@constCast(raw)));
++        const row = (self.rowAt(index) catch |err| {
++            self.fault = err;
++            return try faultWidget(arena);
++        }) orelse return null;
++        const visible = try arena.create(VisibleRow);
++        visible.* = .{ .owner = self, .row = row };
++        return visible.widget();
++    }
++
++    fn faultWidget(arena: std.mem.Allocator) std.mem.Allocator.Error!fw.Widget {
++        const text = try arena.create(fw.Text);
++        text.* = .{ .text = "History display unavailable", .softwrap = false };
++        return text.widget();
 +    }
 +
 +    /// Returned offsets refer to the original immutable source, not a cache.
@@ -1593,6 +1622,51 @@ new file mode 100644
 +            if (offset < span.end or offset <= span.start) return row;
 +        }
 +        return self.len - 1;
++    }
++};
++
++/// Frame-owned visible row. Graphemes are copied only into a per-column slot;
++/// repeated zero-width clusters reuse that slot rather than growing the frame.
++/// The source must already be valid, terminal-safe UTF-8.
++const VisibleRow = struct {
++    owner: *Index,
++    row: Row,
++
++    fn widget(self: *VisibleRow) fw.Widget {
++        return .{ .userdata = self, .drawFn = draw };
++    }
++
++    fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface {
++        const self: *VisibleRow = @ptrCast(@alignCast(raw));
++        return self.drawSource(ctx) catch |err| {
++            if (err == error.OutOfMemory) return error.OutOfMemory;
++            self.owner.fault = err;
++            const text = try Index.faultWidget(ctx.arena);
++            return text.draw(ctx);
++        };
++    }
++
++    fn drawSource(self: *VisibleRow, ctx: fw.DrawContext) !fw.Surface {
++        const width = ctx.max.width orelse ctx.min.width;
++        const surface = try fw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = 1 });
++        const slots = try ctx.arena.alloc(?[]u8, width);
++        @memset(slots, null);
++        if (self.row.start == self.row.end or width == 0) return surface;
++        const reader = self.owner.checkpoints[0].cursor.reader;
++        var graphemes = try vaxis.unicode.PagedGraphemeIterator.init(reader, self.row.start);
++        var column: usize = 0;
++        while (try graphemes.next()) |span| {
++            if (span.start >= self.row.end or column >= width) break;
++            if (span.len > 4096) return error.GraphemeTooLarge;
++            if (slots[column] == null) slots[column] = try ctx.arena.alloc(u8, 4096);
++            const bytes = slots[column].?[0..span.len];
++            for (0..span.len) |i| bytes[i] = (try reader.readByte(span.start + i)) orelse return error.InvalidSourceRead;
++            const columns = ctx.stringWidth(bytes);
++            if (column + columns > width) break;
++            surface.writeCell(@intCast(column), 0, .{ .char = .{ .grapheme = bytes, .width = @intCast(columns) } });
++            column += columns;
++        }
++        return surface;
 +    }
 +};
 diff --git a/src/vxfw/ScrollBars.zig b/src/vxfw/ScrollBars.zig
