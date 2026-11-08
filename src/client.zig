@@ -386,18 +386,27 @@ pub const VerifiedContentScratch = opaque {
     /// This uses constant scratch and replays the prefix; it does not cache a
     /// per-byte or per-row mapping.
     pub fn sourceAnchor(self: *const VerifiedContentScratch, display_offset: u64) !SourceAnchor {
-        return (try self.mapProjection(.{ .display = display_offset })).anchor;
+        return self.sourceAnchorCancelable(display_offset, null);
+    }
+
+    pub fn sourceAnchorCancelable(self: *const VerifiedContentScratch, display_offset: u64, cancellation: ?*const Cancellation) !SourceAnchor {
+        return (try self.mapProjection(.{ .display = display_offset }, cancellation)).anchor;
     }
 
     /// Restore a projection byte offset for an anchor from this same source.
     pub fn projectionOffset(self: *const VerifiedContentScratch, anchor: SourceAnchor) !u64 {
-        return (try self.mapProjection(.{ .source = anchor })).display;
+        return self.projectionOffsetCancelable(anchor, null);
+    }
+
+    pub fn projectionOffsetCancelable(self: *const VerifiedContentScratch, anchor: SourceAnchor, cancellation: ?*const Cancellation) !u64 {
+        return (try self.mapProjection(.{ .source = anchor }, cancellation)).display;
     }
 
     const AnchorQuery = union(enum) { display: u64, source: SourceAnchor };
     const AnchorMatch = struct { anchor: SourceAnchor, display: u64 };
 
-    fn mapProjection(self: *const VerifiedContentScratch, query: AnchorQuery) !AnchorMatch {
+    fn mapProjection(self: *const VerifiedContentScratch, query: AnchorQuery, cancellation: ?*const Cancellation) !AnchorMatch {
+        if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
         const source: *const ScratchState = @ptrCast(@alignCast(self));
         var terminal: @import("TerminalText.zig") = .{ .mode = .multiline };
         var input: [protocol.content_window_bytes]u8 = undefined;
@@ -406,6 +415,7 @@ pub const VerifiedContentScratch = opaque {
         var group_start: u64 = 0;
         var projected: u64 = 0;
         while (raw < source.length) {
+            if (cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
             const count = try self.readAt(raw, &input);
             if (count == 0) return error.TruncatedResponse;
             for (input[0..count]) |byte| {

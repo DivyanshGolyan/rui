@@ -268,6 +268,23 @@ test "native Activity page boundaries include undisplayed identities in both dir
     try std.testing.expect(empty.before == null and empty.after == null);
 }
 
+/// Poll only the opaque Host change token. A Host replacement is reported as
+/// an error rather than being compared or merged with the old page.
+pub fn sourceChanged(requests: client.Requests, store: []const u8, page: *const SourcePage) !bool {
+    const instance = try servingInstance(requests.io, store);
+    if (!std.mem.eql(u8, &instance, &page.instance)) return error.HostInstanceChanged;
+    var fenced = requests;
+    fenced.host_instance = &instance;
+    const reply = switch (try fenced.activityPageSince(store, &page.session, .{ .direction = .backward, .limit = 1 }, page.token)) {
+        .page => |value| value,
+        .failure => |failure| return fenced.failRead(failure),
+    };
+    try ensureServing(requests.io, store, instance);
+    // Without a usable token the result is conservatively treated as changed;
+    // the caller must not infer equality from an end cursor alone.
+    return !reply.facts.not_modified;
+}
+
 /// Load one identified item into exclusively owned temporary custody. Its
 /// bytes cannot be observed before the complete source passes authentication.
 pub fn openPageSource(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io.Dir, store: []const u8, page: *const SourcePage, item_index: usize) !*client.VerifiedContentScratch {

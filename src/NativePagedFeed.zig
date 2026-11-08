@@ -29,8 +29,23 @@ pub const Anchor = struct {
     source: ?client.VerifiedContentScratch.SourceAnchor,
 };
 
+/// Prepared on the UI thread while the page is live; resolving the raw span
+/// can scan the source and belongs to a joined background worker.
+pub const AnchorInput = struct {
+    anchor: Anchor,
+    scratch: ?*client.VerifiedContentScratch,
+    projection: u64,
+
+    pub fn resolve(self: AnchorInput, cancellation: ?*const client.Cancellation) !Anchor {
+        var result = self.anchor;
+        if (self.scratch) |scratch| result.source = try scratch.sourceAnchorCancelable(self.projection, cancellation);
+        return result;
+    }
+};
+
 allocator: std.mem.Allocator,
 page: observations.SourcePage,
+request: replies.ActivityCursor,
 items: [protocol.ActivityPage.items]*Item = undefined,
 count: usize = 0,
 row_count: u32 = 0,
@@ -43,7 +58,7 @@ pub fn load(allocator: std.mem.Allocator, requests: client.Requests, dir: std.Io
     if (width == 0) return error.InvalidWidth;
     const page = try observations.sourcePage(requests, store, session, cursor, instance);
     const self = try allocator.create(Self);
-    self.* = .{ .allocator = allocator, .page = page, .width = width };
+    self.* = .{ .allocator = allocator, .page = page, .request = cursor, .width = width };
     errdefer self.destroy();
     const ctx: fw.DrawContext = .{ .arena = allocator, .min = .{ .width = width }, .max = .{ .width = width, .height = null }, .cell_size = .{} };
     for (0..page.count) |i| {
@@ -78,6 +93,11 @@ pub fn destroy(self: *Self) void {
     allocator.destroy(self);
 }
 
+pub fn fault(self: *const Self) ?anyerror {
+    for (self.items[0..self.count]) |item| if (item.index.fault) |err| return err;
+    return null;
+}
+
 pub fn builder(self: *Self) fw.ScrollView.Builder {
     return .{ .userdata = self, .hasFn = hasRow, .buildFrameFn = drawRow };
 }
@@ -109,27 +129,30 @@ fn drawRow(raw: *const anyopaque, row: usize, cursor: usize, arena: std.mem.Allo
     return label.widget();
 }
 
-/// Capture the exact source identity and a raw-source span for a visual row.
-/// Mapping can scan the source prefix and should be run off the UI thread.
-pub fn anchorAt(self: *const Self, row: usize) !?Anchor {
+/// Prepare a source-bound visual anchor without scanning the full source.
+/// The caller keeps this page alive until the worker resolves the anchor.
+pub fn prepareAnchor(self: *const Self, row: usize) !?AnchorInput {
     const location = self.locate(row) orelse return null;
     const item = location.item;
-    const source_anchor = if (location.row) |line| blk: {
-        const span = (try item.index.rowAt(line)) orelse return error.InvalidTarget;
-        break :blk try item.source.scratch.sourceAnchor(span.start);
-    } else null;
-    return .{ .instance = self.page.instance, .session = self.page.session, .position = item.source.item.position, .ordinal = item.source.item.ordinal, .reference = item.source.item.reference, .source = source_anchor };
+    const span = if (location.row) |line| (try item.index.rowAt(line)) orelse return error.InvalidTarget else null;
+    return .{
+        .anchor = .{ .instance = self.page.instance, .session = self.page.session, .position = item.source.item.position, .ordinal = item.source.item.ordinal, .reference = item.source.item.reference, .source = null },
+        .scratch = if (span == null) null else item.source.scratch,
+        .projection = if (span) |value| value.start else 0,
+    };
 }
 
 /// Resolve only against the same Activity identity and content binding.
-pub fn rowForAnchor(self: *const Self, anchor: Anchor) !?u32 {
+pub fn rowForAnchor(self: *const Self, anchor: Anchor, cancellation: ?*const client.Cancellation) !?u32 {
     if (!std.mem.eql(u8, &self.page.instance, &anchor.instance) or !std.mem.eql(u8, &self.page.session, &anchor.session)) return null;
     var base: usize = 0;
     for (self.items[0..self.count]) |item| {
         const id = item.source.item;
         if (id.position == anchor.position and id.ordinal == anchor.ordinal and std.meta.eql(id.reference, anchor.reference)) {
             const row = if (anchor.source) |source| blk: {
-                const projection = try item.source.scratch.projectionOffset(source);
+                const projection = try item.source.scratch.projectionOffsetCancelable(source, cancellation);
+                item.source.cancellation = cancellation;
+                defer item.source.cancellation = null;
                 const offset = std.math.cast(usize, projection) orelse return error.InvalidTarget;
                 const line = (try item.index.rowForOffset(offset)) orelse return error.InvalidTarget;
                 break :blk base + 1 + line;

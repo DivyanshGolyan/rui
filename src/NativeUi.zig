@@ -7,7 +7,8 @@ const client = @import("client.zig");
 const protocol = @import("protocol.zig");
 const Overview = @import("Overview.zig");
 const observations = @import("NativeObservations.zig");
-const NativeFeed = @import("NativeFeed.zig");
+const NativePagedFeed = @import("NativePagedFeed.zig");
+const replies = @import("protocol_reply.zig");
 const Task = @import("ClientTask.zig");
 const Submission = @import("SessionSubmission.zig");
 const defaults = @import("product_defaults.zig");
@@ -73,16 +74,23 @@ const RowWidget = struct {
     }
 };
 
+const Arrival = enum { tail, older, newer, reflow };
+const PageRequest = struct {
+    cursor: replies.ActivityCursor,
+    instance: ?protocol.InstanceId,
+    arrival: Arrival,
+};
+const PageJob = union(enum) {
+    load: struct {
+        request: PageRequest,
+        width: u16,
+        anchor: ?NativePagedFeed.AnchorInput,
+    },
+    poll: *NativePagedFeed,
+};
 const ReadKind = union(enum) {
     list: u64,
-    conversation: struct {
-        id: Id,
-        epoch: u64,
-        since: ?@import("protocol_reply.zig").SessionToken,
-        after: ?@import("protocol_reply.zig").ActivityCursor,
-        instance: ?protocol.InstanceId,
-        refresh: bool,
-    },
+    conversation: struct { id: Id, epoch: u64, job: PageJob },
 
     fn isCurrent(self: ReadKind, destination: ?Id, epoch: u64) bool {
         return switch (self) {
@@ -91,7 +99,8 @@ const ReadKind = union(enum) {
         };
     }
 };
-const ReadResult = union(enum) { list: []observations.Row, conversation: ?observations.Conversation };
+const PageResult = struct { page: *NativePagedFeed, row: ?u32, arrival: Arrival };
+const ReadResult = union(enum) { list: []observations.Row, page: PageResult, poll: bool };
 
 init: std.process.Init,
 options: Overview.Options,
@@ -103,13 +112,12 @@ destination: ?Id = null,
 list: fw.ListView = .{ .children = .{ .slice = &.{} }, .item_count = 0, .draw_cursor = false },
 rows: []*RowWidget = &.{},
 feed: fw.ScrollBars = .{ .scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 }, .draw_horizontal_scrollbar = true },
-content: NativeFeed = .{},
-feed_index: fw.Text.LineIndex = .{},
-feed_index_dirty: bool = true,
-feed_token: ?@import("protocol_reply.zig").SessionToken = null,
-feed_cursor: ?@import("protocol_reply.zig").ActivityCursor = null,
-feed_instance: ?protocol.InstanceId = null,
-feed_force_refresh: bool = false,
+page: ?*NativePagedFeed = null,
+old_page: ?*NativePagedFeed = null,
+pending_page: ?PageRequest = null,
+new_activity: bool = false,
+no_older: bool = false,
+no_newer: bool = false,
 feed_stale: bool = false,
 navigation_epoch: u64 = 0,
 following: bool = true,
@@ -125,11 +133,8 @@ worker: Task = .{},
 read_kind: ReadKind = .{ .list = 0 },
 read_arena: ?*std.heap.ArenaAllocator = null,
 read_result: ?ReadResult = null,
-read_refreshing: std.atomic.Value(bool) = .init(false),
 list_arena: ?*std.heap.ArenaAllocator = null,
 old_list_arena: ?*std.heap.ArenaAllocator = null,
-feed_arenas: std.ArrayList(*std.heap.ArenaAllocator) = .empty,
-old_feed_arenas: std.ArrayList(*std.heap.ArenaAllocator) = .empty,
 submission: Submission,
 submitted_draft: ?*Draft = null,
 submitted_revision: u64 = 0,
@@ -176,10 +181,9 @@ fn deinit(self: *Self) void {
     self.freeArena(self.read_arena);
     self.freeArena(self.list_arena);
     self.freeArena(self.old_list_arena);
-    self.feed_index.deinit(self.init.gpa);
-    self.freeFeedArenas(&self.feed_arenas);
-    self.freeFeedArenas(&self.old_feed_arenas);
-    self.content.deinit(self.init.gpa);
+    self.dropReadResult();
+    if (self.page) |page| page.destroy();
+    if (self.old_page) |page| page.destroy();
     var values = self.drafts.valueIterator();
     while (values.next()) |value| value.*.destroy(self.init.gpa);
     self.drafts.deinit();
@@ -207,11 +211,6 @@ fn freeArena(self: *Self, arena: ?*std.heap.ArenaAllocator) void {
     self.init.gpa.destroy(value);
 }
 
-fn freeFeedArenas(self: *Self, arenas: *std.ArrayList(*std.heap.ArenaAllocator)) void {
-    for (arenas.items) |arena| self.freeArena(arena);
-    arenas.deinit(self.init.gpa);
-    arenas.* = .empty;
-}
 
 fn getDraft(self: *Self, id: Id) !*Draft {
     if (self.drafts.get(id)) |found| return found;
@@ -235,14 +234,38 @@ fn rowAt(raw: *const anyopaque, index: usize, _: usize) ?fw.Widget {
     return self.rows[index].widget();
 }
 
+const page_items = 4;
+
+fn tailRequest() PageRequest {
+    return .{ .cursor = .{ .direction = .backward, .limit = page_items }, .instance = null, .arrival = .tail };
+}
+
+fn queuePage(self: *Self, request: PageRequest) void {
+    self.pending_page = request;
+    if (self.worker.thread != null) self.worker.cancel();
+}
+
 fn startRead(self: *Self) !void {
     if (self.worker.thread != null) return;
+    const kind: ReadKind = if (self.destination) |id| kind: {
+        if (self.body_width <= @intFromBool(self.feed.draw_vertical_scrollbar)) return;
+        const width = self.body_width - @intFromBool(self.feed.draw_vertical_scrollbar);
+        const request: ?PageRequest = if (self.pending_page) |pending| pending else if (self.page == null) tailRequest() else null;
+        if (request) |value| {
+            const anchor = if (value.arrival == .reflow and self.page != null)
+                try self.page.?.prepareAnchor(self.feed.scroll_view.firstVisibleIndex())
+            else null;
+            self.pending_page = null;
+            break :kind .{ .conversation = .{ .id = id, .epoch = self.navigation_epoch, .job = .{ .load = .{ .request = value, .width = width, .anchor = anchor } } } };
+        }
+        if (self.new_activity and !self.following) return;
+        break :kind .{ .conversation = .{ .id = id, .epoch = self.navigation_epoch, .job = .{ .poll = self.page.? } } };
+    } else .{ .list = self.navigation_epoch };
     const arena = try self.init.gpa.create(std.heap.ArenaAllocator);
     arena.* = std.heap.ArenaAllocator.init(self.init.gpa);
     self.read_arena = arena;
     self.read_result = null;
-    self.read_refreshing.store(false, .release);
-    self.read_kind = if (self.destination) |id| .{ .conversation = .{ .id = id, .epoch = self.navigation_epoch, .since = self.feed_token, .after = self.feed_cursor, .instance = self.feed_instance, .refresh = self.feed_force_refresh } } else .{ .list = self.navigation_epoch };
+    self.read_kind = kind;
     self.worker.start(self.init.io, self, readWork) catch |err| {
         self.freeArena(self.read_arena);
         self.read_arena = null;
@@ -255,28 +278,59 @@ fn readWork(raw: *anyopaque, task: *Task) !void {
     const alloc = self.read_arena.?.allocator();
     self.read_result = switch (self.read_kind) {
         .list => .{ .list = try observations.list(alloc, task.requests(), self.options.store, self.scratch) },
-        .conversation => |conversation| .{ .conversation = try observations.conversation(alloc, task.requests(), self.options.store, &conversation.id, if (conversation.refresh) null else conversation.since, if (conversation.refresh) null else conversation.after, conversation.instance, conversation.refresh, &self.read_refreshing) },
+        .conversation => |conversation| switch (conversation.job) {
+            .poll => |page| .{ .poll = try observations.sourceChanged(task.requests(), self.options.store, &page.page) },
+            .load => |job| load: {
+                const anchor = if (job.anchor) |value| try value.resolve(task.requests().cancellation) else null;
+                const path = self.init.environ_map.get("TMPDIR") orelse "/tmp";
+                if (!std.fs.path.isAbsolute(path)) return error.InvalidTemporaryDirectory;
+                var dir = try std.Io.Dir.cwd().openDir(self.init.io, path, .{});
+                defer dir.close(self.init.io);
+                var cursor = job.request.cursor;
+                const page = while (true) {
+                    const loaded = try NativePagedFeed.load(self.init.gpa, task.requests(), dir, self.options.store, &conversation.id, cursor, job.request.instance, job.width);
+                    if (loaded.count != 0 or loaded.page.next == null) break loaded;
+                    cursor = loaded.page.next.?;
+                    loaded.destroy();
+                };
+                errdefer page.destroy();
+                const row = if (anchor) |value| try page.rowForAnchor(value, task.requests().cancellation) else null;
+                if (anchor != null and row == null) return error.HistoryAnchorUnavailable;
+                break :load .{ .page = .{ .page = page, .row = row, .arrival = job.request.arrival } };
+            },
+        },
     };
+}
+
+fn dropReadResult(self: *Self) void {
+    if (self.read_result) |result| switch (result) {
+        .page => |value| value.page.destroy(),
+        else => {},
+    };
+    self.read_result = null;
 }
 
 fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
     if (self.worker.thread == null or !self.worker.completed()) return;
     const relevant = self.read_kind.isCurrent(self.destination, self.navigation_epoch);
     self.worker.join() catch |err| {
-        if (relevant) {
+        if (relevant and !(err == error.Cancelled and self.pending_page != null)) {
             if (self.read_kind == .conversation) {
                 self.feed_stale = true;
-                self.feed_force_refresh = true;
+                self.notice = @errorName(err);
+                if (err == error.HostInstanceChanged) self.pending_page = tailRequest();
             } else self.notice = @errorName(err);
             ctx.redraw = true;
         }
+        self.dropReadResult();
         self.freeArena(self.read_arena);
         self.read_arena = null;
         return;
     };
     const arena = self.read_arena.?;
     self.read_arena = null;
-    if (!relevant) {
+    if (!relevant or (self.read_kind == .conversation and self.pending_page != null)) {
+        self.dropReadResult();
         self.freeArena(arena);
         return;
     }
@@ -305,67 +359,69 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
             };
             if (self.list.cursor >= rows.len) self.list.jumpToItem(@intCast(rows.len -| 1));
         },
-        .conversation => |maybe_conversation| {
-            const conversation = maybe_conversation orelse {
-                self.freeArena(arena);
-                return;
-            };
-            const blocks = conversation.blocks;
-            if (conversation.refresh) {
-                var fresh: NativeFeed = .{};
-                errdefer fresh.deinit(self.init.gpa);
-                try fresh.append(self.init.gpa, arena.allocator(), blocks);
-                var arenas: std.ArrayList(*std.heap.ArenaAllocator) = .empty;
-                errdefer arenas.deinit(self.init.gpa);
-                if (blocks.len != 0) try arenas.append(self.init.gpa, arena);
-                self.freeFeedArenas(&self.old_feed_arenas);
-                self.old_feed_arenas = self.feed_arenas;
-                self.feed_arenas = arenas;
-                self.content.deinit(self.init.gpa);
-                self.content = fresh;
-                if (blocks.len == 0) self.freeArena(arena);
-                self.feed_index_dirty = true;
-                ctx.redraw = true;
-            } else if (blocks.len != 0) {
-                try self.feed_arenas.ensureUnusedCapacity(self.init.gpa, 1);
-                try self.content.append(self.init.gpa, arena.allocator(), blocks);
-                self.feed_arenas.appendAssumeCapacity(arena);
-                self.feed_index_dirty = true;
-                ctx.redraw = true;
-            } else self.freeArena(arena);
-            self.feed_cursor = conversation.cursor;
-            self.feed_token = conversation.token;
-            self.feed_instance = conversation.instance;
-            self.feed_force_refresh = false;
-            if (self.feed_stale) {
-                self.feed_stale = false;
+        .poll => |changed| {
+            self.freeArena(arena);
+            if (changed) {
+                if (self.following) self.pending_page = tailRequest() else self.new_activity = true;
                 ctx.redraw = true;
             }
         },
+        .page => |result| {
+            self.freeArena(arena);
+            if (result.page.count == 0 and self.page != null and (result.arrival == .older or result.arrival == .newer)) {
+                if (result.arrival == .older) self.no_older = true else self.no_newer = true;
+                result.page.destroy();
+            } else {
+                if (self.old_page) |old| old.destroy();
+                self.old_page = self.page;
+                self.page = result.page;
+                self.feed.scroll_view = .{ .children = .{ .builder = result.page.builder() }, .item_count = result.page.row_count };
+                self.feed.estimated_content_height = result.page.row_count;
+                self.no_older = result.page.page.before == null or (result.page.request.direction == .backward and result.page.page.next == null);
+                self.no_newer = result.page.page.after == null or (result.page.request.direction == .forward and result.page.page.next == null) or result.arrival == .tail;
+                switch (result.arrival) {
+                    .tail => { self.new_activity = false; self.feed.scroll_view.jumpToEnd(); },
+                    .older => self.feed.scroll_view.jumpToEnd(),
+                    .newer => self.feed.scroll_view.jumpToItem(0),
+                    .reflow => if (result.row) |row| { self.feed.scroll_view.jumpToItem(row); },
+                }
+                self.feed_stale = false;
+            }
+            ctx.redraw = true;
+        },
     }
+    self.read_result = null;
+}
+
+fn retirePage(self: *Self) void {
+    if (self.page) |page| {
+        if (self.old_page) |old| old.destroy();
+        self.old_page = page;
+        self.page = null;
+    }
+    self.feed.scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 };
 }
 
 fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
     _ = try self.getDraft(id);
+    self.worker.cancel();
+    self.retirePage();
     self.destination = id;
     self.navigation_epoch +%= 1;
     self.following = true;
-    self.content.clearRetainingCapacity();
-    self.freeFeedArenas(&self.old_feed_arenas);
-    self.old_feed_arenas = self.feed_arenas;
-    self.feed_arenas = .empty;
-    self.feed_index_dirty = true;
-    self.feed_token = null;
-    self.feed_cursor = null;
-    self.feed_instance = null;
-    self.feed_force_refresh = false;
+    self.pending_page = tailRequest();
+    self.new_activity = false;
+    self.no_older = false;
+    self.no_newer = false;
     self.feed_stale = false;
-    self.feed.scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 };
     try ctx.requestFocus(self.activeDraft().field.widget());
     ctx.redraw = true;
 }
 
 fn back(self: *Self, ctx: *fw.EventContext) !void {
+    self.worker.cancel();
+    self.retirePage();
+    self.pending_page = null;
     self.destination = null;
     self.navigation_epoch +%= 1;
     try ctx.requestFocus(self.overview_draft.field.widget());
@@ -457,6 +513,23 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             const wheel = mouse.button == .wheel_up or mouse.button == .wheel_down;
             const scrollbar = self.body_width != 0 and mouse.col == self.body_width - 1 and mouse.row > 0 and mouse.row < self.body_bottom and (mouse.type == .press or mouse.type == .drag);
             if (wheel or scrollbar) self.following = false;
+            if (wheel and self.page != null and self.pending_page == null) {
+                const page = self.page.?;
+                if (mouse.button == .wheel_up and self.feed.scroll_view.atStart() and !self.no_older) {
+                    if (page.page.before) |cursor| self.queuePage(.{ .cursor = cursor, .instance = page.page.instance, .arrival = .older });
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+                if (mouse.button == .wheel_down and self.feed.scroll_view.atEnd() and (!self.no_newer or self.new_activity)) {
+                    if (page.page.after) |boundary| {
+                        var cursor = boundary;
+                        if (self.new_activity) cursor.end = null;
+                        self.queuePage(.{ .cursor = cursor, .instance = page.page.instance, .arrival = .newer });
+                    }
+                    ctx.consumeAndRedraw();
+                    return;
+                }
+            }
         },
         .key_press => |key| {
             if (!self.pasting and key.matches('r', .{ .ctrl = true })) {
@@ -507,17 +580,14 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             }
             if (self.destination != null and key.matches(vaxis.Key.home, .{ .ctrl = true })) {
                 self.following = false;
-                self.feed.scroll_view.cursor = 0;
-                self.feed.scroll_view.ensureScroll();
+                if (self.page) |page| self.queuePage(.{ .cursor = .{ .direction = .forward, .limit = page_items }, .instance = page.page.instance, .arrival = .newer });
                 ctx.consumeAndRedraw();
                 return;
             }
             if (self.destination != null and key.matches(vaxis.Key.escape, .{})) {
                 if (!self.following) {
                     self.following = true;
-                    if (self.content.widgets.items.len != 0) {
-                        self.feed.scroll_view.jumpToEnd();
-                    }
+                    self.queuePage(tailRequest());
                 } else try self.back(ctx);
                 ctx.consumeAndRedraw();
                 return;
@@ -547,15 +617,16 @@ fn event(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             ctx.redraw = true;
         },
         .tick => {
-            if (self.worker.thread != null and self.read_refreshing.load(.acquire)) switch (self.read_kind) {
-                .conversation => if (self.read_kind.isCurrent(self.destination, self.navigation_epoch) and !self.feed_stale) {
-                    self.feed_stale = true;
-                    ctx.redraw = true;
-                },
-                .list => {},
-            };
             try self.completeRead(ctx);
             try self.finishSubmission(ctx);
+            if (self.page) |page| {
+                const width = self.body_width -| @intFromBool(self.feed.draw_vertical_scrollbar);
+                if (width != 0 and width != page.width and self.pending_page == null) {
+                    var cursor = page.request;
+                    cursor.end = page.page.end;
+                    self.queuePage(.{ .cursor = cursor, .instance = page.page.instance, .arrival = .reflow });
+                }
+            }
             if (self.worker.thread == null) self.startRead() catch |err| {
                 self.notice = @errorName(err);
             };
@@ -575,6 +646,8 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
     if (width == 0 or height == 0) return fw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = height });
     self.header.text = if (self.destination) |id| (if (self.feed_stale)
         try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  History may be stale · Esc returns", .{&id})
+    else if (self.new_activity)
+        try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  New activity · Esc follows", .{&id})
     else
         try std.fmt.allocPrint(ctx.arena, "Session {s}  ·  Esc returns", .{&id})) else "Sessions  ·  Alt-↑/↓ select · Alt-Enter open";
     self.status.text = if (self.notice.len == 0) "Enter send · Shift-Enter or Ctrl-J newline · Ctrl-Q quit" else self.notice;
@@ -591,17 +664,13 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
     self.body_bottom = 1 + body_height;
     const body_ctx = ctx.withConstraints(.{ .width = width, .height = body_height }, .{ .width = width, .height = body_height });
     if (self.destination != null and body_height != 0) {
-        const content_width = width -| @intFromBool(self.feed.draw_vertical_scrollbar);
-        if (self.feed_index_dirty or self.feed_index.width == null or self.feed_index.width.? != content_width) {
-            try self.feed_index.reflow(self.init.gpa, self.content.widgets.items, body_ctx.withConstraints(.{ .width = content_width }, .{ .width = content_width, .height = null }));
-            self.feed_index_dirty = false;
-            self.feed.scroll_view.children = .{ .builder = self.feed_index.builder() };
-            self.feed.scroll_view.item_count = @intCast(self.feed_index.len);
-            self.feed.estimated_content_height = @intCast(self.feed_index.len);
-        }
         if (self.following) self.feed.scroll_view.jumpToEnd();
     }
     const body = if (self.destination == null) try self.list.draw(body_ctx) else try self.feed.draw(body_ctx);
+    if (self.page) |page| if (page.fault()) |err| {
+        self.feed_stale = true;
+        self.notice = @errorName(err);
+    };
     const children = try ctx.arena.alloc(fw.SubSurface, 4);
     children[0] = .{ .origin = .{ .col = 0, .row = 0 }, .surface = header, .z_index = 0 };
     children[1] = .{ .origin = .{ .col = 0, .row = 1 }, .surface = body, .z_index = 0 };
@@ -617,7 +686,7 @@ test "navigation epoch rejects stale overview and session reads" {
     try std.testing.expect(list.isCurrent(null, 3));
     try std.testing.expect(!list.isCurrent(null, 5));
     try std.testing.expect(!list.isCurrent(id, 3));
-    const conversation: ReadKind = .{ .conversation = .{ .id = id, .epoch = 4, .since = null, .after = null, .instance = null, .refresh = false } };
+    const conversation: ReadKind = .{ .conversation = .{ .id = id, .epoch = 4, .job = .{ .load = .{ .request = tailRequest(), .width = 80, .anchor = null } } } };
     try std.testing.expect(conversation.isCurrent(id, 4));
     try std.testing.expect(!conversation.isCurrent(id, 6));
     try std.testing.expect(!conversation.isCurrent(other, 4));
