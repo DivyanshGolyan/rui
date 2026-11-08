@@ -258,6 +258,10 @@ fn queuePage(self: *Self, request: PageRequest) void {
 }
 
 fn startRead(self: *Self) !void {
+    return self.startReadUsing(Task.start);
+}
+
+fn startReadUsing(self: *Self, start_worker: anytype) !void {
     if (self.worker.thread != null) return;
     const kind: ReadKind = if (self.destination) |id| kind: {
         if (self.body_width <= @intFromBool(self.feed.draw_vertical_scrollbar)) return;
@@ -268,7 +272,6 @@ fn startRead(self: *Self) !void {
                 try self.page.?.prepareAnchor(self.feed.scroll_view.firstVisibleIndex())
             else
                 null;
-            self.pending_page = null;
             break :kind .{ .conversation = .{ .id = id, .epoch = self.navigation_epoch, .job = .{ .load = .{ .request = value, .width = width, .anchor = anchor } } } };
         }
         if (self.new_activity and !self.following) return;
@@ -279,11 +282,12 @@ fn startRead(self: *Self) !void {
     self.read_arena = arena;
     self.read_result = null;
     self.read_kind = kind;
-    self.worker.start(self.init.io, self, readWork) catch |err| {
+    start_worker(&self.worker, self.init.io, self, readWork) catch |err| {
         self.freeArena(self.read_arena);
         self.read_arena = null;
         return err;
     };
+    if (kind == .conversation and kind.conversation.job == .load) self.pending_page = null;
 }
 
 fn readWork(raw: *anyopaque, task: *Task) !void {
@@ -558,16 +562,26 @@ fn openExport(self: *Self) !void {
     self.export_open = true;
 }
 
+/// Later navigation owns the viewport: cancel a reflow holding an older
+/// anchor and recapture after the input has been applied and drawn.
+fn supersedeReflow(self: *Self) void {
+    if (self.pending_page) |pending| if (pending.arrival != .reflow) return;
+    if (self.worker.thread == null or self.read_kind != .conversation) return;
+    const job = self.read_kind.conversation.job;
+    if (job != .load or job.load.request.arrival != .reflow) return;
+    self.queuePage(job.load.request);
+}
+
 /// Move within the authenticated source before fetching another Activity page.
 /// A running page load retains authority over its old-frame anchor until join.
 fn navigateEdge(self: *Self, backward: bool, ctx: *fw.EventContext) !bool {
     const page = self.page orelse return false;
     if (if (backward) !self.feed.scroll_view.atStart() else !self.feed.scroll_view.atEnd()) return false;
-    if (self.pending_page != null) {
+    if (self.pending_page) |pending| if (pending.arrival != .reflow) {
         ctx.consumeEvent();
         return true;
-    }
-    if (self.worker.thread != null and self.read_kind == .conversation and self.read_kind.conversation.job == .load) {
+    };
+    if (self.worker.thread != null and self.read_kind == .conversation and self.read_kind.conversation.job == .load and self.read_kind.conversation.job.load.request.arrival != .reflow) {
         self.notice = "History loading; scroll again when ready";
         ctx.consumeAndRedraw();
         return true;
@@ -618,7 +632,10 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
         } else if (self.destination != null) {
             const wheel = mouse.button == .wheel_up or mouse.button == .wheel_down;
             const scrollbar = self.body_width != 0 and mouse.col == self.body_width - 1 and mouse.row > 0 and mouse.row < self.body_bottom and (mouse.type == .press or mouse.type == .drag);
-            if (wheel or scrollbar) self.following = false;
+            if (wheel or scrollbar) {
+                self.following = false;
+                self.supersedeReflow();
+            }
             if (wheel and try self.navigateEdge(mouse.button == .wheel_up, ctx)) return;
         },
         .key_press => |key| {
@@ -713,6 +730,7 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             }
             if (self.destination != null and (key.matches(vaxis.Key.page_up, .{}) or key.matches(vaxis.Key.page_down, .{}))) {
                 self.following = false;
+                self.supersedeReflow();
                 if (try self.navigateEdge(key.matches(vaxis.Key.page_up, .{}), ctx)) return;
                 try self.feed.scroll_view.handleEvent(ctx, .{ .key_press = .{ .codepoint = if (key.matches(vaxis.Key.page_up, .{})) 'u' else 'd', .mods = .{ .ctrl = true } } });
                 ctx.consumeAndRedraw();
@@ -839,4 +857,29 @@ test "native export overlay consumes and frees paste before it reaches draft" {
     const text = try std.testing.allocator.dupe(u8, "must not reach the draft");
     try capture(&self, &ctx, .{ .paste = text });
     try std.testing.expect(ctx.consume_event);
+}
+
+test "native pending navigation survives worker start failure" {
+    const Failure = struct {
+        fn start(_: *Task, _: std.Io, _: *anyopaque, _: Task.Run) !void {
+            return error.WitnessSpawnFailure;
+        }
+    };
+    var self: Self = undefined;
+    self.init = undefined;
+    self.init.gpa = std.testing.allocator;
+    self.init.io = std.testing.io;
+    self.worker = .{};
+    self.destination = "abc123".*;
+    self.navigation_epoch = 1;
+    self.body_width = 80;
+    self.feed = .{ .scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 } };
+    self.page = null;
+    self.pending_page = tailRequest();
+    self.read_arena = null;
+    self.read_result = null;
+    const original = self.pending_page.?;
+    try std.testing.expectError(error.WitnessSpawnFailure, self.startReadUsing(Failure.start));
+    try std.testing.expect(self.pending_page != null and std.meta.eql(original, self.pending_page.?));
+    try std.testing.expect(self.read_arena == null and self.worker.thread == null);
 }
