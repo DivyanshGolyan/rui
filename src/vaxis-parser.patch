@@ -1248,7 +1248,7 @@ index 2c6edb6..81acf55 100644
 +    try std.testing.expectEqualStrings("ab\n界c", value);
 +}
 diff --git a/src/vxfw/ScrollBars.zig b/src/vxfw/ScrollBars.zig
-index eff49f1..fc8bce9 100644
+index eff49f1..3d72b55 100644
 --- a/src/vxfw/ScrollBars.zig
 +++ b/src/vxfw/ScrollBars.zig
 @@ -180,7 +180,7 @@ pub fn handleCapture(self: *ScrollBars, ctx: *vxfw.EventContext, event: vxfw.Eve
@@ -1269,6 +1269,15 @@ index eff49f1..fc8bce9 100644
                          counter += 1;
  
                      break :count @floatFromInt(counter);
+@@ -426,7 +426,7 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+             const thumb_top_f = widget_height_f * top_child_idx_f / total_num_children_f;
+ 
+             break :pos @intFromFloat(thumb_top_f);
+-        } else max.height -| thumb_height;
++        } else scroll_view_surface.size.height -| thumb_height;
+ 
+         // Once we know the thumb height and its position we can draw the scroll bar.
+ 
 diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
 index 1c569eb..10429b7 100644
 --- a/src/vxfw/ScrollView.zig
