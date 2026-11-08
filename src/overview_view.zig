@@ -2035,8 +2035,9 @@ fn compose(state: *State, value: Composed, model: ?[]const u8, effects: *Effects
                 .action => |pressed| .{ .action = pressed },
                 .refused => .{ .refused = .unbound },
                 .left, .right => {
-                    const providers = state.menu.entries[state.menu.find(model orelse return) orelse return].providers;
-                    picker.step = .{ .sign_in = nextSignIn(providers, picker.step.sign_in, if (choice == .left) .left else .right) };
+                    const entry = state.menu.entries[state.menu.find(model orelse return) orelse return];
+                    if (!pickFits(state.size.width, entry)) return state.say(.attention, "Widen for /model", .{});
+                    picker.step = .{ .sign_in = nextSignIn(entry.providers, picker.step.sign_in, if (choice == .left) .left else .right) };
                     return;
                 },
                 .enter => return pick(state, model, effects),
@@ -2443,12 +2444,35 @@ fn keptOutput(gpa: Allocator, text: []const u8, cut: bool) error{OutOfMemory}![]
     return std.fmt.allocPrint(gpa, "{s}\nOutput cut at {d} KiB.", .{ text, max_output_bytes / 1024 });
 }
 
+/// The input paints sign-ins from column 8, reserving the last column.
+/// Provider labels and marker are ASCII or one-cell glyphs, like the painter.
+fn signInsFit(width: usize, providers: model_picker.Providers) bool {
+    var column: usize = 8;
+    for (std.enums.values(Provider)) |provider| if (providers.contains(provider)) {
+        const end = column + 3 + provider.signIn().len;
+        if (end + 1 > width) return false;
+        column = end + 2;
+    };
+    return true;
+}
+
+/// IDs are validated printable ASCII. Both model and sign-ins must be
+/// legible before the picker changes or commits a provider choice.
+fn pickFits(width: usize, entry: model_picker.Entry) bool {
+    return entry.id.len <= width -| 5 and
+        (entry.providers.count() <= 1 or signInsFit(width, entry.providers));
+}
+
 /// Enter in the picker. A model one sign-in offers is the whole pick; one
 /// that more offer turns the input row into the sign-in choice, at the
 /// default's sign-in. A model Rui does not list runs with default limits.
 fn pick(state: *State, model: ?[]const u8, effects: *Effects) void {
     const picker = &state.picker.?;
     const entry = state.menu.entries[state.menu.find(model orelse return) orelse return];
+    // IDs have validated printable ASCII syntax. The physical row starts at
+    // column 4 and reserves the last column; never pick an ellipsized ID.
+    // For a shared model both provider choices must also fit in full.
+    if (!pickFits(state.size.width, entry)) return state.say(.attention, "Widen for /model", .{});
     const provider = switch (picker.step) {
         .sign_in => |chosen| chosen,
         .models => choice: {
