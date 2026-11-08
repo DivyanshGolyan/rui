@@ -1363,14 +1363,40 @@ test "actual overflow yields wording before clipping required status" {
         if (!choice) {
             try std.testing.expectError(error.TerminalTooSmall, Test.render(failed, &out.writer, .{ .row = 2, .col = 24, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .status = "Idle" }, &live));
         } else {
-            // The choice's input row needs the same rows the draft does.
+            // Explicitly essential status must fail before output rather than
+            // being sacrificed to the selected Action's command row.
             var action = try ActionFixture.init(1);
             defer action.deinit();
             try failed.adopt(std.testing.io, action.file, 1, true);
-            try std.testing.expectError(error.TerminalTooSmall, Test.render(failed, &out.writer, .{ .row = 2, .col = 12, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .command = true, .status = "? Delete\n! Original retained" }, &.{}));
+            const output_before = out.written().len;
+            const tiny: std.posix.winsize = .{ .row = 2, .col = 12, .xpixel = 0, .ypixel = 0 };
+            try std.testing.expectError(error.TerminalTooSmall, Test.render(failed, &out.writer, tiny, "", 0, .{ .command = true, .status = "? Delete\n! Original retained", .status_essential = true }, &.{}));
+            try std.testing.expectEqual(output_before, out.written().len);
+            try std.testing.expect(failed.offered() == null);
             try std.testing.expectEqual(ConsentPolicy.Row.selector, failed.selected.row);
+            try std.testing.expectError(error.RenderBackendPoisoned, failed.backend.encode());
         }
     }
+    // The same status is routine unless its owner marks it essential. It
+    // yields to the Action source; a command row must not become an offer.
+    const routine = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(routine);
+    try Test.init(routine, std.testing.io, &environ, false);
+    defer Test.deinit(routine);
+    var action = try ActionFixture.init(1);
+    defer action.deinit();
+    try routine.adopt(std.testing.io, action.file, 1, true);
+    const delivered = try Test.render(routine, &out.writer, .{ .row = 2, .col = 12, .xpixel = 0, .ypixel = 0 }, "", 0, .{ .command = true, .status = "? Delete\n! Original retained" }, &.{});
+    var row: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("row 000", rowText(routine, 0, &row));
+    try std.testing.expectEqualStrings("  Command ru", rowText(routine, 1, &row));
+    try std.testing.expect(!delivered.notice);
+    try std.testing.expect(routine.offered() == null);
+    try std.testing.expect(routine.presented(delivered));
+    try std.testing.expect(!routine.presented(delivered));
+    try std.testing.expect(!routine.promptCompleted(.empty, false, false));
+    try std.testing.expect(routine.offered() == null);
+    try std.testing.expectEqual(ConsentPolicy.Row.selector, routine.selected.row);
 }
 
 test "the running call's row carries the clock, in its place, and other work ends the conversation" {

@@ -667,7 +667,15 @@ test "complete approval and overflow survive short layouts or fail before render
     try frame.plan(&document, input);
     try std.testing.expectEqual(@as(u16, 1), frame.draft_top);
     try std.testing.expectEqual(@as(u16, 0), frame.line_height);
+    // Routine context yields to the Action source and choice at 8x2.
     input.status = "? Delete\n! Original retained";
+    try frame.plan(&document, input);
+    try std.testing.expectEqualStrings("", frame.status.text());
+    try std.testing.expectEqual(@as(u16, 0), frame.status_height);
+    try std.testing.expectEqual(@as(u16, 1), frame.height);
+    try std.testing.expectEqual(@as(u16, 1), frame.draft_top);
+    // A genuinely essential two-row status is not silently suppressed.
+    input.status_essential = true;
     try std.testing.expectError(error.TerminalTooSmall, frame.plan(&document, input));
 }
 
