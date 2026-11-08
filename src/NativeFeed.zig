@@ -93,14 +93,15 @@ test "native feed keeps prose wrapped and fenced source horizontally scrollable"
     defer arena.deinit();
     var feed: Self = .{};
     defer feed.deinit(std.testing.allocator);
-    const source = "before prose\n```zig\nlong-code-line\n```\nafter prose";
+    const source = "before prose\n```zig\nlong-\x1b[31mcode-line\n```\nafter prose";
+    const display = "before prose\n```zig\nlong-code-line\n```\nafter prose";
     try feed.append(std.testing.allocator, arena.allocator(), &.{.{
         .kind = .assistant,
         .position = 1,
         .ordinal = 0,
         .reference = .{ .length = source.len, .digest = @import("protocol.zig").contentDigest(source) },
         .source = source,
-        .display = source,
+        .display = display,
     }});
     try std.testing.expect(feed.widgets.items[1].softwrap);
     try std.testing.expect(!feed.widgets.items[2].softwrap);

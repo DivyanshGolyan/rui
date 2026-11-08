@@ -1248,7 +1248,7 @@ index 2c6edb6..81acf55 100644
 +    try std.testing.expectEqualStrings("ab\n界c", value);
 +}
 diff --git a/src/vxfw/ScrollBars.zig b/src/vxfw/ScrollBars.zig
-index eff49f1..8339ef1 100644
+index eff49f1..2ab691e 100644
 --- a/src/vxfw/ScrollBars.zig
 +++ b/src/vxfw/ScrollBars.zig
 @@ -66,7 +66,7 @@ horizontal_scrollbar_drag_thumb: vaxis.Cell = .{
@@ -1269,16 +1269,22 @@ index eff49f1..8339ef1 100644
                                      counter += 1;
  
                                  break :count @floatFromInt(counter);
-@@ -251,7 +251,7 @@ pub fn handleCapture(self: *ScrollBars, ctx: *vxfw.EventContext, event: vxfw.Eve
+@@ -251,10 +251,11 @@ pub fn handleCapture(self: *ScrollBars, ctx: *vxfw.EventContext, event: vxfw.Eve
  
                      const new_view_col_start_f =
                          new_thumb_col_start_f * max_content_width_f / widget_width_f;
 -                    const new_view_col_start: u32 = @intFromFloat(@ceil(new_view_col_start_f));
 +                    const new_view_col_start: u64 = @intFromFloat(@ceil(new_view_col_start_f));
  
-                     self.scroll_view.scroll.left =
-                         @min(new_view_col_start, self.last_frame_max_content_width);
-@@ -389,7 +389,7 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+-                    self.scroll_view.scroll.left =
+-                        @min(new_view_col_start, self.last_frame_max_content_width);
++                    const viewport_width = self.last_frame_size.width -| @intFromBool(self.draw_vertical_scrollbar);
++                    const last_start = self.last_frame_max_content_width -| viewport_width;
++                    self.scroll_view.scroll.left = @min(new_view_col_start, last_start);
+ 
+                     return ctx.consumeAndRedraw();
+                 }
+@@ -389,7 +390,7 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
                  .slice => |slice| break :count @floatFromInt(slice.len),
                  .builder => |builder| {
                      var counter: usize = 0;
@@ -1287,7 +1293,7 @@ index eff49f1..8339ef1 100644
                          counter += 1;
  
                      break :count @floatFromInt(counter);
-@@ -426,7 +426,7 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+@@ -426,7 +427,7 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
              const thumb_top_f = widget_height_f * top_child_idx_f / total_num_children_f;
  
              break :pos @intFromFloat(thumb_top_f);
@@ -1296,7 +1302,7 @@ index eff49f1..8339ef1 100644
  
          // Once we know the thumb height and its position we can draw the scroll bar.
  
-@@ -479,21 +479,21 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
+@@ -479,21 +480,21 @@ pub fn draw(self: *ScrollBars, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surfa
  
          const widget_width_f: f32 = @floatFromInt(max.width);
  
@@ -1324,7 +1330,7 @@ index eff49f1..8339ef1 100644
                  @floatFromInt(max_content_width);
  
 diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
-index 1c569eb..39c2bdf 100644
+index 1c569eb..8b0a73f 100644
 --- a/src/vxfw/ScrollView.zig
 +++ b/src/vxfw/ScrollView.zig
 @@ -11,10 +11,22 @@ const ScrollView = @This();
@@ -1517,7 +1523,22 @@ index 1c569eb..39c2bdf 100644
                  .surface = sub.surface,
                  .z_index = 0,
              });
-@@ -538,7 +591,7 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+@@ -535,10 +588,22 @@ fn drawBuilder(self: *ScrollView, ctx: vxfw.DrawContext, builder: Builder) Alloc
+         }
+     }
+ 
++    // A resize or a shorter visible child can move the final valid start.
++    // Redraw once at the clamped offset rather than leaving a partial or
++    // entirely blank viewport beyond the content.
++    const viewport_width = max_size.width -| child_offset;
++    var widest: u64 = viewport_width;
++    for (child_list.items) |child| widest = @max(widest, child.surface.scroll_width orelse child.surface.size.width);
++    const last_start = widest -| viewport_width;
++    if (self.scroll.left > last_start) {
++        self.scroll.left = last_start;
++        return self.drawBuilder(ctx, builder);
++    }
++
      // Reset horizontal scroll info.
      self.scroll.has_more_horizontal = false;
      for (child_list.items) |child| {

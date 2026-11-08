@@ -219,3 +219,56 @@ test "native horizontal line viewport reaches Unicode past one million columns" 
     try std.testing.expectEqualStrings("Z", surface.readCell(2, 0).char.grapheme);
     try std.testing.expect(fixed.end_index < storage.len);
 }
+
+test "native horizontal scrollbar drag stops at final complete viewport" {
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+    try source.writer.writeAll("HEAD");
+    for (0..160) |_| try source.writer.writeByte('x');
+    try source.writer.writeAll("界END");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 20, .height = 5 }, .cell_size = .{} };
+    var index: fw.Text.LineIndex = .{};
+    defer index.deinit(std.testing.allocator);
+    const input = [_]fw.Text{.{ .text = source.written(), .softwrap = false }};
+    try index.reflow(std.testing.allocator, &input, ctx);
+    var bars: fw.ScrollBars = .{ .scroll_view = .{ .children = .{ .builder = index.builder() }, .item_count = 1 } };
+    _ = try bars.draw(ctx);
+    var event_ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    defer event_ctx.cmds.deinit(std.testing.allocator);
+    try bars.handleEvent(&event_ctx, .{ .mouse = .{ .col = 0, .row = 4, .button = .left, .mods = .{}, .type = .press } });
+    try bars.handleCapture(&event_ctx, .{ .mouse = .{ .col = 19, .row = 4, .button = .left, .mods = .{}, .type = .drag } });
+    const drawn = try bars.draw(ctx);
+    const line = drawn.children[0].surface.children[0].surface;
+    try std.testing.expectEqualStrings("界", line.readCell(14, 0).char.grapheme);
+    try std.testing.expectEqualStrings("E", line.readCell(16, 0).char.grapheme);
+    try std.testing.expectEqualStrings("D", line.readCell(18, 0).char.grapheme);
+
+    const wide = ctx.withConstraints(.{}, .{ .width = 200, .height = 5 });
+    const resized = try bars.draw(wide);
+    const full = resized.children[0].surface.children[0].surface;
+    try std.testing.expectEqualStrings("H", full.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("界", full.readCell(164, 0).char.grapheme);
+    try std.testing.expectEqualStrings("D", full.readCell(168, 0).char.grapheme);
+}
+
+test "native horizontal viewport clips wide grapheme only at the edge" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{ .width = 2 }, .max = .{ .width = 2, .height = null }, .cell_size = .{} };
+    const original = "界X";
+    var index: fw.Text.LineIndex = .{};
+    defer index.deinit(std.testing.allocator);
+    const input = [_]fw.Text{.{ .text = original, .softwrap = false }};
+    try index.reflow(std.testing.allocator, &input, ctx);
+    const row = (try index.builder().itemAtIdxForDraw(0, 0, ctx.arena)).?;
+    const clipped = try row.drawHorizontalFn.?(row.userdata, ctx, 1, 2);
+    try std.testing.expect(!std.mem.eql(u8, "界", clipped.readCell(0, 0).char.grapheme));
+    try std.testing.expectEqualStrings("X", clipped.readCell(1, 0).char.grapheme);
+    const restored = try row.drawHorizontalFn.?(row.userdata, ctx, 0, 2);
+    try std.testing.expectEqualStrings("界", restored.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("界X", original);
+}
