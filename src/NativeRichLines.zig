@@ -35,9 +35,9 @@ const Checkpoint = extern struct {
     quote_indent: u8 = 0,
     reserved: [3]u8 = @splat(0),
 
-    fn encode(raw: usize, display: usize, context: markdown.Context) Checkpoint {
+    fn encode(raw: usize, display: usize, state: markdown.Context) Checkpoint {
         var result: Checkpoint = .{ .raw = raw, .display = display };
-        switch (context) {
+        switch (state) {
             .plain => {},
             .fence => |fence| {
                 result.mode = switch (fence.marker) {
@@ -71,6 +71,9 @@ const Checkpoint = extern struct {
     }
 };
 
+const table_checkpoint_size = 256;
+const TableCheckpoint = extern struct { first: u64, previous_end: u64, offset: u64 };
+
 pub const Table = extern struct {
     first: u64,
     end: u64,
@@ -85,14 +88,29 @@ source: vaxis.unicode.PagedSource,
 raw_source: vaxis.unicode.PagedSource,
 file: std.Io.File,
 tables: std.Io.File,
+table_checkpoints: std.Io.File,
 count: u64 = 0,
 table_count: u64 = 0,
+table_bytes: u64 = 0,
+table_end: u64 = 0,
+table_indexing: bool = true,
+table_cache_base: u64 = 0,
+table_cache_count: usize = 0,
+table_cache_next_offset: u64 = 0,
+table_cache_previous_end: u64 = 0,
+table_cache: [table_checkpoint_size]Table = undefined,
+table_point_reads: usize = 0,
+table_range_base: u64 = 0,
+table_range_start: u64 = 0,
+table_range_end: u64 = 0,
 cancellation: ?*const client.Cancellation = null,
 cache_base: u64 = 0,
 cache_count: usize = 0,
 cache_raw: usize = 0,
 cache_display: usize = 0,
 cache_context: markdown.Context = .plain,
+cache_raw_reader: vaxis.unicode.PagedReader,
+cache_display_reader: vaxis.unicode.PagedReader,
 cache: [checkpoint_lines]Line = undefined,
 
 /// The source and its authenticated owner must outlive this disposable index.
@@ -109,7 +127,19 @@ pub fn buildRaw(io: std.Io, dir: std.Io.Dir, raw_source: vaxis.unicode.PagedSour
     errdefer file.close(io);
     const tables = try scratch(io, dir);
     errdefer tables.close(io);
-    var self: Self = .{ .io = io, .source = source, .raw_source = raw_source, .file = file, .tables = tables, .cancellation = cancellation };
+    const table_checkpoints = try scratch(io, dir);
+    errdefer table_checkpoints.close(io);
+    var self: Self = .{
+        .io = io,
+        .source = source,
+        .raw_source = raw_source,
+        .file = file,
+        .tables = tables,
+        .table_checkpoints = table_checkpoints,
+        .cancellation = cancellation,
+        .cache_raw_reader = .{ .source = raw_source },
+        .cache_display_reader = .{ .source = source },
+    };
     var raw_reader: vaxis.unicode.PagedReader = .{ .source = raw_source };
     var reader: vaxis.unicode.PagedReader = .{ .source = source };
     var context: markdown.Context = .plain;
@@ -146,6 +176,7 @@ pub fn buildRaw(io: std.Io, dir: std.Io.Dir, raw_source: vaxis.unicode.PagedSour
         try self.append(&context, head[0..head_len], start, source.length, source.length, raw_start, raw_source.length, .canonical_eof);
     } else if (start != source.length) return error.InvalidSourceRead;
     try self.indexTables(raw_source, cancellation);
+    self.table_indexing = false;
     self.cancellation = null;
     return self;
 }
@@ -190,8 +221,6 @@ pub fn lineAt(self_const: *const Self, index: u64) !?Line {
         self.cache_display = std.math.cast(usize, point.display) orelse return error.SourceTooLarge;
         self.cache_context = try point.context();
     }
-    var raw_reader: vaxis.unicode.PagedReader = .{ .source = self.raw_source };
-    var display_reader: vaxis.unicode.PagedReader = .{ .source = self.source };
     const wanted: usize = @intCast(index - base);
     while (self.cache_count <= wanted) {
         const raw_start = self.cache_raw;
@@ -201,7 +230,7 @@ pub fn lineAt(self_const: *const Self, index: u64) !?Line {
         var raw_at = raw_start;
         while (raw_at < self.raw_source.length) : (raw_at += 1) {
             if (raw_at % 4096 == 0) if (self.cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
-            const byte = (try raw_reader.readByte(raw_at)) orelse return error.InvalidSourceRead;
+            const byte = (try self.cache_raw_reader.readByte(raw_at)) orelse return error.InvalidSourceRead;
             if (byte == '\n') break;
             if (head_len < head.len) {
                 head[head_len] = byte;
@@ -211,7 +240,7 @@ pub fn lineAt(self_const: *const Self, index: u64) !?Line {
         var end = start;
         while (end < self.source.length) : (end += 1) {
             if (end % 4096 == 0) if (self.cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
-            if (((try display_reader.readByte(end)) orelse return error.InvalidSourceRead) == '\n') break;
+            if (((try self.cache_display_reader.readByte(end)) orelse return error.InvalidSourceRead) == '\n') break;
         }
         const lf = raw_at < self.raw_source.length;
         if (lf != (end < self.source.length)) return error.InvalidSourceRead;
@@ -237,23 +266,10 @@ pub fn lineAt(self_const: *const Self, index: u64) !?Line {
         self.cache_context = decision.next;
     }
     var line = self.cache[wanted];
-    var low: u64 = 0;
-    var high = self.table_count;
-    while (low < high) {
-        const middle = low + (high - low) / 2;
-        const group = (try self.tableAt(middle)) orelse return error.InvalidSourceRead;
-        if (index < group.first) {
-            high = middle;
-            continue;
-        }
-        if (index >= group.end) {
-            low = middle + 1;
-            continue;
-        }
-        line.table_group = middle;
-        line.table_role = if (index == group.first) .header else if (index == group.first + 1) .rule else .body;
-        break;
-    }
+    if (!self.table_indexing) if (try self.tableForLine(index)) |found| {
+        line.table_group = found.index;
+        line.table_role = if (index == found.group.first) .header else if (index == found.group.first + 1) .rule else .body;
+    };
     return line;
 }
 
@@ -410,8 +426,7 @@ fn indexTables(self: *Self, source: vaxis.unicode.PagedSource, cancellation: ?*c
             try measure(&group, raw, parsed);
         }
         group.end = next;
-        try self.tables.writeStreamingAll(self.io, std.mem.asBytes(&group));
-        self.table_count = try std.math.add(u64, self.table_count, 1);
+        try self.appendTable(group);
         i = next;
     }
 }
@@ -453,15 +468,146 @@ fn measure(group: *Table, raw: []const u8, row: table.Row) !void {
     }
 }
 
-pub fn tableAt(self: *const Self, index: u64) !?Table {
+fn putVar(buffer: []u8, at: *usize, value: u64) !void {
+    var rest = value;
+    while (rest >= 128) {
+        if (at.* == buffer.len) return error.InvalidSourceRead;
+        buffer[at.*] = @as(u8, @intCast(rest & 127)) | 128;
+        at.* += 1;
+        rest >>= 7;
+    }
+    if (at.* == buffer.len) return error.InvalidSourceRead;
+    buffer[at.*] = @intCast(rest);
+    at.* += 1;
+}
+
+fn takeVar(buffer: []const u8, at: *usize) !u64 {
+    var value: u64 = 0;
+    var shift: u6 = 0;
+    while (at.* < buffer.len) {
+        const byte = buffer[at.*];
+        at.* += 1;
+        const part: u64 = byte & 127;
+        if (shift == 63 and part > 1) return error.InvalidSourceRead;
+        value |= part << shift;
+        if (byte & 128 == 0) return value;
+        if (shift > 56) return error.InvalidSourceRead;
+        shift += 7;
+    }
+    return error.TruncatedResponse;
+}
+
+fn appendTable(self: *Self, group: Table) !void {
+    if (group.first < self.table_end or group.end <= group.first) return error.InvalidSourceRead;
+    if (self.table_count % table_checkpoint_size == 0) {
+        const point: TableCheckpoint = .{ .first = group.first, .previous_end = self.table_end, .offset = self.table_bytes };
+        try self.table_checkpoints.writeStreamingAll(self.io, std.mem.asBytes(&point));
+    }
+    var bytes: [128]u8 = undefined;
+    var at: usize = 0;
+    try putVar(&bytes, &at, group.first - self.table_end);
+    try putVar(&bytes, &at, group.end - group.first);
+    try putVar(&bytes, &at, group.count);
+    var alignment: u16 = 0;
+    for (group.alignment[0..group.count], 0..) |value, column| {
+        if (value > 2) return error.InvalidSourceRead;
+        alignment |= @as(u16, value) << @as(u4, @intCast(2 * column));
+    }
+    try putVar(&bytes, &at, alignment);
+    for (group.widths[0..group.count]) |width| try putVar(&bytes, &at, width);
+    try self.tables.writeStreamingAll(self.io, bytes[0..at]);
+    self.table_bytes = try std.math.add(u64, self.table_bytes, at);
+    self.table_count = try std.math.add(u64, self.table_count, 1);
+    self.table_end = group.end;
+}
+
+fn tablePoint(self: *const Self, block: u64) !TableCheckpoint {
+    if (@import("builtin").is_test) @constCast(self).table_point_reads += 1;
+    var point: TableCheckpoint = undefined;
+    const offset = try std.math.mul(u64, block, @sizeOf(TableCheckpoint));
+    if (try self.table_checkpoints.readPositionalAll(self.io, std.mem.asBytes(&point), offset) != @sizeOf(TableCheckpoint)) return error.TruncatedResponse;
+    return point;
+}
+
+pub fn tableAt(self_const: *const Self, index: u64) !?Table {
+    const self = @constCast(self_const);
     if (index >= self.table_count) return null;
-    var group: Table = undefined;
-    const offset = try std.math.mul(u64, index, @sizeOf(Table));
-    if (try self.tables.readPositionalAll(self.io, std.mem.asBytes(&group), offset) != @sizeOf(Table)) return error.TruncatedResponse;
-    return group;
+    const base = index / table_checkpoint_size * table_checkpoint_size;
+    if (self.table_cache_count == 0 or self.table_cache_base != base) {
+        const point = try self.tablePoint(index / table_checkpoint_size);
+        self.table_cache_base = base;
+        self.table_cache_count = 0;
+        self.table_cache_next_offset = point.offset;
+        self.table_cache_previous_end = point.previous_end;
+    }
+    const wanted: usize = @intCast(index - base);
+    while (self.table_cache_count <= wanted) {
+        if (self.cancellation) |stop| if (stop.stopped.load(.acquire)) return error.Cancelled;
+        var bytes: [128]u8 = undefined;
+        const n = try self.tables.readPositionalAll(self.io, &bytes, self.table_cache_next_offset);
+        var at: usize = 0;
+        const first = try std.math.add(u64, self.table_cache_previous_end, try takeVar(bytes[0..n], &at));
+        const end = try std.math.add(u64, first, try takeVar(bytes[0..n], &at));
+        const count = try takeVar(bytes[0..n], &at);
+        const alignment = try takeVar(bytes[0..n], &at);
+        if (count == 0 or count > table.max_columns or alignment > std.math.maxInt(u16) or end <= first) return error.InvalidSourceRead;
+        var group: Table = .{ .first = first, .end = end, .count = @intCast(count) };
+        for (0..group.count) |column| {
+            group.alignment[column] = @intCast((alignment >> @as(u6, @intCast(2 * column))) & 3);
+            group.widths[column] = try takeVar(bytes[0..n], &at);
+        }
+        self.table_cache[self.table_cache_count] = group;
+        self.table_cache_count += 1;
+        self.table_cache_next_offset = try std.math.add(u64, self.table_cache_next_offset, at);
+        self.table_cache_previous_end = end;
+    }
+    return self.table_cache[wanted];
+}
+
+const FoundTable = struct { index: u64, group: Table };
+fn tableForLine(self: *Self, line: u64) !?FoundTable {
+    if (self.table_count == 0) return null;
+    var base: u64 = self.table_range_base;
+    if (self.table_cache_count == 0 or line < self.table_range_start or line >= self.table_range_end) {
+        const blocks = try std.math.divCeil(u64, self.table_count, table_checkpoint_size);
+        var low: u64 = 0;
+        var high = blocks;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const point = try self.tablePoint(mid);
+            if (point.first <= line) low = mid + 1 else high = mid;
+        }
+        if (low == 0) return null;
+        const block = low - 1;
+        const point = try self.tablePoint(block);
+        self.table_range_start = point.first;
+        self.table_range_end = if (block + 1 < blocks) (try self.tablePoint(block + 1)).first else std.math.maxInt(u64);
+        base = block * table_checkpoint_size;
+        self.table_range_base = base;
+    }
+    const end = @min(self.table_count, base + table_checkpoint_size);
+    _ = (try self.tableAt(end - 1)) orelse return error.InvalidSourceRead;
+    var low: usize = 0;
+    var high = self.table_cache_count;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        const group = self.table_cache[mid];
+        if (line < group.first) {
+            high = mid;
+            continue;
+        }
+        if (line >= group.end) {
+            low = mid + 1;
+            continue;
+        }
+        return .{ .index = base + mid, .group = group };
+    }
+
+    return null;
 }
 
 pub fn close(self: *Self) void {
+    self.table_checkpoints.close(self.io);
     self.tables.close(self.io);
     self.file.close(self.io);
     self.* = undefined;
@@ -539,7 +685,7 @@ test "native rich table index retains column facts without padded rows" {
     try std.testing.expectEqual(Mode.@"opaque", (try index.lineAt(5005)).?.mode);
     try std.testing.expectEqual(TableRole.none, (try index.lineAt(5006)).?.table_role);
     try std.testing.expectEqual((try std.math.divCeil(u64, index.count, checkpoint_lines)) * @sizeOf(Checkpoint), try index.file.length(io));
-    try std.testing.expectEqual(@as(u64, @sizeOf(Table)), try index.tables.length(io));
+    try std.testing.expect((try index.tables.length(io)) < @sizeOf(Table));
     std.debug.print("rich-index source_bytes={d} lines={d} line_disk_bytes={d} table_disk_bytes={d}\n", .{ source_length, index.count, try index.file.length(io), try index.tables.length(io) });
 }
 
@@ -782,4 +928,60 @@ test "native raw table cells display escaped controls without changing source" {
     var original: [raw.len]u8 = undefined;
     try std.testing.expectEqual(raw.len, try raw_file.readPositionalAll(io, &original, 0));
     try std.testing.expectEqualSlices(u8, raw, &original);
+}
+
+test "native rich compact table intervals handle many small tables and cancellation" {
+    fw.DrawContext.init(.unicode);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const file = try tmp.dir.createFile(io, "raw", .{ .read = true });
+    defer file.close(io);
+    const row = "a | b\n--- | ---\n\n";
+    const groups = 10_000;
+    for (0..groups) |_| try file.writeStreamingAll(io, row);
+    const backing: TestSource = .{ .io = io, .file = file };
+    const source: vaxis.unicode.PagedSource = .{ .userdata = &backing, .length = row.len * groups, .readFn = TestSource.read };
+    var rich = try Self.build(io, tmp.dir, source, null);
+    defer rich.close();
+    try std.testing.expectEqual(@as(u64, groups), rich.table_count);
+    try std.testing.expectEqual(@as(usize, 0), rich.table_point_reads);
+    for ([_]u64{ 0, 257, 4999, 9999, 1 }) |i| {
+        const group = (try rich.tableAt(i)).?;
+        try std.testing.expectEqual(i * 3, group.first);
+        try std.testing.expectEqual(i * 3 + 2, group.end);
+        try std.testing.expectEqual(TableRole.header, (try rich.lineAt(i * 3)).?.table_role);
+        try std.testing.expectEqual(TableRole.rule, (try rich.lineAt(i * 3 + 1)).?.table_role);
+        try std.testing.expectEqual(TableRole.none, (try rich.lineAt(i * 3 + 2)).?.table_role);
+    }
+    const line_bytes = try rich.file.length(io);
+    const table_bytes = try rich.tables.length(io);
+    const table_point_bytes = try rich.table_checkpoints.length(io);
+    try std.testing.expect(line_bytes + table_bytes + table_point_bytes < row.len * groups);
+    std.debug.print("small-tables source={d} groups={d} line_checkpoints={d} table_data={d} table_checkpoints={d} cache_bytes={d}\n", .{ row.len * groups, groups, line_bytes, table_bytes, table_point_bytes, @sizeOf(@TypeOf(rich.cache)) + @sizeOf(@TypeOf(rich.table_cache)) });
+
+    const Cancelling = struct {
+        source: TestSource,
+        stop: *client.Cancellation,
+        served: usize = 0,
+        threshold: usize,
+        fn read(raw: *const anyopaque, offset: u64, output: []u8) !usize {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(raw)));
+            const n = try TestSource.read(&self.source, offset, output);
+            self.served += n;
+            if (self.served > self.threshold) self.stop.requestStop();
+            return n;
+        }
+    };
+    var stop: client.Cancellation = .{};
+    var cancelling: Cancelling = .{ .source = backing, .stop = &stop, .threshold = 2 * row.len * groups + 4096 };
+    const cancelled_source: vaxis.unicode.PagedSource = .{ .userdata = &cancelling, .length = row.len * groups, .readFn = Cancelling.read };
+    try std.testing.expectError(error.Cancelled, Self.build(io, tmp.dir, cancelled_source, &stop));
+    try std.testing.expect(cancelling.served > 2 * row.len * groups);
+    var directory = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer directory.close(io);
+    var entries = directory.iterate();
+    const only = (try entries.next(io)).?;
+    try std.testing.expectEqualStrings("raw", only.name);
+    try std.testing.expect((try entries.next(io)) == null);
 }
