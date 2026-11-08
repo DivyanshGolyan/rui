@@ -73,7 +73,7 @@ fn work(raw: *anyopaque, task: *Task) !void {
             try observations.ensureServing(self.io, self.store, request.instance);
             var requests = task.requests();
             requests.host_instance = &request.instance;
-            const current = try session_view.current(requests, self.store, &request.id, self.scratch.?);
+            const current = session_view.current(requests, self.store, &request.id, self.scratch.?) catch |err| return fencedCurrentFailure(err, task.read_failure);
             try observations.ensureServing(self.io, self.store, request.instance);
             self.session_binding = view.Default.of(@tagName(current.settings.provider.value), current.settings.model.slice()) orelse return error.InvalidResponse;
         },
@@ -86,6 +86,12 @@ fn work(raw: *anyopaque, task: *Task) !void {
             _ = try preferences.update(self.home, .{ .provider = .{ .set = @tagName(binding.provider) }, .model = .{ .set = binding.model.slice() } }, &readiness);
         },
     }
+}
+fn fencedCurrentFailure(err: anyerror, failure: ?replies.ReadFailure) anyerror {
+    if (err == error.HostInvocationFailed) if (failure) |value| {
+        if (value.status == 409 and value.diagnostic.type.eql("invocation_error") and value.diagnostic.code.eql("host_instance_changed")) return error.HostInstanceChanged;
+    };
+    return err;
 }
 pub fn complete(self: *Self) ?Completion {
     if (self.task.thread == null or !self.task.completed()) return null;
@@ -168,4 +174,23 @@ test "model reconciliation republishes locked current preferences without changi
     const loaded = try preferences.load(home);
     try std.testing.expectEqualStrings("kept-model", loaded.model.slice());
     try std.testing.expect(!loaded.notifications);
+}
+
+test "fenced Current maps only the exact decoded Host instance 409" {
+    const changed = try replies.decodeReadFailure(.{ .status = 409, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"host_instance_changed\"}" }, false);
+    var task: Task = .{};
+    task.io = std.testing.io;
+    const error_from_current = task.requests().failRead(changed);
+    try std.testing.expect(fencedCurrentFailure(error_from_current, task.read_failure) == error.HostInstanceChanged);
+    try std.testing.expect(fencedCurrentFailure(error.Cancelled, task.read_failure) == error.Cancelled);
+    var other = changed;
+    try other.diagnostic.code.set("another_error");
+    try std.testing.expect(fencedCurrentFailure(error.HostInvocationFailed, other) == error.HostInvocationFailed);
+    other = changed;
+    other.status = 500;
+    try std.testing.expect(fencedCurrentFailure(error.HostInvocationFailed, other) == error.HostInvocationFailed);
+    other = changed;
+    try other.diagnostic.type.set("other_type");
+    try std.testing.expect(fencedCurrentFailure(error.HostInvocationFailed, other) == error.HostInvocationFailed);
+    try std.testing.expect(fencedCurrentFailure(error.CanonicalStoreFailure, changed) == error.CanonicalStoreFailure);
 }

@@ -519,11 +519,8 @@ fn submit(self: *Self) !void {
             current.revision +%= 1;
             return;
         }
-        if (self.model_save_uncertain and !self.model_effects.reconciling()) {
-            self.model_effects.requestReconcile();
-            self.notice = "Reconciling model defaults…";
-            current.field.clearRetainingCapacity();
-            current.revision +%= 1;
+        if (self.model_save_uncertain) {
+            self.notice = if (self.model_effects.reconciling() or self.model_effects.saving()) "Reconciling model defaults; draft retained" else "Model save uncertain · Alt-M retry reconciliation; draft retained";
             return;
         }
         if (self.body_width < 7 or self.body_bottom <= 1) {
@@ -536,7 +533,7 @@ fn submit(self: *Self) !void {
         return;
     }
     if (self.destination == null and (self.model_effects.saving() or self.model_save_uncertain)) {
-        self.notice = if (self.model_save_uncertain) "Model save uncertain · use /model to reconcile; draft retained" else "Saving model default; draft retained";
+        self.notice = if (self.model_save_uncertain) "Model save uncertain · Alt-M retry reconciliation; draft retained" else "Saving model default; draft retained";
         return;
     }
     self.submitted_destination = self.destination;
@@ -746,12 +743,12 @@ fn applyModelCompletion(self: *Self, result: NativeModelEffects.Completion) !voi
             // must neither clear its uncertainty nor replace its intent.
             if (self.model_effects.pending_save != null) return;
             if (answer.failure != null) {
-                self.notice = "Model reconciliation failed · use /model to retry";
+                self.notice = "Model reconciliation failed · Alt-M retry";
                 return;
             }
             const values = answer.values orelse return;
             const binding = self.reconciledDefault(values) orelse {
-                self.notice = "Cannot resolve saved defaults · repair them, then use /model";
+                self.notice = "Cannot resolve defaults · repair them, then Alt-M retry";
                 return;
             };
             self.model_default = binding;
@@ -767,7 +764,11 @@ fn applyModelCompletion(self: *Self, result: NativeModelEffects.Completion) !voi
                     self.model_save_uncertain = true;
                     self.model_uncertain_binding = answer.binding;
                 }
-                self.notice = if (self.model_effects.pending_save != null) "Saving newer model default…" else if (self.model_save_uncertain) "Model save uncertain · use /model to reconcile" else "Model default not saved";
+                if (self.model_save_uncertain) {
+                    if (self.model_picker.isOpen()) self.modelAction(.edit);
+                    if (self.model_effects.pending_save == null) self.model_effects.requestReconcile();
+                }
+                self.notice = if (self.model_effects.pending_save != null) "Saving newer model default…" else if (self.model_save_uncertain) "Reconciling model defaults…" else "Model default not saved";
             } else {
                 self.model_default = answer.binding;
                 self.model_save_uncertain = false;
@@ -879,6 +880,14 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
                         return;
                     }
                 }
+            }
+            if (!self.pasting and self.destination == null and self.model_save_uncertain and key.matches('m', .{ .alt = true })) {
+                if (!self.model_effects.reconciling() and !self.model_effects.saving()) {
+                    self.model_effects.requestReconcile();
+                    self.notice = "Reconciling model defaults…";
+                }
+                ctx.consumeAndRedraw();
+                return;
             }
             if (self.model_picker.isOpen() and !self.pasting) {
                 const action: ?NativeModelPicker.Input = if (key.matches(vaxis.Key.escape, .{})) .close else if (key.matches(vaxis.Key.up, .{})) .previous else if (key.matches(vaxis.Key.down, .{})) .next else if (key.matches(vaxis.Key.home, .{})) .first else if (key.matches(vaxis.Key.end, .{})) .last else if (key.matches(vaxis.Key.left, .{}) and self.model_picker.choice() != null) .left else if (key.matches(vaxis.Key.right, .{}) and self.model_picker.choice() != null) .right else if (key.matches(vaxis.Key.enter, .{})) .enter else null;
@@ -1335,7 +1344,7 @@ test "model reconciliation keeps newer picks and releases confirmed defaults" {
     try std.testing.expectEqualStrings("attempted", self.model_default.?.model.slice());
 }
 
-test "model command queues retryable reconciliation without discarding a Message draft" {
+test "automatic reconciliation and Alt-M retry retain draft and caret" {
     fw.DrawContext.init(.unicode);
     var self: Self = undefined;
     self.init = undefined;
@@ -1347,25 +1356,71 @@ test "model command queues retryable reconciliation without discarding a Message
     self.model_picker = NativeModelPicker.init(std.testing.allocator);
     defer self.model_picker.deinit();
     self.model_effects = .{ .allocator = std.testing.allocator, .io = std.testing.io, .home = "", .store = "" };
+    self.options = undefined;
+    self.options.selectors = .{};
     self.model_default = model_view.Default.of("codex", "old");
-    self.model_save_uncertain = true;
-    self.model_uncertain_binding = model_view.Default.of("codex", "attempted");
+    self.model_save_uncertain = false;
+    self.model_uncertain_binding = null;
+    self.pasting = false;
+    self.export_open = false;
+    self.body_width = 80;
     self.notice = "";
+    self.modelAction(.open);
+    try std.testing.expect(self.model_picker.isOpen());
     try self.overview_draft.field.insertSliceAtCursor("hello");
-    try self.submit();
-    const retained = try self.overview_draft.field.snapshot();
-    defer std.testing.allocator.free(retained);
-    try std.testing.expectEqualStrings("hello", retained);
-    self.overview_draft.field.clearRetainingCapacity();
-    try self.overview_draft.field.insertSliceAtCursor("/model");
-    try self.submit();
+    self.overview_draft.field.cursorLeft();
+    self.overview_draft.field.cursorLeft();
+    const cursor = self.overview_draft.field.byteOffsetToCursor();
+    const attempted = model_view.Default.of("codex", "attempted").?;
+    try self.applyModelCompletion(.{ .save = .{ .binding = attempted, .failure = error.PreferenceDirectorySyncFailed } });
     try std.testing.expect(self.model_effects.pending_reconcile);
     try std.testing.expect(!self.model_picker.isOpen());
-    try std.testing.expect(self.model_save_uncertain);
+    try std.testing.expectEqual(cursor, self.overview_draft.field.byteOffsetToCursor());
+    try self.submit();
+    const before = try self.overview_draft.field.snapshot();
+    defer std.testing.allocator.free(before);
+    try std.testing.expectEqualStrings("hello", before);
+    try std.testing.expectEqual(cursor, self.overview_draft.field.byteOffsetToCursor());
     self.model_effects.pending_reconcile = false;
     try self.applyModelCompletion(.{ .reconcile = .{ .values = null, .failure = error.AccessDenied } });
     try std.testing.expect(self.model_save_uncertain);
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+    try capture(&self, &ctx, .{ .key_press = .{ .codepoint = 'm', .mods = .{ .alt = true } } });
+    try std.testing.expect(ctx.consume_event);
+    try std.testing.expect(self.model_effects.pending_reconcile);
+    try std.testing.expectEqual(cursor, self.overview_draft.field.byteOffsetToCursor());
+    self.model_effects.pending_reconcile = false;
+    var values: preferences.Values = .{};
+    try values.provider.set("codex");
+    try values.model.set("attempted");
+    try self.applyModelCompletion(.{ .reconcile = .{ .values = values, .failure = null } });
+    try std.testing.expect(!self.model_save_uncertain);
+    try std.testing.expectEqualStrings("attempted", self.model_default.?.model.slice());
+    const after = try self.overview_draft.field.snapshot();
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings("hello", after);
+    try std.testing.expectEqual(cursor, self.overview_draft.field.byteOffsetToCursor());
+}
+
+test "model command does not open picker during uncertain reconciliation" {
+    fw.DrawContext.init(.unicode);
+    var self: Self = undefined;
+    self.init = undefined;
+    self.init.gpa = std.testing.allocator;
+    self.overview_draft = try Draft.create(std.testing.allocator);
+    defer self.overview_draft.destroy(std.testing.allocator);
+    self.destination = null;
+    self.submission = .{ .io = std.testing.io, .store = "", .session = "", .directory = "", .environment = .empty };
+    self.model_picker = NativeModelPicker.init(std.testing.allocator);
+    defer self.model_picker.deinit();
+    self.model_effects = .{ .allocator = std.testing.allocator, .io = std.testing.io, .home = "", .store = "", .pending_reconcile = true };
+    self.model_save_uncertain = true;
+    self.notice = "";
     try self.overview_draft.field.insertSliceAtCursor("/model");
     try self.submit();
+    try std.testing.expect(!self.model_picker.isOpen());
     try std.testing.expect(self.model_effects.pending_reconcile);
+    const retained = try self.overview_draft.field.snapshot();
+    defer std.testing.allocator.free(retained);
+    try std.testing.expectEqualStrings("/model", retained);
 }
