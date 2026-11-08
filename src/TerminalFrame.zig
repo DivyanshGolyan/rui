@@ -116,6 +116,8 @@ pub const Input = struct {
     /// draws, the frame shows this status in place of `status`: the row
     /// confirms a send that `status` says `Sent` of.
     queued: ?[]const u8 = null,
+    queued_rows: u16 = 1,
+    queued_min: u16 = 1,
     selected: bool,
     action_visible: bool,
     action_pending: bool = false,
@@ -146,7 +148,7 @@ pub fn plan(self: *Self, document: *Viewport.Document, input: Input) !void {
         var row = input;
         row.status = status;
         try self.fit(document, row);
-        if (self.queued_height != 0) return;
+        if (self.queued_height >= input.queued_min) return;
     }
     var plain = input;
     plain.queued = null;
@@ -278,7 +280,7 @@ fn fit(self: *Self, document: *Viewport.Document, input: Input) !void {
     self.list_height = @intCast(@min(input.command_rows, input_rows - self.draft.rows));
     // A queued Message's row takes only a row the conversation's text would
     // have: it is dropped before any draft or command list row.
-    self.queued_height = @intFromBool(input.queued != null and room > self.draft.rows + self.list_height);
+    self.queued_height = if (input.queued != null) @min(input.queued_rows, room -| self.draft.rows -| self.list_height) else 0;
     const unreserved = input.height - self.draft.rows - self.list_height - self.rule_height - self.bottom_rule_height - footer;
     available = unreserved - self.live_height - self.queued_height;
     self.height = available - heading_height - call_rows;

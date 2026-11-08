@@ -32,6 +32,7 @@ const slash_commands = slash_commands_shared.conversation;
 const model_capability = @import("model_capability.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
+const SessionQueue = @import("SessionQueue.zig");
 const status_page = @import("status_page.zig");
 const preferences = @import("preferences.zig");
 pub const Command = reads.Command;
@@ -73,6 +74,7 @@ saved_requests: reads.SavedRequests = .{},
 /// are listed.
 recover_line: [slash_commands_shared.recover_line_bytes]u8 = undefined,
 reader: Task = .{},
+queue: SessionQueue = .{},
 upgrade_requested: bool = false,
 upgrade_job: UpgradePanel = .{},
 upgrade_running: bool = false,
@@ -1243,6 +1245,13 @@ fn driveActive(self: *Self) !void {
                 try self.launch(self.freeze(.activity), reads.scan);
             } else if (self.terminal.screen.consent == null and !self.reading.opening and self.submission.view() == null and self.live.work.first_action != null and self.input.pending() == .none) {
                 try self.launch(self.freeze(.permission), reads.permission);
+            } else if (self.queue.wanted != null and !self.queue.busy and self.terminal.screen.consent == null) {
+                const request = self.queue.wanted.?;
+                self.queue.wanted = null;
+                const job = self.freeze(.queue);
+                job.queue_request = .{ .snapshot = request.snapshot, .position = request.position, .direction = request.direction };
+                try self.launch(job, reads.queuePage);
+                self.queue.busy = true;
             }
         }
         // Input routes by the latest frame's editor. Once a transition revokes
@@ -1366,10 +1375,10 @@ fn drawFrame(self: *Self) !void {
             .sending => "",
         };
     } else statusLines(&status_buffer, context.buffered(), base_status, self.line.archive_state);
-    var queued_buffer: [Frame.status_capacity]u8 = undefined;
-    const queued: ?Screen.Footer.Queued = if (self.queuedRow()) |row| .{
-        .waiting = row.waiting,
-        .status = statusLines(&queued_buffer, context.buffered(), submission_status orelse if (self.admission.echo) |echo| (if (echo <= row.newest) "" else "Sent") else "", self.line.archive_state),
+    const queued: ?Screen.Footer.Queued = if (self.queue.snapshot != null and self.queue.snapshot.?.queued.count != 0) .{
+        .waiting = .{ .line = "", .count = self.queue.snapshot.?.queued.count },
+        .status = status,
+        .list = &self.queue,
     } else null;
     // The overview's stop prompt or notice, else the conversation's own.
     const said = self.lender.line(self.lender.context, self.live.work.state.asOf(now_ms));
@@ -1379,8 +1388,14 @@ fn drawFrame(self: *Self) !void {
     self.dirty = false;
     const notice_revision = self.upgrade_note_revision;
     const rendered_upgrade = said.text == null and self.notice == null and !screen.actionVisible() and self.upgrade_note_len != 0;
+    // Input pumped while the frame is in flight cannot target its new rows.
+    self.queue.visible = false;
     const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .original = self.originalDisplay(), .compact_archive = compact_archive, .status = status, .status_essential = (compact_original and self.originalDisplay().? != .sending) or self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .notice_essential = waiting and self.submissionOccupied() and notice != null and std.mem.startsWith(u8, notice.?, "!") and !(compact_original and screen.actionVisible() and screen.consent.?.row == .selector and said.text == null and self.notice != null and originalGuidance(self.notice.?)), .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
-    _ = screen.presented(delivered);
+    const current_frame = screen.presented(delivered);
+    const uninterrupted = if (screen.ticket) |ticket| ticket.inputs == screen.inputs else false;
+    self.queue.visible = current_frame and uninterrupted and delivered.queue and screen.consent == null;
+    if (!self.queue.visible) self.queue.focused = false;
+    if (current_frame and delivered.queue and !uninterrupted) self.dirty = true;
     if (delivered.notice and rendered_upgrade and notice_revision == self.upgrade_note_revision) self.upgrade_note_shown = true;
 }
 
@@ -1955,6 +1970,31 @@ fn inputEvent(self: *Self, decoded: TerminalInput.Decoded) !void {
     const offer = screen.spendOffer();
     const selected = Editor.select(conversation_keys, decoded);
     const asked = self.overviewSays().asking;
+    // This opt-in chord does not steal composer text or the Action selector.
+    // It is accepted only when a current delivered frame showed the hint.
+    if (screen.consent == null and asked == null and self.queue.visible and !screen.stale() and self.shownCommands() == null and decoded == .event and !decoded.event.pasted and decoded.event.event == .key_press) {
+        const key = decoded.event.event.key_press;
+        if (key.matchExact('q', .{ .alt = true })) {
+            if (self.queue.page.len == 0) {
+                if (!self.queue.busy and self.queue.wanted == null) self.queue.wanted = .{ .snapshot = self.queue.snapshot.? };
+            } else self.queue.focused = !self.queue.focused;
+            self.dirty = true;
+            return;
+        }
+        if (self.queue.focused) {
+            if (key.matchExact(vaxis.Key.up, .{}) or key.matchExact(vaxis.Key.down, .{})) {
+                self.queue.move(self.init.gpa, if (key.codepoint == vaxis.Key.up) .backward else .forward);
+                self.dirty = true;
+                return;
+            }
+            if (key.matchExact(vaxis.Key.escape, .{})) {
+                self.queue.focused = false;
+                self.dirty = true;
+                return;
+            }
+            self.queue.focused = false;
+        }
+    } else if (self.queue.focused and !(decoded == .event and decoded.event.event == .key_release)) self.queue.focused = false;
     if (asked == .archive and selected == .enter) {
         try self.converse(if (Editor.plainEnter(decoded)) .confirm_archive else .other);
         self.dirty = true;
@@ -2182,6 +2222,13 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
 
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
+    if (self.reading.phase == .queue) {
+        self.queue.busy = false;
+        if (end == .complete) {
+            const request = self.job.queue_request.?;
+            _ = self.queue.publish(.{ .snapshot = request.snapshot, .position = request.position, .direction = request.direction }, self.job.result.queue_page.?);
+        }
+    }
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     // A pending inspection supersedes a silent read it cancelled.
     const owned_cancel = self.upgrade_reobserve_draining and self.reader.cancellation.stopped.load(.acquire);
@@ -2243,18 +2290,6 @@ fn settleReader(self: *Self) !void {
         }
     }
     try self.applyReader(end);
-}
-
-/// What the queued row shows, if it shows (see `queued_line.unshown`): the
-/// newest waiting Message, by the line read from it, and how many wait
-/// that live output has not shown.
-pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
-    const queued = self.live.queued;
-    const count = queued_line.unshown(queued.count, queued.oldest_position, self.live.drawn);
-    if (count == 0) return null;
-    const shown = if (self.live.queued_line) |*shown| shown else return null;
-    if (shown.admission != queued.newest_admission) return null;
-    return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = count } };
 }
 
 /// Appends a joined read's staged live output; none of it showed before.
@@ -2389,6 +2424,7 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
         .details => "! Details unavailable; draft retained.",
         .inspection => if (self.inspection.kind == .copy) "! Copy unavailable; draft retained." else "! Inspection unavailable; draft retained.",
         .recall => "! Sent message unavailable; draft retained.",
+        .queue => "! Pending messages unavailable; draft retained.",
         else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
     };
     try out.writeAll(summary);
@@ -2472,6 +2508,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
                 .details => "! Details unavailable; draft retained.",
                 .message => "! Message unavailable; Ctrl-O to retry. Draft retained.",
                 .recall => "! Sent message unavailable; draft retained.",
+                .queue => "! Pending messages unavailable; draft retained.",
                 .inspection => if (self.inspection.kind == .copy) self.copyFailure(end.failed.err) else "! Inspection unavailable; draft retained.",
                 else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
             };
@@ -2484,6 +2521,11 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         self.live.compact_tools = if (self.reading.phase == .activity or self.reading.phase == .permission) self.job.result.compact_tools else false;
     if (self.reading.phase == .history or self.reading.phase == .message) {
         self.notice = null; // Clears "Loading earlier messages…" or "Opening message…".
+    } else if (self.reading.phase == .queue) {
+        // A queue page publishes only after its joined snapshot check.
+        if (self.notice) |notice| if (std.mem.eql(u8, notice, "! Pending messages unavailable; draft retained.")) {
+            self.notice = null;
+        };
     } else if (self.reading.phase == .recall) {
         // showRecalled selected the notice.
     } else if (self.reading.phase == .details or self.reading.phase == .inspection) {
@@ -2496,6 +2538,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         self.live.work = result.work.work;
         // A taken Message leaves the queued row in the frame that shows it.
         self.live.queued = result.queued;
+        if (result.queue_snapshot) |snapshot| self.queue.observe(snapshot);
         if (result.queued_line) |shown| self.live.queued_line = shown;
         self.live.drawn = self.job.drawn;
         if (self.admission.echo) |admission| if (admission <= self.admission.delivered) {
@@ -2515,7 +2558,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         }
     }
     // A /status asked for during this read is the next read's, at once.
-    self.poll_at = if (self.inspection.status_requested) 0 else std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
+    if (self.reading.phase != .queue) self.poll_at = if (self.inspection.status_requested) 0 else std.Io.Clock.awake.now(self.init.io).nanoseconds + 250_000_000;
     // News goes out first in the next frame, once the read is applied.
     if (observed) |read| try self.lender.observed(self.lender.context, read.work, if (self.line.facts(&self.hint, self.session)) |facts| facts.name else self.session, read.opening);
     self.dirty = true;
@@ -2586,28 +2629,14 @@ test "frontend commits spacing only for completed visible reads" {
     }
 }
 
-test "the queued row shows what waits until it is taken, whatever the work is doing" {
+test "pending snapshot includes already drawn admissions regardless of work state" {
     const some: protocol.Queued = .{ .count = 2, .oldest_position = 30, .newest_admission = 9, .newest_position = 34 };
-    const Case = struct { queued: protocol.Queued, state: protocol.WorkState, drawn: queued_line.Drawn = .{}, line: ?u64 = 9, count: u64 = 2, shown: bool };
-    var line: queued_line.Line = .{ .len = 0 };
-    try line.set("check the cache");
-    for ([_]Case{
-        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .shown = true },
-        .{ .queued = some, .state = .{ .approval = .{ .since = 1 } }, .shown = true },
-        // A Message held back and then left pending, which live output
-        // shows only once taken: the row shows it meanwhile.
-        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = true },
-        .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .shown = true },
-        // Sent while the Session stayed pending: the first showed at its
-        // Admission and still waits, so the row counts only the second.
-        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .drawn = .{ .admission = 7, .position = 30 }, .count = 1, .shown = true },
-        // Nothing waits, or the one waiting showed while it waited.
-        .{ .queued = .{}, .state = .{ .working = .{ .since = 1 } }, .shown = false },
-        .{ .queued = .{ .count = 1, .oldest_position = 34, .newest_admission = 9, .newest_position = 34 }, .state = .{ .pending = .{ .since = 1 } }, .drawn = .{ .admission = 9, .position = 34 }, .shown = false },
-        // The line held is another Message's, or none was read.
-        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = 8, .shown = false },
-        .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = null, .shown = false },
-    }) |case| {
+    for ([_]protocol.WorkState{
+        .{ .working = .{ .since = 1 } },
+        .{ .approval = .{ .since = 1 } },
+        .{ .pending = .{ .since = 1 } },
+        .{ .idle = .{ .since = 1 } },
+    }) |state| {
         var self: Self = .{
             .init = undefined,
             .store = "unused",
@@ -2617,16 +2646,15 @@ test "the queued row shows what waits until it is taken, whatever the work is do
             .command = undefined,
             .terminal = undefined,
             .colour = false,
-            .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .drawn = case.drawn, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
+            .live = .{ .queued = some, .work = .{ .state = state }, .drawn = .{ .admission = 7, .position = 30 } },
         };
-        const row = self.queuedRow() orelse {
-            try std.testing.expect(!case.shown);
-            continue;
-        };
-        try std.testing.expect(case.shown);
-        try std.testing.expectEqual(@as(u64, 9), row.newest);
-        try std.testing.expectEqual(case.count, row.waiting.count);
-        try std.testing.expectEqualStrings("check the cache", row.waiting.line);
+        self.queue.observe(.{ .boundary = 34, .queued = some });
+        // The old preview subtracted the already drawn oldest admission.
+        // The native page request must include both actual pending identities.
+        try std.testing.expectEqualDeep(some, self.queue.wanted.?.snapshot.queued);
+        try std.testing.expectEqual(@as(u64, 30), self.queue.wanted.?.snapshot.queued.oldest_position);
+        self.queue.observe(.{ .boundary = 35, .queued = .{} });
+        try std.testing.expect(self.queue.wanted == null and self.queue.page.len == 0);
     }
 }
 
@@ -6244,4 +6272,67 @@ test "conversation duplicate Escape joins cancelled task through real decoder" {
     try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
     try std.testing.expect(std.mem.startsWith(u8, self.upgrade_note[0..self.upgrade_note_len], "Upgrade cancelled"));
     try std.testing.expect(!self.upgrade_note_shown);
+}
+
+test "inline pending list routes delivered focus without consuming the draft or Action" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.init.gpa = std.testing.allocator;
+    const snapshot: reads.QueueSnapshot = .{ .boundary = 20, .queued = .{ .count = 3, .oldest_position = 3, .newest_position = 12, .newest_admission = 9 } };
+    self.queue.observe(snapshot);
+    const request = self.queue.wanted.?;
+    self.queue.wanted = null;
+    var page: reads.QueuePage = .{ .len = 2, .newer = true };
+    page.entries[0] = .{ .admission = 4, .position = 3, .line = .{} };
+    page.entries[1] = .{ .admission = 7, .position = 8, .line = .{} };
+    try page.entries[0].line.set("same 中文");
+    try page.entries[1].line.set("same 中文");
+    try std.testing.expect(self.queue.publish(request, page));
+    try sendKeys(self, "draft");
+    try held.settle();
+    var storage: [512]u8 = undefined;
+    try std.testing.expect(self.queue.visible);
+    try std.testing.expect(rowWith(held.screen, "Pending: Alt-Q", &storage) != null);
+    try std.testing.expect(rowWith(held.screen, "4 same 中文", &storage) != null);
+    try std.testing.expect(rowWith(held.screen, "7 same 中文", &storage) != null);
+    // While replacement output is blocked, the old frame cannot confer
+    // authority on the newly painted list. The real output pump sees Alt-Q.
+    try held.hold("\x1bq");
+    try self.drawFrame();
+    try std.testing.expect(held.pumps != 0);
+    try std.testing.expect(!self.queue.focused and !self.queue.visible);
+    try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+    try held.settle();
+    try sendKeys(self, "\x1bq");
+    try held.settle();
+    try std.testing.expect(self.queue.focused);
+    try self.inputEvent(.{ .event = .{ .event = .{ .key_release = .{ .codepoint = 'q', .mods = .{ .alt = true } } }, .pasted = false } });
+    try std.testing.expect(self.queue.focused);
+    try sendKeys(self, "\x1b[B");
+    try held.settle();
+    try std.testing.expectEqual(@as(usize, 1), self.queue.list.cursor);
+    try std.testing.expectEqual(@as(u64, 7), self.queue.page.entries[self.queue.list.cursor].admission);
+    try sendKeys(self, "\x1b[B");
+    try std.testing.expectEqual(@as(u64, 8), self.queue.wanted.?.position);
+    try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+    // Pasted input leaves list focus and still edits the same draft.
+    try sendKeys(self, "\x1b[200~!\x1b[201~");
+    try std.testing.expect(!self.queue.focused);
+    try std.testing.expectEqualStrings("draft!", self.input.composition().bytes);
+    // Observing a stop removes old rows before the next delivered frame.
+    self.queue.observe(.{ .boundary = 21, .queued = .{} });
+    self.dirty = true;
+    try held.settle();
+    try std.testing.expect(!self.queue.visible);
+    try std.testing.expect(rowWith(held.screen, "same 中文", &storage) == null);
+    // A real adopted Action owns its choice; Alt-Q cannot select or decide it.
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    try held.settle();
+    const action = held.screen.consent.?.action;
+    try sendKeys(self, "\x1bq");
+    try std.testing.expectEqual(action, held.screen.consent.?.action);
+    try std.testing.expect(self.submission.view() == null);
+    try std.testing.expectEqualStrings("draft!", self.input.composition().bytes);
 }

@@ -208,7 +208,10 @@ pub fn readQueuePage(requests: client.Requests, job: *const Job, snapshot: Queue
     if (page.facts.end != boundary) return error.InvalidActivityPage;
     for (page.facts.items[0..page.facts.count]) |item| {
         if (item.position < queue.oldest_position or item.position > queue.newest_position) continue;
-        const message = switch (item.value) { .admission => |value| value, else => return error.InvalidActivityPage };
+        const message = switch (item.value) {
+            .admission => |value| value,
+            else => return error.InvalidActivityPage,
+        };
         if (message.state != .queued or message.sender != null) return error.InvalidActivityPage;
         result.entries[result.len] = .{ .admission = message.admission, .position = item.position, .line = (try readFirstLine(requests, job, item.position, .fails)).? };
         result.len += 1;
@@ -278,6 +281,7 @@ pub const Job = struct {
     older: ?protocol_reply.ConversationCursor = null,
     target: Target = .older,
     recall: ?Input.Step = null,
+    queue_request: ?struct { snapshot: QueueSnapshot, position: u64, direction: @FieldType(protocol.ActivityPage, "direction") } = null,
     // Messages shown in live output before this read.
     messages: Messages = .{},
     // The Messages waiting at the live cursor, as the Host reported them;
@@ -342,6 +346,7 @@ pub const Job = struct {
         // first line when the row shows it and does not hold it yet.
         queued: protocol.Queued = .{},
         queue_snapshot: ?QueueSnapshot = null,
+        queue_page: ?QueuePage = null,
         queued_line: ?queued_line.Shown = null,
         live: View.Live = .{},
         cursor: protocol_reply.ActivityCursor = .{},
@@ -567,6 +572,17 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
         job.result.compact_tools = false;
         job.result.action = action;
     }
+}
+
+/// One bounded queue page on the frontend's existing joined reader.
+pub fn queuePage(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const request = job.queue_request.?;
+    const page = try readQueuePage(task.requests(), job, request.snapshot, request.position, request.direction);
+    // The UI asks only from the initial end or a validated page edge whose
+    // corresponding more flag is true. A nonempty snapshot must have a row.
+    if (request.snapshot.queued.count != 0 and page.len == 0) return error.InvalidActivityPage;
+    job.result.queue_page = page;
 }
 
 pub fn scan(raw: *anyopaque, task: *Task) !void {
@@ -1955,7 +1971,7 @@ const FakeHost = struct {
     held: bool = false,
     payload: []const u8 = text,
     listing: bool = false,
-    queue_read: ?struct { boundary: u64, queue: protocol.Queued, position: u64 = 0, direction: @FieldType(protocol.ActivityPage, "direction") = .forward } = null,
+    queue_read: ?struct { boundary: u64, queue: protocol.Queued, position: u64 = 0, direction: @FieldType(protocol.ActivityPage, "direction") = .forward, ui: bool = false } = null,
     queue_result: QueuePage = .{},
     refuse_content: bool = false,
     pages: usize = 0,
@@ -2130,7 +2146,12 @@ const FakeHost = struct {
         job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
         var task: Task = .{ .io = io };
         if (self.queue_read) |step| {
-            self.queue_result = try readQueuePage(task.requests(), job, .{ .boundary = step.boundary, .queued = step.queue }, step.position, step.direction);
+            const snapshot: QueueSnapshot = .{ .boundary = step.boundary, .queued = step.queue };
+            if (step.ui) {
+                job.queue_request = .{ .snapshot = snapshot, .position = step.position, .direction = step.direction };
+                try queuePage(job, &task);
+                self.queue_result = job.result.queue_page.?;
+            } else self.queue_result = try readQueuePage(task.requests(), job, snapshot, step.position, step.direction);
         } else if (self.listing) try list(job, &task, job.target.listing) else try scan(job, &task);
         self.shown = self.output[0..try inspection.readPositionalAll(io, &self.output, 0)];
     }
@@ -2156,6 +2177,22 @@ test "an empty queue does not ask the Host for rows or content" {
     try std.testing.expect(!host.queue_result.older and !host.queue_result.newer);
     try std.testing.expectEqual(@as(usize, 0), host.pages);
     try std.testing.expectEqual(@as(usize, 0), host.contents);
+}
+
+test "UI queue reader rejects absent members in either direction" {
+    var tail: [6]FakeHost.Tail = undefined;
+    for (&tail, 1..) |*row, id| row.* = .{ .value = FakeHost.message(id) };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 6 };
+    const one: protocol.Queued = .{ .count = 1, .oldest_position = 3, .newest_position = 3, .newest_admission = 3 };
+    var job: Job = .{ .session = "k7m2qx" };
+    for ([_]struct { direction: @FieldType(protocol.ActivityPage, "direction"), position: u64 }{
+        .{ .direction = .forward, .position = 4 },
+        .{ .direction = .backward, .position = 2 },
+    }) |step| {
+        host.queue_read = .{ .boundary = 6, .queue = one, .position = step.position, .direction = step.direction, .ui = true };
+        try std.testing.expectError(error.InvalidActivityPage, host.read(&job));
+        try std.testing.expect(job.result.queue_page == null);
+    }
 }
 
 test "bounded queue windows retain equal admissions across a later stop" {

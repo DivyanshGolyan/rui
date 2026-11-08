@@ -65,6 +65,8 @@ There is no completion.
 For input longer than 64 KiB, redirect a file into `rui session send --to ID < FILE`.
 If a submission is uncertain, Ctrl-R retries that same request instead of creating a new one.
 
+Messages waiting behind the current work appear in an inline Pending section. Each row is a compact first-line preview; equal text can still be separate Messages. Press Alt-Q to focus the section, then Up or Down to move through all waiting Messages, including beyond the loaded page. Esc returns to the draft. Typing also returns to the draft without discarding it. An Action keeps priority over the section. If the terminal is too short to show it, enlarge the terminal; at the smallest sizes the required Action, status and draft take precedence.
+
 ## Screen and scrolling
 
 The conversation uses the full terminal screen.
