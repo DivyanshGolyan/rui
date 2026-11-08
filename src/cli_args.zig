@@ -21,6 +21,7 @@ pub const Command = enum {
     session_unarchive,
     session_interrupt_model,
     session_read_conversation,
+    session_export_activity,
     session_resume,
     request_inspect,
     request_wait,
@@ -60,6 +61,7 @@ pub const Command = enum {
             .session_unarchive => .{ .resource = .session, .name = "unarchive", .description = "Restore an archived Session to active lists without resuming stopped work. Refused while archival is still settling.", .options = destination ++ session ++ capture, .mutation = true, .requires = need_session },
             .session_interrupt_model => .{ .resource = .session, .name = "interrupt-model", .description = "Interrupt the exact model Operation after inspecting its Session and Turn.", .options = destination ++ session ++ capture ++ &[_]Option{ value("turn", "ID"), value("operation", "ID") }, .mutation = true, .requires = need_session ++ &[_][]const []const u8{ &.{"turn"}, &.{"operation"} } },
             .session_read_conversation => .{ .resource = .session, .name = "read-conversation", .description = "Stream the exact saved public Conversation content at position and ordinal.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"} } },
+            .session_export_activity => .{ .resource = .session, .name = "export-activity", .description = "Verify an Activity item against its captured length and Rui content digest v1, then export to a new file without overwriting.", .options = destination ++ session ++ &[_]Option{ value("position", "POSITION"), value("ordinal", "ORDINAL"), value("content-bytes", "N"), value("content-digest", "HEX"), value("output", "PATH") }, .requires = need_session ++ &[_][]const []const u8{ &.{"position"}, &.{"ordinal"}, &.{"content-bytes"}, &.{"content-digest"}, &.{"output"} } },
             .session_resume => .{ .resource = .session, .name = "resume", .description = "Open an existing Session in the live terminal frontend. Requires terminal input/output; starts or attaches to a managed Host.", .options = destination ++ session, .positional = "ID", .positional_conflicts = &.{.{ .code = .session_selector_repeated, .option = "session" }}, .requires = &.{&.{ "", "session" }} },
             .request_inspect => .{ .resource = .request, .name = "inspect", .description = "Observe the original submitted command once. HANDLE loads its saved identity; --store and --key address it explicitly. Never transmits captured intent.", .options = destination ++ key, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
             .request_wait => .{ .resource = .request, .name = "wait", .description = "Wait for the original request to end or need permission. Prints the latest request inspect JSON, never an answer or token. Polls without holding capture or Host resources and never starts, resumes or retargets work. --timeout-seconds defaults to 300 (1..86400). Exits 0 when ended or waiting for permission, 5 on timeout or signal while pending, 4 if absent: rui request recover HANDLE.", .options = destination ++ key ++ &[_]Option{value("timeout-seconds", "N")}, .positional = "HANDLE", .positional_conflicts = saved_identity, .requires = &.{&.{ "", "key", "key-hex" }} },
@@ -160,6 +162,7 @@ fn value(comptime name: []const u8, argument: []const u8) Option {
     if (comptime std.mem.eql(u8, name, "action") or std.mem.eql(u8, name, "turn") or std.mem.eql(u8, name, "operation") or std.mem.eql(u8, name, "position"))
         return numeric(name, argument, 1, std.math.maxInt(i64), .id_malformed);
     if (comptime std.mem.eql(u8, name, "attempt")) return numeric(name, argument, 1, std.math.maxInt(i64), .count_malformed);
+    if (comptime std.mem.eql(u8, name, "content-bytes")) return numeric(name, argument, 0, @import("protocol.zig").max_sqlite_content_bytes, .count_malformed);
     if (comptime std.mem.eql(u8, name, "ordinal")) return numeric(name, argument, 0, std.math.maxInt(i64), .count_malformed);
     if (comptime std.mem.eql(u8, name, "active-capacity")) return numeric(name, argument, 0, std.math.maxInt(usize), .count_malformed);
     if (comptime std.mem.eql(u8, name, "timeout-seconds")) return numeric(name, argument, 1, @import("request_wait.zig").max_timeout_seconds, .count_malformed);

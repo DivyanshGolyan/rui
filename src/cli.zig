@@ -290,6 +290,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .session_unarchive => try archiveSession(init, parsed, false),
         .session_interrupt_model => try interruptModel(init, parsed),
         .session_read_conversation => try readConversation(init, parsed),
+        .session_export_activity => try exportActivity(init, parsed),
         .session_resume => try resumeSession(init, parsed),
         .request_inspect => try observe(init, parsed),
         .request_wait => try waitRequest(init, parsed),
@@ -3069,6 +3070,30 @@ fn readConversation(init: std.process.Init, parsed: *const cli_args.Parsed) !voi
         try writeReadFailure(init.io, failure, reference, .stderr);
         return readFailureError(failure);
     }
+}
+
+fn exportActivity(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
+    const export_owner = @import("NativeSourceExport.zig");
+    const digest = try export_owner.parseDigest(parsed.get("content-digest").?);
+    const length = (try parsed.number(u64, "content-bytes")).?;
+    const position = (try parsed.number(u64, "position")).?;
+    const ordinal = (try parsed.number(u64, "ordinal")).?;
+    const session = parsed.get("session").?;
+    var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try selectedStore(init, parsed.get("store"), &selected_buffer);
+    const temp_path = init.environ_map.get("TMPDIR") orelse "/tmp";
+    if (!std.fs.path.isAbsolute(temp_path)) return error.InvalidTemporaryDirectory;
+    var temp_dir = try std.Io.Dir.cwd().openDir(init.io, temp_path, .{});
+    defer temp_dir.close(init.io);
+    const requests_: client.Requests = .{ .io = init.io };
+    const source = try requests_.readVerifiedActivityScratch(init.gpa, temp_dir, store, session, position, ordinal, .{ .bytes = length, .digest = digest });
+    defer source.close();
+    const path = parsed.get("output").?;
+    const name = std.fs.path.basename(path);
+    if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..") or path[path.len - 1] == '/') return error.InvalidArguments;
+    var directory = try std.Io.Dir.cwd().openDir(init.io, std.fs.path.dirname(path) orelse ".", .{});
+    defer directory.close(init.io);
+    try export_owner.publish(init.io, directory, name, source, length);
 }
 
 test "hex selector bounds are the protocol's identity bounds" {
