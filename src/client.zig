@@ -102,7 +102,7 @@ pub const Requests = struct {
         const carried: ?Environment = if (captured.target == .message) environment else null;
         if (carried) |value| if (value.bytes() > protocol.max_environment_bytes) return .fail(null, error.EnvironmentTooLarge);
         const paths = platform.resolveClientPaths(self.io, captured.saved.store.slice()) catch |err| return .fail(.store, err);
-        const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), ResponseTiming.mutation, captured.length, &captured.file, null, null, carried, reply_buffer, null)) {
+        const reply = switch (sendSource(self, &paths, std.meta.activeTag(captured.target).route(), ResponseTiming.mutation, captured.length, &captured.file, null, self.host_instance, carried, reply_buffer, null)) {
             .done => |reply| reply,
             .failed => |failure| return .fail(failure.step, failure.err),
         };
@@ -5096,4 +5096,66 @@ test "native verified scratch streams terminal safe projection without changing 
     defer directory.close(io);
     var entries = directory.iterate();
     try std.testing.expect((try entries.next(io)) == null);
+}
+
+test "native captured decision sends its observed Host fence" {
+    const Peer = struct {
+        var client_fd: std.posix.fd_t = undefined;
+        var failure: ?anyerror = null;
+        fn connect(_: ?*anyopaque, _: *const std.Io.net.UnixAddress) std.Io.net.UnixAddress.ConnectError!std.Io.net.Socket.Handle {
+            return client_fd;
+        }
+        fn serve(fd: std.posix.fd_t, expected: []const u8) void {
+            exchange(fd, expected) catch |err| {
+                failure = err;
+            };
+        }
+        fn exchange(fd: std.posix.fd_t, expected: []const u8) !void {
+            defer closeTestDescriptor(fd);
+            var head: [1024]u8 = undefined;
+            var used: usize = 0;
+            while (!std.mem.endsWith(u8, head[0..used], "\r\n\r\n")) {
+                if (used == head.len) return error.TestRequestHeadTooLarge;
+                const n = std.posix.system.read(fd, head[used..].ptr, 1);
+                if (n != 1) return error.TestRequestTruncated;
+                used += 1;
+            }
+            try std.testing.expect(std.mem.indexOf(u8, head[0..used], "X-Rui-Host-Instance: a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7\r\n") != null);
+            var bytes: [4096]u8 = undefined;
+            var offset: usize = 0;
+            while (offset < expected.len) {
+                const n = std.posix.system.read(fd, bytes[offset..expected.len].ptr, expected.len - offset);
+                if (n <= 0) return error.TestRequestTruncated;
+                offset += @intCast(n);
+            }
+            try std.testing.expectEqualSlices(u8, expected, bytes[0..offset]);
+            try writeAll(fd, empty_test_response);
+        }
+    };
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var record_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const record = try std.fmt.bufPrint(&record_buffer, "{s}/decision", .{root});
+    var captured = try capturePermissionDecision(io, .{ .store = root, .session = "k7m2qx", .action_id = 19, .decision = .allow_once }, .{ .explicit = .{ .record = record, .key = "owned-key" } });
+    defer captured.close(io);
+    var expected: [4096]u8 = undefined;
+    const expected_len = try captured.file.readPositionalAll(io, &expected, 0);
+    try std.testing.expectEqual(captured.length, expected_len);
+    const sockets = try socketPair();
+    Peer.client_fd = sockets[0];
+    Peer.failure = null;
+    const peer = try std.Thread.spawn(.{}, Peer.serve, .{ sockets[1], expected[0..expected_len] });
+    var vtable = io.vtable.*;
+    vtable.netConnectUnix = Peer.connect;
+    const connected_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+    const instance: protocol.InstanceId = @splat(0xa7);
+    var buffer: ReplyBuffer = .{};
+    const result = (Requests{ .io = connected_io, .host_instance = &instance }).sendCaptured(&captured, .empty, &buffer);
+    peer.join();
+    if (Peer.failure) |err| return err;
+    try std.testing.expectEqual(@as(u16, 200), (try result.get()).status);
 }

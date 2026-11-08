@@ -34,6 +34,13 @@ pub const Intent = union(enum) {
         };
     }
 };
+/// An explicit confirmation bound to the Host that supplied the Action.
+pub const ObservedDecision = struct {
+    action: u64,
+    decision: protocol.PermissionDecision,
+    observed_instance: protocol.InstanceId,
+};
+
 pub const Kind = enum { message, decision };
 pub const State = enum { not_started, submitting, unconfirmed, rejected };
 const Publication = enum { not_sent, unknown, published };
@@ -69,6 +76,10 @@ environment: client.Environment,
 configuration: ?client.ConfigureInput = null,
 captured_hook: ?*const fn (std.Io) anyerror!void = null,
 intent: ?Intent = null,
+/// The first send of an observed Action stays fenced until transmission may
+/// have reached a Host. A retry can never clear earlier ambiguity.
+observed_instance: ?protocol.InstanceId = null,
+transmission_may_have_reached_host: bool = false,
 /// Original Message bytes, frozen before starting the worker.
 message_bytes: [65_536]u8 = undefined,
 state: State = .not_started,
@@ -104,6 +115,14 @@ pub fn recovery(self: *const Self) Recovery {
 }
 
 pub fn begin(self: *Self, intent: Intent) !void {
+    return self.beginWithFence(intent, null);
+}
+
+pub fn beginObservedDecision(self: *Self, decision: ObservedDecision) !void {
+    return self.beginWithFence(.{ .decision = .{ .action = decision.action, .decision = decision.decision } }, decision.observed_instance);
+}
+
+fn beginWithFence(self: *Self, intent: Intent, instance: ?protocol.InstanceId) !void {
     std.debug.assert(self.intent == null and self.task.thread == null);
     // Freeze the original before randomness, reservation or launch can fail.
     // Neither retries nor a later draft borrow the caller's editor.
@@ -112,6 +131,8 @@ pub fn begin(self: *Self, intent: Intent) !void {
         .message_then_deny => |reason| .{ .message_then_deny = .{ .text = try self.freezeMessage(reason.text), .action = reason.action } },
         .decision => intent,
     };
+    self.observed_instance = instance;
+    self.transmission_may_have_reached_host = false;
     self.state = .not_started;
     self.reply = null;
     self.publication = .not_sent;
@@ -364,7 +385,7 @@ pub fn join(self: *Self) End {
     const result = self.task.join();
     return self.apply(result) catch |err| {
         self.last_error = err;
-        self.state = if (self.publication == .not_sent) .not_started else .unconfirmed;
+        self.state = if (self.publication == .not_sent or (self.observed_instance != null and !self.transmission_may_have_reached_host)) .not_started else .unconfirmed;
         return .{ .failed = .{ .err = err } };
     };
 }
@@ -399,7 +420,8 @@ fn apply(self: *Self, result: anyerror!void) !End {
 pub fn discardUnsentOrRejected(self: *Self) !void {
     if (self.intent == null) return;
     if (self.task.thread != null) return error.SubmissionUnresolved;
-    if (self.state != .rejected and !(self.state == .not_started and self.publication == .not_sent)) return error.SubmissionUnresolved;
+    const definitely_unsent = self.state == .not_started and (self.publication == .not_sent or (self.observed_instance != null and !self.transmission_may_have_reached_host));
+    if (self.state != .rejected and !definitely_unsent) return error.SubmissionUnresolved;
     self.release();
 }
 
@@ -413,6 +435,8 @@ fn release(self: *Self) void {
     std.debug.assert(self.task.thread == null);
     self.close();
     self.intent = null;
+    self.observed_instance = null;
+    self.transmission_may_have_reached_host = false;
     self.publication = .not_sent;
     self.last_error = null;
     self.retry = null;
@@ -436,7 +460,85 @@ fn submit(raw: *anyopaque, task: *Task) !void {
     };
     self.publication = .published;
     if (self.captured_hook) |hook| try hook(task.io);
-    self.reply = try task.requests().sendCaptured(&self.captured.?, self.environment, &self.reply_buffer).get();
+    try self.sendOriginal(task);
+}
+
+/// Capture custody and wire custody are distinct: published local bytes do not
+/// prove a request ever reached a Host. Only an explicit retry may reuse this
+/// function after a potentially transmitted attempt.
+fn sendOriginal(self: *Self, task: *Task) !void {
+    var requests = task.requests();
+    requests.host_instance = self.firstTransmissionFence();
+    switch (requests.sendCaptured(&self.captured.?, self.environment, &self.reply_buffer)) {
+        .failed => |failure| {
+            self.noteSendFailure(failure.step);
+            return failure.err;
+        },
+        .done => |reply| {
+            self.noteSendReply(reply);
+            self.reply = reply;
+        },
+    }
+}
+
+fn firstTransmissionFence(self: *const Self) ?*const protocol.InstanceId {
+    if (self.transmission_may_have_reached_host) return null;
+    if (self.observed_instance) |*instance| return instance;
+    return null;
+}
+
+fn noteSendFailure(self: *Self, step: ?client.Step) void {
+    if (step) |value| if (value.mayHaveReachedHost()) {
+        self.transmission_may_have_reached_host = true;
+    };
+}
+
+fn noteSendReply(self: *Self, reply: protocol_reply.MutationReply) void {
+    // A validated instance-mismatch reply means this attempt was refused
+    // before admission, but can never erase ambiguity from an earlier attempt.
+    const mismatch = reply.status == 409 and if (reply.diagnostic) |diagnostic|
+        diagnostic.type.eql("invocation_error") and diagnostic.code.eql("host_instance_changed")
+    else
+        false;
+    if (!mismatch) self.transmission_may_have_reached_host = true;
+}
+
+test "native observed decision retains fence until transmission may reach Host" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var self: Self = .{ .io = io, .store = root, .session = "k7m2qx", .directory = root, .environment = .empty };
+    defer {
+        self.cancel();
+        _ = self.join();
+        self.close();
+    }
+    const instance: protocol.InstanceId = @splat(0xa7);
+    try self.beginObservedDecision(.{ .action = 19, .decision = .allow_once, .observed_instance = instance });
+    const end = self.join();
+    try std.testing.expect(end == .failed);
+    try std.testing.expectEqual(State.not_started, self.view().?.state);
+    try std.testing.expect(self.recovery() == .not_sent);
+    try std.testing.expectEqualSlices(u8, &instance, self.firstTransmissionFence().?);
+    try std.testing.expect(self.captured != null);
+    const key = self.key;
+    self.noteSendFailure(null);
+    self.noteSendFailure(.connect);
+    const refusal = protocol_reply.decodeMutationReply(.{ .status = 409, .body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"host_instance_changed\"}" }, "k7m2qx", .{ .permission_decision = .{ .action = 19, .decision = .allow_once } });
+    self.noteSendReply(refusal);
+    try std.testing.expectEqualSlices(u8, &instance, self.firstTransmissionFence().?);
+    try std.testing.expectEqualSlices(u8, &key, &self.key);
+    self.noteSendFailure(.admission_response);
+    try std.testing.expect(self.firstTransmissionFence() == null);
+    self.noteSendFailure(.connect);
+    self.noteSendReply(refusal);
+    try std.testing.expect(self.firstTransmissionFence() == null);
+    try std.testing.expectEqualSlices(u8, &key, &self.key);
+    self.state = .unconfirmed;
+    try std.testing.expectError(error.SubmissionUnresolved, self.discardUnsentOrRejected());
+    try std.testing.expect(self.recovery() == .saved);
 }
 
 test "submission reservation failure retains unsent intent ahead of accepted history" {
@@ -720,7 +822,7 @@ fn resend(raw: *anyopaque, task: *Task) !void {
         if (!expected.matches(&self.captured.?.saved, self.captured.?.target)) return error.OriginalBindingMismatch;
         self.publication = .published;
     }
-    self.reply = try task.requests().sendCaptured(&self.captured.?, self.environment, &self.reply_buffer).get();
+    try self.sendOriginal(task);
 }
 
 test "submission settles wire Admission only after join and releases only accepted or discarded intent" {

@@ -207,7 +207,7 @@ fn deinit(self: *Self) void {
 fn recoveryGuide(self: *Self) void {
     switch (self.submission.recovery()) {
         .none => {},
-        .not_sent => stderr.diagnostic("rui: Message was not sent; no recovery record was published.\n", .{}),
+        .not_sent => stderr.diagnostic("rui: Original request was not sent.\n", .{}),
         .uncertain => |key| stderr.diagnostic("rui: Capture not confirmed. Inspect rui request list for reserved key {s}; recover only that original, never replacement input.\n", .{key}),
         .saved => |saved| if (saved.rejected) {
             stderr.diagnostic("rui: Original request rejected. Use rui request inspect {s}.\n", .{saved.original.key});
@@ -655,7 +655,7 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
                     self.submission.cancel();
                     self.notice = "Cancelling local wait; original may already be admitted";
                 } else switch (self.submission.recovery()) {
-                    .not_sent => self.notice = "Original not saved; Ctrl-R retry or Ctrl-D discard before quit",
+                    .not_sent => self.notice = "Original not sent; Ctrl-R retry or Ctrl-D discard before quit",
                     .uncertain => self.notice = "Capture uncertain; Ctrl-R retry before quit",
                     else => ctx.quit = true,
                 }
