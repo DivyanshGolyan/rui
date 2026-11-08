@@ -1270,7 +1270,7 @@ index 1c569eb..e7c757b 100644
  fn insertChildren(
      self: *ScrollView,
 diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
-index fe46d2b..530600a 100644
+index fe46d2b..80afec1 100644
 --- a/src/vxfw/Text.zig
 +++ b/src/vxfw/Text.zig
 @@ -3,6 +3,52 @@ const vaxis = @import("../main.zig");
@@ -1351,7 +1351,7 @@ index fe46d2b..530600a 100644
 +            const idx = if (self.long_word) |cached| cached.end else self.nextWrap();
              const word = self.line[self.index..idx];
 -            const next_width = self.ctx.stringWidth(word);
-+            const next_width = if (self.long_word) |cached| cached.remaining_width else self.ctx.stringWidth(word);
++            const next_width = if (self.long_word) |cached| cached.remaining_width else self.measureWord(word);
  
              if (self.ctx.max.width) |max| {
                  if (cur_width + next_width > max) {
@@ -1377,7 +1377,7 @@ index fe46d2b..530600a 100644
                      // We are softwrapping, advance index to the start of the next word
                      const end = self.index;
                      self.index = std.mem.indexOfNonePos(u8, self.line, self.index, soft_breaks) orelse self.line.len;
-@@ -263,6 +318,7 @@ pub const SoftwrapIterator = struct {
+@@ -263,11 +318,21 @@ pub const SoftwrapIterator = struct {
              }
  
              self.index = idx;
@@ -1385,3 +1385,17 @@ index fe46d2b..530600a 100644
              cur_width += @intCast(next_width);
          }
          return .{ .width = cur_width, .bytes = self.line[start..] };
+     }
+ 
++    // DrawContext.stringWidth is capped at u16. Measure a long word as
++    // graphemes so its remaining width never silently loses the suffix.
++    fn measureWord(self: *SoftwrapIterator, word: []const u8) usize {
++        var total: usize = 0;
++        var iter = self.ctx.graphemeIterator(word);
++        while (iter.next()) |item| total +|= self.ctx.stringWidth(item.bytes(word));
++        return total;
++    }
++
+     /// Determines the index of the end of the next word
+     fn nextWrap(self: *SoftwrapIterator) usize {
+         // Find the first linear whitespace char
