@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Disposable real-Host picker journey; local stub only, no user Store."""
 import fcntl
+import json
 import os
 import pathlib
 import sys
+import subprocess
 import termios
 from types import SimpleNamespace
 
@@ -75,6 +77,17 @@ def main():
     fixture = Fixture(binary, output)
     try:
         fixture.start()
+        # This unique saved Message can only be rendered after the matching
+        # Session page is installed. It is sent solely to the fixture Host and
+        # its loopback synthetic provider.
+        fixture.answer("PICKER PAGE SEED ANSWER")
+        seeded = subprocess.run(
+            [str(binary), "session", "send", "--store", str(fixture.store),
+             "--to", fixture.session, "--key", "picker-page-seed"],
+            input="PICKER PAGE SEED MESSAGE", text=True, env=fixture.env,
+            capture_output=True, timeout=20, check=True,
+        )
+        assert json.loads(seeded.stdout)["answer"]["status"] == "accepted", "seed was not admitted"
         with defer_signals():
             fixture.tty = DirectPty([sys.executable, str(pathlib.Path(__file__).resolve()), "--tty-exec",
                                     str(binary), "--store", str(fixture.store)],
@@ -110,7 +123,9 @@ def main():
         assert f"model={chosen}\n" in preferences, "saved identity differs from selected row"
         assert "provider=codex\n" in preferences, "saved provider does not match fixture sign-in"
         tty.send(b"\x1b\r")  # Alt-Enter opens fixture's existing Session.
-        tty.marker(f"Session {fixture.session}")
+        tty.wait(lambda: tty.screen.reached(f"Session {fixture.session}")
+                 and tty.screen.reached("PICKER PAGE SEED MESSAGE"),
+                 label="Session page installed with seeded Message")
         tty.send(b"/model\r")
         tty.marker("new Session: /model in overview")
         assert "gpt-6-luna" in tty.screen.completed, "Session fixed model not reported"
