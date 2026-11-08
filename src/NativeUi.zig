@@ -72,7 +72,12 @@ const RowWidget = struct {
     }
 };
 
-const ReadKind = union(enum) { list, conversation: struct { id: Id, since: ?@import("protocol_reply.zig").SessionToken } };
+const ReadKind = union(enum) { list, conversation: struct {
+    id: Id,
+    epoch: u64,
+    since: ?@import("protocol_reply.zig").SessionToken,
+    after: ?@import("protocol_reply.zig").ActivityCursor,
+} };
 const ReadResult = union(enum) { list: []observations.Row, conversation: ?observations.Conversation };
 
 init: std.process.Init,
@@ -85,10 +90,12 @@ destination: ?Id = null,
 list: fw.ListView = .{ .children = .{ .slice = &.{} }, .item_count = 0, .draw_cursor = false },
 rows: []*RowWidget = &.{},
 feed: fw.ScrollBars = .{ .scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 }, .draw_horizontal_scrollbar = true },
-blocks: []fw.Text = &.{},
+blocks: std.ArrayList(fw.Text) = .empty,
 feed_index: fw.Text.LineIndex = .{},
 feed_index_dirty: bool = true,
 feed_token: ?@import("protocol_reply.zig").SessionToken = null,
+feed_cursor: ?@import("protocol_reply.zig").ActivityCursor = null,
+feed_epoch: u64 = 0,
 following: bool = true,
 body_width: u16 = 0,
 body_bottom: u16 = 0,
@@ -104,8 +111,8 @@ read_arena: ?*std.heap.ArenaAllocator = null,
 read_result: ?ReadResult = null,
 list_arena: ?*std.heap.ArenaAllocator = null,
 old_list_arena: ?*std.heap.ArenaAllocator = null,
-feed_arena: ?*std.heap.ArenaAllocator = null,
-old_feed_arena: ?*std.heap.ArenaAllocator = null,
+feed_arenas: std.ArrayList(*std.heap.ArenaAllocator) = .empty,
+old_feed_arenas: std.ArrayList(*std.heap.ArenaAllocator) = .empty,
 submission: Submission,
 submitted_draft: ?*Draft = null,
 submitted_revision: u64 = 0,
@@ -153,8 +160,9 @@ fn deinit(self: *Self) void {
     self.freeArena(self.list_arena);
     self.freeArena(self.old_list_arena);
     self.feed_index.deinit(self.init.gpa);
-    self.freeArena(self.feed_arena);
-    self.freeArena(self.old_feed_arena);
+    self.freeFeedArenas(&self.feed_arenas);
+    self.freeFeedArenas(&self.old_feed_arenas);
+    self.blocks.deinit(self.init.gpa);
     var values = self.drafts.valueIterator();
     while (values.next()) |value| value.*.destroy(self.init.gpa);
     self.drafts.deinit();
@@ -180,6 +188,12 @@ fn freeArena(self: *Self, arena: ?*std.heap.ArenaAllocator) void {
     const value = arena orelse return;
     value.deinit();
     self.init.gpa.destroy(value);
+}
+
+fn freeFeedArenas(self: *Self, arenas: *std.ArrayList(*std.heap.ArenaAllocator)) void {
+    for (arenas.items) |arena| self.freeArena(arena);
+    arenas.deinit(self.init.gpa);
+    arenas.* = .empty;
 }
 
 fn getDraft(self: *Self, id: Id) !*Draft {
@@ -210,7 +224,7 @@ fn startRead(self: *Self) !void {
     arena.* = std.heap.ArenaAllocator.init(self.init.gpa);
     self.read_arena = arena;
     self.read_result = null;
-    self.read_kind = if (self.destination) |id| .{ .conversation = .{ .id = id, .since = self.feed_token } } else .list;
+    self.read_kind = if (self.destination) |id| .{ .conversation = .{ .id = id, .epoch = self.feed_epoch, .since = self.feed_token, .after = self.feed_cursor } } else .list;
     self.worker.start(self.init.io, self, readWork) catch |err| {
         self.freeArena(self.read_arena);
         self.read_arena = null;
@@ -223,7 +237,7 @@ fn readWork(raw: *anyopaque, task: *Task) !void {
     const alloc = self.read_arena.?.allocator();
     self.read_result = switch (self.read_kind) {
         .list => .{ .list = try observations.list(alloc, task.requests(), self.options.store, self.scratch) },
-        .conversation => |conversation| .{ .conversation = try observations.conversation(alloc, task.requests(), self.options.store, &conversation.id, conversation.since) },
+        .conversation => |conversation| .{ .conversation = try observations.conversation(alloc, task.requests(), self.options.store, &conversation.id, conversation.since, conversation.after) },
     };
 }
 
@@ -269,7 +283,7 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
         },
         .conversation => |maybe_conversation| {
             const id = self.read_kind.conversation.id;
-            if (self.destination == null or !std.mem.eql(u8, &self.destination.?, &id)) {
+            if (self.destination == null or self.read_kind.conversation.epoch != self.feed_epoch or !std.mem.eql(u8, &self.destination.?, &id)) {
                 self.freeArena(arena);
                 return;
             }
@@ -278,16 +292,22 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
                 return;
             };
             const blocks = conversation.blocks;
+            if (blocks.len == 0) {
+                self.feed_cursor = conversation.cursor;
+                self.feed_token = conversation.token;
+                self.freeArena(arena);
+                return;
+            }
             const widgets = try arena.allocator().alloc(fw.Text, blocks.len);
             for (blocks, widgets) |block, *item| {
                 const prefix = if (block.kind == .user) "You\n" else "Assistant\n";
                 item.* = .{ .text = try std.fmt.allocPrint(arena.allocator(), "{s}{s}\n", .{ prefix, block.display }), .softwrap = true, .width_basis = .parent };
             }
-            self.freeArena(self.old_feed_arena);
-            self.old_feed_arena = self.feed_arena;
-            self.feed_arena = arena;
+            try self.blocks.ensureUnusedCapacity(self.init.gpa, widgets.len);
+            try self.feed_arenas.append(self.init.gpa, arena);
+            self.blocks.appendSliceAssumeCapacity(widgets);
+            self.feed_cursor = conversation.cursor;
             self.feed_token = conversation.token;
-            self.blocks = widgets;
             self.feed_index_dirty = true;
             ctx.redraw = true;
         },
@@ -297,10 +317,15 @@ fn completeRead(self: *Self, ctx: *fw.EventContext) !void {
 fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
     _ = try self.getDraft(id);
     self.destination = id;
+    self.feed_epoch +%= 1;
     self.following = true;
-    self.blocks = &.{};
+    self.blocks.clearRetainingCapacity();
+    self.freeFeedArenas(&self.old_feed_arenas);
+    self.old_feed_arenas = self.feed_arenas;
+    self.feed_arenas = .empty;
     self.feed_index_dirty = true;
     self.feed_token = null;
+    self.feed_cursor = null;
     self.feed.scroll_view = .{ .children = .{ .slice = &.{} }, .item_count = 0 };
     try ctx.requestFocus(self.activeDraft().field.widget());
     ctx.redraw = true;
@@ -308,6 +333,7 @@ fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
 
 fn back(self: *Self, ctx: *fw.EventContext) !void {
     self.destination = null;
+    self.feed_epoch +%= 1;
     try ctx.requestFocus(self.overview_draft.field.widget());
     ctx.redraw = true;
 }
@@ -455,7 +481,7 @@ fn capture(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
             if (self.destination != null and key.matches(vaxis.Key.escape, .{})) {
                 if (!self.following) {
                     self.following = true;
-                    if (self.blocks.len != 0) {
+                    if (self.blocks.items.len != 0) {
                         self.feed.scroll_view.jumpToEnd();
                     }
                 } else try self.back(ctx);
@@ -523,7 +549,7 @@ fn draw(raw: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface
     if (self.destination != null and body_height != 0) {
         const content_width = width -| @intFromBool(self.feed.draw_vertical_scrollbar);
         if (self.feed_index_dirty or self.feed_index.width == null or self.feed_index.width.? != content_width) {
-            try self.feed_index.reflow(self.init.gpa, self.blocks, body_ctx.withConstraints(.{ .width = content_width }, .{ .width = content_width, .height = null }));
+            try self.feed_index.reflow(self.init.gpa, self.blocks.items, body_ctx.withConstraints(.{ .width = content_width }, .{ .width = content_width, .height = null }));
             self.feed_index_dirty = false;
             self.feed.scroll_view.children = .{ .builder = self.feed_index.builder() };
             self.feed.scroll_view.item_count = @intCast(self.feed_index.lines.items.len);

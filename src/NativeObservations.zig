@@ -17,6 +17,8 @@ pub const Row = struct {
 pub const Conversation = struct {
     blocks: []Block,
     token: ?replies.SessionToken,
+    /// Last activity item, including non-message items, for the next delta.
+    cursor: ?replies.ActivityCursor,
 };
 
 pub const Block = struct {
@@ -107,7 +109,7 @@ pub fn list(allocator: std.mem.Allocator, requests: client.Requests, store: []co
 
 /// Reads Message content with the Host's length and digest binding. The
 /// returned blocks are values, not screen geometry or a mutable editor.
-pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, store: []const u8, id: []const u8, since: ?replies.SessionToken) !?Conversation {
+pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, store: []const u8, id: []const u8, since: ?replies.SessionToken, after: ?replies.ActivityCursor) !?Conversation {
     if (since) |token| {
         const poll = switch (try requests.activityPageSince(store, id, .{}, token)) {
             .page => |value| value,
@@ -116,7 +118,8 @@ pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, sto
         if (poll.facts.not_modified) return null;
     }
     var blocks: std.ArrayList(Block) = .empty;
-    var cursor: replies.ActivityCursor = .{};
+    var cursor: replies.ActivityCursor = after orelse .{};
+    var last = after;
     var snapshot_token: ?replies.SessionToken = null;
     var first = true;
     while (true) {
@@ -129,6 +132,7 @@ pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, sto
             first = false;
         }
         for (page.facts.items[0..page.facts.count]) |item| {
+            last = .{ .position = item.position, .ordinal = item.ordinal };
             const selected: ?struct { kind: @FieldType(Block, "kind"), content: protocol.ActivityItem.Content } = switch (item.value) {
                 .user => |message| .{ .kind = .user, .content = message.content },
                 .assistant => |answer| .{ .kind = .assistant, .content = answer.content },
@@ -142,5 +146,5 @@ pub fn conversation(allocator: std.mem.Allocator, requests: client.Requests, sto
         }
         cursor = page.continuation() orelse break;
     }
-    return .{ .blocks = try blocks.toOwnedSlice(allocator), .token = snapshot_token };
+    return .{ .blocks = try blocks.toOwnedSlice(allocator), .token = snapshot_token, .cursor = last };
 }
