@@ -43,7 +43,7 @@ const RowWidget = struct {
     index: usize,
 
     fn widget(self: *RowWidget) fw.Widget {
-        return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
+        return .{ .userdata = self, .eventHandler = RowWidget.event, .drawFn = RowWidget.draw };
     }
     fn event(raw: *anyopaque, ctx: *fw.EventContext, value: fw.Event) !void {
         const self: *RowWidget = @ptrCast(@alignCast(raw));
@@ -130,7 +130,7 @@ pub fn run(init: std.process.Init, options: Overview.Options, hooks: Overview.Ho
     defer self.deinit();
     if (options.open) |id| {
         self.destination = id;
-        _ = try self.draft(id);
+        _ = try self.getDraft(id);
     }
     var tty_buffer: [65536]u8 = undefined;
     var app = try fw.App.init(init.io, init.gpa, init.environ_map, &tty_buffer);
@@ -162,7 +162,7 @@ fn freeArena(self: *Self, arena: ?*std.heap.ArenaAllocator) void {
     self.init.gpa.destroy(value);
 }
 
-fn draft(self: *Self, id: Id) !*Draft {
+fn getDraft(self: *Self, id: Id) !*Draft {
     if (self.drafts.get(id)) |found| return found;
     const made = try Draft.create(self.init.gpa);
     errdefer made.destroy(self.init.gpa);
@@ -277,7 +277,7 @@ fn completeRead(self: *Self) !void {
 }
 
 fn open(self: *Self, id: Id, ctx: *fw.EventContext) !void {
-    _ = try self.draft(id);
+    _ = try self.getDraft(id);
     self.destination = id;
     self.following = true;
     self.blocks = &.{};
