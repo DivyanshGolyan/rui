@@ -75,6 +75,13 @@ fn lineAt(bytes: []const u8, at: usize) ?Line {
 
 const TableLine = struct { raw: []const u8, parsed: table.Row };
 
+// These bound temporary metadata and formatted output per table, not history.
+// A table beyond either limit stays available as original text with a notice.
+const max_table_rows = 4096;
+const max_table_render_bytes = 1024 * 1024;
+const table_fallback_start = "[Table too large to format; original text follows]\n";
+const table_fallback_end = "[End of unformatted table]\n";
+
 fn appendPart(widgets: *std.ArrayList(fw.Text), arena: std.mem.Allocator, part: []const u8, mode: markdown.Context.Mode) !void {
     if (mode != .prose) {
         try widgets.append(arena, .{ .text = part, .softwrap = false });
@@ -110,30 +117,51 @@ fn appendPart(widgets: *std.ArrayList(fw.Text), arena: std.mem.Allocator, part: 
         var rows: std.ArrayList(TableLine) = .empty;
         try rows.append(arena, .{ .raw = head.raw, .parsed = first });
         var next = delimiter.next;
+        var too_many_rows = false;
         while (lineAt(part, next)) |line| {
             const parsed = switch (table.parse(line.raw, line.ending, columns.count)) {
                 .row => |value| value,
                 else => break,
             };
             if (!parsed.has_pipe) break;
-            try rows.append(arena, .{ .raw = line.raw, .parsed = parsed });
+            if (rows.items.len < max_table_rows) {
+                try rows.append(arena, .{ .raw = line.raw, .parsed = parsed });
+            } else too_many_rows = true;
             next = line.next;
         }
         if (at > prose_start) try widgets.append(arena, .{ .text = part[prose_start..at] });
-        const rendered = try renderTable(arena, rows.items, columns);
-        try widgets.append(arena, .{ .text = rendered, .softwrap = false });
+        const rendered = if (too_many_rows) null else try renderTable(arena, rows.items, columns);
+        if (rendered) |text| {
+            try widgets.append(arena, .{ .text = text, .softwrap = false });
+        } else {
+            try widgets.append(arena, .{ .text = table_fallback_start });
+            try widgets.append(arena, .{ .text = part[at..next], .softwrap = false });
+            try widgets.append(arena, .{ .text = table_fallback_end });
+        }
         at = next;
         prose_start = at;
     }
     if (prose_start < part.len) try widgets.append(arena, .{ .text = part[prose_start..] });
 }
 
-fn renderTable(arena: std.mem.Allocator, rows: []const TableLine, columns: table.Columns) ![]const u8 {
+fn renderTable(arena: std.mem.Allocator, rows: []const TableLine, columns: table.Columns) !?[]const u8 {
     const ctx: fw.DrawContext = .{ .arena = arena, .min = .{}, .max = .{}, .cell_size = .{} };
     var widths: [table.max_columns]usize = @splat(0);
     for (rows) |row| for (row.parsed.cells[0..row.parsed.count], 0..) |cell, col| {
         widths[col] = @max(widths[col], tableCellWidth(ctx, row.raw[cell.start..cell.end]));
     };
+    // Conservative upper bound includes the UTF-8 rule, cell bytes (tabs can
+    // expand), padding and separators. Saturation is a refusal, never a wrap.
+    var estimated: usize = 1;
+    for (widths[0..columns.count]) |width| estimated +|= (width *| 3) +| 6;
+    for (rows) |row| {
+        for (row.parsed.cells[0..row.parsed.count], 0..) |cell, col| {
+            estimated +|= ((@as(usize, cell.end) - cell.start) *| 8) +| widths[col] +| 6;
+        }
+        estimated +|= 1;
+        if (estimated > max_table_render_bytes) return null;
+    }
+    if (estimated > max_table_render_bytes) return null;
     var output: std.Io.Writer.Allocating = .init(arena);
     for (rows, 0..) |row, row_index| {
         if (row_index == 1) try tableRule(&output.writer, widths[0..columns.count]);
@@ -331,4 +359,62 @@ test "native quote rail wraps on every row without changing source" {
     }
     try index.reflow(std.testing.allocator, feed.widgets.items, ctx);
     try std.testing.expectEqualStrings(source, feed.sourceAt(5, 0).?.source);
+}
+
+test "native oversized table falls back visibly without amplified output" {
+    fw.DrawContext.init(.unicode);
+    var original: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer original.deinit();
+    try original.writer.writeAll("a | b\n--- | ---\n");
+    for (0..100_000) |_| try original.writer.writeAll("s | t  \n");
+    for (0..4000) |_| try original.writer.writeByte('W');
+    try original.writer.writeAll(" | z\n");
+    const source = original.written();
+    var storage: [2 * 1024 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var arena = std.heap.ArenaAllocator.init(fixed.allocator());
+    defer arena.deinit();
+    var feed: Self = .{};
+    defer feed.deinit(std.testing.allocator);
+    try feed.append(std.testing.allocator, arena.allocator(), &.{.{
+        .kind = .assistant,
+        .position = 6,
+        .ordinal = 0,
+        .reference = .{ .length = source.len, .digest = @import("protocol.zig").contentDigest(source) },
+        .source = source,
+        .display = source,
+    }});
+    try std.testing.expectEqualStrings(table_fallback_start, feed.widgets.items[1].text);
+    try std.testing.expectEqualStrings(source, feed.widgets.items[2].text);
+    try std.testing.expect(!feed.widgets.items[2].softwrap);
+    try std.testing.expectEqualStrings(table_fallback_end, feed.widgets.items[3].text);
+    try std.testing.expectEqualStrings(source, feed.sourceAt(6, 0).?.source);
+    std.debug.print("oversized-table input_bytes={d} fixed_arena_bytes={d} row_limit={d} format_limit={d}\\n", .{ source.len, fixed.end_index, max_table_rows, max_table_render_bytes });
+    try std.testing.expect(fixed.end_index < storage.len);
+}
+
+test "native table format budget rejects width by row amplification" {
+    fw.DrawContext.init(.unicode);
+    var original: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer original.deinit();
+    try original.writer.writeAll("a | b\n--- | ---\n");
+    for (0..1000) |_| try original.writer.writeAll("s | t\n");
+    for (0..4000) |_| try original.writer.writeByte('W');
+    try original.writer.writeAll(" | z\n");
+    const source = original.written();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var feed: Self = .{};
+    defer feed.deinit(std.testing.allocator);
+    try feed.append(std.testing.allocator, arena.allocator(), &.{.{
+        .kind = .assistant,
+        .position = 7,
+        .ordinal = 0,
+        .reference = .{ .length = source.len, .digest = @import("protocol.zig").contentDigest(source) },
+        .source = source,
+        .display = source,
+    }});
+    try std.testing.expectEqualStrings(table_fallback_start, feed.widgets.items[1].text);
+    try std.testing.expectEqualStrings(source, feed.widgets.items[2].text);
+    try std.testing.expectEqualStrings(source, feed.sourceAt(7, 0).?.source);
 }
