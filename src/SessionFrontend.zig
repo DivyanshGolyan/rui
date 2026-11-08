@@ -1330,7 +1330,16 @@ fn drawFrame(self: *Self) !void {
     else if (self.tmux and !waiting and view.bytes.len != 0)
         try context.writeAll("In tmux, Shift-Enter sends · Alt-J adds a line");
     var status_buffer: [Frame.status_capacity]u8 = undefined;
-    const status = statusLines(&status_buffer, context.buffered(), base_status, self.line.archive_state);
+    const geometry = self.terminal.geometry();
+    // A tiny held Action still needs a whole recovery instruction. Keep the
+    // occupied row truthful and reserve one status row for the next action.
+    const compact_original = waiting and self.line.archive_state == .active and
+        self.originalDisplay() != null and (geometry.col < 32 or geometry.row <= 4);
+    const status = if (compact_original) switch (self.originalDisplay().?) {
+        .not_sent, .unconfirmed => "Ctrl-R",
+        .rejected => "/discard",
+        .sending => "",
+    } else statusLines(&status_buffer, context.buffered(), base_status, self.line.archive_state);
     var queued_buffer: [Frame.status_capacity]u8 = undefined;
     const queued: ?Screen.Footer.Queued = if (self.queuedRow()) |row| .{
         .waiting = row.waiting,
@@ -1344,7 +1353,7 @@ fn drawFrame(self: *Self) !void {
     self.dirty = false;
     const notice_revision = self.upgrade_note_revision;
     const rendered_upgrade = said.text == null and self.notice == null and !screen.actionVisible() and self.upgrade_note_len != 0;
-    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .original_pending = self.submissionOccupied(), .status = status, .status_essential = self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
+    const delivered = try self.terminal.redraw(view.bytes, view.cursor, .{ .command = self.commandActive(), .original = self.originalDisplay(), .status = status, .status_essential = (compact_original and self.originalDisplay().? != .sending) or self.line.archive_state != .active or (submission_status != null and (std.mem.startsWith(u8, submission_status.?, "!") or std.mem.startsWith(u8, submission_status.?, "Rejected"))), .notice = notice orelse "", .commands = self.nextCommands(self.terminal.screen.commands), .session = if (facts) |shown| .{ .facts = shown, .shown = &self.shown } else null, .live = live, .queued = queued }, &self.live.view);
     _ = screen.presented(delivered);
     if (delivered.notice and rendered_upgrade and notice_revision == self.upgrade_note_revision) self.upgrade_note_shown = true;
 }
@@ -1558,6 +1567,16 @@ fn submissionOccupied(self: *const Self) bool {
 
 fn approvalBlocked(self: *const Self) bool {
     return self.commandActive() or self.submissionOccupied();
+}
+
+fn originalDisplay(self: *const Self) ?Screen.Footer.Original {
+    const original = self.submission.view() orelse return if (self.submission.task.thread != null) .sending else null;
+    return switch (original.state) {
+        .not_started => .not_sent,
+        .submitting => .sending,
+        .unconfirmed => .unconfirmed,
+        .rejected => .rejected,
+    };
 }
 
 /// What a key does in a conversation, beside the draft or an Action's choice.
@@ -1976,7 +1995,12 @@ fn choose(self: *Self, key: Screen.ChoiceKey, offer: ?Screen.Offer) !void {
             } } });
         },
         .blocked => |why| self.notice = switch (why) {
-            .command => if (self.submissionOccupied()) "! Original pending. Nothing authorized." else "! Command still running. Nothing authorized.",
+            .command => if (self.originalDisplay()) |original| switch (original) {
+                .rejected => "! Original rejected. /discard clears it; nothing authorized.",
+                .not_sent => "! Original not sent. Ctrl-R retries; nothing authorized.",
+                .unconfirmed => "! Original not confirmed. Ctrl-R retries; nothing authorized.",
+                .sending => "! Original pending. Nothing authorized.",
+            } else "! Command still running. Nothing authorized.",
             .not_ready, .layout => "! Not ready; nothing authorized.",
         },
     }
@@ -3508,7 +3532,12 @@ test "occupied original blocks stale and drawn Action decisions and retained rea
         try std.testing.expect(held.screen.actionVisible());
         try std.testing.expectEqualStrings("original message", try self.input.message(self.submission.intent.?.message));
         try std.testing.expectEqual(@as([36]u8, @splat('K')), self.submission.key);
-        try std.testing.expectEqualStrings("! Original pending. Nothing authorized.", self.notice.?);
+        try std.testing.expectEqualStrings(switch (state) {
+            .not_started => "! Original not sent. Ctrl-R retries; nothing authorized.",
+            .submitting => "! Original pending. Nothing authorized.",
+            .unconfirmed => "! Original not confirmed. Ctrl-R retries; nothing authorized.",
+            .rejected => "! Original rejected. /discard clears it; nothing authorized.",
+        }, self.notice.?);
         self.dirty = true;
         try held.settle();
         try std.testing.expectEqual(ConsentPolicy.Approval.held, held.screen.selected.approval);

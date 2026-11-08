@@ -714,7 +714,7 @@ pub const Footer = struct {
     /// A command is running: a read Action's choice is held.
     command: bool = false,
     /// A retained original occupies the one submission slot.
-    original_pending: bool = false,
+    original: ?Original = null,
     status: []const u8 = "",
     status_essential: bool = false,
     notice: []const u8 = "",
@@ -723,6 +723,8 @@ pub const Footer = struct {
     session: ?SessionLine = null,
     live: ?work_line.Line = null,
     queued: ?Queued = null,
+
+    pub const Original = enum { not_sent, sending, unconfirmed, rejected };
 
     /// While its row draws, the frame shows `status` in place of the
     /// footer's: the row confirms a send that status says `Sent` of.
@@ -784,7 +786,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     // Selected after the geometry: a resize restarts reading, and the frame
     // says so. The choice takes the input's row in place of the draft, which
     // it keeps.
-    const selector = self.select(footer.command or footer.original_pending).row == .selector;
+    const selector = self.select(footer.command or footer.original != null).row == .selector;
     const draft = try self.prepareDraft(if (selector) "" else bytes, size);
     const window = self.backend.window();
     const scratch = self.backend.scratch();
@@ -892,7 +894,7 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     if (layout.rule_height != 0) try self.drawRule(window.child(.{ .y_off = layout.list_row - 1, .height = 1 }), size.col, layout.draft, rule_label);
     const overflow = try scratch.create([32]u8);
     if (layout.list_height != 0) self.drawCommands(window, &layout, &self.commands.?, overflow);
-    if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col, footer.original_pending) else {
+    if (selector) self.drawChoice(window.child(.{ .y_off = layout.draft_top, .height = 1 }), size.col, footer.original) else {
         // Continuation rows align under the text; only the draft's first
         // line has a glyph. Each shown line is printed whole: draft_layout
         // already broke it to fit.
@@ -954,9 +956,14 @@ pub fn renderPrepared(self: *Self, out: *std.Io.Writer, size: std.posix.winsize,
     return .{ .frame = self.frames, .notice = layout.notice.length != 0 };
 }
 
-fn drawChoice(self: *const Self, window: vaxis.Window, width: u16, original_pending: bool) void {
+fn drawChoice(self: *const Self, window: vaxis.Window, width: u16, original: ?Footer.Original) void {
     const waiting: []const u8 = switch (self.selected.approval) {
-        .held => if (original_pending) "  Original pending…" else "  Command running…",
+        .held => if (original) |state| switch (state) {
+            .not_sent => "Not sent · Ctrl-R",
+            .sending => "Sending…",
+            .unconfirmed => if (width < 13) "Not sure" else "Unconfirmed · Ctrl-R",
+            .rejected => "Rejected · /discard",
+        } else "  Command running…",
         else => "",
     };
     if (waiting.len != 0) {
@@ -1860,6 +1867,39 @@ test "conversation source edge and rail retain full physical width" {
             try Check.rows(screen, columns, edge, bytes[0 .. columns - 2]);
             try screen.latest();
         };
+    }
+}
+
+test "tiny occupied Action shows original state and recovery without an offer" {
+    const io = std.testing.io;
+    var environ = try std.testing.environ.createMap(std.testing.allocator);
+    defer environ.deinit();
+    const screen = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(screen);
+    try Test.init(screen, io, &environ, false);
+    defer Test.deinit(screen);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    var action = try ActionFixture.init(1);
+    defer action.deinit();
+    try screen.adopt(io, action.file, 10, true);
+    const tiny: std.posix.winsize = .{ .row = 2, .col = 8, .xpixel = 0, .ypixel = 0 };
+    const Case = struct { original: Footer.Original, status: []const u8, first: []const u8, second: []const u8 };
+    for ([_]Case{
+        .{ .original = .not_sent, .status = "Ctrl-R", .first = "Ctrl-R", .second = "Not sent" },
+        .{ .original = .sending, .status = "", .first = "row 000", .second = "Sending…" },
+        .{ .original = .unconfirmed, .status = "Ctrl-R", .first = "Ctrl-R", .second = "Not sure" },
+        .{ .original = .rejected, .status = "/discard", .first = "/discard", .second = "Rejected" },
+    }) |case| {
+        const receipt = try Test.render(screen, &out.writer, tiny, "", 0, .{ .original = case.original, .status = case.status, .status_essential = true }, &.{});
+        var row: [64]u8 = undefined;
+        try std.testing.expectEqualStrings(case.first, rowText(screen, 0, &row));
+        try std.testing.expectEqualStrings(case.second, rowText(screen, 1, &row));
+        try std.testing.expectEqual(ConsentPolicy.Approval.held, screen.selected.approval);
+        try std.testing.expect(screen.presented(receipt));
+        try std.testing.expect(!screen.promptCompleted(.empty, false, false));
+        try std.testing.expect(screen.offered() == null);
+        try std.testing.expectEqual(@as(u64, 10), screen.consent.?.action);
     }
 }
 
