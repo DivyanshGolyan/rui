@@ -462,11 +462,9 @@ test "inline skills initial render limits remain keyed refusals with ordinary co
     try std.testing.expectEqual(.skills_unavailable, refused.rejected.code);
     try std.testing.expect(!store.isFenced());
     var used: std.atomic.Value(u64) = .init(0);
-    var page = try store.captureSessionList(&.{}, .{ .scratch_path = root, .scratch_budget = .{ .used = &used, .limit = 1024 }, .request_number = 1 });
-    defer page.deinit();
-    var bytes: [1024]u8 = undefined;
-    const count = try page.read(0, &bytes);
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..count], .{});
+    const bytes = try storage.testingSessionList(&store, &tmp, .{}, &used, 1);
+    defer std.testing.allocator.free(bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 0), parsed.value.object.get("sessions").?.array.items.len);
 }

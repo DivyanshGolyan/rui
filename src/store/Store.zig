@@ -37,6 +37,7 @@ const model_admission_domain = @import("domain/model_admission.zig");
 const model_settlement_domain = @import("domain/model_settlement.zig");
 const reads_domain = @import("domain/reads.zig");
 const report_domain = @import("domain/report.zig");
+const session_list_read = @import("domain/session_list_read.zig");
 const rsql = @import("rsql.zig");
 const store_access = @import("access.zig");
 const Access = store_access.Access;
@@ -74,7 +75,6 @@ const ModelOperationKind = historical_domain.ModelOperationKind;
 const PermissionDecisionReply = command_domain.PermissionDecisionReply;
 const PrefixSeal = historical_domain.PrefixSeal;
 const PublicConversationPage = reads_domain.PublicConversationPage;
-const SessionListOptions = report_domain.SessionListOptions;
 const SessionObservation = reads_domain.SessionObservation;
 const SessionReport = report_domain.SessionReport;
 const SessionReportCapture = report_domain.SessionReportCapture;
@@ -1038,26 +1038,30 @@ pub const Store = struct {
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        try entry.finishCapture(capture, report_domain.renderSessionReport(&access, session_ref, options.profile, options.execution, capture));
+        const result = report_domain.renderSessionReport(&access, session_ref, options.profile, options.execution, capture);
+        return entry.finishCapture(capture.ordinary_failure, result);
     }
 
-    /// Returns an owned, unlinked page; no SQLite cursor survives capture.
-    /// The caller releases its scratch charge by deinitializing the report.
-    pub fn captureSessionList(self: *Store, request: *const session_list.ListSessions, options: SessionListOptions) !SessionReport {
+    /// Reads one list page under one Entry and hands it to `visitor`
+    /// (`session_list_read.readSessionList`). An error the visitor returns
+    /// is its own and does not fence the Store.
+    pub fn readSessionList(self: *Store, request: *const session_list.ListSessions, visitor: anytype) !void {
         try request.validate();
-        var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
-        try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
-        errdefer capture.deinit();
-        try self.queue().run(captureSessionListHeld, .{ self, request, &capture });
-        return capture.seal();
+        var watched: session_list_read.Watched(@TypeOf(visitor)) = .{ .visitor = visitor };
+        try self.queue().run(SessionListHeld(@TypeOf(visitor)).readSessionListHeld, .{ self, request, &watched });
     }
 
-    fn captureSessionListHeld(self: *Store, request: *const session_list.ListSessions, capture: *SessionReportCapture) !void {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: ReadAccess = .open(&entry);
-        defer access.deinit();
-        try entry.finishCapture(capture, report_domain.renderSessionList(&access, request, capture));
+    fn SessionListHeld(comptime Visitor: type) type {
+        return struct {
+            fn readSessionListHeld(self: *Store, request: *const session_list.ListSessions, watched: *session_list_read.Watched(Visitor)) !void {
+                const entry = try enter(self, .none);
+                defer entry.release();
+                var access: ReadAccess = .open(&entry);
+                defer access.deinit();
+                const result = session_list_read.readSessionList(&access, request, watched);
+                return entry.finishCapture(watched.failed, result);
+            }
+        };
     }
 
     pub fn actionArguments(self: *Store, session_ref: []const u8, action_id: u64) !ContentReference {
@@ -1858,11 +1862,12 @@ pub const Entry = struct {
         };
     }
 
-    /// Report capture marks its own scratch failures ordinary.
-    fn finishCapture(self: Entry, capture: *const SessionReportCapture, result: anytype) @TypeOf(result) {
+    /// A capture's own failure, such as exhausted scratch, is `ordinary`
+    /// and does not fence the Store.
+    fn finishCapture(self: Entry, ordinary: bool, result: anytype) @TypeOf(result) {
         comptime assertSmallResult(@TypeOf(result));
         return result catch |err| {
-            if (capture.ordinary_failure) return err;
+            if (ordinary) return err;
             return fence(self.store, err);
         };
     }

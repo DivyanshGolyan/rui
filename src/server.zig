@@ -26,6 +26,7 @@ const host_reply = @import("host_reply.zig");
 const ScratchBudget = @import("ScratchBudget.zig");
 const wire_request = @import("wire_request.zig");
 const store_module = @import("store.zig");
+const session_list_reply = @import("session_list_reply.zig");
 const launch_frame = @import("launch_frame.zig");
 const core_tools = @import("core_tools.zig");
 const tools = @import("tools.zig");
@@ -1790,12 +1791,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                     return fd.json(200, protocol.max_response_bytes, host_reply.renderSessionsNotModified, .{since});
                 }
             }
-            const page = host.store.captureSessionList(request_value, .{
-                .scratch_path = host.lease.paths.scratch.slice(),
-                .scratch_budget = host.retention.sharedBudget(),
-                .request_number = request_number,
-                .fail_unlink = host.hooks.fails(.report_unlink),
-            }) catch |err| {
+            const page = captureSessionList(host, request_value, request_number) catch |err| {
                 if (err == error.ReportScratchCleanupFailed) {
                     fenceDispatch(host, "Session list scratch cleanup", err);
                     return respondStatic(fd, 500, .observation_error, "report_scratch_cleanup_failed");
@@ -1890,6 +1886,22 @@ fn renderModelList(out: protocol.JsonOut, host: *Host) error{BufferTooLarge}!voi
     out.writer.writeAll(protocol.model_list_reply.head) catch return error.BufferTooLarge;
     host.model_lists.render(out.writer) catch return error.BufferTooLarge;
     out.writer.writeAll(protocol.model_list_reply.tail) catch return error.BufferTooLarge;
+}
+
+/// One list page, read by the Store and written by the Host
+/// (`session_list_reply`), in an owned, unlinked scratch file: no SQLite
+/// cursor survives it. Deinitializing it releases its scratch charge.
+fn captureSessionList(host: *Host, request: *const protocol.ListSessions, request_number: u64) !store_module.SessionReport {
+    try request.validate();
+    var capture: store_module.SessionReportCapture = .{ .io = host.io, .writer = null, .budget = host.retention.sharedBudget() };
+    try capture.create(host.lease.paths.scratch.slice(), request_number, host.hooks.fails(.report_unlink));
+    errdefer capture.deinit();
+    const reply = try createUnfilled(host.allocator, session_list_reply.Reply(store_module.SessionReportCapture));
+    defer host.allocator.destroy(reply);
+    reply.capture = &capture;
+    reply.rows = 0;
+    try host.store.readSessionList(request, reply);
+    return capture.seal();
 }
 
 /// One `T` on the heap whose bytes stay unwritten until its initializer or

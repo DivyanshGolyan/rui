@@ -4,7 +4,6 @@ const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
-const session_list = @import("../../session_list.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
@@ -63,13 +62,6 @@ pub const SessionReportOptions = struct {
     request_number: u64,
     profile: cli_value.ReportProfile = .current,
     execution: SessionReportExecution,
-    fail_unlink: bool = false,
-};
-
-pub const SessionListOptions = struct {
-    scratch_path: []const u8,
-    scratch_budget: ScratchBudget,
-    request_number: u64,
     fail_unlink: bool = false,
 };
 
@@ -151,7 +143,7 @@ pub const SessionReportCapture = struct {
 
     /// Writes a protocol shape straight into the capture, so a fact's
     /// maximum encoding never sits whole on the intake worker's stack.
-    fn appendShape(self: *SessionReportCapture, comptime shape: anytype, args: anytype) AppendError!void {
+    pub fn appendShape(self: *SessionReportCapture, comptime shape: anytype, args: anytype) AppendError!void {
         var buffer: [256]u8 = undefined;
         var sink: ShapeSink = .{ .capture = self, .writer = .{ .vtable = &.{ .drain = ShapeSink.drain }, .buffer = &buffer } };
         protocol.writeShape(&sink.writer, shape, args) catch return sink.failure.?;
@@ -246,7 +238,7 @@ pub const SessionReportCapture = struct {
         const tools = try sortedToolNames(names, &sorted);
         var buffer: [256]u8 = undefined;
         var sink: ShapeSink = .{ .capture = self, .writer = .{ .vtable = &.{ .drain = ShapeSink.drain }, .buffer = &buffer } };
-        writeToolNames(&sink.writer, tools) catch return sink.failure.?;
+        tool_name.writeNamesJson(&sink.writer, tools) catch return sink.failure.?;
         sink.writer.flush() catch return sink.failure.?;
     }
 
@@ -348,154 +340,6 @@ pub fn archiveState(a: *ReadAccess, session: []const u8) !session_archive.State 
     return archiveStateFromIntent(row);
 }
 
-/// Active includes a stop still completing. All avoids archive seeks;
-/// otherwise compare whether the Session is completely archived.
-fn archiveFilterSql(comptime parameter: []const u8) []const u8 {
-    return " AND (" ++ parameter ++ "='all' OR ((" ++ command_domain.archive_state_sql ++ ")='archived')=(" ++ parameter ++ "='archived'))";
-}
-
-/// The newest Session's creation sequence, the ceiling of a list that
-/// starts from the beginning.
-const list_ceiling = rsql.Read(.{
-    .sql = "SELECT coalesce(max(created_seq),0) AS ceiling FROM session",
-    .Args = struct {},
-    .Row = struct { ceiling: u64 },
-    .cardinality = .each,
-});
-
-/// A page and one Session more, which says whether there are more: the
-/// `LIMIT` of each page read and its `readEach` bound.
-const list_limit = session_list.session_list_page_size + 1;
-
-/// A full traversal's page of Sessions in creation order, with the one
-/// after it. The index walks hidden candidates until nine pass the derived
-/// archive filter; the result retains only those nine references.
-const list_page = rsql.Read(.{
-    .sql = "SELECT created_seq,session_ref FROM session WHERE created_seq>?1 AND created_seq<=?2" ++ archiveFilterSql("?3") ++ " ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
-    .Args = struct { after: u64, ceiling: u64, archive: session_archive.Filter },
-    .Row = ListPage.Row,
-    .cardinality = .each,
-});
-
-/// `list_page` within one Workspace.
-const workspace_list_page = rsql.Read(.{
-    .sql = "SELECT created_seq,session_ref FROM session @index(session_workspace_list) " ++
-        "WHERE workspace_digest=?3 AND workspace=?4 AND created_seq>?1 AND created_seq<=?2" ++ archiveFilterSql("?5") ++ " ORDER BY created_seq LIMIT " ++ std.fmt.comptimePrint("{d}", .{list_limit}),
-    .Args = struct { after: u64, ceiling: u64, digest: [32]u8, workspace: []const u8, archive: session_archive.Filter },
-    .Row = ListPage.Row,
-    .cardinality = .each,
-});
-
-/// The change ring's key for a Workspace: the stored key of its
-/// Sessions, or none while it has none.
-const workspace_key = rsql.Read(.{
-    .sql = "SELECT workspace_key FROM session WHERE workspace_digest=?1 AND workspace=?2 LIMIT 1",
-    .Args = struct { digest: [32]u8, workspace: []const u8 },
-    .Row = struct { workspace_key: rsql.Positive },
-    .cardinality = .optional,
-});
-
-/// A page of a full traversal: its Sessions' references, up to a page,
-/// and whether a Session follows them (`list_limit`).
-const ListPage = struct {
-    const Row = struct { created_seq: rsql.Positive, session_ref: SessionText };
-
-    refs: [session_list.session_list_page_size]change_ring.Id = undefined,
-    count: usize = 0,
-    last: u64 = 0,
-    more: bool = false,
-    failure: ?error{CorruptStore} = null,
-
-    pub fn visit(page: *ListPage, row: *const Row) bool {
-        if (page.count == page.refs.len) {
-            page.more = true;
-            return false;
-        }
-        const ref = row.session_ref.slice();
-        // The session table's CHECK (schema.zig) holds every stored
-        // reference to `id_bytes`; main read any up to 128 bytes.
-        if (ref.len != change_ring.id_bytes) {
-            page.failure = error.CorruptStore;
-            return false;
-        }
-        page.refs[page.count] = ref[0..change_ring.id_bytes].*;
-        page.last = row.created_seq.get();
-        page.count += 1;
-        return true;
-    }
-};
-
-pub fn renderSessionList(a: *ReadAccess, request: *const session_list.ListSessions, capture: *SessionReportCapture) !void {
-    const self = a.store;
-    const generation = self.commit_generation.load(.acquire);
-    // Changed rows answer while the hint still covers the token; a token
-    // from another opening, or one too old, gets a full traversal.
-    if (request.since) |since| {
-        const through = if (request.changed) |changed| changed.through else generation;
-        if (std.mem.eql(u8, &since.instance, &self.instance) and through <= generation and self.changes.covers(since.generation))
-            return renderChangedSessions(a, request, since.generation, through, capture);
-    }
-    try renderAllSessions(a, request, generation, capture);
-}
-
-/// Every Session in scope, in creation order, eight per page. A full
-/// traversal applies the archive filter before LIMIT, within the request's
-/// scope, `after` and `ceiling`. A list from the beginning reads its ceiling
-/// in the page's round: every
-/// Session is at or below the newest, so the page needs no bound then.
-fn renderAllSessions(a: *ReadAccess, request: *const session_list.ListSessions, generation: u64, capture: *SessionReportCapture) !void {
-    // An aggregate has one row, stepped once, as main did.
-    var maximum: reads_domain.First(list_ceiling.Row) = .{};
-    if (request.after == 0) a.readEach(list_ceiling, .{}, 1, &maximum);
-    const bound: u64 = if (request.after == 0) std.math.maxInt(i64) else request.ceiling;
-    var page: ListPage = .{};
-    if (request.workspace) |*workspace|
-        a.readEach(workspace_list_page, .{ .after = request.after, .ceiling = bound, .digest = store_core.workspaceDigest(workspace.slice()), .workspace = workspace.slice(), .archive = request.archive }, list_limit, &page)
-    else
-        a.readEach(list_page, .{ .after = request.after, .ceiling = bound, .archive = request.archive }, list_limit, &page);
-    try store_access.runAs(a, error.SessionReadFailed);
-    if (page.failure) |err| return err;
-    const ceiling = if (request.after == 0) (maximum.row orelse return error.SessionReadFailed).ceiling else request.ceiling;
-    try appendSessionRows(a, page.refs[0..page.count], capture);
-    var token: [change_ring.Token.max_bytes]u8 = undefined;
-    const since = (change_ring.Token{ .instance = a.store.instance, .generation = generation }).format(&token);
-    if (page.more)
-        try capture.appendShape(protocol.session_list_reply.full_tail, .{ session_list.ListDelta.full, since, page.last, ceiling })
-    else
-        try capture.appendShape(protocol.session_list_reply.last_tail, .{ session_list.ListDelta.full, since });
-    std.debug.assert(capture.length + capture.buffered <= protocol.session_list_reply.max_bytes);
-}
-
-/// The Sessions in scope that the hint says changed in (since, through],
-/// in ID order, eight per page: the Workspace's key, then one pass over
-/// the ring in memory, then the shown rows. A Session it names may be
-/// unchanged; one it omits did not change. The archive filter deliberately
-/// does not apply: caches need transitions out of their visible set too.
-/// Tokens are scope-unbound hints; a changed archive/workspace filter needs
-/// a fresh full traversal, not reuse of the previous scope's token.
-fn renderChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions, since: u64, through: u64, capture: *SessionReportCapture) !void {
-    var workspace: ?u64 = null;
-    if (request.workspace) |*scope| {
-        var key: workspace_key.Result = undefined;
-        a.read(workspace_key, .{ .digest = store_core.workspaceDigest(scope.slice()), .workspace = scope.slice() }, &key);
-        try store_access.runAs(a, error.SessionReadFailed);
-        workspace = if (key) |row| row.workspace_key.get() else 0;
-    }
-    const self = a.store;
-    const after: ?*const change_ring.Id = if (request.changed) |*changed| &changed.after_reference else null;
-    var references: [session_list.session_list_page_size + 1]change_ring.Id = undefined;
-    const changed = self.changes.changed(since, through, workspace, after, &references);
-    const count = @min(changed.len, session_list.session_list_page_size);
-    try appendSessionRows(a, changed[0..count], capture);
-    var token: [change_ring.Token.max_bytes]u8 = undefined;
-    const next = (change_ring.Token{ .instance = self.instance, .generation = through }).format(&token);
-    if (changed.len > count)
-        try capture.appendShape(protocol.session_list_reply.changed_tail, .{ session_list.ListDelta.changed, next, through, &changed[count - 1] })
-    else
-        try capture.appendShape(protocol.session_list_reply.last_tail, .{ session_list.ListDelta.changed, next });
-    std.debug.assert(capture.length + capture.buffered <= protocol.session_list_reply.max_bytes);
-}
-
 /// A Session's first Message is the earlier of two seeks: a Turn binds
 /// queued Messages in admission order, so the first Turn's first
 /// admission precedes every other bound one, and the only other candidate
@@ -516,17 +360,17 @@ const first_unbound = rsql.Read(.{
 });
 
 /// Both first-Message seeks, queued in one round.
-const FirstCandidates = struct {
+pub const FirstCandidates = struct {
     bound: first_bound.Result = null,
     unbound: first_unbound.Result = null,
 
-    fn queue(first: *FirstCandidates, a: *ReadAccess, session: []const u8) void {
+    pub fn queue(first: *FirstCandidates, a: *ReadAccess, session: []const u8) void {
         a.read(first_bound, .{ .session = session }, &first.bound);
         a.read(first_unbound, .{ .session = session }, &first.unbound);
     }
 
     /// The earlier candidate, or 0 for none.
-    fn admission(first: *const FirstCandidates) u64 {
+    pub fn admission(first: *const FirstCandidates) u64 {
         const bound = if (first.bound) |row| row.first_admission_id.get() else std.math.maxInt(u64);
         const unbound = if (first.unbound) |row| row.admission_id.get() else std.math.maxInt(u64);
         const earlier = @min(bound, unbound);
@@ -535,7 +379,7 @@ const FirstCandidates = struct {
 };
 
 /// The latest Message to the Session ?1 with no Session sender.
-const person_message_sql = "SELECT admitted_at FROM message_admission @index(message_admission_person) " ++
+pub const person_message_sql = "SELECT admitted_at FROM message_admission @index(message_admission_person) " ++
     "WHERE session_ref=?1 AND sender_session_ref IS NULL ORDER BY admission_position DESC LIMIT 1";
 
 const person_message = rsql.Read(.{
@@ -546,11 +390,11 @@ const person_message = rsql.Read(.{
 });
 
 /// The first Message `m`'s own row and its content's metadata.
-const first_message_columns = "m.admission_id AS first_admission,m.admission_position AS first_position,m.admitted_at AS first_admitted_at," ++
+pub const first_message_columns = "m.admission_id AS first_admission,m.admission_position AS first_position,m.admitted_at AS first_admitted_at," ++
     "m.sender_session_ref AS first_sender,first_content.byte_length AS first_length,first_content.digest AS first_digest,first_content.private AS first_private";
 
 /// The content metadata of the first Message `m`.
-const first_content_join = "JOIN content first_content ON first_content.content_id=m.content_id";
+pub const first_content_join = "JOIN content first_content ON first_content.content_id=m.content_id";
 
 /// A first Message as `firstMessage` reads it; a list row's are null
 /// when it has none.
@@ -574,7 +418,7 @@ const first_message = rsql.Read(.{
 /// The names `tool_set.namesSql` joined, in name order, the order
 /// configure gave the set's members. A bad or repeated name, or too many,
 /// is `CorruptStore`.
-fn sortedToolNames(names: ?[]const u8, sorted: *[tool_catalog.max_tools][]const u8) ![]const []const u8 {
+pub fn sortedToolNames(names: ?[]const u8, sorted: *[tool_catalog.max_tools][]const u8) ![]const []const u8 {
     var count: usize = 0;
     if (names) |joined| {
         var each = std.mem.splitScalar(u8, joined, ',');
@@ -595,70 +439,10 @@ fn sortedToolNames(names: ?[]const u8, sorted: *[tool_catalog.max_tools][]const 
     return sorted[0..count];
 }
 
-/// Writes `names` as a JSON array of strings.
-fn writeToolNames(writer: *std.Io.Writer, names: []const []const u8) std.Io.Writer.Error!void {
-    try writer.writeAll("[");
-    for (names, 0..) |name, index| {
-        if (index != 0) try writer.writeAll(",");
-        try writer.writeAll("\"");
-        try writer.writeAll(name);
-        try writer.writeAll("\"");
-    }
-    try writer.writeAll("]");
-}
-
-const settings_columns = "session.session_ref,session.parent_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
-    command_domain.archive_state_sql ++ " AS archive_state," ++
-    "(" ++ person_message_sql ++ ") AS from_person_at,";
-
-/// One list row: the Session's settings, its latest Message from no
-/// Session, and its first Message, the admission ?2. A missing Message
-/// or content finds no row. Its Row is over 1 KiB, so its visitor owns
-/// it (`RowsRender`).
-const list_row = rsql.Read(.{
-    .sql = "SELECT " ++ settings_columns ++ first_message_columns ++ " FROM session " ++
-        "JOIN message_admission m ON m.admission_id=?2 AND m.session_ref=session.session_ref " ++ first_content_join ++ " WHERE session.session_ref=?1",
-    .Args = struct { session: []const u8, first: u64 },
-    .Row = ListRow,
-    .cardinality = .each,
-});
-
-/// `list_row` of a Session with no first Message.
-const list_row_bare = rsql.Read(.{
-    .sql = "SELECT " ++ settings_columns ++ "NULL AS first_admission,NULL AS first_position,NULL AS first_admitted_at,NULL AS first_sender," ++
-        "NULL AS first_length,NULL AS first_digest,NULL AS first_private FROM session WHERE session.session_ref=?1",
-    .Args = struct { session: []const u8 },
-    .Row = ListRow,
-    .cardinality = .each,
-});
-
-const ListRow = struct {
-    session_ref: SessionText,
-    parent_ref: ?Bounded(session_id.bytes),
-    workspace: Bounded(workspace_path.max_bytes),
-    provider: provider_name.Provider,
-    model: Bounded(model_capability.max_model_bytes),
-    tools: ?Bounded(tool_set.max_names_bytes),
-    permission_mode: u8,
-    label: ?Bounded(tool_presentation.max_label_bytes),
-    created_at: rsql.Positive,
-    revision: rsql.Positive,
-    next_position: rsql.Positive,
-    archive_state: session_archive.State,
-    from_person_at: ?rsql.Positive,
-    first_admission: ?rsql.Positive,
-    first_position: ?rsql.Positive,
-    first_admitted_at: ?rsql.Positive,
-    first_sender: ?SessionText,
-    first_length: ?u64,
-    first_digest: ?[32]u8,
-    first_private: ?bool,
-};
-
 /// The first Message of a row with `FirstMessageColumns`, read for the
 /// admission `first` (0 for none). Content that is private is
 /// `CorruptStore`.
-fn firstMessage(row: anytype, first: u64) error{CorruptStore}!?protocol.FirstMessage {
+pub fn firstMessage(row: anytype, first: u64) error{CorruptStore}!?protocol.FirstMessage {
     if (first == 0) return null;
     if (row.first_private orelse return error.CorruptStore) return error.CorruptStore;
     return .{
@@ -668,112 +452,6 @@ fn firstMessage(row: anytype, first: u64) error{CorruptStore}!?protocol.FirstMes
         .sender = if (row.first_sender) |sender| .{ .session = sender } else null,
         .content = .{ .length = row.first_length orelse return error.CorruptStore, .digest = row.first_digest orelse return error.CorruptStore },
     };
-}
-
-/// The page head and its rows. Each row's first admission and work take
-/// the rounds their reads depend on, shared by every row; the rows'
-/// settings come last (`renderRows`), so the page holds one row's text at
-/// a time and not eight.
-noinline fn appendSessionRows(a: *ReadAccess, references: []const change_ring.Id, capture: *SessionReportCapture) !void {
-    const now_ms = try store_core.readUnixMilliseconds(a.store.io);
-    try capture.appendShape(protocol.session_list_reply.head, .{});
-    var firsts: [session_list.session_list_page_size]FirstCandidates = undefined;
-    var works: [session_list.session_list_page_size]WorkRead = undefined;
-    // Each row's reads queued together: a pass ends where a statement is
-    // queued again, so the round takes one pass per row, not two.
-    for (references, firsts[0..references.len], works[0..references.len]) |*reference, *first, *work| {
-        first.queue(a, reference);
-        work.* = .{ .session = reference };
-        _ = work.queue(a);
-    }
-    try runReport(a);
-    for (works[0..references.len]) |*work| try work.advance();
-    try readWorks(a, works[0..references.len]);
-    var shown: [session_list.session_list_page_size]ShownRow = undefined;
-    for (references, firsts[0..references.len], works[0..references.len], shown[0..references.len]) |*reference, *first, *work, *row|
-        row.* = .{ .reference = reference, .first = first.admission(), .work = work };
-    try renderRows(a, shown[0..references.len], std.math.cast(u64, now_ms) orelse return error.IntegerOutOfRange, capture);
-}
-
-/// What a list row read before its settings.
-const ShownRow = struct { reference: *const change_ring.Id, first: u64, work: *const WorkRead };
-
-/// Reads each shown row's `list_row` in one round and renders it as it
-/// steps. The row it decodes is in report scratch (`RowScratch`).
-noinline fn renderRows(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, capture: *SessionReportCapture) !void {
-    const scratch = a.store.reportScratch(RowScratch);
-    var render: RowsRender = .{ .decoded = &scratch.row, .tools_json = &scratch.tools_json, .rows = rows, .now_ms = now_ms, .capture = capture };
-    for (rows) |row| {
-        if (row.first == 0)
-            a.readEach(list_row_bare, .{ .session = row.reference }, 1, &render)
-        else
-            a.readEach(list_row, .{ .session = row.reference, .first = row.first }, 1, &render);
-    }
-    const ran = runReport(a);
-    // A pass stops at a failed step, so a row that failed to render did
-    // before any later row's step failed: its error is main's first.
-    if (render.failure) |err| return err;
-    try ran;
-    if (render.shown != rows.len) return error.CorruptStore;
-}
-
-/// A list row and its rendered tools, kept in the Store's report scratch
-/// and not on a Host stack frame.
-const RowScratch = struct { row: ListRow, tools_json: [tool_name.max_names_json_bytes]u8 };
-
-/// Renders each `list_row` as it steps, in the page's order. A row that
-/// is not the next shown Session's, or a missing one, is `CorruptStore`;
-/// after a failure it renders nothing more.
-const RowsRender = struct {
-    decoded: *ListRow,
-    tools_json: *[tool_name.max_names_json_bytes]u8,
-    rows: []const ShownRow,
-    now_ms: u64,
-    capture: *SessionReportCapture,
-    shown: usize = 0,
-    failure: ?RenderError = null,
-
-    const RenderError = @typeInfo(@typeInfo(@TypeOf(renderListRow)).@"fn".return_type.?).error_union.error_set;
-
-    pub fn visit(render: *RowsRender, row: *const ListRow) bool {
-        if (render.failure != null) return false;
-        renderListRow(render.capture, render.rows, render.shown, render.now_ms, row, render.tools_json) catch |err| {
-            render.failure = err;
-            return false;
-        };
-        render.shown += 1;
-        return true;
-    }
-};
-
-fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow, tools_json: *[tool_name.max_names_json_bytes]u8) !void {
-    if (index == rows.len or !std.mem.eql(u8, row.session_ref.slice(), rows[index].reference)) return error.CorruptStore;
-    var sorted: [tool_catalog.max_tools][]const u8 = undefined;
-    const names = try sortedToolNames(if (row.tools) |*tools| tools.slice() else null, &sorted);
-    var writer = std.Io.Writer.fixed(tools_json);
-    try writeToolNames(&writer, names);
-    if (row.label) |*label| try configuration_domain.checkLabel(label.slice());
-    const work: protocol.SessionWork = .fromCore(try rows[index].work.work(row.created_at.get(), now_ms));
-    const peers: protocol.PeerFacts = .{ .from_person_at = optional(row.from_person_at) };
-    const fields: protocol.SessionRow.Fields = .{
-        .archive_state = row.archive_state,
-        .reference = row.session_ref.slice(),
-        .parent = if (row.parent_ref) |*parent| parent.slice() else null,
-        .workspace = row.workspace.slice(),
-        .provider = row.provider,
-        .model = row.model.slice(),
-        .tools = writer.buffered(),
-        .permission_mode = try configuration_domain.permissionMode(row.permission_mode),
-        .label = if (row.label) |*label| label.slice() else null,
-        .created_at = row.created_at.get(),
-        .revision = row.revision.get(),
-        .end = row.next_position.get() - 1,
-        .first_message = try firstMessage(row, rows[index].first),
-        .work = &work,
-        .peers = &peers,
-    };
-    if (index != 0) try capture.append(",");
-    try capture.appendShape(.{protocol.Hole{ .json = protocol.SessionRow.Fields }}, .{&fields});
 }
 
 /// A Session report on the report's Access `a`: its saved Session and
@@ -1609,19 +1287,13 @@ const work_stop = rsql.Read(.{
     .cardinality = .each,
 });
 
-/// The name main gave each work and list statement whose step fails;
+/// The name main gave each work and first-Message statement whose step fails;
 /// any other is `CorruptStore`, as main's per-row reads answered.
 pub const report_failures = .{
-    .{ list_ceiling, error.SessionReadFailed },
-    .{ list_page, error.SessionReadFailed },
-    .{ workspace_list_page, error.SessionReadFailed },
-    .{ workspace_key, error.SessionReadFailed },
     .{ first_bound, error.SessionReadFailed },
     .{ first_unbound, error.SessionReadFailed },
     .{ person_message, error.SessionReadFailed },
     .{ first_message, error.CorruptStore },
-    .{ list_row, error.SessionReadFailed },
-    .{ list_row_bare, error.SessionReadFailed },
 } ++ work_failures;
 
 /// The names main gave the work reads' failed steps.
