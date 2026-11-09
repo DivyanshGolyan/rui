@@ -127,11 +127,13 @@ class AdmissionTest(unittest.TestCase):
         for name in ('linux_build', 'linux_build_unit', 'macos_build_unit'):
             self.assertEqual(budget(job(text, name)), 15)
 
-    def test_main_ruleset_requires_admission_and_prs_without_bypass(self):
+    def test_main_ruleset_requires_admission_and_prs_with_only_an_admin_pr_bypass(self):
         ruleset = json.loads((ROOT / '.github/main-ruleset.json').read_text())
         self.assertEqual(ruleset['target'], 'branch')
         self.assertEqual(ruleset['enforcement'], 'active')
-        self.assertEqual(ruleset['bypass_actors'], [])
+        # Admins may merge a PR past a check GitHub never ran; nobody pushes to main directly.
+        self.assertEqual(ruleset['bypass_actors'],
+                         [{'actor_id': 5, 'actor_type': 'RepositoryRole', 'bypass_mode': 'pull_request'}])
         self.assertEqual(ruleset['conditions']['ref_name'], {'include': ['refs/heads/main'], 'exclude': []})
         rules = {rule['type']: rule for rule in ruleset['rules']}
         self.assertIn('pull_request', rules)
