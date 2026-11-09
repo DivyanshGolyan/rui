@@ -34,35 +34,6 @@ func clientPeak(binary, store, session string) (uint64, error) {
 	return strconv.ParseUint(match[1], 10, 64)
 }
 
-type optionalField struct {
-	State string  `json:"state"`
-	Value *string `json:"value,omitempty"`
-}
-type configurationFields struct {
-	Workspace      optionalField `json:"workspace"`
-	Provider       optionalField `json:"provider"`
-	Model          optionalField `json:"model"`
-	Instructions   optionalField `json:"instructions"`
-	Tools          optionalField `json:"tools"`
-	PermissionMode optionalField `json:"permission_mode"`
-	OutputSchema   optionalField `json:"output_schema"`
-}
-type configurationCommand struct {
-	Version       string              `json:"version"`
-	Kind          string              `json:"kind"`
-	Store         string              `json:"store"`
-	Key           string              `json:"key"`
-	Session       string              `json:"session"`
-	Configuration configurationFields `json:"configuration"`
-}
-
-func configuration(store, workspace, identity string) configurationCommand {
-	omitted := optionalField{State: "omitted"}
-	provider := "codex"
-	model := "measurement-model"
-	return configurationCommand{Version: measurement.WireVersion, Kind: "configure", Store: store, Key: identity, Configuration: configurationFields{Workspace: optionalField{State: "value", Value: &workspace}, Provider: optionalField{State: "value", Value: &provider}, Model: optionalField{State: "value", Value: &model}, Instructions: omitted, Tools: omitted, PermissionMode: omitted, OutputSchema: omitted}}
-}
-
 func run(binary string) (result map[string]any, resultError error) {
 	started := time.Now()
 	directory, err := os.MkdirTemp("/private/tmp", "rui-configuration-measure-")
@@ -83,29 +54,35 @@ func run(binary string) (result map[string]any, resultError error) {
 	if !storeOK || !socketOK {
 		return nil, errors.New("Host readiness omitted Store or socket")
 	}
-	workspace, err := measurement.RepositoryRoot()
-	if err != nil {
-		return nil, err
-	}
+	client := measurement.Client{Binary: binary, Artifacts: directory, Store: canonicalStore, Deadline: deadline}
 	stages := make([]map[string]any, 0, len(sessionCounts))
 	admitted := 0
 	var firstSession string
+	var record map[string]any
 	for _, target := range sessionCounts {
 		for admitted < target {
-			identity := fmt.Sprintf("measure/%08d", admitted)
+			identity := fmt.Sprintf("measure-%08d", admitted)
+			if record == nil {
+				// The CLI fills the creation defaults; the rest replay its record.
+				if firstSession, err = client.Configure(identity, "", "--tools", "none"); err != nil {
+					return nil, err
+				}
+				if record, err = client.ConfigureRecord(identity); err != nil {
+					return nil, err
+				}
+				admitted++
+				continue
+			}
+			record["key"] = identity
 			var answer map[string]any
-			if err := measurement.ExchangeUnix(deadline, socketPath, "/v1/configure", configuration(canonicalStore, workspace, identity), &answer); err != nil {
+			if err := measurement.ExchangeUnix(deadline, socketPath, "/v1/configure", record, &answer); err != nil {
 				return nil, err
 			}
 			if status, _ := measurement.StringField(answer, "answer", "status"); status != "accepted" {
 				return nil, fmt.Errorf("configuration %s was %v", identity, answer)
 			}
-			session, err := measurement.ConfigurationSession(answer)
-			if err != nil {
+			if _, err := measurement.ConfigurationSession(answer); err != nil {
 				return nil, err
-			}
-			if admitted == 0 {
-				firstSession = session
 			}
 			admitted++
 		}

@@ -84,6 +84,7 @@ Normal changes retain policy and the Linux aggregate even for a narrow diff.
 Only the explicit documentation classification can omit them; an empty target list alone cannot.
 
 Qualification Go changes select `measurement-check`.
+Changes to the CLI configuration surface (CLI grammar and client, creation defaults, the wire protocol and `openapi.json`, and Host configuration admission) select it too: its configure contract runs the measurement runners' `session configure` call and a replay of its saved record against the current Rui, so drift fails in the PR that causes it rather than in the next campaign.
 Linux-memory Python or C changes also run the collector unittests and compile the diagnostic probe on Linux.
 Other qualification changes state manual syntax or compilation requirements.
 Stored historical results select no product suites.

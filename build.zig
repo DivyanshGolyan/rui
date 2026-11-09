@@ -747,6 +747,15 @@ pub fn build(b: *std.Build) void {
     queue_audit_test.addFileArg(ci.path(sqlite_shell));
     measurement_test_step.dependOn(&queue_audit_test.step);
 
+    // The runners' configure call against the current CLI and Host, so a change
+    // to either fails here rather than in the next measurement campaign.
+    const configure_contract = b.addSystemCommand(&.{"python3"});
+    configure_contract.addFileArg(b.path("tests/integration/host_process.py"));
+    configure_contract.addArgs(&.{ "exec", "env", "GOTOOLCHAIN=local", "go", "test", "-count=1", "-mod=readonly", "-run", "^TestConfigureContract$", "./measurement", "-args", "-rui" });
+    configure_contract.setCwd(b.path("tests/qualification"));
+    configure_contract.addFileArg(ci.path(release_safe));
+    measurement_test_step.dependOn(&configure_contract.step);
+
     const linux_cross_step = b.step(
         "cross-check-linux",
         "Compile Linux x86-64 and experimental Linux ARM64",
