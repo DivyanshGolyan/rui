@@ -7,11 +7,12 @@ const vxfw = vaxis.vxfw;
 const Composer = @import("Composer.zig");
 const PermissionCard = @import("PermissionCard.zig");
 const Self = @This();
+const empty: vxfw.Text = .{ .text = "" };
 
 composer: Composer,
 permission: ?*PermissionCard = null,
-facts: vxfw.RichText = .{ .text = &.{}, .softwrap = false, .width_basis = .parent },
-status: vxfw.RichText = .{ .text = &.{}, .softwrap = false, .width_basis = .parent },
+facts: vxfw.Widget = empty.widget(),
+status: vxfw.Widget = empty.widget(),
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = draw };
@@ -27,31 +28,33 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const content = try primary.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - footer_rows }));
     const row = ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = 1 });
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = content };
-    if (footer_rows >= 1) children[1] = .{ .origin = .{ .row = content.size.height, .col = 0 }, .surface = try self.facts.widget().draw(row) };
-    if (footer_rows == 2) children[2] = .{ .origin = .{ .row = content.size.height + 1, .col = 0 }, .surface = try self.status.widget().draw(row) };
+    if (footer_rows >= 1) children[1] = .{ .origin = .{ .row = content.size.height, .col = 0 }, .surface = try self.facts.draw(row) };
+    if (footer_rows == 2) children[2] = .{ .origin = .{ .row = content.size.height + 1, .col = 0 }, .surface = try self.status.draw(row) };
     return .{ .widget = self.widget(), .size = .{ .width = size.width, .height = content.size.height + footer_rows }, .buffer = &.{}, .children = children };
 }
 
 test "InputArea keeps facts below the composer when a notice replaces the status" {
     var bytes: [128]u8 = undefined;
     var editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    const facts: vxfw.RichText = .{ .text = &.{.{ .text = "new Session · gpt-6.1-sol · high · ~/rui" }}, .softwrap = false, .width_basis = .parent };
+    var status: vxfw.RichText = .{ .text = &.{.{ .text = "enter sends" }}, .softwrap = false, .width_basis = .parent };
     var input: Self = .{
         .composer = .{ .editor = &editor, .placeholder = "Type a task" },
-        .facts = .{ .text = &.{.{ .text = "new Session · gpt-6.1-sol · high · ~/rui" }}, .softwrap = false, .width_basis = .parent },
-        .status = .{ .text = &.{.{ .text = "enter sends" }}, .softwrap = false, .width_basis = .parent },
+        .facts = facts.widget(),
+        .status = status.widget(),
     };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     for ([_]vxfw.Size{ .{ .width = 80, .height = 24 }, .{ .width = 40, .height = 10 } }) |size| {
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
-        input.status.text = &.{.{ .text = "enter sends" }};
+        status.text = &.{.{ .text = "enter sends" }};
         const idle = try input.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 5), idle.size.height);
         try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
         try std.testing.expectEqual(@as(i17, 4), idle.children[2].origin.row);
         try std.testing.expectEqualStrings("n", idle.children[1].surface.readCell(0, 0).char.grapheme);
         try std.testing.expectEqualStrings("e", idle.children[2].surface.readCell(0, 0).char.grapheme);
-        input.status.text = &.{.{ .text = "Not sent: this Action needs a decision", .style = .{ .bold = true } }};
+        status.text = &.{.{ .text = "Not sent: this Action needs a decision", .style = .{ .bold = true } }};
         const notice = try input.widget().draw(ctx);
         try std.testing.expectEqualDeep(idle.children[1].surface.buffer, notice.children[1].surface.buffer);
         try std.testing.expectEqualStrings("N", notice.children[2].surface.readCell(0, 0).char.grapheme);
