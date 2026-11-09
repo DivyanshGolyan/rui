@@ -50,6 +50,17 @@ class PlatformBoundaryTest(unittest.TestCase):
     def test_repository_platform_sites_are_all_under_mac_paths(self):
         self.assertEqual(violations(sites()), [])
 
+    def test_scan_reaches_files_in_subdirectories(self):
+        # Before the scan recursed, src/http1 and src/mcp sockets named the
+        # platform unseen, and a listener shutdown that wakes accept only on
+        # Linux sat in src/mcp/test_server.zig.
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            for path in ("src/mcp/test_server.zig", "src/os/socket.zig"):
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                (root / path).write_text("_ = std.c.shutdown(listener, std.c.SHUT.RDWR);\n")
+            self.assertEqual(sites(root), {"src/mcp/test_server.zig": 1})
+
     def test_zig_scan_reads_platform_names_and_divergent_syscalls(self):
         for source in ('const os = builtin.os.tag;', 'if (@import("builtin").os.tag == .macos) {}',
                        '_ = std.c.shutdown(fd, std.c.SHUT.WR);', 'std.posix.kill(-pgid, .KILL) catch {};',

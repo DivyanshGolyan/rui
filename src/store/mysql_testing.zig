@@ -9,6 +9,7 @@ const literal = @import("mysql_literal.zig");
 const rows = @import("mysql_row.zig");
 const rsql = @import("rsql.zig");
 const protocol = @import("../protocol.zig");
+const os = @import("../os/os.zig");
 const change_ring = @import("../change_ring.zig");
 const dialect = @import("mysql_dialect_check.zig");
 var mutex: std.Io.Mutex = .init;
@@ -761,7 +762,7 @@ fn liveReadEpoch(storage: *Store) !u64 {
 }
 
 test "store.mysql live Linux unit process idle and fixed workload private memory observations" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (!os.proc_memory) return error.SkipZigTest;
     if (!try available()) return error.SkipZigTest;
     std.debug.print("MySQL memory evidence: 3 fresh Stores in this native UNIT PROCESS, not isolated Host/per-Store memory. Includes fixture/root/schema setup and unit-process allocator history. Unix socket only: TLS not measured. No trim/madvise, warmup, discarded repetitions or acceptance thresholds. Kernel kB reported as exact KiB; process tree not sampled.\n", .{});
     for (0..3) |rep| {
@@ -802,7 +803,7 @@ test "store.mysql live Linux unit process idle and fixed workload private memory
 }
 
 test "store.mysql Linux memory observation reads proc without a database" {
-    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    if (!os.proc_memory) return error.SkipZigTest;
     const sample = try LinuxMemory.read();
     try std.testing.expect(sample.rss_kib > 0);
 }
