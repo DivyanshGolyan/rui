@@ -629,19 +629,47 @@ test "oversized marked paste preserves the draft and caret and accepts the next 
     }
 }
 
-/// A screen's Tab: the text it adds to `draft`, or null to add the tab.
+/// A screen's Tab: the edit it makes to `draft` with the caret at `caret`,
+/// or null to add the tab.
 pub const Completion = struct {
     context: *const anyopaque,
-    add: *const fn (context: *const anyopaque, draft: []const u8) ?[]const u8,
+    add: *const fn (context: *const anyopaque, draft: []const u8, caret: usize) ?Replacement,
 };
 
-/// Completes a clean command word; a partial character or a rejected draft
-/// takes the tab as it always did.
+/// What Tab does to the draft: `text` in place of `draft[start..end]`, the
+/// caret after it.
+pub const Replacement = struct {
+    start: usize,
+    end: usize,
+    text: []const u8,
+
+    /// `text` added at the end of `draft`, as a command word completes.
+    pub fn append(draft: []const u8, text: []const u8) Replacement {
+        return .{ .start = draft.len, .end = draft.len, .text = text };
+    }
+};
+
+/// Completes a clean draft; a partial character or a rejected draft takes
+/// the tab as it always did.
 fn tab(self: *Editor) KeyOutcome {
     const completion = self.completion orelse return self.insert('\t', false);
     if (self.partial_length != 0 or self.rejected != null) return self.insert('\t', false);
-    const added = completion.add(completion.context, self.buffer[0..self.length]) orelse return self.insert('\t', false);
-    return self.append(added);
+    const completed = completion.add(completion.context, self.buffer[0..self.length], self.cursor) orelse return self.insert('\t', false);
+    return self.replace(completed);
+}
+
+/// Puts `change`'s text in place of its range, the caret after it. A change
+/// at the draft's end is an append; one that would overflow the draft is
+/// refused whole and leaves the draft as it was.
+pub fn replace(self: *Editor, change: Replacement) KeyOutcome {
+    std.debug.assert(change.start <= change.end and change.end <= self.length);
+    if (change.start == self.length) return self.append(change.text);
+    if (self.length - (change.end - change.start) + change.text.len > self.buffer.len) return .{ .refused = .overflow };
+    if (change.end != change.start) _ = self.erase(change.start, change.end);
+    self.cursor = change.start;
+    const outcome = self.insertText(change.text, false);
+    if (self.rejected) |why| return .{ .refused = why };
+    return if (outcome == .refused) outcome else .redraw;
 }
 
 /// Adds `text` at the draft's end, the caret after it, as Tab's completion
@@ -663,10 +691,38 @@ test "an append that overflows the draft is refused, not cut short" {
     try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, editor.append("x"));
 }
 
+test "Tab puts a completion's completed in place of its range, the caret after it, or refuses it whole" {
+    const Complete = struct {
+        /// Completes the `/re` the caret ends to `/review `.
+        fn add(_: *const anyopaque, draft: []const u8, caret: usize) ?Replacement {
+            const start = std.mem.lastIndexOfScalar(u8, draft[0..caret], '/') orelse return null;
+            return .{ .start = start, .end = caret, .text = "/review " };
+        }
+        const review: Completion = .{ .context = &{}, .add = add };
+    };
+    var storage: [24]u8 = undefined;
+    var editor: Editor = .{ .buffer = &storage, .completion = Complete.review };
+    var stream: Input = .{};
+    for ("use /re on it") |byte| _ = editor.feed(&stream, byte);
+    editor.cursor = "use /re".len;
+    try std.testing.expectEqual(KeyOutcome.redraw, editor.feed(&stream, '\t'));
+    try std.testing.expectEqualStrings("use /review  on it", editor.buffer[0..editor.length]);
+    try std.testing.expectEqual("use /review ".len, editor.cursor);
+    // Three bytes more than fit: refused whole, the draft and caret unchanged.
+    var small: [12]u8 = undefined;
+    var full: Editor = .{ .buffer = &small, .completion = Complete.review };
+    for ("go /re now") |byte| _ = full.feed(&stream, byte);
+    full.cursor = "go /re".len;
+    try std.testing.expectEqual(KeyOutcome{ .refused = .overflow }, full.feed(&stream, '\t'));
+    try std.testing.expectEqualStrings("go /re now", full.buffer[0..full.length]);
+    try std.testing.expectEqual("go /re".len, full.cursor);
+    try std.testing.expectEqual(@as(?keymap.Refusal, null), full.rejected);
+}
+
 test "Tab over a partial character or a rejected draft does what it did before completion" {
     const Complete = struct {
-        fn add(_: *const anyopaque, _: []const u8) ?[]const u8 {
-            return "atus";
+        fn add(_: *const anyopaque, draft: []const u8, _: usize) ?Replacement {
+            return .append(draft, "atus");
         }
         const status: Completion = .{ .context = &{}, .add = add };
     };

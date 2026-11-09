@@ -1023,11 +1023,11 @@ fn emptyComposer(self: *Self, edits: u32) TerminalEditor {
 /// Tab: the rest of the highlighted entry's word in the draft's list,
 /// shown, hidden or closed; null for a draft no list is for, which takes
 /// the tab.
-fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
+fn tabCompletion(context: *const anyopaque, draft: []const u8, _: usize) ?TerminalEditor.Replacement {
     const self: *const Self = @ptrCast(@alignCast(context));
     if (view.commands.suggest(draft, .{}) == null) return null;
-    const shown = view.nextCommands(&self.state, self.composerDraft()) orelse return "";
-    return shown.completion();
+    const shown = view.nextCommands(&self.state, self.composerDraft()) orelse return .append(draft, "");
+    return .append(draft, shown.completion());
 }
 
 /// Draws the core's screen at `frame`, writing only what the terminal does

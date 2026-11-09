@@ -1170,17 +1170,17 @@ fn shownCommands(self: *Self) ?*slash_commands_shared.Shown {
 /// Tab: the rest of the highlighted entry's word in the draft's list,
 /// shown, hidden or closed; null for a draft no list is for, which takes
 /// the tab.
-fn tabCompletion(context: *const anyopaque, draft: []const u8) ?[]const u8 {
+fn tabCompletion(context: *const anyopaque, draft: []const u8, _: usize) ?Editor.Replacement {
     // The editor lends back the frontend `startInput` registered, whose
     // rows' lines this writes.
     const self: *Self = @ptrCast(@alignCast(@constCast(context)));
     if (draft.len == 0) {
         const rows = self.nextCommands(self.terminal.screen.commands) orelse return null;
-        return rows.completion();
+        return .append(draft, rows.completion());
     }
     if (slash_commands.suggest(draft, .{}) == null) return null;
-    const shown = self.nextCommands(self.terminal.screen.commands) orelse return "";
-    return shown.completion();
+    const shown = self.nextCommands(self.terminal.screen.commands) orelse return .append(draft, "");
+    return .append(draft, shown.completion());
 }
 
 // A notice fits the rows under the input as the status fits above it.
