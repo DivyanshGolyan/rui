@@ -273,7 +273,7 @@ pub fn build(b: *std.Build) void {
     }
     b.step(
         "direct-pty",
-        "Run the synthetic direct-PTY key matrix and tmux smoke (nonblocking)",
+        "Run the synthetic direct-PTY key matrix (nonblocking)",
     ).dependOn(&addPtyHarness(b, "tests/qualification/direct-pty/matrix.py", ci.path(release_safe)).step);
     b.step(
         "direct-pty-controls",

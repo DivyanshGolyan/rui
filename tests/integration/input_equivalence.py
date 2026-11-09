@@ -80,7 +80,7 @@ def main():
     os.execv(sys.executable, [
         sys.executable, str(args.harness.resolve()), str(args.binary.resolve()),
         "--vectors", str(path.resolve()), "--output", str(args.output.resolve()),
-        "--jobs", str(args.jobs), "--surface", "direct",
+        "--jobs", str(args.jobs),
     ])
 
 
