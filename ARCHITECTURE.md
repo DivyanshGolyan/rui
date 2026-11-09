@@ -2227,16 +2227,13 @@ A ready existing Host retains its actual capacity/capabilities; no model capabil
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 `/sessions unarchived`, `/sessions archived`, and `/sessions all` choose the server-side archive filter.
 The header names the view; changing it clears the previous traversal.
-`/archive` or Alt-A puts away the selected Session, with a Stop and archive confirmation while it has work.
+`/archive` or Alt-A puts away the selected Session at once, stopping its work first when it has any; nothing asks, because `/sessions archived` and `/unarchive` bring it back.
 `/unarchive` restores the selected Session.
-`/undo` restores the last Session explicitly archived from this overview.
 A row remains visible with archive progress until the server reports it archived.
 Archived rows and exact conversations show their archive state.
 Conversations also expose `/archive` and `/unarchive`; these validated commands and Alt-A forward semantic intents for the exact open Session even when it is absent from the listing.
-The overview core owns their shared confirmation, archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
+The overview core owns their archive/restore request ledger and worker effects; conversation slash commands never run a separate CLI archive mutation.
 Alt-A leaves the draft, caret and retained original unchanged.
-The shared Stop and archive prompt captures its Session reference; unpasted, unmodified Enter confirms it before any draft, picker or permission choice, and Esc cancels it without clearing or sending the draft.
-Archive confirmation spends any permission offer without deciding the Action.
 While a conversation is open the refreshes go on without the screen or input, for [desktop notifications](#desktop-notifications).
 Marks hold still: `●` active, `◌` queued, `○` idle or waiting on approval, `✓` finished, `×` failed, `■` stopped; moving to its group says a row changed.
 Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.
@@ -2258,8 +2255,8 @@ A stop's answer asks for a listing at once, so `■ stopped` follows within one 
 While a stop of a row is in flight or unconfirmed, the row reads `Stopping…` and takes no other stop; Ctrl-X then names the stop's recovery.
 A retry that has fallen due reads as the pending work it became in its words, mark and colour alike.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
-Ctrl-X, then Ctrl-X again, stops the open Session from the conversation, exactly as on the overview (Divyansh approved this on 2026-10-31, front-end plan PR 5).
-The conversation hands each input, as Ctrl-X or another, to the overview that lent it the terminal, with the work the conversation shows in place of a row's, and the overview's core decides it with the same prompt, ledger and worker, so a Session not yet listed stops too.
+One Ctrl-X stops the open Session from the conversation at once, exactly as on the overview; nothing asks, because stopping loses nothing (Divyansh, 2026-11-09).
+The conversation hands each input, as Ctrl-X or another, to the overview that lent it the terminal, with the work the conversation shows in place of a row's, and the overview's core decides it with the same ledger and worker, so a Session not yet listed stops too.
 Esc or Ctrl-G with the prompt open only cancels it, any other input cancels it and acts, and Ctrl-X before the conversation's first read says the Session stops once it opens.
 While a conversation is open the overview's worker starts stops and listing jobs, a stop first, and a start waits for the overview's return.
 Every job's answer is taken there, so a stop's notice shows in the conversation and a stop never waits behind a listing.
@@ -2603,8 +2600,9 @@ Explicitly ask-configured Sessions use the same allow-once/deny path, without sp
 The frontend's caller owns the terminal and lends it.
 The caller creates the screen and `SessionTerminal`, installs the SIGINT and SIGTERM handlers and passes the cancellation they stop.
 `SessionFrontend.run` draws until the person leaves or a signal arrives, and returns how it stopped: `detached`, `interrupted` or `returned`.
-It returns `returned` only when nothing would be lost or dismissed: no draft, pending Action, sub-view, running command or unresolved submission.
+It returns `returned` only when nothing would be lost or dismissed: no draft, pending Action, sub-view or running command, and no original that is not yet saved (`not_started` or `submitting`).
 The overview then closes the frontend, which joins its reader, and draws again without restoring the terminal or printing a notice.
+A rejected original is released as `/discard` would. An unconfirmed one goes into the overview's request ledger: the overview says `! Not confirmed · rui request recover KEY`, and its departure prints the line the conversation's exit would have printed. When that ledger is full, the frontend leaves as Ctrl-C would and prints the line itself.
 It never restores the terminal or prints the Detached notice.
 Its caller restores the terminal, lets the frontend join its borrowers and write the guidance that follows restoration, then prints the notice from that outcome.
 A frontend that stops running never cancels Host work.
@@ -2718,7 +2716,7 @@ The interface preserves the shell's previous screen; conversation output does no
 This trade-off is accepted for one library-owned renderer.
 It retains a bounded latest view (256 KiB each for live text and a selected inspection).
 PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines and the mouse wheel scroll it; Esc, Ctrl-G, End on an empty draft or scrolling past the end returns to the latest view, or to a pending Action.
-At the latest view, Esc, Ctrl-G or End on an empty draft returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view, running command or unresolved submission; a draft keeps the conversation open, and the status line says to clear it first.
+At the latest view, Esc, Ctrl-G or End on an empty draft returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view or running command, and no original still unsaved; a draft keeps the conversation open, and the status line says to clear it first.
 Sending a Message returns to the latest view, where it and its reply appear, and a page asked for before it no longer opens over it.
 With nothing said yet, scrolling up reaches `Start of conversation`.
 Scrolling up from live text freezes a transcript copy that starts at the first retained read boundary.

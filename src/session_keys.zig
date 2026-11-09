@@ -1,11 +1,10 @@
 //! What a key does in a conversation, decided over values
-//! `SessionFrontend` read: the conversation's one key table, whether the
-//! overview's open ask takes an input, and what an input does at an
-//! Action's Allow once / Deny choice. The shell decodes the key, spends the
+//! `SessionFrontend` read: the conversation's one key table, which inputs
+//! clear the overview's notice, and what an input does at an Action's
+//! Allow once / Deny choice. The shell decodes the key, spends the
 //! offer and carries out what these return.
 const std = @import("std");
 const keymap = @import("keymap.zig");
-const overview_view = @import("overview_view.zig");
 const ConsentPolicy = @import("session_consent.zig");
 
 /// What a key does in a conversation, beside the draft or an Action's choice.
@@ -40,7 +39,7 @@ pub const Action = enum {
     detach,
     /// Retries the uncertain original.
     recover,
-    /// Asks to stop the Session, and stops it at a second press.
+    /// Stops the Session at once.
     stop,
     archive,
 };
@@ -72,22 +71,12 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 /// One input as the conversation's table classifies it.
 pub const Selection = keymap.Selection(Action);
 
-/// Who takes an input: the overview's open ask, which it confirms or
-/// cancels, or the conversation, which first cancels any ask unless the key
-/// is one that asks.
-pub const Route = union(enum) {
-    ask: overview_view.ConversationInput,
-    conversation: struct { cancel_ask: bool },
-};
-
-/// An archive ask takes Enter, confirming only an unpasted plain Enter; any
-/// ask takes Esc and Ctrl-G as a cancel. Until the opening read, Ctrl-X and
-/// Alt-A ask nothing, so they cancel an ask as any other key does.
-pub fn route(asking: ?overview_view.Prompt.Action, selected: Selection, plain_enter: bool, opening: bool) Route {
-    if (asking == .archive and selected == .enter) return .{ .ask = if (plain_enter) .confirm_archive else .other };
-    if (asking != null and selected == .action and selected.action == .close) return .{ .ask = .other };
-    const asks = !opening and selected == .action and (selected.action == .stop or selected.action == .archive);
-    return .{ .conversation = .{ .cancel_ask = !asks } };
+/// Whether an input clears the overview's notice: every input but Ctrl-X
+/// and Alt-A, which step the overview themselves once the Session opens.
+/// Until the opening read they do nothing there, so they clear it too.
+pub fn clearsOverviewNotice(selected: Selection, opening: bool) bool {
+    const steps_overview = selected == .action and (selected.action == .stop or selected.action == .archive);
+    return opening or !steps_overview;
 }
 
 /// What an input does at the choice. Only the arrows and Enter act on it.
@@ -121,23 +110,14 @@ pub fn atChoice(selected: Selection, command_holds: bool) AtChoice {
     };
 }
 
-test "an archive ask is confirmed only by a plain Enter; any ask is cancelled by Esc or by an ordinary key" {
-    try std.testing.expectEqual(Route{ .ask = .confirm_archive }, route(.archive, .enter, true, false));
-    // A pasted or modified Enter cancels the archive ask instead.
-    try std.testing.expectEqual(Route{ .ask = .other }, route(.archive, .enter, false, false));
-    // A stop ask takes Enter as ordinary input, which cancels it.
-    try std.testing.expectEqual(Route{ .conversation = .{ .cancel_ask = true } }, route(.stop, .enter, true, false));
-    for ([_]?overview_view.Prompt.Action{ .stop, .archive }) |asking| {
-        try std.testing.expectEqual(Route{ .ask = .other }, route(asking, .{ .action = .close }, false, false));
-        // The asking keys step the overview themselves, so they do not cancel first.
-        try std.testing.expectEqual(Route{ .conversation = .{ .cancel_ask = false } }, route(asking, .{ .action = .stop }, false, false));
-        try std.testing.expectEqual(Route{ .conversation = .{ .cancel_ask = false } }, route(asking, .{ .action = .archive }, false, false));
-        try std.testing.expectEqual(Route{ .conversation = .{ .cancel_ask = true } }, route(asking, .text, false, false));
+test "Ctrl-X and Alt-A keep the overview's notice once the Session opens; every other input clears it" {
+    try std.testing.expect(!clearsOverviewNotice(.{ .action = .stop }, false));
+    try std.testing.expect(!clearsOverviewNotice(.{ .action = .archive }, false));
+    for ([_]Selection{ .enter, .text, .{ .action = .close }, .{ .action = .page_up } }) |selected| {
+        try std.testing.expect(clearsOverviewNotice(selected, false));
     }
-    // Without an ask, Esc is the conversation's own.
-    try std.testing.expectEqual(Route{ .conversation = .{ .cancel_ask = true } }, route(null, .{ .action = .close }, false, false));
-    // Before the opening read, Ctrl-X and Alt-A ask nothing.
-    try std.testing.expectEqual(Route{ .conversation = .{ .cancel_ask = true } }, route(.stop, .{ .action = .stop }, false, true));
+    // Before the opening read, Ctrl-X and Alt-A step nothing.
+    try std.testing.expect(clearsOverviewNotice(.{ .action = .stop }, true));
 }
 
 test "at the choice only the arrows and Enter act; typing moves to the draft unless a command holds the choice" {
