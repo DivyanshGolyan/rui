@@ -25,6 +25,7 @@ const cores = .{
     .{ "codex_credential_policy.zig", @import("codex_credential_policy.zig") },
     .{ "codex_token_wire.zig", @import("codex_token_wire.zig") },
     .{ "command_value.zig", @import("command_value.zig") },
+    .{ "configure_input.zig", @import("configure_input.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
     .{ "draft_layout.zig", @import("draft_layout.zig") },

@@ -19,6 +19,7 @@ fn recordExit(status: caller_exit.Status) void {
 }
 const cli_value = @import("cli_value.zig");
 const cli_args = @import("cli_args.zig");
+const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -1912,21 +1913,11 @@ fn parseRetryWaits(value: []const u8) !retry_policy.Waits {
     return waits;
 }
 
-fn policyArgument(text: []const u8) client.OptionalPolicy {
-    return .{ .present = true, .value = if (std.mem.eql(u8, text, "default")) null else text };
-}
-
-test "policy arguments reset and preserve spelling" {
-    const reset = policyArgument("default");
-    try std.testing.expect(reset.present and reset.value == null);
-    try std.testing.expectEqualStrings("00042", policyArgument("00042").value.?);
-}
-
 /// The live Session addresses its own /configure.
 const LiveAddress = struct { store: []const u8, session: []const u8 };
 
 /// "" is the one spelling that clears a Label and can never be one.
-fn labelArgument(text: []const u8) error{InvalidLabel}!client.OptionalPolicy {
+fn labelArgument(text: []const u8) error{InvalidLabel}!configure_input.OptionalPolicy {
     if (text.len == 0) return .{ .present = true, .value = null };
     if (protocol.validLabel(text)) return .{ .present = true, .value = text };
     _ = @import("stderr.zig").write("\nrui: --label must be one line of 1-100 bytes that is not blank. Nothing captured or changed. [invalid_label]\n" ++ cli_args.label_help);
@@ -1976,7 +1967,7 @@ fn admitModel(model: []const u8) error{InvalidModel}!void {
 fn configure(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, start: bool) !bool {
     const io = init.io;
     const named = if (live) |address| address.session else parsed.get("session");
-    var input = client.ConfigureInput{
+    var input = configure_input.ConfigureInput{
         .store = "",
         .session = if (named) |reference| .{ .named = reference } else .create,
         .reload_skills = parsed.has("reload-skills"),
@@ -1995,9 +1986,9 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     if (parsed.get("permission-mode")) |mode| input.permission_mode = .{ .present = true, .value = mode };
     if (parsed.get("output-schema")) |path| input.output_schema = .{ .state = .value, .path = path };
     if (parsed.has("text-output")) input.output_schema = .{ .state = .explicit_null };
-    if (parsed.get("compaction-trigger")) |text| input.compaction_trigger = policyArgument(text);
-    if (parsed.get("output-reservation")) |text| input.output_reservation = policyArgument(text);
-    if (parsed.get("reasoning-effort")) |text| input.reasoning_effort = policyArgument(text);
+    if (parsed.get("compaction-trigger")) |text| input.compaction_trigger = configure_input.policy(text);
+    if (parsed.get("output-reservation")) |text| input.output_reservation = configure_input.policy(text);
+    if (parsed.get("reasoning-effort")) |text| input.reasoning_effort = configure_input.policy(text);
     if (parsed.get("label")) |text| input.label = try labelArgument(text);
     var binding: new_session_selection.Binding = .{};
     var saved_effort: ?model_capability.ReasoningEffort = null;
@@ -2022,17 +2013,13 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
         binding = try snapshot.resolveUnprompted();
         input.provider = .{ .present = true, .value = binding.provider.slice() };
         input.model = .{ .present = true, .value = binding.model.slice() };
-        if (!input.reasoning_effort.present) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), snapshot.defaults.reasoning_effort);
-        if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(binding.model.slice(), null);
-        if (!input.compaction_trigger.present or input.compaction_trigger.value == null) input.compaction_trigger = .{ .present = true, .value = try std.fmt.bufPrint(&compaction_buffer, "{d}", .{client.defaultCompactionTrigger(std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?, binding.model.slice())}) };
+        input.completeCreation(std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?, binding.model.slice(), snapshot.defaults.reasoning_effort, &compaction_buffer);
         if (!input.workspace.present) {
             var cwd = try std.Io.Dir.cwd().openDir(io, ".", .{});
             defer cwd.close(io);
             const length = try cwd.realPath(io, &workspace_buffer);
             input.workspace = .{ .present = true, .value = workspace_buffer[0..length] };
         }
-        if (input.tools == null) input.tools = product_defaults.tools;
-        if (!input.permission_mode.present) input.permission_mode = .{ .present = true, .value = product_defaults.permission_mode };
     }
     if (start) {
         try message(init, parsed, .{
@@ -2047,14 +2034,14 @@ fn configure(init: std.process.Init, requester: client.Requests, parsed: *const 
     };
 }
 
-fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, configuration: client.ConfigureInput, step: *?client.Step) !bool {
+fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed: *const cli_args.Parsed, live: ?LiveAddress, configuration: configure_input.ConfigureInput, step: *?client.Step) !bool {
     const io = init.io;
     const interactive = live != null;
     var input = configuration;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     input.store = try selectedStore(init, if (live) |address| address.store else parsed.get("store"), &selected_buffer);
     var compaction_buffer: [20]u8 = undefined;
-    if (input.session == .named and ((input.compaction_trigger.present and input.compaction_trigger.value == null) or (input.reasoning_effort.present and input.reasoning_effort.value == null))) {
+    if (input.session == .named and input.resetsToDefault()) {
         var current_model: protocol.Bounded(protocol.max_model_bytes) = .{};
         var current_provider: protocol.Provider = undefined;
         {
@@ -2064,8 +2051,7 @@ fn configureCaptured(init: std.process.Init, requester: client.Requests, parsed:
             try current_model.set(if (input.model.present) input.model.value else observed.current.settings.model.slice());
             current_provider = observed.current.settings.provider.value;
         }
-        if (input.compaction_trigger.present and input.compaction_trigger.value == null) input.compaction_trigger.value = try std.fmt.bufPrint(&compaction_buffer, "{d}", .{client.defaultCompactionTrigger(current_provider, current_model.slice())});
-        if (input.reasoning_effort.present and input.reasoning_effort.value == null) input.reasoning_effort = client.defaultStartEffort(current_model.slice(), null);
+        input.completeReset(current_provider, current_model.slice(), &compaction_buffer);
     }
 
     var directory_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -2109,7 +2095,7 @@ fn reportConfigurationFailure(err: anyerror, admitted: ?bool, key: []const u8) v
 }
 
 const StartMessage = struct {
-    input: client.ConfigureInput,
+    input: configure_input.ConfigureInput,
     receipt: StartConfiguration,
 };
 
@@ -3412,7 +3398,7 @@ const StartConfiguration = struct {
     reasoning_effort: ?[]const u8,
     effort_source: enum { flag, saved, model_default },
 
-    fn resolve(input: client.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
+    fn resolve(input: configure_input.ConfigureInput, effort_flag: bool, saved_effort: ?model_capability.ReasoningEffort) StartConfiguration {
         const model = input.model.value;
         return .{
             .provider = input.provider.value,
@@ -4101,17 +4087,6 @@ fn testPipe() ![2]std.posix.fd_t {
 
 fn closeDescriptor(fd: std.posix.fd_t) void {
     _ = std.c.close(fd);
-}
-
-test "cli fresh defaults are explicit for known and unknown models" {
-    const known = client.defaultStartEffort("gpt-6.1-sol", null);
-    try std.testing.expect(known.present);
-    try std.testing.expectEqualStrings(product_defaults.reasoning_effort, known.value.?);
-    const unknown = client.defaultStartEffort("unlisted-model", null);
-    try std.testing.expect(unknown.present);
-    try std.testing.expectEqualStrings(product_defaults.reasoning_effort, unknown.value.?);
-    try std.testing.expectEqual(@as(u64, 115200), client.defaultCompactionTrigger(.openai, "unlisted-model"));
-    try std.testing.expectEqual(model_capability.contextWindow("gpt-6.1-sol") * 90 / 100, client.defaultCompactionTrigger(.openai, "gpt-6.1-sol"));
 }
 
 test "existing explicit captures bypass fresh option choices while new captures refuse" {
