@@ -11,6 +11,7 @@ const Engine = @import("Engine.zig");
 const Connection = @import("Connection.zig");
 const Resolver = @import("Resolver.zig");
 const c = @import("h2_c");
+const openssl = @import("tls_client").c;
 
 const ns_per_ms = std.time.ns_per_ms;
 
@@ -1050,12 +1051,12 @@ test "https: a partial TLS record waits for the socket instead of spinning" {
     // the socket: the client reads them and needs the rest.
     const connection = harness.peer.connections.items[0];
     const ssl = connection.ssl.?;
-    const memory = c.BIO_new(c.BIO_s_mem()) orelse return error.OutOfMemory;
-    c.SSL_set0_wbio(ssl, memory);
+    const memory = openssl.BIO_new(openssl.BIO_s_mem()) orelse return error.OutOfMemory;
+    openssl.SSL_set0_wbio(ssl, memory);
     var written: usize = 0;
-    try std.testing.expectEqual(@as(c_int, 1), c.SSL_write_ex(ssl, "a whole record of plaintext", 27, &written));
+    try std.testing.expectEqual(@as(c_int, 1), openssl.SSL_write_ex(ssl, "a whole record of plaintext", 27, &written));
     var record: [128]u8 = undefined;
-    const record_len = c.BIO_read(memory, &record, record.len);
+    const record_len = openssl.BIO_read(memory, &record, record.len);
     try std.testing.expect(record_len > 10);
     try std.testing.expectEqual(@as(isize, 10), std.c.send(connection.socket, &record, 10, 0));
     try harness.client.wait(100);

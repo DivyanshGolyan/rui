@@ -18,7 +18,8 @@ const mutation_answer = @import("../../mutation_answer.zig");
 const provider_name = @import("../../provider_name.zig");
 const session_archive = @import("../../session_archive.zig");
 const session_id = @import("../../session_id.zig");
-const wire_request = @import("../../wire_request.zig");
+const content_custody = @import("../../content_custody.zig");
+const command_input = @import("../../command_input.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
@@ -154,7 +155,7 @@ pub const MessageReads = struct {
 
 /// The handle a peer Message's sender claims, when its address names this
 /// Store: only then can an Action of this Store hold it.
-fn claimedHandle(command: *const wire_request.MessageCommand, selector: []const u8) ?[]const u8 {
+fn claimedHandle(command: *const content_custody.MessageCommand, selector: []const u8) ?[]const u8 {
     const handle = if (command.sender_handle) |*value| value else return null;
     const claimed = if (command.sender) |*value| value else return null;
     if (!claimed.store.eql(selector)) return null;
@@ -163,14 +164,14 @@ fn claimedHandle(command: *const wire_request.MessageCommand, selector: []const 
 
 /// Whether the Message's sender is what its handle proves: no sender and
 /// no handle, or the Session of the Action `found` holds the handle.
-fn senderValid(command: *const wire_request.MessageCommand, selector: []const u8, found: message_sender.Result) bool {
+fn senderValid(command: *const content_custody.MessageCommand, selector: []const u8, found: message_sender.Result) bool {
     if (command.sender_handle == null) return command.sender == null;
     if (claimedHandle(command, selector) == null) return false;
     const row = found orelse return false;
     return command.sender.?.session.eql(&row.session.ref);
 }
 
-fn readMessage(a: anytype, selector: []const u8, command: *const wire_request.MessageCommand, reads: *MessageReads) void {
+fn readMessage(a: anytype, selector: []const u8, command: *const content_custody.MessageCommand, reads: *MessageReads) void {
     lookupCommand(a, command.key.slice(), &reads.saved);
     if (claimedHandle(command, selector)) |handle| a.read(message_sender, .{ .handle = handle }, &reads.sender);
 }
@@ -178,7 +179,7 @@ fn readMessage(a: anytype, selector: []const u8, command: *const wire_request.Me
 /// A Message's answer when round 1 found it saved, or null for a fresh
 /// one. An accepted replay reads its admission and text in a round of its
 /// own.
-fn replayMessage(a: anytype, command: *const wire_request.MessageCommand, reads: *const MessageReads) !?MessageReply {
+fn replayMessage(a: anytype, command: *const content_custody.MessageCommand, reads: *const MessageReads) !?MessageReply {
     switch (try classify(message_admission.Rejection, &reads.saved, .message, command.session.slice(), &reads.digest)) {
         .fresh => return null,
         .conflict => {
@@ -210,7 +211,7 @@ fn replayMessage(a: anytype, command: *const wire_request.MessageCommand, reads:
 /// position. Then commits.
 fn rejectMessage(
     a: anytype,
-    command: *const wire_request.MessageCommand,
+    command: *const content_custody.MessageCommand,
     reads: *const MessageReads,
     sender_known: bool,
     code: message_admission.Rejection,
@@ -221,7 +222,7 @@ fn rejectMessage(
 
 fn rejectMessageWithFailure(
     a: anytype,
-    command: *const wire_request.MessageCommand,
+    command: *const content_custody.MessageCommand,
     reads: *const MessageReads,
     sender_known: bool,
     code: message_admission.Rejection,
@@ -247,7 +248,7 @@ fn rejectMessageWithFailure(
 fn admitMessage(
     a: anytype,
     io: std.Io,
-    command: *const wire_request.MessageCommand,
+    command: *const content_custody.MessageCommand,
     reads: *MessageReads,
     head: rsql.SessionHead,
     session: Bounded(session_id.max_reference_bytes),
@@ -305,7 +306,7 @@ pub fn submitMessage(
     io: std.Io,
     served: anytype,
     selector: []const u8,
-    command: *const wire_request.MessageCommand,
+    command: *const content_custody.MessageCommand,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
     captured_skill: ?*const skills_domain.MessageCapture,
@@ -325,7 +326,7 @@ noinline fn submitTo(
     io: std.Io,
     served: anytype,
     selector: []const u8,
-    command: *const wire_request.MessageCommand,
+    command: *const content_custody.MessageCommand,
     committed: ?MessageCommitted,
     captured_skill: ?*const skills_domain.MessageCapture,
     faults: Faults,
@@ -376,7 +377,7 @@ noinline fn submitCreating(
     io: std.Io,
     served: anytype,
     selector: []const u8,
-    command: *const wire_request.MessageCommand,
+    command: *const content_custody.MessageCommand,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
     captured_skill: ?*const skills_domain.MessageCapture,
@@ -670,7 +671,7 @@ pub fn startAgent(
     caller: []const u8,
     task: []const u8,
     attached: bool,
-    configuration: *wire_request.Configuration,
+    configuration: *content_custody.Configuration,
     committed: ?MessageCommitted,
     initial_skills: ?*const skills_domain.Initial,
     captured: ?*const skills_domain.MessageCapture,
@@ -948,7 +949,7 @@ fn stopObservation(row: *const stop_selection.Row) SessionStopObservation {
 
 /// A stop's own interruption finding the Operation changed is the stop's
 /// selection changing, as on main.
-pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
+pub fn stopSession(a: anytype, command: *const command_input.SessionStopCommand, faults: Faults) !SessionStopReply {
     return stopRounds(a, command, false, faults, null) catch |err| switch (err) {
         error.InterruptionTargetChanged => error.StopSelectionChanged,
         else => err,
@@ -960,7 +961,7 @@ pub fn stopSession(a: anytype, command: *const protocol.SessionStopCommand, faul
 /// key is free while the obligation stands. Any stop settles what the
 /// Session owes, and a newer obligation has another key: an owed stop
 /// whose key is not the one owed now runs nothing and answers conflict.
-pub fn stopOwedSession(a: anytype, command: *const protocol.SessionStopCommand, faults: Faults) !SessionStopReply {
+pub fn stopOwedSession(a: anytype, command: *const command_input.SessionStopCommand, faults: Faults) !SessionStopReply {
     return stopRounds(a, command, true, faults, null) catch |err| switch (err) {
         error.InterruptionTargetChanged => error.StopSelectionChanged,
         else => err,
@@ -982,7 +983,7 @@ pub fn stopOwedSession(a: anytype, command: *const protocol.SessionStopCommand, 
 /// the text is new). The last page's write and the Turn's close run in the
 /// final round, at commit, with the position advance. With no Actions to
 /// cancel, every write runs at commit.
-fn stopRounds(a: anytype, command: *const protocol.SessionStopCommand, owed: bool, faults: Faults, archive: ?*const protocol.SessionArchiveCommand) !SessionStopReply {
+fn stopRounds(a: anytype, command: *const command_input.SessionStopCommand, owed: bool, faults: Faults, archive: ?*const command_input.SessionArchiveCommand) !SessionStopReply {
     const digest = if (archive) |request| request.semanticDigest() else command.semanticDigest();
     const kind: cli_value.CommandKind = if (archive != null) .session_archive else .session_stop;
     const key = command.key.slice();
@@ -1193,9 +1194,9 @@ const archive_request = rsql.Read(.{
     .cardinality = .one,
 });
 
-pub fn archiveSession(a: anytype, command: *const protocol.SessionArchiveCommand, faults: Faults) !SessionArchiveReply {
+pub fn archiveSession(a: anytype, command: *const command_input.SessionArchiveCommand, faults: Faults) !SessionArchiveReply {
     if (!command.archived) return restoreSession(a, command, faults);
-    const stop: protocol.SessionStopCommand = .{ .store = command.store, .key = command.key, .session = command.session };
+    const stop: command_input.SessionStopCommand = .{ .store = command.store, .key = command.key, .session = command.session };
     const result = try stopRounds(a, &stop, false, faults, command);
     return switch (result) {
         .accepted => |accepted| .{ .accepted = .{
@@ -1213,7 +1214,7 @@ pub fn archiveSession(a: anytype, command: *const protocol.SessionArchiveCommand
     };
 }
 
-fn restoreSession(a: anytype, command: *const protocol.SessionArchiveCommand, faults: Faults) !SessionArchiveReply {
+fn restoreSession(a: anytype, command: *const command_input.SessionArchiveCommand, faults: Faults) !SessionArchiveReply {
     const digest = command.semanticDigest();
     const key = command.key.slice();
     const session = command.session.slice();
@@ -1327,7 +1328,7 @@ fn modelInterruptionTarget(row: *const interruption_target.Row) error{CorruptSto
 }
 
 fn interruptionRejection(
-    command: *const protocol.ModelInterruptionCommand,
+    command: *const command_input.ModelInterruptionCommand,
     target: target_session.Result,
     operation: interruption_operation.Result,
 ) ?mutation_answer.ModelInterruptionRejection {
@@ -1347,7 +1348,7 @@ fn interruptionRejection(
 /// `interruptionRejection`; the write round saves the command and its
 /// target, interrupts the Operation and closes the Turn when nothing is
 /// pending, then commits.
-pub fn interruptModel(a: anytype, command: *const protocol.ModelInterruptionCommand, faults: Faults) !ModelInterruptionReply {
+pub fn interruptModel(a: anytype, command: *const command_input.ModelInterruptionCommand, faults: Faults) !ModelInterruptionReply {
     const digest = command.semanticDigest();
     const session = command.session.slice();
     var saved: saved_command.Result = undefined;
@@ -1448,7 +1449,7 @@ const denial: content_domain.Import = blk: {
 };
 
 fn decisionRejection(
-    command: *const protocol.PermissionDecisionCommand,
+    command: *const command_input.PermissionDecisionCommand,
     target: target_session.Result,
     action: decision_action.Result,
 ) ?mutation_answer.PermissionDecisionRejection {
@@ -1465,7 +1466,7 @@ fn decisionRejection(
 /// and, for a denial, its result text's row. The decision is
 /// `decisionRejection`; the write round saves the command and its target,
 /// then authorizes or denies the Action, and commits.
-pub fn decidePermission(a: anytype, command: *const protocol.PermissionDecisionCommand, faults: Faults) !PermissionDecisionReply {
+pub fn decidePermission(a: anytype, command: *const command_input.PermissionDecisionCommand, faults: Faults) !PermissionDecisionReply {
     const digest = command.semanticDigest();
     const session = command.session.slice();
     var saved: saved_command.Result = undefined;

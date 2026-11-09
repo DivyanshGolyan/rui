@@ -7,6 +7,9 @@ const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
+const conversation_read = @import("../conversation_read.zig");
+const session_list = @import("../session_list.zig");
+const activity_read = @import("../activity_read.zig");
 const tool_proposal = @import("../tool_proposal.zig");
 const workspace_path = @import("../workspace_path.zig");
 const store_path = @import("../store_path.zig");
@@ -16,7 +19,8 @@ const content_string = @import("../content_string.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const model_capability = @import("../model_capability.zig");
 const session_id = @import("../session_id.zig");
-const wire_request = @import("../wire_request.zig");
+const content_custody = @import("../content_custody.zig");
+const command_input = @import("../command_input.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const action_domain = @import("domain/action.zig");
@@ -632,7 +636,7 @@ pub const Store = struct {
     /// not serve its Session's provider.
     pub fn configure(
         self: *Store,
-        command: *const wire_request.ConfigureCommand,
+        command: *const content_custody.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
         return self.configureWithInitialSkills(command, null, null, faults);
@@ -643,24 +647,24 @@ pub const Store = struct {
     /// Borrows `preset` until the synchronous queued write returns.
     pub fn configureWithPreset(
         self: *Store,
-        command: *const wire_request.ConfigureCommand,
+        command: *const content_custody.ConfigureCommand,
         preset: *const configuration_domain.PresetDecision,
         faults: Faults,
     ) ConfigureReply {
         return self.configureWithInitialSkills(command, preset, null, faults);
     }
 
-    pub fn configureWithInitialSkills(self: *Store, command: *const wire_request.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) ConfigureReply {
+    pub fn configureWithInitialSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) ConfigureReply {
         return self.configureWithCapturedSkills(command, preset, initial_skills, null, faults);
     }
 
-    pub fn configureWithCapturedSkills(self: *Store, command: *const wire_request.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) ConfigureReply {
+    pub fn configureWithCapturedSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) ConfigureReply {
         return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, faults });
     }
 
     fn configureHeld(
         self: *Store,
-        command: *const wire_request.ConfigureCommand,
+        command: *const content_custody.ConfigureCommand,
         preset: ?*const configuration_domain.PresetDecision,
         initial_skills: ?*const skills_domain.Initial,
         reload_capture: ?*const skills_domain.Capture,
@@ -696,24 +700,24 @@ pub const Store = struct {
     /// Session's provider before creating anything.
     pub fn submitMessageWithModel(
         self: *Store,
-        command: *const wire_request.MessageCommand,
+        command: *const content_custody.MessageCommand,
         committed: ?MessageCommitted,
         faults: Faults,
     ) MessageReply {
         return self.submitMessageWithInitialSkills(command, committed, null, faults);
     }
 
-    pub fn submitMessageWithInitialSkills(self: *Store, command: *const wire_request.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) MessageReply {
+    pub fn submitMessageWithInitialSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) MessageReply {
         return self.submitMessageCapturedSkills(command, committed, initial_skills, null, faults);
     }
 
-    pub fn submitMessageCapturedSkills(self: *Store, command: *const wire_request.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, faults: Faults) MessageReply {
+    pub fn submitMessageCapturedSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.MessageCapture, faults: Faults) MessageReply {
         return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, faults });
     }
 
     fn submitMessageWithModelHeld(
         self: *Store,
-        command: *const wire_request.MessageCommand,
+        command: *const content_custody.MessageCommand,
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
         captured_skill: ?*const skills_domain.MessageCapture,
@@ -728,7 +732,7 @@ pub const Store = struct {
 
     pub fn stopSession(
         self: *Store,
-        command: *const protocol.SessionStopCommand,
+        command: *const command_input.SessionStopCommand,
         faults: Faults,
     ) SessionStopReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
@@ -737,7 +741,7 @@ pub const Store = struct {
 
     fn stopSessionHeld(
         self: *Store,
-        command: *const protocol.SessionStopCommand,
+        command: *const command_input.SessionStopCommand,
         faults: Faults,
     ) SessionStopReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
@@ -747,12 +751,12 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopSession(&access, command, faults))) catch .infrastructure_failure;
     }
 
-    pub fn archiveSession(self: *Store, command: *const protocol.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
+    pub fn archiveSession(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
         return self.queue().write(archiveSessionHeld, .{ self, command, faults });
     }
 
-    fn archiveSessionHeld(self: *Store, command: *const protocol.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
+    fn archiveSessionHeld(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
@@ -761,11 +765,11 @@ pub const Store = struct {
     }
 
     /// The stop an attached child owes (D38), as `nextCoreWork` names it.
-    pub fn stopOwedSession(self: *Store, command: *const protocol.SessionStopCommand, faults: Faults) SessionStopReply {
+    pub fn stopOwedSession(self: *Store, command: *const command_input.SessionStopCommand, faults: Faults) SessionStopReply {
         return self.queue().write(stopOwedSessionHeld, .{ self, command, faults });
     }
 
-    fn stopOwedSessionHeld(self: *Store, command: *const protocol.SessionStopCommand, faults: Faults) SessionStopReply {
+    fn stopOwedSessionHeld(self: *Store, command: *const command_input.SessionStopCommand, faults: Faults) SessionStopReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
@@ -775,7 +779,7 @@ pub const Store = struct {
 
     pub fn interruptModel(
         self: *Store,
-        command: *const protocol.ModelInterruptionCommand,
+        command: *const command_input.ModelInterruptionCommand,
         faults: Faults,
     ) ModelInterruptionReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
@@ -784,7 +788,7 @@ pub const Store = struct {
 
     fn interruptModelHeld(
         self: *Store,
-        command: *const protocol.ModelInterruptionCommand,
+        command: *const command_input.ModelInterruptionCommand,
         faults: Faults,
     ) ModelInterruptionReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
@@ -796,7 +800,7 @@ pub const Store = struct {
 
     pub fn decidePermission(
         self: *Store,
-        command: *const protocol.PermissionDecisionCommand,
+        command: *const command_input.PermissionDecisionCommand,
         faults: Faults,
     ) PermissionDecisionReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
@@ -805,7 +809,7 @@ pub const Store = struct {
 
     fn decidePermissionHeld(
         self: *Store,
-        command: *const protocol.PermissionDecisionCommand,
+        command: *const command_input.PermissionDecisionCommand,
         faults: Faults,
     ) PermissionDecisionReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
@@ -836,7 +840,7 @@ pub const Store = struct {
 
     /// Tokens cover follow polling after the unpinned forward page is drained,
     /// not another slice of a bounded, backward or intra-position traversal.
-    fn activitySince(request: *const protocol.ActivityPage) ?change_ring.SessionToken {
+    fn activitySince(request: *const activity_read.ActivityPage) ?change_ring.SessionToken {
         if (request.direction != .forward or request.end != null or request.ordinal != null) return null;
         return sessionSince(request.session.slice(), request.since);
     }
@@ -897,11 +901,11 @@ pub const Store = struct {
     // group's final acceptance position. No transaction survives this call.
     // The fixed end is the last committed position at the first read, not a
     // count of visible rows; a private-only append cannot become public later.
-    pub fn publicConversationPage(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
+    pub fn publicConversationPage(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage) !void {
         return self.queue().run(publicConversationPageHeld, .{ self, request, out });
     }
 
-    fn publicConversationPageHeld(self: *Store, request: *const protocol.ConversationPage, out: *PublicConversationPage) !void {
+    fn publicConversationPageHeld(self: *Store, request: *const conversation_read.ConversationPage, out: *PublicConversationPage) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -911,11 +915,11 @@ pub const Store = struct {
 
     // Resolve the public identity again, rather than accepting a global digest:
     // another Session's content or private provider material is not authority.
-    pub fn openPublicConversationContent(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
+    pub fn openPublicConversationContent(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
         return self.queue().run(openPublicConversationContentHeld, .{ self, request });
     }
 
-    fn openPublicConversationContentHeld(self: *Store, request: *const protocol.ConversationContent) !ContentLocation {
+    fn openPublicConversationContentHeld(self: *Store, request: *const conversation_read.ConversationContent) !ContentLocation {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -923,7 +927,7 @@ pub const Store = struct {
         return entry.finish(Ordinary.public_content, reads_domain.openPublicConversationContent(&access, request));
     }
 
-    pub fn activityPage(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
+    pub fn activityPage(self: *Store, request: *const activity_read.ActivityPage, out: *protocol.ActivityFacts) !void {
         try request.validate();
         if (self.unchangedSession(activitySince(request))) |token| {
             out.not_modified = true;
@@ -933,7 +937,7 @@ pub const Store = struct {
         return self.queue().run(activityPageHeld, .{ self, request, out });
     }
 
-    fn activityPageHeld(self: *Store, request: *const protocol.ActivityPage, out: *protocol.ActivityFacts) !void {
+    fn activityPageHeld(self: *Store, request: *const activity_read.ActivityPage, out: *protocol.ActivityFacts) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
@@ -958,11 +962,11 @@ pub const Store = struct {
         };
     }
 
-    pub fn searchActivity(self: *Store, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+    pub fn searchActivity(self: *Store, request: *const activity_read.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
         return self.queue().run(searchActivityHeld, .{ self, request, out });
     }
 
-    fn searchActivityHeld(self: *Store, request: *const protocol.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
+    fn searchActivityHeld(self: *Store, request: *const activity_read.ActivitySearch, out: *protocol.ActivitySearchFacts) !void {
         try request.validate();
         const entry = try enter(self, .none);
         defer entry.release();
@@ -971,11 +975,11 @@ pub const Store = struct {
         return entry.finish(Ordinary.page, reads_domain.searchActivity(&access, request, out));
     }
 
-    pub fn openActivityContent(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
+    pub fn openActivityContent(self: *Store, request: *const activity_read.ReadActivityContent) !ContentLocation {
         return self.queue().run(openActivityContentHeld, .{ self, request });
     }
 
-    fn openActivityContentHeld(self: *Store, request: *const protocol.ReadActivityContent) !ContentLocation {
+    fn openActivityContentHeld(self: *Store, request: *const activity_read.ReadActivityContent) !ContentLocation {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
         defer entry.release();
@@ -984,11 +988,11 @@ pub const Store = struct {
         return entry.finish(Ordinary.content, reads_domain.openActivityContent(&access, request));
     }
 
-    pub fn activityTool(self: *Store, request: *const protocol.ReadActivityContent) !reads_domain.ActivityTool {
+    pub fn activityTool(self: *Store, request: *const activity_read.ReadActivityContent) !reads_domain.ActivityTool {
         return self.queue().run(activityToolHeld, .{ self, request });
     }
 
-    fn activityToolHeld(self: *Store, request: *const protocol.ReadActivityContent) !reads_domain.ActivityTool {
+    fn activityToolHeld(self: *Store, request: *const activity_read.ReadActivityContent) !reads_domain.ActivityTool {
         if (request.position == 0 or request.position > std.math.maxInt(i64) or request.ordinal > std.math.maxInt(i64)) return error.ContentNotFound;
         const entry = try enter(self, .none);
         defer entry.release();
@@ -1039,7 +1043,7 @@ pub const Store = struct {
 
     /// Returns an owned, unlinked page; no SQLite cursor survives capture.
     /// The caller releases its scratch charge by deinitializing the report.
-    pub fn captureSessionList(self: *Store, request: *const protocol.ListSessions, options: SessionListOptions) !SessionReport {
+    pub fn captureSessionList(self: *Store, request: *const session_list.ListSessions, options: SessionListOptions) !SessionReport {
         try request.validate();
         var capture: SessionReportCapture = .{ .io = self.io, .writer = null, .budget = options.scratch_budget };
         try capture.create(options.scratch_path, options.request_number, options.fail_unlink);
@@ -1048,7 +1052,7 @@ pub const Store = struct {
         return capture.seal();
     }
 
-    fn captureSessionListHeld(self: *Store, request: *const protocol.ListSessions, capture: *SessionReportCapture) !void {
+    fn captureSessionListHeld(self: *Store, request: *const session_list.ListSessions, capture: *SessionReportCapture) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -1307,17 +1311,17 @@ pub const Store = struct {
     /// Runs the `start_agent` call `binding` names with its checked
     /// arguments, in one transaction; `configuration` is the agent's spec,
     /// which this completes. `committed` runs once the task is admitted.
-    pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *wire_request.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
+    pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
         return self.startAgentWithInitialSkills(binding, caller, task, attached, configuration, committed, null, null, faults);
     }
 
     /// `captured` is what the Host's binding of `task` against
     /// `initial_skills`' catalog found.
-    pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *wire_request.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
+    pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
         return self.queue().write(startAgentHeld, .{ self, binding, caller, task, attached, configuration, committed, initial_skills, captured, faults });
     }
 
-    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *wire_request.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
+    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentStart {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.agent_start) = .open(&entry);
@@ -2066,13 +2070,13 @@ pub fn readSessionForTesting(self: *Store, session_ref: []const u8) !?CurrentCon
     return current;
 }
 
-pub fn activityPageForTesting(self: *Store, request: protocol.ActivityPage) !protocol.ActivityFacts {
+pub fn activityPageForTesting(self: *Store, request: activity_read.ActivityPage) !protocol.ActivityFacts {
     var page: protocol.ActivityFacts = undefined;
     try self.activityPage(&request, &page);
     return page;
 }
 
-pub fn publicConversationPageForTesting(self: *Store, request: protocol.ConversationPage) !PublicConversationPage {
+pub fn publicConversationPageForTesting(self: *Store, request: conversation_read.ConversationPage) !PublicConversationPage {
     var page: PublicConversationPage = undefined;
     try self.publicConversationPage(&request, &page);
     return page;

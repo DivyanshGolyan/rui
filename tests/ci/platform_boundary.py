@@ -27,6 +27,8 @@ MAC_PATHS = (
     # The self-contained HTTP/2 client cannot import src/os, so its sockets,
     # waker and trust paths name the platform themselves.
     "src/h2/*",
+    # Trust loading reads the host's bundles, which differ on macOS.
+    "src/tls_client/*",
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",
     "build.zig", "build.zig.zon",
     ".github/actions/setup/*", ".github/workflows/qualify-macos.yml",

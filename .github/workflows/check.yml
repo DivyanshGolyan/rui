@@ -415,7 +415,7 @@ jobs:
     env:
       # The unit dialect check and launch-frame Host integration both
       # require CI's live MySQL server.
-      LIVE_MYSQL: ${{ contains(matrix.targets, 'test') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') || contains(matrix.targets, 'launch-frame-integration') }}
+      LIVE_MYSQL: ${{ contains(matrix.targets, 'test') || contains(matrix.targets, 'test-store') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') || contains(matrix.targets, 'launch-frame-integration') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -501,7 +501,7 @@ jobs:
         # Fails when the unit binary left no record or PREPAREd nothing, so
         # any path that keeps the check from running (selection, launcher
         # environment, caching) turns this shard red.
-        if: ${{ !cancelled() && (contains(matrix.targets, 'test') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers')) }}
+        if: ${{ !cancelled() && (contains(matrix.targets, 'test') || contains(matrix.targets, 'test-store') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers')) }}
         run: |
           set -euo pipefail
           python3 -B tests/ci/live_engine_step.py verify mysql | tee -a "$GITHUB_STEP_SUMMARY"

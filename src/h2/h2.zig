@@ -42,19 +42,7 @@ const c = @import("h2_c");
 const policy = @import("policy.zig");
 const Record = @import("Stream.zig");
 const Engine = @import("Engine.zig");
-const tls = @import("tls.zig");
-
-/// What the Store's Postgres TLS shares with this module: one copy of
-/// OpenSSL, its client settings, host naming and trust loading. Its
-/// `.system` trust is the bundle OpenSSL reads, never SecTrust, which
-/// verifies only this module's sessions on its job threads.
-pub const openssl_client = struct {
-    pub const c = @import("h2_c");
-    pub const HostKind = tls.HostKind;
-    pub const newContext = tls.newContext;
-    pub const nameHost = tls.nameHost;
-    pub const loadTrust = tls.loadTrust;
-};
+const tls_client = @import("tls_client");
 
 /// The library versions this client is written and tested against.
 pub const nghttp2_version = "1.70.0";
@@ -62,7 +50,7 @@ pub const openssl_version = "3.6.3";
 
 pub const max_url_bytes = 2048;
 /// The longest DNS name; IP literals are shorter.
-pub const max_host_bytes = 253;
+pub const max_host_bytes = tls_client.max_host_bytes;
 pub const max_endpoints = 4;
 /// Request fields a caller may set; pseudo-headers, content-length and
 /// accept-encoding are the client's own.
@@ -87,7 +75,7 @@ pub const read_allowance_bytes = 64 * 1024;
 pub fn checkLibraries() error{UnexpectedLibraryVersion}!void {
     const nghttp2: *const c.nghttp2_info = c.nghttp2_version(0) orelse return error.UnexpectedLibraryVersion;
     if (!std.mem.eql(u8, std.mem.span(nghttp2.version_str), nghttp2_version)) return error.UnexpectedLibraryVersion;
-    const linked = c.OpenSSL_version(c.OPENSSL_VERSION_STRING) orelse return error.UnexpectedLibraryVersion;
+    const linked = tls_client.c.OpenSSL_version(tls_client.c.OPENSSL_VERSION_STRING) orelse return error.UnexpectedLibraryVersion;
     if (!std.mem.eql(u8, std.mem.span(linked), openssl_version)) return error.UnexpectedLibraryVersion;
 }
 
@@ -183,16 +171,10 @@ pub const Endpoint = enum(u8) { _ };
 
 pub const Liveness = policy.Liveness;
 
-/// What verifies an `https://` peer. Verification is never off.
-pub const Trust = union(enum) {
-    /// Apple SecTrust on macOS. On Linux, OpenSSL's `SSL_CERT_FILE` (a
-    /// PEM bundle) and `SSL_CERT_DIR` (colon-separated hashed directories)
-    /// when either is set and not empty, read when trust loads; otherwise
-    /// the first readable bundle among the host's usual CA bundle paths.
-    system,
-    /// Only the certificates in this PEM file (`--provider-ca-file`).
-    ca_file: []const u8,
-};
+/// What verifies an `https://` peer. Verification is never off. `.system`
+/// is Apple SecTrust on macOS, and elsewhere what `tls_client.Trust`
+/// describes; `.ca_file` is only that file (`--provider-ca-file`).
+pub const Trust = tls_client.Trust;
 
 pub const Options = struct {
     /// Most streams alive at once. Sizes the connection table: one
@@ -425,7 +407,7 @@ pub const Stream = extern struct {
 // ------------------------------------------------------------------- Client
 
 pub const InitError = error{ OutOfMemory, SystemResources, HttpsProxyInvalid, HttpsProxySchemeUnsupported };
-pub const EndpointError = UrlError || error{ OutOfMemory, TooManyEndpoints, TrustUnavailable, InvalidCaFile, InvalidSslCertFile, InvalidSslCertDir };
+pub const EndpointError = UrlError || tls_client.TrustError || error{ OutOfMemory, TooManyEndpoints };
 pub const PrepareError = error{ OutOfMemory, InvalidRequest };
 pub const DriveError = error{PollFailed};
 

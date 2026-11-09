@@ -4,7 +4,6 @@
 
 const std = @import("std");
 const platform = @import("../../platform.zig");
-const protocol = @import("../../protocol.zig");
 const provider_route = @import("../../provider_route.zig");
 const content_string = @import("../../content_string.zig");
 const change_ring = @import("../../change_ring.zig");
@@ -98,7 +97,7 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LENGTH, @intCast(content_string.max_bytes + 4096));
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_SQL_LENGTH, 16 * 1024);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, 32);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, protocol.max_json_depth);
+    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, @import("../../json_limits.zig").max_depth);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
     // 65: a settlement's wide duplicate read binds its Operation and 64 digests as
