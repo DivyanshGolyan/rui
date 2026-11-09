@@ -15,7 +15,7 @@ import termios
 import time
 
 from host_process import dispose_all, stop_process
-from terminal_process import open_pty, read_output, spawn
+from terminal_process import open_pty, spawn
 import os_semantics
 
 
@@ -46,7 +46,7 @@ def replay(actor, name, steps, *, error=None):
                 assert remaining > 0, (name, "replay deadline", bytes(records), bytes(output))
                 ready = select.select([master, process.stderr], [], [], min(remaining, 0.1))[0]
                 for fd in ready:
-                    data = read_output(fd, 4096) if isinstance(fd, int) else os.read(fd.fileno(), 4096)
+                    data = os.read(fd, 4096) if isinstance(fd, int) else os.read(fd.fileno(), 4096)
                     assert data, (name, "unexpected EOF", bytes(records), process.poll())
                     (output if fd == master else records).extend(data)
                 assert len(output) + len(records) < 65536, (name, "transcript overflow")
@@ -68,12 +68,12 @@ def replay(actor, name, steps, *, error=None):
             remaining = deadline - time.monotonic()
             assert remaining > 0, (name, "exit deadline", bytes(records))
             for fd in select.select([master, process.stderr], [], [], min(remaining, 0.1))[0]:
-                data = read_output(fd, 4096) if isinstance(fd, int) else os.read(fd.fileno(), 4096)
+                data = os.read(fd, 4096) if isinstance(fd, int) else os.read(fd.fileno(), 4096)
                 (output if fd == master else records).extend(data)
         process.wait(timeout=max(0.001, deadline - time.monotonic()))
         for fd, destination in ((master, output), (process.stderr.fileno(), records)):
             while select.select([fd], [], [], 0)[0]:
-                data = read_output(fd, 4096) if fd == master else os.read(fd, 4096)
+                data = os.read(fd, 4096) if fd == master else os.read(fd, 4096)
                 if not data:
                     break
                 destination.extend(data)

@@ -2,6 +2,8 @@
 //! Queuing claims no position; each delivery positions one row and queues
 //! the next hop atomically, so tree depth never grows a transaction.
 const protocol = @import("../../protocol.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const session_id = @import("../../session_id.zig");
 const rsql = @import("../rsql.zig");
 const Faults = @import("../Store.zig").Faults;
 
@@ -33,7 +35,7 @@ const pending = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,f.child_ref,f.kind,f.source_id " ++
         "FROM session_forward f JOIN session s ON s.session_ref=f.target_ref WHERE f.forward_id=?1 AND f.position IS NULL",
     .Args = struct { forward_id: u64 },
-    .Row = struct { session: rsql.SessionHead, child_ref: protocol.Bounded(protocol.session_id_bytes), kind: u8, source_id: rsql.Positive },
+    .Row = struct { session: rsql.SessionHead, child_ref: Bounded(session_id.bytes), kind: u8, source_id: rsql.Positive },
     .cardinality = .optional,
 });
 

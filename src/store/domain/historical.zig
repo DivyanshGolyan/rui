@@ -3,6 +3,13 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const workspace_path = @import("../../workspace_path.zig");
+const store_path = @import("../../store_path.zig");
+const content_string = @import("../../content_string.zig");
+const session_id = @import("../../session_id.zig");
+const Bounded = @import("../../bounded.zig").Bounded;
+const model_capability = @import("../../model_capability.zig");
+const provider_name = @import("../../provider_name.zig");
 const tool_catalog = @import("../../tools.zig");
 const output_format = @import("../../output_format.zig");
 const prefix_seal = @import("../../prefix_seal.zig");
@@ -59,18 +66,18 @@ pub const HistoricalSettings = struct {
     output_reservation: u64 = 0,
     /// Effective effort frozen at admission; null when the binding has no
     /// inferred default and no override.
-    reasoning_effort: ?protocol.ReasoningEffort = null,
+    reasoning_effort: ?model_capability.ReasoningEffort = null,
     /// The effort the Session's first Operation froze.
-    starting_effort: ?protocol.ReasoningEffort = null,
+    starting_effort: ?model_capability.ReasoningEffort = null,
     /// The codec the Session pinned at creation.
-    codec: protocol.Codec,
-    provider: protocol.Provider,
-    model: protocol.Bounded(protocol.max_model_bytes),
-    workspace: protocol.Bounded(protocol.max_workspace_bytes),
+    codec: provider_name.Codec,
+    provider: provider_name.Provider,
+    model: Bounded(model_capability.max_model_bytes),
+    workspace: Bounded(workspace_path.max_bytes),
     /// The originating Operation's own address: canonical Store selector and
     /// exact Session reference, for the Rui-owned request context.
-    store: protocol.Bounded(protocol.max_store_bytes),
-    session: protocol.Bounded(protocol.max_session_bytes),
+    store: Bounded(store_path.max_bytes),
+    session: Bounded(session_id.max_reference_bytes),
     session_affinity: [16]u8,
     baseline_instructions: HistoricalContent,
     output_schema: ?HistoricalContent,
@@ -81,7 +88,7 @@ pub const HistoricalSettings = struct {
 /// One tool record the frozen settings offer, as saved: its texts are
 /// rendered from the Store, never from the Host's built-ins.
 pub const HistoricalTool = struct {
-    name: protocol.Bounded(tool_catalog.max_name_bytes) = .{},
+    name: Bounded(tool_catalog.max_name_bytes) = .{},
     owner: tool_catalog.Owner = undefined,
     description: HistoricalContent = undefined,
     input_schema: HistoricalContent = undefined,
@@ -94,11 +101,11 @@ pub const HistoricalEntry = struct {
     position: u64,
     kind: HistoricalEntryKind,
     content: ?HistoricalContent = null,
-    requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null,
+    requested_model: ?Bounded(model_capability.max_model_bytes) = null,
     // A User entry's peer sender, in this view's Store.
-    sender: ?protocol.Bounded(protocol.max_session_bytes) = null,
+    sender: ?Bounded(session_id.max_reference_bytes) = null,
     /// An Operation entry's frozen effort.
-    effort: ?protocol.ReasoningEffort = null,
+    effort: ?model_capability.ReasoningEffort = null,
     /// An Operation entry's frozen tool set, and whether its boundary
     /// declares any function tool (`HistoricalView.nextDeclaredTool`).
     tool_set_id: u64 = 0,
@@ -209,7 +216,7 @@ pub const HistoricalView = struct {
         next: u64 = 0,
         /// Bytes of the text read so far, all in order from its start.
         read: u64 = 0,
-        hash: @TypeOf(protocol.contentHasher()) = protocol.contentHasher(),
+        hash: @TypeOf(content_string.hasher()) = content_string.hasher(),
     };
 
     /// The view's selected Compaction Base: its admission position, from
@@ -529,7 +536,7 @@ const historical_tool = rsql.Read(.{
         "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id WHERE member.tool_set_id=?1 AND member.ordinal=?2",
     .Args = struct { set: u64, ordinal: u64 },
     .Row = struct {
-        name: *protocol.Bounded(tool_catalog.max_name_bytes),
+        name: *Bounded(tool_catalog.max_name_bytes),
         owner: tool_catalog.Owner,
         description_id: rsql.Positive,
         description_length: u64,
@@ -555,7 +562,7 @@ const historical_declared_tool = rsql.Read(.{
     .Args = struct { operation: u64, set: u64, ordinal: u64, position: u64, anchor: u64 },
     .Row = struct {
         ordinal: u64,
-        name: *protocol.Bounded(tool_catalog.max_name_bytes),
+        name: *Bounded(tool_catalog.max_name_bytes),
         owner: tool_catalog.Owner,
         description_id: rsql.Positive,
         description_length: u64,
@@ -610,7 +617,7 @@ const historical_provider_tool = rsql.Read(.{
     .sql = "SELECT member.ordinal,tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=?1 AND member.ordinal>=?2 AND tool.owner='provider' ORDER BY member.ordinal LIMIT 1",
     .Args = struct { set: u64, ordinal: u64 },
-    .Row = struct { ordinal: u64, name: *protocol.Bounded(tool_catalog.max_name_bytes) },
+    .Row = struct { ordinal: u64, name: *Bounded(tool_catalog.max_name_bytes) },
     .cardinality = .optional,
 });
 
@@ -689,22 +696,22 @@ const historical_settings = rsql.Read(.{
         "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 WHERE o.operation_id=?1",
     .Args = struct { operation: u64 },
     .Row = struct {
-        model: *protocol.Bounded(protocol.max_model_bytes),
+        model: *Bounded(model_capability.max_model_bytes),
         instructions_content_id: rsql.Positive,
         output_schema_content_id: ?rsql.Positive,
         tool_set_id: rsql.Positive,
         member_count: u64,
         provider_count: u64,
-        provider: protocol.Provider,
-        session_ref: *protocol.Bounded(protocol.max_session_bytes),
-        workspace: *protocol.Bounded(protocol.max_workspace_bytes),
+        provider: provider_name.Provider,
+        session_ref: *Bounded(session_id.max_reference_bytes),
+        workspace: *Bounded(workspace_path.max_bytes),
         compaction_trigger: ?u64,
         output_reservation: ?u64,
-        reasoning_effort: ?protocol.ReasoningEffort,
-        codec: protocol.Bounded(40),
+        reasoning_effort: ?model_capability.ReasoningEffort,
+        codec: Bounded(40),
         plain_codec: bool,
         purpose: u8,
-        starting_effort: ?protocol.ReasoningEffort,
+        starting_effort: ?model_capability.ReasoningEffort,
         catalogs_consistent: bool,
     },
     .cardinality = .optional,
@@ -758,7 +765,7 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     out.provider = row.provider;
     // Requests are built by the codec the Session pinned, which takes no
     // options; a Session pinned to one this Host does not serve cannot be.
-    out.codec = std.meta.stringToEnum(protocol.Codec, row.codec.slice()) orelse return error.CorruptStore;
+    out.codec = std.meta.stringToEnum(provider_name.Codec, row.codec.slice()) orelse return error.CorruptStore;
     if (!row.plain_codec) return error.CorruptStore;
     out.session_affinity = hash.finalResult()[0..16].*;
 }
@@ -1045,13 +1052,13 @@ const historical_entries = rsql.Read(.{
         byte_length: ?u64,
         digest: ?[32]u8,
         private: ?bool,
-        model: ?protocol.Bounded(protocol.max_model_bytes),
-        provider: ?protocol.Provider,
+        model: ?Bounded(model_capability.max_model_bytes),
+        provider: ?provider_name.Provider,
         item_kind: ?u8,
         item_id_digest: ?[32]u8,
         consistent: ?bool,
-        sender: ?protocol.Bounded(protocol.max_session_bytes),
-        effort: ?protocol.ReasoningEffort,
+        sender: ?Bounded(session_id.max_reference_bytes),
+        effort: ?model_capability.ReasoningEffort,
         tool_set_id: ?rsql.Positive,
         declares: ?bool,
     },
@@ -1152,7 +1159,7 @@ fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) er
         .declares = row.declares orelse return error.CorruptStore,
     };
     var content: ?HistoricalContent = null;
-    var requested_model: ?protocol.Bounded(protocol.max_model_bytes) = null;
+    var requested_model: ?Bounded(model_capability.max_model_bytes) = null;
     if (kind == .provider_output) {
         // Keep contradictory owners visible instead of filtering their
         // output away. Accepted-population validation cannot see failed
@@ -1208,7 +1215,7 @@ const group_item = rsql.Read(.{
         "FROM model_output_item item JOIN model_operation source ON source.operation_id=item.operation_id " ++
         "WHERE item.operation_id=?1 AND item.item_ordinal>=?2 ORDER BY item.item_ordinal LIMIT 1",
     .Args = struct { operation: u64, ordinal: u64 },
-    .Row = struct { item_ordinal: u64, item_kind: u8, session_ref: protocol.Bounded(protocol.max_session_bytes), session_position: rsql.Positive, consistent: bool },
+    .Row = struct { item_ordinal: u64, item_kind: u8, session_ref: Bounded(session_id.max_reference_bytes), session_position: rsql.Positive, consistent: bool },
     .cardinality = .optional,
 });
 
@@ -1398,7 +1405,7 @@ fn outputAt(a: *ReadAccess, view: *HistoricalView, position: u64) !HistoricalOut
         const content = try viewContent(view, id.get(), &text_row, false);
         // Its parts' reads check a nonempty text; an empty one is
         // checked here.
-        if (content.length == 0 and !std.mem.eql(u8, &content.digest, &protocol.contentDigest(""))) return error.CorruptStore;
+        if (content.length == 0 and !std.mem.eql(u8, &content.digest, &content_string.digest(""))) return error.CorruptStore;
         text = .{ .content_id = content.content_id, .length = content.length, .digest = content.digest };
     }
     var call: ?[3]HistoricalContent = null;

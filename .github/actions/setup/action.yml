@@ -98,7 +98,7 @@ runs:
       if: ${{ inputs.cold != 'true' && inputs.compiled != 'true' }}
       shell: bash
       env:
-        DEPS: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'src/build_*', 'src/*.patch') }}-
+        DEPS: rui-build-v2-${{ runner.os }}-${{ runner.arch }}-0.17.0-${{ steps.tools.outputs.identity }}-${{ hashFiles('build.zig.zon', 'screen-emulator/build.zig.zon', 'src/build_*', 'src/*.patch') }}-
         SOURCES: ${{ hashFiles('build.zig', 'src/**', 'tests/integration/**') }}-
         CHECK_PART: ${{ inputs.check-part }}
       run: |
@@ -141,6 +141,7 @@ runs:
           ~/.cache/zig
           .zig-cache
           zig-pkg
+          screen-emulator/zig-pkg
         key: ${{ steps.build-keys.outputs.key }}
         restore-keys: |
           ${{ steps.build-keys.outputs.prefix-sources }}
@@ -153,6 +154,7 @@ runs:
           ~/.cache/zig
           .zig-cache
           zig-pkg
+          screen-emulator/zig-pkg
         key: ${{ steps.build-keys.outputs.key }}
         restore-keys: |
           ${{ steps.build-keys.outputs.prefix-sources }}
@@ -262,3 +264,13 @@ runs:
         set -euo pipefail
         mkdir -p "$ZIG_GLOBAL_CACHE_DIR/tmp"
         bash src/fetch_dependencies.sh
+    # Only steps that run the PTY screen observer build its libghostty-vt,
+    # from the test-only package in screen-emulator; installs never fetch it.
+    # It keeps its own zig-pkg: Zig refuses ghostty's path dependencies from
+    # a package directory outside it.
+    - name: Fetch the screen observer's pinned package graph
+      if: ${{ steps.requirements.outputs.screen == 'true' && inputs.compiled != 'true' && (inputs.cold == 'true' || (steps.build-cache.outputs.cache-hit || steps.build-cache-restore.outputs.cache-hit) != 'true') }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        env -u ZIG_LOCAL_PKG_DIR zig build --build-file screen-emulator/build.zig --fetch

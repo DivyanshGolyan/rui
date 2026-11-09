@@ -1605,7 +1605,18 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
         .host_info => {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
             // Atomics and fixed values only: this reply never touches SQLite.
-            try fd.json(200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{ host.lease.paths.store.slice(), host.instance, host.custody.records.len, host.intake_capacity, host.descriptor_soft_limit, host.started_at, host.custody.held(), host.turns_paused.load(.acquire), host.providers.routes(), host.store.mysqlDoublewrite() });
+            try fd.json(200, protocol.max_host_info_response_bytes, host_reply.renderHostInfo, .{host_reply.HostInfo{
+                .store = host.lease.paths.store.slice(),
+                .instance = host.instance,
+                .active_capacity = host.custody.records.len,
+                .intake_capacity = host.intake_capacity,
+                .descriptor_soft_limit = host.descriptor_soft_limit,
+                .started_at = host.started_at,
+                .custody_occupied = host.custody.held(),
+                .paused = host.turns_paused.load(.acquire),
+                .routes = host.providers.routes(),
+                .doublewrite = host.store.mysqlDoublewrite(),
+            }});
         },
         .host_pause => |pause| {
             if (!host.launchAllowed()) return respondStatic(fd, 503, .host_unavailable, "dispatch_fenced");
@@ -1623,12 +1634,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 fenceDispatch(host, "configuration save", error.CanonicalStoreFailure);
             }
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            const status: u16 = switch (result) {
-                .accepted, .rejected => 200,
-                .conflict => 409,
-                .infrastructure_failure => 500,
-            };
-            try fd.json(status, protocol.max_response_bytes, host_reply.renderConfigureReply, .{ command, result });
+            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderConfigureReply, .{ command.session.slice(), result });
         },
         .message => |*command| {
             const result = submitMessage(host, command, client_environment.?);
@@ -1636,12 +1642,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 fenceDispatch(host, "message save", error.CanonicalStoreFailure);
             }
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            const status: u16 = switch (result) {
-                .accepted, .rejected => 200,
-                .conflict => 409,
-                .infrastructure_failure => 500,
-            };
-            try fd.json(status, protocol.max_response_bytes, host_reply.renderMessageReply, .{ command, result });
+            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderMessageReply, .{ command.session.slice(), result });
         },
         .session_stop => |*command| {
             var timing = ControlTiming.init(host, command.key, "session_stop", accepted_at_ns);
@@ -1651,12 +1652,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }
             if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            const status: u16 = switch (result) {
-                .accepted, .rejected => 200,
-                .conflict => 409,
-                .infrastructure_failure => 500,
-            };
-            try fd.json(status, protocol.max_response_bytes, host_reply.renderSessionStopReply, .{ command, result });
+            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderSessionStopReply, .{ command.session.slice(), result });
             fd.timing = timing;
         },
         .session_archive => |*command| {
@@ -1667,12 +1663,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }
             if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            const status: u16 = switch (result) {
-                .accepted, .rejected => 200,
-                .conflict => 409,
-                .infrastructure_failure => 500,
-            };
-            try fd.json(status, protocol.max_response_bytes, host_reply.renderSessionArchiveReply, .{ command, result });
+            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderSessionArchiveReply, .{ command.session.slice(), result });
             fd.timing = timing;
         },
         .model_interruption => |*command| {
@@ -1683,12 +1674,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }
             if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            const status: u16 = switch (result) {
-                .accepted, .rejected => 200,
-                .conflict => 409,
-                .infrastructure_failure => 500,
-            };
-            try fd.json(status, protocol.max_response_bytes, host_reply.renderModelInterruptionReply, .{ command, result });
+            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderModelInterruptionReply, .{ store_module.ModelInterruptionTarget{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id }, result });
             fd.timing = timing;
         },
         .permission_decision => |*command| {
@@ -1699,12 +1685,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             }
             if (result == .accepted) publishControlHint(host, command.key.slice());
             if (header.drop == .after_commit and result != .infrastructure_failure) return;
-            const status: u16 = switch (result) {
-                .accepted, .rejected => 200,
-                .conflict => 409,
-                .infrastructure_failure => 500,
-            };
-            try fd.json(status, protocol.max_response_bytes, host_reply.renderPermissionDecisionReply, .{ command, result });
+            try fd.json(host_reply.httpStatus(result), protocol.max_response_bytes, host_reply.renderPermissionDecisionReply, .{ host_reply.PermissionTarget{ .session = command.session, .action_id = command.action_id, .decision = command.decision }, result });
             fd.timing = timing;
         },
         .observe_command => |*command| {
@@ -2044,22 +2025,12 @@ const HeaderReader = struct {
     }
 };
 
-/// The configure and message renderers read only `command.session`, so they
-/// take any command; both mutation tests list them first.
-fn ReplyCommand(comptime render: anytype, comptime index: usize) type {
-    return switch (index) {
-        0 => wire_request.ConfigureCommand,
-        1 => wire_request.MessageCommand,
-        else => @typeInfo(@typeInfo(@TypeOf(render)).@"fn".param_types[1].?).pointer.child,
-    };
-}
-
 test "canonical failure classifier accepts every production mutation failure envelope" {
     const protocol_reply = @import("protocol_reply.zig");
-    inline for (.{ host_reply.renderConfigureReply, host_reply.renderMessageReply, host_reply.renderSessionStopReply, host_reply.renderSessionArchiveReply, host_reply.renderModelInterruptionReply, host_reply.renderPermissionDecisionReply }, 0..) |render, index| {
-        const Command = ReplyCommand(render, index);
+    inline for (.{ host_reply.renderConfigureReply, host_reply.renderMessageReply, host_reply.renderSessionStopReply, host_reply.renderSessionArchiveReply, host_reply.renderModelInterruptionReply, host_reply.renderPermissionDecisionReply }) |render| {
+        const Subject = @typeInfo(@TypeOf(render)).@"fn".param_types[1].?;
         var response = protocol.ResponseBuffer{};
-        try response.render(render, .{ &Command{}, .infrastructure_failure });
+        try response.render(render, .{ std.mem.zeroes(Subject), .infrastructure_failure });
         try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}", response.slice());
         try std.testing.expectError(error.CanonicalStoreFailure, protocol_reply.checkCanonicalFailure(.{ .status = 500, .body = response.slice() }));
     }
@@ -2123,15 +2094,14 @@ test "mutation decoder validates all six actual producers and preserved domain a
     const session = "k7m2qx";
     const content: store_module.ContentReference = .{ .length = 9, .digest = protocol.contentDigest("seven\nµ!") };
     inline for (.{ host_reply.renderConfigureReply, host_reply.renderMessageReply, host_reply.renderSessionStopReply, host_reply.renderModelInterruptionReply, host_reply.renderPermissionDecisionReply, host_reply.renderSessionArchiveReply }, 0..) |render, index| {
-        const Command = ReplyCommand(render, index);
         const MutationReply = @typeInfo(@TypeOf(render)).@"fn".param_types[2].?;
-        var command: Command = .{};
-        try command.session.set(session);
-        if (index == 3) {
-            command.turn_id = 3;
-            command.operation_id = 11;
-        }
-        if (index == 4) command.action_id = 7;
+        var named: protocol.Bounded(protocol.max_session_bytes) = .{};
+        try named.set(session);
+        const subject = switch (index) {
+            3 => store_module.ModelInterruptionTarget{ .session = named, .turn_id = 3, .operation_id = 11 },
+            4 => host_reply.PermissionTarget{ .session = named, .action_id = 7, .decision = .deny },
+            else => @as([]const u8, session),
+        };
         const target: protocol_reply.MutationTarget = switch (index) {
             0 => .configure,
             1 => .{ .message = .{ .bytes = content.length, .digest = content.digest } },
@@ -2142,8 +2112,8 @@ test "mutation decoder validates all six actual producers and preserved domain a
             else => unreachable,
         };
         const accepted: MutationReply = switch (index) {
-            0 => .{ .accepted = .{ .replayed = true, .revision = 13, .created = false, .session = command.session } },
-            1 => .{ .accepted = .{ .replayed = true, .admission_id = 17, .content = content, .session = command.session } },
+            0 => .{ .accepted = .{ .replayed = true, .revision = 13, .created = false, .session = named } },
+            1 => .{ .accepted = .{ .replayed = true, .admission_id = 17, .content = content, .session = named } },
             2 => .{ .accepted = .{ .replayed = true, .selection = .{ .selected_turn_id = 19, .admission_cutoff = 23 }, .completion = .pending } },
             3, 4 => .{ .accepted = .{ .replayed = true } },
             5 => .{ .accepted = .{ .replayed = true, .archived = true, .completion = .pending } },
@@ -2162,7 +2132,7 @@ test "mutation decoder validates all six actual producers and preserved domain a
                     else => {},
                 }
                 var response: protocol.ResponseBuffer = .{};
-                try response.render(render, .{ &command, result });
+                try response.render(render, .{ subject, result });
                 const status: u16 = if (result == .conflict) 409 else if (result == .infrastructure_failure) 500 else 200;
                 const decoded = protocol_reply.decodeMutationReply(.{ .status = status, .body = response.slice() }, session, target);
                 try std.testing.expectEqual(status, decoded.status);
@@ -2196,7 +2166,7 @@ test "mutation decoder validates all six actual producers and preserved domain a
             idle.accepted.selection.selected_turn_id = null;
             idle.accepted.completion = .completed;
             var response: protocol.ResponseBuffer = .{};
-            try response.render(render, .{ &command, idle });
+            try response.render(render, .{ subject, idle });
             const answer = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, session, target).answer;
             try std.testing.expectEqual(@as(?u64, null), answer.result.accepted.session_stop.turn);
             try std.testing.expectEqual(.completed, answer.result.accepted.session_stop.completion);
@@ -2211,7 +2181,7 @@ test "initial Message reply binds its allocated Session and original input befor
     var allocated: protocol.Bounded(protocol.max_session_bytes) = .{};
     try allocated.set("k7m2qx");
     var response: protocol.ResponseBuffer = .{};
-    try response.render(host_reply.renderMessageReply, .{ &wire_request.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
+    try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
         .content = content,
@@ -2229,7 +2199,7 @@ test "initial Message reply binds its allocated Session and original input befor
     try std.testing.expectError(error.RequestBindingMismatch, protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "", changed).answer);
     response = .{};
     try allocated.set("BAD-ID");
-    try response.render(host_reply.renderMessageReply, .{ &wire_request.MessageCommand{ .configuration = .{} }, store_module.MessageReply{ .accepted = .{
+    try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .accepted = .{
         .replayed = true,
         .admission_id = 17,
         .content = content,
@@ -3094,7 +3064,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.ResponseBuffer = .{};
-            try response.render(host_reply.renderSessionStopReply, .{ command, result });
+            try response.render(host_reply.renderSessionStopReply, .{ command.session.slice(), result });
             try std.testing.expectEqual(expected, response.len);
         }
 
@@ -3104,7 +3074,7 @@ test "control response variants fit exact worst-case JSON bounds" {
             expected: usize,
         ) !void {
             var response: protocol.ResponseBuffer = .{};
-            try response.render(host_reply.renderModelInterruptionReply, .{ command, result });
+            try response.render(host_reply.renderModelInterruptionReply, .{ store_module.ModelInterruptionTarget{ .session = command.session, .turn_id = command.turn_id, .operation_id = command.operation_id }, result });
             try std.testing.expectEqual(expected, response.len);
         }
 
@@ -3128,7 +3098,7 @@ test "control response variants fit exact worst-case JSON bounds" {
         .completion = .completed,
     } }, protocol.shapeBytes(protocol.session_stop_reply.accepted));
     var pending_response: protocol.ResponseBuffer = .{};
-    try pending_response.render(host_reply.renderSessionStopReply, .{ &stop_command, store_module.SessionStopReply{ .accepted = .{
+    try pending_response.render(host_reply.renderSessionStopReply, .{ stop_command.session.slice(), store_module.SessionStopReply{ .accepted = .{
         .replayed = false,
         .selection = .{
             .selected_turn_id = std.math.maxInt(u64),
@@ -4295,11 +4265,14 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     const protocol_reply = @import("protocol_reply.zig");
     var response: protocol.ResponseBuffer = .{};
     const id = "0123456789abcdef0123456789abcdef";
-    try response.render(host_reply.renderHostInfo, .{ id, @as(protocol.InstanceId, @splat(1)), 2, 100, 1024, 1792918800, 0, false, protocol.routesAll(.unserved), "OFF" });
+    var info: host_reply.HostInfo = .{ .store = id, .instance = @splat(1), .active_capacity = 2, .intake_capacity = 100, .descriptor_soft_limit = 1024, .started_at = 1792918800, .custody_occupied = 0, .paused = false, .routes = protocol.routesAll(.unserved), .doublewrite = "OFF" };
+    try response.render(host_reply.renderHostInfo, .{info});
     const status = try protocol_reply.parseHostInfo(response.slice(), id);
     try std.testing.expectEqualStrings("OFF", status.ready.innodb_doublewrite.?.slice());
     response.len = 0;
-    try response.render(host_reply.renderHostInfo, .{ "/sqlite", @as(protocol.InstanceId, @splat(1)), 2, 100, 1024, 1792918800, 0, false, protocol.routesAll(.unserved), null });
+    info.store = "/sqlite";
+    info.doublewrite = null;
+    try response.render(host_reply.renderHostInfo, .{info});
     try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
     // MySQL's bounded opaque id fits within SQLite's existing reply budget.
     try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), protocol.max_host_info_response_bytes);
@@ -4453,7 +4426,7 @@ test "session archive renders accepted intent and completion for both archive an
         for (std.meta.tags(protocol.SessionStopCompletion)) |completion| {
             for ([_]bool{ false, true }) |replayed| {
                 var response: protocol.ResponseBuffer = .{};
-                try response.render(host_reply.renderSessionArchiveReply, .{ &command, store_module.SessionArchiveReply{ .accepted = .{
+                try response.render(host_reply.renderSessionArchiveReply, .{ command.session.slice(), store_module.SessionArchiveReply{ .accepted = .{
                     .replayed = replayed,
                     .archived = archived,
                     .completion = completion,
@@ -4468,7 +4441,7 @@ test "session archive renders accepted intent and completion for both archive an
     }
     for (std.meta.tags(protocol.SessionArchiveRejection)) |code| {
         var response: protocol.ResponseBuffer = .{};
-        try response.render(host_reply.renderSessionArchiveReply, .{ &command, store_module.SessionArchiveReply{ .rejected = .{ .replayed = true, .code = code } } });
+        try response.render(host_reply.renderSessionArchiveReply, .{ command.session.slice(), store_module.SessionArchiveReply{ .rejected = .{ .replayed = true, .code = code } } });
         const decoded = try protocol_reply.decodeMutationReply(.{ .status = 200, .body = response.slice() }, "k7m2qx", .{ .session_archive = .{ .archived = true } }).answer;
         try std.testing.expectEqualStrings(@tagName(code), decoded.result.rejected.slice());
     }
