@@ -3178,6 +3178,10 @@ def persistent_permission_case(decision="deny-action", exit_code=0, signal_failu
                 os.write(master, b"run without approval\n")
                 live = read_terminal(master, "+1 more calls · /status", composer=True)
                 fixture.wait_for(lambda: all((state / f"bypass-started-{index}").exists() for index in range(4)), "held bypass effects")
+                # The display bound is drawn while the calls are still queued.
+                # A running call's row gains its clock only on a later frame,
+                # which a loaded runner draws after the effects start.
+                live += read_terminal(master, f"• {bypass_description} · ", composer=True)
                 assert live.index(f"• {bypass_description}") < live.index("• Inspect application settings"), live
                 assert re.search(rf"^• {bypass_description} · \d+s$", live, re.M), ("the running call's row carries the clock", live)
                 assert "Check final sibling" not in live, live
