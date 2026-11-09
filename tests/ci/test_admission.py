@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import textwrap
 import shlex
+import shutil
 import unittest
 
 from select_tests import select
@@ -55,8 +56,14 @@ class PlanFixture:
         self.repo.mkdir()
         self.git('init', '-q', '-b', 'main')
         self.write('.git/info/exclude', 'selection.json\n__pycache__/\n')
-        for name in ('select_tests.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py'):
+        for name in ('select_tests.py', 'docs_only.py', 'qualification.py', 'strict_paths.py', 'platform_boundary.py',
+                     'import_architecture.py', 'stack_frames.json'):
             self.write('tests/ci/' + name, (ROOT / 'tests/ci' / name).read_text())
+        # The selector's import graph reads the source tree.
+        for name in subprocess.check_output(['git', 'ls-files', '-z', 'src', 'tests/integration'], cwd=ROOT).decode().split('\0'):
+            if name and (ROOT / name).is_file():
+                (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / name, self.repo / name)
         self.write('build.zig', (ROOT / 'build.zig').read_text())
         self.write('README.md', 'Base. Another sentence on one line.\n')
         self.base = self.commit()

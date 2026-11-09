@@ -15,8 +15,9 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import (CACHE_POLICY, CHECK_COVERS, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES, POLICY_SELF_CHECKS, RENDERER_HARNESSES,
-                          RULES, execution_batches, matches, select, setup_requirements)
+from select_tests import (CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+                          POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, Graph, execution_batches, matches, select,
+                          setup_requirements, tree_graph)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -39,6 +40,7 @@ def named_paths(patterns):
 def covered(target, targets):
     """`target` runs when `targets` are selected, directly or inside check or check-full."""
     return (target in targets or target in CHECK_COVERS and bool(targets & {"check", "check-full"})
+            or any(target in cases and broad in targets for broad, cases in FIXTURE_COVERS.items())
             or target in {"check", "stack-frames"} and "check-full" in targets
             or target == "stack-frames" and "check" in targets)
 
@@ -137,8 +139,9 @@ class SelectionTest(unittest.TestCase):
                      "src/model_catalog_main.zig", "src/model_catalog_snapshot.zig"):
             for phase in ("development", "review"):
                 with self.subTest(path=path, phase=phase):
-                    expected = ["test-logic"] if phase == "development" else ["stack-frames", "test-logic"]
-                    self.assertEqual(select([path], phase, AVAILABLE)["targets"], expected)
+                    targets = select([path], phase, AVAILABLE)["targets"]
+                    self.assertIn("test-logic", targets)
+                    self.assertNotIn("check", targets)
 
     def test_development_does_not_claim_native_acceptance(self):
         # The Store keeps `test` for the live MySQL check (LIVE_RULES); nothing else widens.
@@ -182,48 +185,45 @@ class SelectionTest(unittest.TestCase):
 
     def test_portable_owner_does_not_require_full_suite(self):
         result = select(["src/request_encoding.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["stack-frames", "test-logic"])
-        self.assertFalse(result["native_required"])
+        self.assertIn("test-logic", result["targets"])
+        self.assertNotIn("check", result["targets"])
 
     def test_host_frame_inputs_select_the_linux_frame_gate(self):
+        # src/preferences.zig reaches the Host only through stack_frames.json's
+        # host_modules; #975's 8 KiB frame was caught there.
         for path in ("src/request_encoding.zig", "src/h2/Engine.zig", "src/bash_platform.c", "build.zig",
-                     "tests/ci/stack_frames.json", "tests/ci/stack_frames.py"):
+                     "src/preferences.zig", "src/store.zig", "tests/ci/stack_frames.json", "tests/ci/stack_frames.py"):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertIn("stack-frames", result["targets"])
                 self.assertNotIn("stack-frames", result["native_targets"])
-        # check runs the gate itself; renderer owners never reach a Host stack.
-        store = select(["src/store.zig"], "review", AVAILABLE)["targets"]
-        self.assertIn("check", store)
-        self.assertNotIn("stack-frames", store)
-        for path in ("src/store/Store.zig", "src/store/domain/turn.zig"):
-            self.assertEqual(select([path], "review", AVAILABLE), select(["src/store.zig"], "review", AVAILABLE))
-        self.assertNotIn("stack-frames", select(["src/SessionFrontend.zig"], "review", AVAILABLE)["targets"])
+        # Zig the Host never compiles has no Host frame.
+        for path in ("src/SessionFrontend.zig", "src/tests.zig", "src/logic_tests.zig", "src/store/wire/pg.zig"):
+            with self.subTest(path=path):
+                self.assertNotIn("stack-frames", select([path], "review", AVAILABLE)["targets"])
 
     def test_logic_root_selects_its_executable_root(self):
         for path in ("src/logic_tests.zig", "src/core_boundary.zig"):
-            result = select([path], "review", AVAILABLE)
-            self.assertEqual(result["targets"], ["stack-frames", "test-logic"])
+            self.assertEqual(select([path], "review", AVAILABLE)["targets"], ["test-logic"])
 
     def test_native_unit_aggregate_selects_its_root_not_check(self):
         alone = select(["src/tests.zig"], "review", AVAILABLE)
-        self.assertEqual((alone["targets"], alone["native_targets"]), (["stack-frames", "test"], ["test"]))
-        # What it newly lists still selects its owner's checks, or check when unmapped.
+        self.assertEqual((alone["targets"], alone["native_targets"]), (["test"], ["test"]))
+        # What it newly lists selects what reaches that file, not check.
         owned = select(["src/tests.zig", "src/mcp/Running.zig"], "review", AVAILABLE)["targets"]
-        self.assertEqual(owned, ["launch-frame-integration", "stack-frames", "test", "test-logic"])
-        self.assertIn("check", select(["src/tests.zig", "src/provider_output.zig"], "review", AVAILABLE)["targets"])
+        self.assertTrue({"launch-frame-integration", "test"} <= set(owned))
+        self.assertNotIn("check", owned)
 
     def test_shared_context_text_keeps_all_request_oracle_consumers(self):
-        consumers = {
-            "src/model_instructions.txt": ["src/model_adapter.zig", "tests/integration/model_fixture.py",
-                                           "tests/qualification/measurement/client.go"],
-            "src/peer_message.txt": ["src/model_adapter.zig", "tests/integration/peer_integration.py"],
-        }
-        for path, sources in consumers.items():
-            owners = select(sources, "review", AVAILABLE)
-            result = select([path], "review", AVAILABLE)
-            for family in ("targets", "native_targets"):
-                self.assertEqual(result[family], owners[family], path)
+        # The Host embeds both texts in requests; fixtures and Go request oracles read them.
+        request = {"test", "dispatch-integration", "transport-h2-integration"}
+        for path, readers in (("src/model_instructions.txt", {"codex-h2-integration", "current-facts-integration",
+                                                               "server-delivery-integration", "peer-integration",
+                                                               "measurement-check"}),
+                              ("src/peer_message.txt", {"peer-integration", "sender-identity-integration"})):
+            with self.subTest(path=path):
+                targets = set(select([path], "review", AVAILABLE)["targets"])
+                self.assertEqual({target for target in request | readers if not covered(target, targets)}, set())
 
     def test_cli_configuration_surface_runs_the_measurement_configure_contract(self):
         for path in ("src/cli_args.zig", "src/client.zig", "src/product_defaults.zig", "src/protocol.zig",
@@ -242,25 +242,34 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(core=core):
                 self.assertIn("test-logic", select([f"src/{core}"], "review", AVAILABLE)["targets"])
 
-    def test_cli_value_cores_keep_their_native_consumers(self):
-        for core in ("caller_error", "caller_exit", "cli_value", "retention_capacity"):
+    def test_registered_cores_reach_only_unit_roots_unless_a_fixture_names_them(self):
+        # A core's value tests own its decisions. A fixture that asserts one
+        # names it as an owner, and keeps it.
+        graph = tree_graph()
+        self.assertTrue(graph.cores)
+        for core in sorted(graph.cores):
             with self.subTest(core=core):
-                result = select([f"src/{core}.zig"], "review", AVAILABLE)
-                self.assertIn("test-logic", result["targets"])
-                self.assertIn("check", result["targets"])
-                self.assertIn("check", result["native_targets"])
+                reached = graph.targets(core) or set()
+                # What compiles the core or reads it, as fixtures read owned values.
+                compiled = {target for target, files in graph.reached.items() if core in files}
+                named = {target for target, (_, _, owners) in FIXTURES.items() if core in owners}
+                self.assertTrue(named <= reached)
+                self.assertEqual(reached - compiled - named, set())
+        for path in ("src/cli_value.zig", "src/draft_layout.zig", "src/keymap.zig"):
+            with self.subTest(path=path):
+                self.assertNotIn("check", select([path], "review", AVAILABLE)["targets"])
 
     def test_http2_client_selects_its_own_tests(self):
-        result = select(["src/h2/Engine.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["stack-frames", "test-h2"])
-        result = select(["src/h2/policy.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["stack-frames", "test-h2", "test-logic"])
+        for path in ("src/h2/Engine.zig", "src/h2/policy.zig"):
+            with self.subTest(path=path):
+                targets = select([path], "review", AVAILABLE)["targets"]
+                self.assertIn("test-h2", targets)
+                self.assertNotIn("check", targets)
+        self.assertIn("test-logic", select(["src/h2/policy.zig"], "review", AVAILABLE)["targets"])
 
     def test_postgres_wire_client_selects_its_own_tests_and_h2_trust_reaches_them(self):
-        result = select(["src/store/wire/pg.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["stack-frames", "test-pg"])
-        result = select(["src/h2/tls.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["stack-frames", "test-h2", "test-pg"])
+        self.assertEqual(select(["src/store/wire/pg.zig"], "review", AVAILABLE)["targets"], ["test-pg"])
+        self.assertTrue({"test-h2", "test-pg"} <= set(select(["src/h2/tls.zig"], "review", AVAILABLE)["targets"]))
 
     def test_store_rule_leaves_wire_clients_to_their_own_rules(self):
         self.assertNotIn("dispatch-debug-integration", select(["src/store/wire/mysql.zig"], "review", AVAILABLE)["targets"])
@@ -269,45 +278,41 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(matches("src/store/domain/turn.zig", ("src/store/*", "!src/store/wire/*")))
 
     def test_portable_roots_keep_their_native_owner_checks(self):
-        for path in ("src/SessionInput.zig", "src/tools.zig"):
-            result = select([path], "review", AVAILABLE)
-            for family in ("targets", "native_targets"):
-                self.assertEqual(result[family], ["check", "test-logic"])
+        for path, owner in (("src/SessionInput.zig", "human-cli-integration"), ("src/tools.zig", "bash-integration")):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertTrue({"test-logic", owner} <= set(result[family]))
+                    self.assertNotIn("check", result[family])
 
     def test_response_timing_keeps_native_timeout_consumers(self):
         result = select(["src/ResponseTiming.zig"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
-            self.assertEqual(result[family], ["admission-debug-integration", "check", "test-full", "test-logic"])
+            self.assertTrue({"admission-debug-integration", "request-wait-integration", "test-full", "test-logic"}
+                            <= set(result[family]))
         self.assertTrue(result["native_required"])
 
     def test_test_full_runs_beside_a_full_native_suite(self):
-        # test-full holds only the real-time witness; check or check-full runs the rest.
+        # test-full holds only the real-time witness; test, check or check-full runs the rest.
         for path in ("src/client.zig", "src/ResponseTiming.zig", "build.zig", "build.zig.zon",
                      "install.sh", ".github/actions/setup/action.yml"):
             with self.subTest(path=path):
                 targets = set(select([path], "review", AVAILABLE)["targets"])
                 self.assertIn("test-full", targets)
-                self.assertTrue(targets & {"check", "check-full"})
+                self.assertTrue(targets & {"test", "check", "check-full"})
         self.assertIn("check-full", NATIVE)
 
-    def test_frontend_alone_selects_logic_and_pty_callers_not_check(self):
-        pty = ["canonical-failure-integration", "terminal-restoration-integration"]
-        for path, expected in (
-                # src/tests.zig, not the logic root, runs these owners' unit tests.
-                ("src/SessionFrontend.zig", ["admission-debug-integration", *pty, "test", "test-logic", "upgrade-integration"]),
-                ("src/SessionTerminal.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
-                ("src/ClientTask.zig", ["admission-debug-integration", *pty, "test", "test-logic"]),
-                ("src/ConversationViewport.zig", [*pty, "test-logic"]),
-                ("src/TerminalEditor.zig", ["admission-debug-integration", *pty, "test-logic", "upgrade-integration"]),
-                ("src/TerminalText.zig", ["admission-debug-integration", *pty, "test-logic"]),
-                ("src/session_sequence_model_test.zig", ["test-logic"])):
+    def test_frontend_selects_the_pty_fixtures_that_drive_it_not_check(self):
+        for path in ("src/SessionFrontend.zig", "src/SessionTerminal.zig", "src/Overview.zig"):
             with self.subTest(path=path):
                 result = select([path, "README.md"], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
-                    self.assertEqual(result[family], expected)
-        result = select(["src/SessionScreen.zig", "src/TerminalFrame.zig", "src/AnswerRenderer.zig"],
+                    self.assertIn("human-cli-integration", result[family])
+                    self.assertNotIn("check", result[family])
+        # The human CLI gate runs the PTY cases it composes; they are not selected twice.
+        result = select(["src/SessionFrontend.zig", "tests/integration/terminal_restoration_integration.py"],
                         "review", AVAILABLE)
-        self.assertNotIn("check", result["targets"] + result["native_targets"])
+        self.assertNotIn("terminal-restoration-integration", result["targets"])
 
     def test_renderer_diff_skips_check_before_landing(self):
         for paths in (["src/SessionFrontend.zig"], ["src/TerminalText.zig"], ["src/AnswerRenderer.zig"],
@@ -329,46 +334,11 @@ class SelectionTest(unittest.TestCase):
             with self.subTest(paths=paths):
                 self.assertTrue(select(paths, "review", AVAILABLE)["retry"])
 
-    def test_strict_path_beside_frontend_keeps_check(self):
-        # execution_turn.zig is strict but alone selects only its logic root.
-        self.assertEqual(select(["src/execution_turn.zig"], "review", AVAILABLE)["targets"], ["stack-frames", "test-logic"])
-        for strict_path in ("src/execution_turn.zig", "src/store.zig", "src/server.zig",
-                            "tests/integration/bash_integration.py", "src/store_recovery.zig"):
-            for frontend in ("src/SessionFrontend.zig", "src/ConversationViewport.zig",
-                             "src/TerminalText.zig", "src/AnswerRenderer.zig",
-                             "src/session_sequence_model_test.zig"):
-                with self.subTest(strict=strict_path, frontend=frontend):
-                    result = select([frontend, strict_path], "review", AVAILABLE)
-                    for family in ("targets", "native_targets"):
-                        self.assertIn("check", result[family])
-        for strict_path in ("build.zig", "install.sh"):
-            with self.subTest(strict=strict_path):
-                result = select(["src/SessionTerminal.zig", strict_path], "review", AVAILABLE)
-                self.assertIn("check-full", result["targets"])
-
-    def test_frontend_beside_other_executable_change_keeps_check(self):
-        for frontend in ("src/SessionFrontend.zig", "src/TerminalText.zig", "src/ConversationViewport.zig",
-                         "src/session_sequence_model_test.zig"):
-            for other in ("src/provider.zig", "src/request_encoding.zig", "tests/ci/select_tests.py"):
-                with self.subTest(frontend=frontend, other=other):
-                    result = select([frontend, other], "review", AVAILABLE)
-                    for family in ("targets", "native_targets"):
-                        self.assertIn("check", result[family])
-        # Renderer and documentation together are still renderer-only.
-        for paths in (["src/SessionFrontend.zig", "src/TerminalText.zig", "README.md", "docs/x.md"],
-                      ["src/AnswerRenderer.zig", "src/ConversationViewport.zig", "research/notes.md"]):
-            with self.subTest(paths=paths):
-                result = select(paths, "review", AVAILABLE)
-                self.assertNotIn("check", result["targets"] + result["native_targets"])
-        # AnswerRenderer never selected check; its ordinary union stays as before.
-        self.assertEqual(select(["src/AnswerRenderer.zig", "src/request_encoding.zig"], "review",
-                                AVAILABLE)["targets"], ["stack-frames", "test-logic"])
-
     def test_composed_gates_do_not_cover_the_separate_logic_root(self):
         for logic in ("src/logic_tests.zig", "src/AnswerRenderer.zig",
                       "src/request_encoding.zig", "src/execution_turn.zig",
                       "src/ResponseTiming.zig"):
-            for composed in ("src/server.zig", "src/store.zig", "build.zig"):
+            for composed in ("tests/integration/host_process.py", "build.zig"):
                 with self.subTest(logic=logic, composed=composed):
                     result = select([logic, composed], "review", AVAILABLE)
                     self.assertIn("test-logic", result["targets"])
@@ -551,13 +521,11 @@ class SelectionTest(unittest.TestCase):
         # Both systems also run the bounded Debug failure-provenance subset;
         # neither composed gate executes the Debug artifact through it.
         result = select(["src/store.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["check", "dispatch-debug-integration"])
-        self.assertEqual(result["native_targets"], ["dispatch-debug-integration", "test"])
+        for family in ("targets", "native_targets"):
+            self.assertTrue({"dispatch-debug-integration", "dispatch-integration", "test"} <= set(result[family]))
+            self.assertNotIn("check", result[family])
+            self.assertNotIn("human-cli-integration", result[family])
         self.assertTrue(result["native_required"])
-        combined = select(["src/store.zig", "src/server.zig"], "review", AVAILABLE)
-        self.assertEqual(combined["native_targets"], ["admission-debug-integration", "check",
-                                                     "codex-h2-integration", "dispatch-debug-integration",
-                                                     "transport-h2-integration"])
         full = select(["src/store.zig", "build.zig"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
             self.assertIn("dispatch-debug-integration", full[family])
@@ -584,11 +552,11 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(result["targets"], sorted(native + ["stack-frames"]))
 
     def test_union_deduplicates_only_checks_owned_by_broad_gate(self):
-        result = select(["src/store.zig", "src/codex_credentials.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["check", "codex-credential-integration", "codex-h2-integration",
-                                             "dispatch-debug-integration"])
-        self.assertEqual(result["native_targets"], ["codex-credential-integration", "codex-h2-integration", "codex-integration",
-                                                    "dispatch-debug-integration", "test"])
+        result = select(["tests/integration/host_process.py", "src/codex_credentials.zig"], "review", AVAILABLE)
+        for family in ("targets", "native_targets"):
+            self.assertIn("check", result[family])
+            self.assertTrue({"codex-credential-integration", "codex-h2-integration"} <= set(result[family]))
+            self.assertFalse(set(result[family]) & CHECK_COVERS)
 
     def test_build_changes_keep_long_and_debug_checks(self):
         result = select(["build.zig"], "review", AVAILABLE)
@@ -602,9 +570,8 @@ class SelectionTest(unittest.TestCase):
         self.assertNotIn("login-signal-integration", result["native_targets"])
 
     def test_transport_inputs_keep_both_native_h2_owners(self):
-        for path in ("src/build_transport.sh", "build.zig.zon",
-                     "tests/integration/codex_h2_integration.py", "tests/integration/codex_integration.py",
-                     "tests/integration/transport_h2_integration.py", "tests/integration/transport_h2_integration_test.py"):
+        for path in ("src/build_transport.sh", "build.zig.zon", "src/os/socket.zig",
+                     "tests/integration/codex_h2_integration.py", "tests/integration/transport_h2_integration.py"):
             result = select([path], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertIn("transport-h2-integration", result[family])
@@ -668,38 +635,45 @@ class SelectionTest(unittest.TestCase):
     def test_model_scenarios_do_not_select_shared_fixture_consumers(self):
         result = select(["tests/integration/dispatch_integration.py"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
-            self.assertEqual(result[family], ["dispatch-debug-integration", "dispatch-integration"])
+            self.assertTrue({"dispatch-debug-integration", "dispatch-integration"} <= set(result[family]))
+            self.assertNotIn("check", result[family])
+            self.assertNotIn("control-integration", result[family])
 
-    def test_standalone_helper_routes_add_without_losing_existing_consumers(self):
-        for path, owner in (("host_process.py", "check"),
-                            ("control_integration.py", "check"),
-                            ("canonical_failure_integration.py", "canonical-failure-integration")):
-            result = select([f"tests/integration/{path}"], "review", AVAILABLE)
-            for family in ("targets", "native_targets"):
-                self.assertIn(owner, result[family])
+    def test_helper_modules_select_the_fixtures_that_import_them(self):
+        # A helper selects every fixture that imports it, and check once it
+        # reaches every case check runs; a fixture module another fixture
+        # imports selects that fixture, not the importer's whole suite.
+        for path, owners in (("host_process.py", {"check", "launch-frame-integration", "ts-client"}),
+                             ("control_integration.py", {"control-integration", "human-cli-integration",
+                                                         "dispatch-integration", "transport-h2-integration"}),
+                             ("canonical_failure_integration.py", {"human-cli-integration", "request-wait-integration"})):
+            with self.subTest(path=path):
+                result = select([f"tests/integration/{path}"], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertTrue(owners <= set(result[family]), sorted(owners - set(result[family])))
+        control = select(["tests/integration/control_integration.py"], "review", AVAILABLE)["targets"]
+        self.assertNotIn("check", control)
 
     def test_shared_fixture_helpers_keep_composed_and_separate_consumers(self):
-        for name in ("control_integration.py", "model_fixture.py", "host_process.py"):
+        for name in ("host_process.py",):
             path = f"tests/integration/{name}"
-            standalone = {"codex-h2-integration", "transport-h2-integration", "server-delivery-integration"}
-            if name != "control_integration.py":
-                standalone.add("current-facts-integration")
+            standalone = {"codex-h2-integration", "transport-h2-integration", "server-delivery-integration",
+                          "current-facts-integration"}
             for composed, paths in (("check", [path]), ("check-full", [path, "build.zig"])):
                 with self.subTest(name=name, composed=composed):
                     result = select(paths, "review", AVAILABLE)
-                    self.assertTrue({composed, *standalone} <= set(result["targets"]))
-                    native = standalone | {composed}
-                    self.assertTrue(native <= set(result["native_targets"]))
                     for family in ("targets", "native_targets"):
+                        self.assertTrue({composed, *standalone} <= set(result[family]))
                         self.assertNotIn("control-integration", result[family])
 
     def test_canonical_failure_is_covered_by_the_composed_human_cli_gate(self):
         path = "tests/integration/canonical_failure_integration.py"
         alone = select([path], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
-            self.assertIn("canonical-failure-integration", alone[family])
+            self.assertIn("human-cli-integration", alone[family])
+            self.assertNotIn("canonical-failure-integration", alone[family])
             self.assertNotIn("check", alone[family])
-        for composed in ("src/server.zig", "build.zig"):
+        for composed in ("tests/integration/host_process.py", "build.zig"):
             combined = select([path, composed], "review", AVAILABLE)
             for family in ("targets", "native_targets"):
                 self.assertNotIn("canonical-failure-integration", combined[family])
@@ -741,10 +715,13 @@ class SelectionTest(unittest.TestCase):
             self.assertEqual(harnesses - {"tests/integration/terminal_restoration_integration.py"},
                              set(RENDERER_HARNESSES))
         for path in ("tests/integration/input_equivalence.py", "tests/integration/session_sequence_model.py",
-                     "tests/integration/session_sequence_model_test.py", "tests/integration/terminal_input_replay.py"):
+                     "tests/integration/session_sequence_model_test.py"):
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
                 self.assertEqual(result["targets"] + result["native_targets"], [])
+        # A blocking fixture that imports a harness runs when it changes.
+        self.assertIn("human-cli-integration",
+                      select(["tests/integration/terminal_input_replay.py"], "review", AVAILABLE)["targets"])
 
     def test_missing_required_target_is_an_error_not_a_skip(self):
         with self.assertRaisesRegex(ValueError, "absent"):
@@ -754,35 +731,34 @@ class SelectionTest(unittest.TestCase):
         # Select each path alone: a simultaneous CLI or logic-root edit must not
         # mask missing coverage when a later change touches only the new owner.
         cases = {
-            "src/new_session_selection.zig": ["admission-debug-integration", "check", "test-logic"],
-            "src/preference_values.zig": ["admission-debug-integration", "check", "test-logic"],
-            "src/provider_selection.zig": ["admission-debug-integration", "check", "test-logic"],
-            "src/model_capability.zig": ["dispatch-integration", "test", "test-logic", "transport-h2-integration"],
+            "src/new_session_selection.zig": {"admission-debug-integration", "human-cli-integration", "test-logic"},
+            "src/preference_values.zig": {"admission-debug-integration", "admission-integration", "test-logic"},
+            "src/provider_selection.zig": {"admission-debug-integration", "test-logic"},
+            "src/model_capability.zig": {"dispatch-integration", "test", "test-logic", "transport-h2-integration"},
         }
         for path, expected in cases.items():
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE)
-                self.assertEqual(result["native_targets"], expected)
-                # check runs stack-frames itself; Linux selects it beside narrower owners.
-                frames = [] if "check" in expected else ["stack-frames"]
-                self.assertEqual(result["targets"], sorted(expected + frames))
-                combined = select([path, "src/server.zig"], "review", AVAILABLE)
+                self.assertTrue(expected <= set(result["native_targets"]), sorted(expected - set(result["native_targets"])))
+                self.assertNotIn("check", result["targets"])
+                combined = select([path, "tests/integration/host_process.py"], "review", AVAILABLE)
                 for family in ("targets", "native_targets"):
                     self.assertIn("test-logic", combined[family])
                     self.assertIn("check", combined[family])
 
     def test_preference_owner_and_fixture_use_canonical_membership(self):
         result = select(["src/preferences.zig"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["admission-debug-integration", "check"])
-        self.assertEqual(result["native_targets"], ["admission-debug-integration", "check"])
+        for family in ("targets", "native_targets"):
+            self.assertTrue({"admission-debug-integration", "preference-policy-integration"} <= set(result[family]))
         for path in ("tests/integration/preference_policy_integration.py",
                      "tests/integration/preference_policy.zig"):
             result = select([path], "review", AVAILABLE)
             self.assertEqual(result["targets"], ["preference-policy-integration"])
             self.assertEqual(result["native_targets"], ["preference-policy-integration"])
-            combined = select([path, "src/protocol.zig"], "review", AVAILABLE)
-            self.assertEqual(combined["targets"], ["check", "measurement-check"])
-            self.assertEqual(combined["native_targets"], ["check", "measurement-check"])
+            combined = select([path, "tests/integration/host_process.py"], "review", AVAILABLE)
+            for family in ("targets", "native_targets"):
+                self.assertIn("check", combined[family])
+                self.assertNotIn("preference-policy-integration", combined[family])
 
     def test_installer_report_runs_the_fixture_that_pins_its_json_reader(self):
         result = select(["release/publish.sh"], "review", AVAILABLE)
@@ -791,15 +767,42 @@ class SelectionTest(unittest.TestCase):
         self.assertTrue(result["mac_required"])
 
     def test_existing_fixture_target_and_new_fixture_fallback(self):
-        result = select(["tests/integration/host_stop_integration.py"], "review", AVAILABLE)
-        self.assertEqual(result["targets"], ["host-stop-integration"])
+        targets = select(["tests/integration/host_stop_integration.py"], "review", AVAILABLE)["targets"]
+        self.assertIn("host-stop-integration", targets)
+        self.assertNotIn("check", targets)
+
+    def test_each_fixture_script_alone_selects_its_target(self):
+        for target, (scripts, executables, _) in FIXTURES.items():
+            for path in (*scripts, *executables):
+                with self.subTest(target=target, path=path):
+                    result = select([path], "review", AVAILABLE)
+                    covering = {broad for broad, cases in FIXTURE_COVERS.items() if target in cases}
+                    self.assertTrue(({target} | covering | {"check", "check-full"}) & set(result["targets"]))
+
+    def test_every_script_the_build_runs_is_a_declared_fixture(self):
+        # A script outside FIXTURES would reach no target through the graph.
+        declared = {script for scripts, _, _ in FIXTURES.values() for script in scripts}
+        named = set(re.findall(r'"(tests/integration/[\w]+\.(?:py|sh))"', Path("build.zig").read_text()))
+        runners = {"tests/integration/check.sh", "tests/integration/host_process.py"}
+        undeclared = {path for path in named - declared - runners if not matches(path, RENDERER_HARNESSES)}
+        self.assertEqual(undeclared, set())
+        for target in FIXTURES:
+            self.assertIn(target, AVAILABLE)
+
+    def test_a_named_import_the_graph_cannot_resolve_is_refused(self):
+        files = {"src/logic_tests.zig": "const cores = .{\n};\n",
+                 "src/cli.zig": 'const future = @import("future_module");\n'}
+        with self.assertRaisesRegex(ValueError, "future_module"):
+            Graph(files, files.__getitem__)
 
     def test_h2_fixture_and_companion_keep_both_owning_targets(self):
-        for path in ("tests/integration/transport_h2_integration.py",
-                     "tests/integration/transport_h2_integration_test.py"):
+        # codex-h2 imports the transport fixture; its companion test is the transport target's own.
+        for path, expected in (("tests/integration/transport_h2_integration.py",
+                                ["codex-h2-integration", "transport-h2-integration"]),
+                               ("tests/integration/transport_h2_integration_test.py", ["transport-h2-integration"])):
             result = select([path], "review", AVAILABLE)
-            self.assertEqual(result["targets"], ["codex-h2-integration", "transport-h2-integration"])
-            self.assertEqual(result["native_targets"], ["codex-h2-integration", "transport-h2-integration"])
+            self.assertEqual(result["targets"], expected)
+            self.assertEqual(result["native_targets"], expected)
 
     def test_public_read_fixture_and_client_select_owner_once(self):
         for owner in ("activity",):
@@ -808,9 +811,10 @@ class SelectionTest(unittest.TestCase):
                 result = select([path], "review", AVAILABLE)
                 self.assertEqual(result["targets"], [f"{owner}-integration"])
                 self.assertEqual(result["native_targets"], [f"{owner}-integration"])
-                combined = select([path, "src/protocol.zig"], "review", AVAILABLE)
-                self.assertEqual(combined["targets"], ["check", "measurement-check"])
-                self.assertEqual(combined["native_targets"], ["check", "measurement-check"])
+                combined = select([path, "tests/integration/host_process.py"], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertIn("check", combined[family])
+                    self.assertNotIn(f"{owner}-integration", combined[family])
 
     def test_admission_owners_keep_complete_debug_matrix(self):
         for path in ("src/server.zig", "src/server_execution.zig", "src/server_host.zig",
