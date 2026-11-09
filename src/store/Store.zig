@@ -16,7 +16,8 @@ const content_string = @import("../content_string.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const model_capability = @import("../model_capability.zig");
 const session_id = @import("../session_id.zig");
-const wire_request = @import("../wire_request.zig");
+const content_custody = @import("../content_custody.zig");
+const command_input = @import("../command_input.zig");
 const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const action_domain = @import("domain/action.zig");
@@ -630,7 +631,7 @@ pub const Store = struct {
     /// not serve its Session's provider.
     pub fn configure(
         self: *Store,
-        command: *const wire_request.ConfigureCommand,
+        command: *const content_custody.ConfigureCommand,
         faults: Faults,
     ) ConfigureReply {
         return self.configureWithInitialSkills(command, null, null, faults);
@@ -641,24 +642,24 @@ pub const Store = struct {
     /// Borrows `preset` until the synchronous queued write returns.
     pub fn configureWithPreset(
         self: *Store,
-        command: *const wire_request.ConfigureCommand,
+        command: *const content_custody.ConfigureCommand,
         preset: *const configuration_domain.PresetDecision,
         faults: Faults,
     ) ConfigureReply {
         return self.configureWithInitialSkills(command, preset, null, faults);
     }
 
-    pub fn configureWithInitialSkills(self: *Store, command: *const wire_request.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) ConfigureReply {
+    pub fn configureWithInitialSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, faults: Faults) ConfigureReply {
         return self.configureWithCapturedSkills(command, preset, initial_skills, null, faults);
     }
 
-    pub fn configureWithCapturedSkills(self: *Store, command: *const wire_request.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) ConfigureReply {
+    pub fn configureWithCapturedSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, faults: Faults) ConfigureReply {
         return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, faults });
     }
 
     fn configureHeld(
         self: *Store,
-        command: *const wire_request.ConfigureCommand,
+        command: *const content_custody.ConfigureCommand,
         preset: ?*const configuration_domain.PresetDecision,
         initial_skills: ?*const skills_domain.Initial,
         reload_capture: ?*const skills_domain.Capture,
@@ -694,24 +695,24 @@ pub const Store = struct {
     /// Session's provider before creating anything.
     pub fn submitMessageWithModel(
         self: *Store,
-        command: *const wire_request.MessageCommand,
+        command: *const content_custody.MessageCommand,
         committed: ?MessageCommitted,
         faults: Faults,
     ) MessageReply {
         return self.submitMessageWithInitialSkills(command, committed, null, faults);
     }
 
-    pub fn submitMessageWithInitialSkills(self: *Store, command: *const wire_request.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) MessageReply {
+    pub fn submitMessageWithInitialSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) MessageReply {
         return self.submitMessageCapturedSkills(command, committed, initial_skills, null, faults);
     }
 
-    pub fn submitMessageCapturedSkills(self: *Store, command: *const wire_request.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.Capture, faults: Faults) MessageReply {
+    pub fn submitMessageCapturedSkills(self: *Store, command: *const content_custody.MessageCommand, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, captured_skill: ?*const skills_domain.Capture, faults: Faults) MessageReply {
         return self.queue().write(submitMessageWithModelHeld, .{ self, command, committed, initial_skills, captured_skill, faults });
     }
 
     fn submitMessageWithModelHeld(
         self: *Store,
-        command: *const wire_request.MessageCommand,
+        command: *const content_custody.MessageCommand,
         committed: ?MessageCommitted,
         initial_skills: ?*const skills_domain.Initial,
         captured_skill: ?*const skills_domain.Capture,
@@ -726,7 +727,7 @@ pub const Store = struct {
 
     pub fn stopSession(
         self: *Store,
-        command: *const protocol.SessionStopCommand,
+        command: *const command_input.SessionStopCommand,
         faults: Faults,
     ) SessionStopReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
@@ -735,7 +736,7 @@ pub const Store = struct {
 
     fn stopSessionHeld(
         self: *Store,
-        command: *const protocol.SessionStopCommand,
+        command: *const command_input.SessionStopCommand,
         faults: Faults,
     ) SessionStopReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
@@ -745,12 +746,12 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.stopSession(&access, command, faults))) catch .infrastructure_failure;
     }
 
-    pub fn archiveSession(self: *Store, command: *const protocol.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
+    pub fn archiveSession(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
         return self.queue().write(archiveSessionHeld, .{ self, command, faults });
     }
 
-    fn archiveSessionHeld(self: *Store, command: *const protocol.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
+    fn archiveSessionHeld(self: *Store, command: *const command_input.SessionArchiveCommand, faults: Faults) SessionArchiveReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
@@ -759,11 +760,11 @@ pub const Store = struct {
     }
 
     /// The stop an attached child owes (D38), as `nextCoreWork` names it.
-    pub fn stopOwedSession(self: *Store, command: *const protocol.SessionStopCommand, faults: Faults) SessionStopReply {
+    pub fn stopOwedSession(self: *Store, command: *const command_input.SessionStopCommand, faults: Faults) SessionStopReply {
         return self.queue().write(stopOwedSessionHeld, .{ self, command, faults });
     }
 
-    fn stopOwedSessionHeld(self: *Store, command: *const protocol.SessionStopCommand, faults: Faults) SessionStopReply {
+    fn stopOwedSessionHeld(self: *Store, command: *const command_input.SessionStopCommand, faults: Faults) SessionStopReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
         defer entry.release();
         var access: Access(.write, error{ InterruptionTargetChanged, StopSelectionChanged }) = .open(&entry);
@@ -773,7 +774,7 @@ pub const Store = struct {
 
     pub fn interruptModel(
         self: *Store,
-        command: *const protocol.ModelInterruptionCommand,
+        command: *const command_input.ModelInterruptionCommand,
         faults: Faults,
     ) ModelInterruptionReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
@@ -782,7 +783,7 @@ pub const Store = struct {
 
     fn interruptModelHeld(
         self: *Store,
-        command: *const protocol.ModelInterruptionCommand,
+        command: *const command_input.ModelInterruptionCommand,
         faults: Faults,
     ) ModelInterruptionReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
@@ -794,7 +795,7 @@ pub const Store = struct {
 
     pub fn decidePermission(
         self: *Store,
-        command: *const protocol.PermissionDecisionCommand,
+        command: *const command_input.PermissionDecisionCommand,
         faults: Faults,
     ) PermissionDecisionReply {
         EntryTrace.fromControl(faults.control_trace).mark(.requested);
@@ -803,7 +804,7 @@ pub const Store = struct {
 
     fn decidePermissionHeld(
         self: *Store,
-        command: *const protocol.PermissionDecisionCommand,
+        command: *const command_input.PermissionDecisionCommand,
         faults: Faults,
     ) PermissionDecisionReply {
         const entry = enter(self, .fromControl(faults.control_trace)) catch return .infrastructure_failure;
@@ -1295,15 +1296,15 @@ pub const Store = struct {
     /// Runs the `start_agent` call `binding` names with its checked
     /// arguments, in one transaction; `configuration` is the agent's spec,
     /// which this completes. `committed` runs once the task is admitted.
-    pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *wire_request.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
+    pub fn startAgent(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, faults: Faults) !AgentStart {
         return self.startAgentWithInitialSkills(binding, caller, task, attached, configuration, committed, null, faults);
     }
 
-    pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *wire_request.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
+    pub fn startAgentWithInitialSkills(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
         return self.queue().write(startAgentHeld, .{ self, binding, caller, task, attached, configuration, committed, initial_skills, faults });
     }
 
-    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *wire_request.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
+    fn startAgentHeld(self: *Store, binding: ActionAttemptBinding, caller: []const u8, task: []const u8, attached: bool, configuration: *content_custody.Configuration, committed: ?MessageCommitted, initial_skills: ?*const skills_domain.Initial, faults: Faults) !AgentStart {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.agent_start) = .open(&entry);
