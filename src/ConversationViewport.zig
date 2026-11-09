@@ -156,6 +156,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// starts with `┆`, so no row of that text can pass for a field, nor
         /// a wrapped row for a new `│` line.
         quotes: bool = false,
+        /// Counts clears: offsets from before one name other text.
+        replacements: u32 = 0,
 
         pub fn append(self: *Self, input: []const u8) !void {
             if (!styled) return self.appendText(input);
@@ -297,6 +299,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         pub fn clear(self: *Self) void {
+            self.replacements +%= 1;
             self.length = 0;
             self.origin = 0;
             self.top = null;
