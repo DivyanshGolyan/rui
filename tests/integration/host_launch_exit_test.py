@@ -154,15 +154,12 @@ def check_process_discovery(cleanup):
 
 
 @contextmanager
-def child_pty(source, *, close_slave=False):
+def child_pty(source):
     master, slave = open_pty()
     caller = None
     try:
         caller = spawn([sys.executable, "-c", source],
             stdin=subprocess.DEVNULL, stdout=slave, stderr=slave)
-        if close_slave:
-            os.close(slave)
-            slave = None
         yield caller, master
     finally:
         try:
@@ -175,6 +172,27 @@ def child_pty(source, *, close_slave=False):
             finally:
                 if slave is not None:
                     os.close(slave)
+
+
+@contextmanager
+def child_pipe(source):
+    """A child whose stdout is a pipe the caller reads, as a PTY master."""
+    read, write = os.pipe()
+    caller = None
+    try:
+        caller = subprocess.Popen([sys.executable, "-c", source], stdin=subprocess.DEVNULL, stdout=write)
+        os.close(write)
+        write = None
+        yield caller, read
+    finally:
+        try:
+            if caller is not None and caller.poll() is None:
+                caller.kill()
+                caller.wait(timeout=5)
+        finally:
+            os.close(read)
+            if write is not None:
+                os.close(write)
 
 
 def check_exit_reader(wait_for_exit):
@@ -219,8 +237,10 @@ raise SystemExit(17)
         assert caller.returncode == 17, "reader did not reap actual caller outcome"
 
     # EOF is not child exit. Observe the actual monotonic operand to require
-    # exactly the remaining allowance, not a fresh five seconds at reap.
-    with child_pty("import os,time; os.close(1); os.close(2); time.sleep(30)", close_slave=True) as (caller, master):
+    # exactly the remaining allowance, not a fresh five seconds at reap. A
+    # terminal's session leader keeps its PTY open, so the master never reads
+    # EOF while the child lives; a pipe gives the reader the same EOF.
+    with child_pipe("import os,time; os.close(1); time.sleep(30)") as (caller, master):
         deadline = time.monotonic() + 0.2
         original_wait = caller.wait
         original_clock = time.monotonic
