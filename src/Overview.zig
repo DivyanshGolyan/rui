@@ -32,6 +32,7 @@ const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalInput = @import("TerminalInput.zig");
 const TerminalText = @import("TerminalText.zig");
 const keymap = @import("keymap.zig");
+const session_view = @import("session_view.zig");
 const model_capability = @import("model_capability.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const preferences = @import("preferences.zig");
@@ -91,6 +92,10 @@ pub const Operations = struct {
     list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
     /// The first line of a Session's first Message, read into `buffer`.
     first_line: *const fn (*Self, client.Requests, []const u8, u64, []u8) anyerror!protocol_reply.ActivityPrefixReply,
+    /// The leading bytes of the command a waiting Action would run, read
+    /// into `buffer`; null when the read is refused or its tool has no
+    /// command to show.
+    action_command: *const fn (*Self, client.Requests, []const u8, u64, []u8) anyerror!?[]const u8,
     /// Write the request's fate into the Reply, and return the error that
     /// ends the overview after a canonical Store failure.
     start: *const fn (*Self, client.Requests, client.MessageInput, *Reply) anyerror!void,
@@ -108,7 +113,7 @@ pub const Operations = struct {
     converse: *const fn (*Self, view.Reference) ?Left,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .save_default = saveDefault, .command = runCommand, .converse = converse };
+pub const client_operations: Operations = .{ .host = hostFacts, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .save_default = saveDefault, .command = runCommand, .converse = converse };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -220,6 +225,7 @@ const Job = union(enum) {
     /// The traversal's next page.
     list,
     lines: view.Reads,
+    commands: view.Commands,
     /// Owns what Enter captured: nothing the core or the composer holds is
     /// read on the worker's thread.
     start: view.OwnedStart,
@@ -236,7 +242,7 @@ const Job = union(enum) {
     /// retire early. Both archive and restore are the same mutation job.
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
-            .host, .list, .lines, .models => .cancel_read,
+            .host, .list, .lines, .commands, .models => .cancel_read,
             .start, .stop, .archive, .save, .command => .settle_effect,
         };
     }
@@ -253,14 +259,16 @@ const Job = union(enum) {
 };
 
 /// One host read and list page, at most one first-line batch, one
-/// model-list read, one save, one command and the requests the core's
-/// ledger allows can wait at once.
-const max_jobs = 6 + view.max_requests;
+/// command-read batch, one model-list read, one save, one command and the
+/// requests the core's ledger allows can wait at once.
+const max_jobs = 7 + view.max_requests;
 
 /// The longest the first frame waits for the terminal's background.
 const background_wait_ms = 200;
 
 const Line = struct { bytes: [view.max_line_read_bytes]u8 = undefined, result: enum { line, refused, unanswered } = .unanswered, len: usize = 0 };
+
+const Command = struct { bytes: [view.max_line_read_bytes]u8 = undefined, text: ?[]const u8 = null, answered: bool = false };
 
 /// A command's output: one byte past what the core takes tells it was cut.
 const Output = struct {
@@ -324,6 +332,8 @@ traversal_archive: protocol.SessionArchiveFilter = .active,
 host: ?view.Host = null,
 page: protocol_reply.SessionListPage = undefined,
 lines: [view.max_first_line_reads]Line = @splat(.{}),
+/// Each command read's leading bytes, null when it has none to show.
+commands: [view.max_first_line_reads]Command = @splat(.{}),
 reply: Reply = .{},
 /// The menu a model-list read built, until the core takes it.
 menu: model_picker.Menu = .{},
@@ -580,6 +590,7 @@ fn event(self: *Self, value: view.Event) !?Next {
             self.queue(.list);
         },
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
+        .read_commands => |reads| self.queue(.{ .commands = reads }),
         .start => |request| self.queue(.{ .start = try request.own(self.init.gpa) }),
         .stop => |reference| self.queue(.{ .stop = reference }),
         .upgrade => {
@@ -710,6 +721,14 @@ fn runJob(self: *Self, requests: client.Requests) !void {
                 },
             };
         },
+        .commands => |reads| {
+            const commands = self.commands[0..reads.len];
+            for (commands) |*command| command.* = .{};
+            for (reads.slice(), commands) |read, *command| {
+                command.text = try self.ops.action_command(self, requests, &read.reference, read.action, &command.bytes);
+                command.answered = true;
+            }
+        },
         .start => |*start| {
             // An unreadable saved effort sends nothing, as a failed capture does.
             var compaction_buffer: [20]u8 = undefined;
@@ -779,6 +798,10 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         .lines => |reads| for (reads.slice(), self.lines[0..reads.len]) |read, *line| {
             const result: view.FirstLine = .{ .reference = read.reference, .admission = read.admission, .line = if (line.result == .line) line.bytes[0..line.len] else null, .unanswered = line.result == .unanswered };
             if (try self.event(.{ .first_line = result })) |next| return next;
+        },
+        // A batch that failed partway leaves the rest unanswered.
+        .commands => |reads| for (reads.slice(), self.commands[0..reads.len]) |read, *command| {
+            if (try self.event(.{ .command = .{ .reference = read.reference, .action = read.action, .text = command.text, .unanswered = !command.answered } })) |next| return next;
         },
         .start => {
             if (self.reply.outcome == .accepted) self.started = self.reply.session;
@@ -1359,6 +1382,26 @@ fn firstLine(self: *Self, requests: client.Requests, session: []const u8, positi
     return requests.readActivityPrefix(self.options.store, session, position, buffer);
 }
 
+/// The leading bytes of a waiting Bash Action's command, read as the
+/// conversation reads an Action: its tool first, then its arguments. Null
+/// for any other tool, an Action resolved since the listing, or a refused
+/// read.
+fn actionCommand(self: *Self, requests: client.Requests, session: []const u8, action: u64, buffer: []u8) !?[]const u8 {
+    const io = self.init.io;
+    const file = self.scratch.?;
+    const tool = try session_view.actionTool(requests, self.options.store, session, action, file) orelse return null;
+    // Action reads write at the descriptor's streaming offset.
+    try io.vtable.fileSeekTo(io.userdata, file, 0);
+    try file.setLength(io, 0);
+    var reply: client.ReplyBuffer = .{};
+    const result = try requests.readActionArguments(self.options.store, session, action, file, &reply);
+    if (result == .command) {
+        try protocol_reply.checkCanonicalFailure(result.command);
+        return null;
+    }
+    return session_view.bashCommand(io, file, &tool, buffer);
+}
+
 fn startSession(self: *Self, requests: client.Requests, input: client.MessageInput, reply: *Reply) !void {
     const io = self.init.io;
     // A capture that fails sends nothing, so the text can be sent again.
@@ -1488,6 +1531,13 @@ const fake_operations: Operations = .{
             return .{ .line = buffer[0..text.len] };
         }
     }.firstLine,
+    .action_command = struct {
+        fn actionCommand(_: *Self, _: client.Requests, _: []const u8, _: u64, buffer: []u8) !?[]const u8 {
+            const text = "zig build test-store";
+            @memcpy(buffer[0..text.len], text);
+            return buffer[0..text.len];
+        }
+    }.actionCommand,
     .start = struct {
         fn start(_: *Self, _: client.Requests, input: client.MessageInput, reply: *Reply) !void {
             const settings = input.configuration.?;
