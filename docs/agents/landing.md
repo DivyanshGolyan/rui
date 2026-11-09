@@ -1,7 +1,7 @@
 # Land a change
 
 [AGENTS.md](../../AGENTS.md#authority) owns authorization and the [standing landing grant](../../AGENTS.md#landing).
-[Landing cadence](../../VERIFICATION.md#landing-cadence) owns candidate admission, releases, strict paths and recovery.
+[Landing cadence](../../VERIFICATION.md#landing-cadence) owns candidate admission, promotion, releases, strict paths and recovery.
 
 ## Publish and merge
 
@@ -15,7 +15,7 @@ Green means the required `admission` check completed successfully for the curren
 [The main ruleset](../../.github/main-ruleset.json) records the required GitHub enforcement.
 Its active remote configuration must match before the publication cutover.
 Pending, skipped, cancelled or earlier-head success is not green.
-A green PR squash-merges without waiting for review signoff or repeated correctness checks after main.
+A green PR squash-merges without waiting for review signoff or a promotion.
 Follow [Review](../../CODING_STANDARDS.md#review) for Codex requests and findings.
 Ship later fixes as follow-up PRs.
 
@@ -42,4 +42,11 @@ For bot-filed issues, the coordinating agent hands the fix to the thread that ow
 
 Before opening a fix, search open CI issues for the touched fixture and include `Fixes #N` for each issue it fixes.
 Issues record defects; they do not form a separate publication gate.
-Diagnose publication failures in the single Release workflow, and recover the same release without rerunning product correctness.
+
+## Promote
+
+Promotion publishes a release and advances `stable`; merging never does.
+Ask the user before dispatching it: `gh workflow run promote.yml --ref main`.
+A red promotion names, on each `promotion-red` issue it files, the first batch commit where that job fails; when a job has several causes, another may come from a later commit.
+Fix forward through an ordinary PR, then promote again.
+Recover an interrupted publication by rerunning that promotion's failed jobs, which reuses the same release identity.

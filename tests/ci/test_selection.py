@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from textwrap import dedent
 from unittest.mock import patch
 
-from select_tests import (CACHE_POLICY, CHECK_COVERS, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES, RENDERER_HARNESSES,
+from select_tests import (CACHE_POLICY, CHECK_COVERS, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES, POLICY_SELF_CHECKS, RENDERER_HARNESSES,
                           RULES, execution_batches, matches, select, setup_requirements)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
@@ -204,6 +204,14 @@ class SelectionTest(unittest.TestCase):
         for path in ("src/logic_tests.zig", "src/core_boundary.zig"):
             result = select([path], "review", AVAILABLE)
             self.assertEqual(result["targets"], ["stack-frames", "test-logic"])
+
+    def test_native_unit_aggregate_selects_its_root_not_check(self):
+        alone = select(["src/tests.zig"], "review", AVAILABLE)
+        self.assertEqual((alone["targets"], alone["native_targets"]), (["stack-frames", "test"], ["test"]))
+        # What it newly lists still selects its owner's checks, or check when unmapped.
+        owned = select(["src/tests.zig", "src/mcp/Running.zig"], "review", AVAILABLE)["targets"]
+        self.assertEqual(owned, ["launch-frame-integration", "stack-frames", "test", "test-logic"])
+        self.assertIn("check", select(["src/tests.zig", "src/provider_output.zig"], "review", AVAILABLE)["targets"])
 
     def test_shared_context_text_keeps_all_request_oracle_consumers(self):
         consumers = {
@@ -688,6 +696,23 @@ class SelectionTest(unittest.TestCase):
             for family in ("targets", "native_targets"):
                 self.assertNotIn("canonical-failure-integration", combined[family])
                 self.assertIn("current-facts-integration", combined[family])
+
+    def test_policy_self_checks_run_only_when_their_inputs_change(self):
+        driver, admission, publication, artifact = (unit for unit, _ in POLICY_SELF_CHECKS)
+        for paths, run in (
+                (["src/cli.zig", "src/store/Store.zig", "tests/integration/human_cli_integration.py",
+                  "README.md", "clients/ts/src/wire.ts"], set()),
+                (["tests/ci/select_tests.py"], {driver, admission, publication, artifact}),
+                (["tests/ci/requirements.txt"], {driver, admission, publication, artifact}),
+                (["build.zig"], {driver, admission}),
+                ([".github/workflows/release.yml"], {admission}),
+                (["src/protocol.zig"], {driver}),
+                (["tests/integration/check.sh"], {driver}),
+                (["tests/integration/host_process.py", "src/cli.zig"], {driver})):
+            for phase in ("development", "review"):
+                with self.subTest(paths=paths, phase=phase):
+                    skips = select(paths, phase, AVAILABLE)["policy_skips"]
+                    self.assertEqual(set(skips), {driver, admission, publication, artifact} - run)
 
     def test_ci_policy_does_not_make_build_qualification_universal(self):
         for path in (".github/workflows/check.yml",

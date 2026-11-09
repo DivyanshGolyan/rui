@@ -4,8 +4,8 @@
 Linux CI predicts Mac CI only while platform differences stay where a reader,
 and the selector, can find them. Only a Mac path may name the platform
 (`builtin.os`, `sys.platform`) or call a syscall whose Linux and Darwin
-semantics diverge. PRs run Mac Selected when they change a Mac path; stable
-still runs it on every main SHA.
+semantics diverge. PRs run Mac Selected when they change a Mac path; each
+promotion runs it before a release.
 """
 import argparse
 import fnmatch
