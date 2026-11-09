@@ -4,6 +4,7 @@ const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
+const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const tool_name = @import("../../tool_name.zig");
@@ -46,7 +47,7 @@ const max_action_resolution_code_bytes = action_domain.max_action_resolution_cod
 const max_permission_decision_bytes = command_domain.max_permission_decision_bytes;
 pub const ReadAccess = reads_domain.ReadAccess;
 const SessionText = Bounded(session_id.max_reference_bytes);
-const Code = Bounded(protocol.max_code_bytes);
+const Code = Bounded(outcome_code.max_bytes);
 
 pub const SessionReportExecution = struct {
     dispatch_fenced: bool,
@@ -1334,13 +1335,13 @@ pub const CurrentJson = struct {
         };
     };
     pub const Outcome = struct {
-        pub const json_shape = .{ "{\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = Reference }, "}" };
+        pub const json_shape = .{ "{\"code\":", H{ .string = outcome_code.max_bytes }, ",\"content\":", H{ .optional_json = Reference }, "}" };
     };
     pub const Work = struct {
         pub const json_shape = .{"{"} ++ protocol.SessionWork.fields ++ .{ ",\"latest_outcome\":", H{ .optional_json = Outcome }, "}" };
     };
     pub const Recent = struct {
-        pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .string = idempotency_key.max_bytes }, ",\"outcome\":", H{ .string = protocol.max_code_bytes }, "}" };
+        pub const json_shape = .{ "{\"turn\":\"", H.decimal, "\",\"message\":", H{ .string = idempotency_key.max_bytes }, ",\"outcome\":", H{ .string = outcome_code.max_bytes }, "}" };
     };
     pub const Unresolved = struct {
         pub const json_shape = .{ "{\"action\":\"", H.decimal, "\",\"parent_operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"tool\":\"", H{ .tag = built_in_tool.BuiltInTool }, "\",\"permission_revision\":\"", H.decimal, "\",\"authorization\":\"", H{ .tag = enum { core, pending, bypass, allow_once } }, "\",\"call_id\":", H{ .json = TextReference }, ",\"arguments\":", H{ .json = TextReference }, ",\"presentation\":", H{ .json = protocol.ToolPresentationJson }, "}" };
@@ -2505,7 +2506,7 @@ pub const full_messages = rsql.Page(.{
         turn_id: ?rsql.Positive,
         operation_id: ?rsql.Positive,
         attempt_ordinal: ?rsql.Positive,
-        outcome_code: ?Bounded(protocol.max_code_bytes),
+        outcome_code: ?Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         outcome_length: ?u64,
         outcome_digest: ?[32]u8,
@@ -2696,7 +2697,7 @@ const full_turns = rsql.Page(.{
         first_admission_id: rsql.Positive,
         input_cutoff: u64,
         operation_id: rsql.Positive,
-        outcome_code: ?Bounded(protocol.max_code_bytes),
+        outcome_code: ?Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         outcome_length: ?u64,
         outcome_digest: ?[32]u8,
@@ -2743,7 +2744,7 @@ const full_operations = rsql.Page(.{
     .Row = struct {
         operation_id: rsql.Positive,
         turn_id: rsql.Positive,
-        resolution_code: ?Bounded(protocol.max_code_bytes),
+        resolution_code: ?Bounded(outcome_code.max_bytes),
         resolution_content_id: ?rsql.Positive,
         resolution_length: ?u64,
         resolution_digest: ?[32]u8,

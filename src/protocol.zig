@@ -6,6 +6,7 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const outcome_code = @import("outcome_code.zig");
 const content_string = @import("content_string.zig");
 const tool_presentation = @import("tool_presentation.zig");
 const tool_name = @import("tool_name.zig");
@@ -37,11 +38,8 @@ pub const max_sender_handle_bytes = 32;
 /// Most bytes of client environment entries one Message carries.
 pub const max_environment_bytes = 64 * 1024;
 pub const max_model_bytes = model_capability.max_model_bytes;
-// Resolution, rejection and failure codes.
-pub const max_code_bytes = 96;
-/// A failed Turn outcome's report: the provider's code and message, each
-/// at most 256 bytes plus a shortened mark, and their separator.
-pub const max_report_bytes = 2 * 256 + ": ".len + 2 * "…".len;
+pub const max_code_bytes = outcome_code.max_bytes;
+pub const max_report_bytes = outcome_code.max_report_bytes;
 pub const max_tool_description_bytes = tool_presentation.max_description_bytes;
 pub const max_tool_name_bytes = tool_name.max_bytes;
 pub const max_tools = tool_name.max_tools;

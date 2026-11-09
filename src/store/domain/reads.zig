@@ -9,6 +9,7 @@ const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const protocol = @import("../../protocol.zig");
+const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
@@ -1463,7 +1464,7 @@ const send_failure = rsql.Read(.{
     .Row = struct {
         command_key: Bounded(idempotency_key.max_bytes),
         target: SessionText,
-        code: Bounded(protocol.max_code_bytes),
+        code: Bounded(outcome_code.max_bytes),
         consistent: bool,
         rejected_at: rsql.Positive,
     },
@@ -1483,7 +1484,7 @@ const turn_outcome = rsql.Read(.{
         session_ref: SessionText,
         turn_id: rsql.Positive,
         operation_id: rsql.Positive,
-        outcome_code: Bounded(protocol.max_code_bytes),
+        outcome_code: Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         consistent: bool,
         resolution_content_id: ?rsql.Positive,

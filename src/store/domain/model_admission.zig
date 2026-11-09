@@ -4,6 +4,7 @@
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
+const outcome_code = @import("../../outcome_code.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const provider_name = @import("../../provider_name.zig");
 const model_capability = @import("../../model_capability.zig");
@@ -171,7 +172,7 @@ const latest_turn = rsql.Read(.{
     .Args = struct { session: []const u8 },
     .Row = struct {
         purpose: u1,
-        resolution_code: ?Bounded(protocol.max_code_bytes),
+        resolution_code: ?Bounded(outcome_code.max_bytes),
         operation_id: rsql.Positive,
         active: bool,
         first_admission_id: rsql.Positive,
@@ -423,7 +424,7 @@ const admission_facts = rsql.Read(.{
         latest_first: ?rsql.Positive,
         latest_operation: ?rsql.Positive,
         latest_compaction: ?bool,
-        latest_resolution: ?Bounded(protocol.max_code_bytes),
+        latest_resolution: ?Bounded(outcome_code.max_bytes),
         instructions: u64,
     },
     .cardinality = .one,

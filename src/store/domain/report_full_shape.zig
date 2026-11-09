@@ -1,6 +1,7 @@
 //! Shapes for the Full report's hand-written, streaming rows in report.zig.
 //! Shared content references and enum domains retain their protocol owners.
 const protocol = @import("../../protocol.zig");
+const outcome_code = @import("../../outcome_code.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const cli_value = @import("../../cli_value.zig");
@@ -60,10 +61,10 @@ pub const Full = struct {
         };
     };
     pub const Outcome = struct {
-        pub const json_shape = .{ "{\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = Reference }, "}" };
+        pub const json_shape = .{ "{\"code\":", H{ .string = outcome_code.max_bytes }, ",\"content\":", H{ .optional_json = Reference }, "}" };
     };
     pub const Resolution = struct {
-        pub const json_shape = .{ "{\"code\":", H{ .string = protocol.max_code_bytes }, ",\"content\":", H{ .optional_json = Inline }, "}" };
+        pub const json_shape = .{ "{\"code\":", H{ .string = outcome_code.max_bytes }, ",\"content\":", H{ .optional_json = Inline }, "}" };
     };
     pub const Exclusion = struct {
         pub const json_shape = .{ "{\"code\":\"session_stopped\",\"command_key\":", H{ .string = idempotency_key.max_bytes }, "}" };

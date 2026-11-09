@@ -3,6 +3,7 @@
 //! and their tests need no Store.
 const std = @import("std");
 const protocol = @import("protocol.zig");
+const outcome_code = @import("outcome_code.zig");
 const tool_presentation = @import("tool_presentation.zig");
 const session_id = @import("session_id.zig");
 const Bounded = @import("bounded.zig").Bounded;
@@ -60,7 +61,7 @@ pub const MessageReply = union(enum) {
 pub const CommandObservation = struct {
     status: protocol.CommandObservationStatus,
     target: Bounded(session_id.max_reference_bytes) = .{},
-    code: Bounded(protocol.max_code_bytes) = .{},
+    code: Bounded(outcome_code.max_bytes) = .{},
     kind: union(cli_value.CommandKind) {
         configure: struct { revision: u64 = 0, created: bool = false },
         message: ?MessageObservation,
@@ -185,7 +186,7 @@ pub const AcceptedMessageQueue = struct {
 
     pub const State = union(enum) {
         queued,
-        excluded: struct { code: Bounded(protocol.max_code_bytes) },
+        excluded: struct { code: Bounded(outcome_code.max_bytes) },
         processing: AttemptBinding,
         completed: struct {
             binding: AttemptBinding,
@@ -193,11 +194,11 @@ pub const AcceptedMessageQueue = struct {
         },
         cancelled: struct {
             binding: AttemptBinding,
-            code: Bounded(protocol.max_code_bytes),
+            code: Bounded(outcome_code.max_bytes),
         },
         failed: struct {
             binding: AttemptBinding,
-            code: Bounded(protocol.max_code_bytes),
+            code: Bounded(outcome_code.max_bytes),
         },
     };
 };

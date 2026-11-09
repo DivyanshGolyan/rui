@@ -3,6 +3,7 @@
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
+const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
 const tool_name = @import("../../tool_name.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
@@ -178,7 +179,7 @@ const owed_ending = rsql.Read(.{
     .Row = struct {
         turn_id: rsql.Positive,
         session_ref: Bounded(session_id.bytes),
-        outcome_code: Bounded(protocol.max_code_bytes),
+        outcome_code: Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         byte_length: ?u64,
         digest: ?[32]u8,

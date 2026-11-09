@@ -5,6 +5,7 @@ const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const protocol = @import("../../protocol.zig");
+const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
@@ -52,7 +53,7 @@ pub const MessageReply = command_reply.MessageReply;
 
 pub const StoredAnswer = struct {
     accepted: bool,
-    code: Bounded(protocol.max_code_bytes) = .{},
+    code: Bounded(outcome_code.max_bytes) = .{},
     revision: u64 = 0,
     created: bool = false,
 };
@@ -83,7 +84,7 @@ const MessageProjection = struct {
         excluded: Bounded(128),
         applied: struct {
             binding: AttemptBinding,
-            outcome_code: ?Bounded(protocol.max_code_bytes),
+            outcome_code: ?Bounded(outcome_code.max_bytes),
             outcome_content_id: ?i64,
         },
     },
@@ -507,7 +508,7 @@ const owed_ending_facts = rsql.Read(.{
     .Row = struct {
         child: rsql.SessionHead,
         parent: Bounded(session_id.bytes),
-        outcome_code: Bounded(protocol.max_code_bytes),
+        outcome_code: Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         digest: ?[32]u8,
         stopped: bool,
@@ -1478,7 +1479,7 @@ const ExistingCommand = struct {
     target: Bounded(session_id.max_reference_bytes),
     digest: [32]u8,
     accepted: bool,
-    code: Bounded(protocol.max_code_bytes),
+    code: Bounded(outcome_code.max_bytes),
     revision: u64,
     created: bool,
     primary_content_id: ?i64,
@@ -1503,7 +1504,7 @@ pub const saved_command = rsql.Read(.{
         target: Bounded(session_id.max_reference_bytes),
         input_digest: [32]u8,
         accepted: bool,
-        code: Bounded(protocol.max_code_bytes),
+        code: Bounded(outcome_code.max_bytes),
         revision: u64,
         created: bool,
         primary_content_id: ?rsql.Positive,
@@ -1662,7 +1663,7 @@ const message_observation = rsql.Read(.{
         turn_id: ?rsql.Positive,
         operation_id: ?rsql.Positive,
         attempt_ordinal: ?rsql.Positive,
-        outcome_code: ?Bounded(protocol.max_code_bytes),
+        outcome_code: ?Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         excluding_stop: ?Bounded(128),
         input_length: u64,
@@ -1767,7 +1768,7 @@ fn messageQueue(row: *const message_observation.Row) !AcceptedMessageQueue {
     return switch (projection.state) {
         .pending => .{ .admission_id = projection.admission_id, .state = .queued },
         .excluded => blk: {
-            var code: Bounded(protocol.max_code_bytes) = .{};
+            var code: Bounded(outcome_code.max_bytes) = .{};
             try code.set("session_stopped");
             break :blk .{ .admission_id = projection.admission_id, .state = .{ .excluded = .{ .code = code } } };
         },
@@ -1849,7 +1850,7 @@ const message_result = rsql.Read(.{
         "(command.accepted=0 OR (command.kind=1 AND command.code IN ('skills_reloaded','skills_unchanged')))",
     .Args = struct { key: []const u8 },
     .Row = struct {
-        outcome_code: ?Bounded(protocol.max_code_bytes),
+        outcome_code: ?Bounded(outcome_code.max_bytes),
         outcome_content_id: ?rsql.Positive,
         stopped: bool,
         answer_length: ?u64,

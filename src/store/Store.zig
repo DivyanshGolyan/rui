@@ -7,6 +7,7 @@ const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
+const outcome_code = @import("../outcome_code.zig");
 const content_string = @import("../content_string.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const model_capability = @import("../model_capability.zig");
@@ -1500,7 +1501,7 @@ pub const Store = struct {
             std.debug.assert(detail.len <= 512 and std.unicode.utf8ValidateSlice(detail));
         }
         const report = failure.report();
-        std.debug.assert(report.len <= protocol.max_report_bytes and std.unicode.utf8ValidateSlice(report));
+        std.debug.assert(report.len <= outcome_code.max_report_bytes and std.unicode.utf8ValidateSlice(report));
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, Ordinary.attempt_binding) = .open(&entry);

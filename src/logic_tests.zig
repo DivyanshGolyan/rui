@@ -55,6 +55,7 @@ const cores = .{
     .{ "model_picker.zig", @import("model_picker.zig") },
     .{ "models_dev.zig", @import("models_dev.zig") },
     .{ "mutation_answer.zig", @import("mutation_answer.zig") },
+    .{ "outcome_code.zig", @import("outcome_code.zig") },
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "path_list.zig", @import("path_list.zig") },
     .{ "product_defaults.zig", @import("product_defaults.zig") },
