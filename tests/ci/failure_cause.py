@@ -43,7 +43,7 @@ NETWORK = re.compile(
     r"returned error: 5\d\d|HTTP 5\d\d|\b5\d\d (?:Internal Server Error|Bad Gateway|Service Unavailable|"
     r"Gateway Time-?out)|error: connection-failed|Could not resolve host|Temporary failure in name resolution|"
     r"NameResolutionError|Connection reset by peer|Connection timed out|ETIMEDOUT|ECONNRESET|EAI_AGAIN|"
-    r"TLS handshake timeout|toomanyrequests")
+    r"TLS handshake timeout|toomanyrequests|Operation timed out")
 # GitHub's own annotations when it never ran or lost the job's runner.
 RUNNER_LOST = re.compile(
     r"was not acquired by Runner|received a shutdown signal|lost communication with the server|"
