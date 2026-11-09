@@ -88,6 +88,69 @@ class ObservationCodecTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+class ChildInputTest(unittest.TestCase):
+    """Fixtures end a child's input only through host_process.close_stdin."""
+
+    def test_communicate_after_closing_stdin_by_hand_fails_and_close_stdin_does_not(self):
+        # The launch-frame fixture's failure in five PRs before #898.
+        child = subprocess.Popen(["cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        child.stdin.write(b"by hand")
+        child.stdin.close()
+        with self.assertRaisesRegex(ValueError, "closed file"):
+            child.communicate(timeout=5)
+        child.wait(timeout=5)
+        child.stdout.close()
+        child = subprocess.Popen(["cat"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        child.stdin.write(b"owned")
+        HOST.close_stdin(child)
+        self.assertEqual(child.communicate(timeout=5), (b"owned", None))
+
+    def test_no_fixture_closes_a_child_stdin_itself(self):
+        offenders = [
+            f"{path.relative_to(ROOT)}:{number}"
+            for pattern in ("*.py", "*.sh")
+            for path in sorted((ROOT / "tests/integration").glob(pattern))
+            if path.name != "host_process.py"
+            for number, line in enumerate(path.read_text().splitlines(), 1)
+            if re.search(r"\.stdin\.close\(\)", line)
+        ]
+        self.assertEqual(offenders, [], "close a child's stdin with host_process.close_stdin(child)")
+
+
+TMP_DIR = re.compile(r"\b(?:var|const)\s+(\w+)\s*=\s*std\.testing\.tmpDir\(\s*\.\{([^}]*)\}\s*\)")
+
+
+def path_only_handle_uses(source):
+    """Lines where a test chmods or lists a `std.testing.tmpDir` opened without `.iterate = true`.
+
+    Without it Linux opens the directory O_PATH, and fchmod or a listing of
+    that handle fails with an unexpected errno (#1040's observation fixture).
+    """
+    found = []
+    for match in TMP_DIR.finditer(source):
+        if re.search(r"\.iterate\s*=\s*true", match[2]):
+            continue
+        rest = source[match.end():]
+        end = re.search(rf"\b(?:var|const)\s+{match[1]}\s*=", rest)
+        scope = rest[:end.start()] if end else rest
+        use = re.search(rf"\b{match[1]}\.dir\.(?:setPermissions|iterate|walk)\(", scope)
+        if use:
+            found.append(source.count("\n", 0, match.end() + use.start()) + 1)
+    return found
+
+
+class TemporaryDirectoryTest(unittest.TestCase):
+    def test_a_path_only_tmp_dir_is_never_chmodded_or_listed(self):
+        self.assertEqual(path_only_handle_uses(
+            "var tmp = std.testing.tmpDir(.{});\ndefer tmp.cleanup();\ntry tmp.dir.setPermissions(io, .fromMode(0o700));\n"), [3])
+        self.assertEqual(path_only_handle_uses(
+            "var tmp = std.testing.tmpDir(.{ .iterate = true });\ntry tmp.dir.setPermissions(io, .fromMode(0o700));\n"), [])
+        offenders = [f"{path.relative_to(ROOT)}:{line}"
+                     for path in sorted((ROOT / "src").rglob("*.zig"))
+                     for line in path_only_handle_uses(path.read_text())]
+        self.assertEqual(offenders, [], "open the directory with std.testing.tmpDir(.{ .iterate = true })")
+
+
 class QualificationEvidenceTest(unittest.TestCase):
     def test_qualification_never_reads_stderr_phase_traces(self):
         # Stderr traces drop records under contention; qualification reads the

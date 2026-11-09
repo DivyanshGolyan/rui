@@ -195,8 +195,9 @@ if [ "$mode" = fresh-defaults ]; then
 fi
 
 # SIGKILL skips capture.abort; revisiting the same record recovers its temporary.
-capture_session=$(python3 - "$rui" "$store" "$records" "$root" <<'PYCAPTURE'
+capture_session=$(PYTHONPATH="$root/tests/integration" python3 - "$rui" "$store" "$records" "$root" <<'PYCAPTURE'
 import json, pathlib, subprocess, sys, time
+from host_process import close_stdin
 binary, store, records, workspace = sys.argv[1:]
 record = pathlib.Path(records) / 'capture-recovery.json'
 args = [binary, 'session', 'configure', '--store', store, '--record', str(record),
@@ -218,7 +219,7 @@ try:
 finally:
     writer.kill()
     writer.wait(timeout=5)
-    writer.stdin.close()
+    close_stdin(writer)
 assert temporary.exists()
 recovered = subprocess.run(args, input=b'new capture', capture_output=True, timeout=10)
 assert recovered.returncode == 0, recovered.stderr
