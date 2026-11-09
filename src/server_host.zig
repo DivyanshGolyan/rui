@@ -249,31 +249,23 @@ pub const Tuning = struct {
     hooks: Hooks = .{},
 
     /// `models_dev_env` is RUI_TEST_MODELS_DEV_URL, read when no option
-    /// names the catalog fixture.
+    /// names the catalog fixture. The `host serve` grammar bounds every
+    /// number, so `parsed` holds only values a Host accepts.
     pub fn fromOptions(parsed: *const cli_args.Parsed, models_dev_env: ?[]const u8) !Tuning {
         var tuning: Tuning = .{};
         const limits = &tuning.limits;
         const hooks = &tuning.hooks;
         if (try parsed.number(u64, "test-bash-scratch-limit-bytes")) |limit| limits.bash_scratch_limit_bytes = limit;
-        if (try parsed.number(usize, "test-retention-entry-capacity")) |capacity| {
-            if (capacity < 2 or capacity > default_retention_entry_capacity) return error.InvalidRetentionEntryCapacity;
-            limits.retention_entry_capacity = capacity;
-        }
+        limits.retention_entry_capacity = try parsed.number(usize, "test-retention-entry-capacity");
         if (parsed.has("test-retention-removal-failure")) hooks.retention_removal = true;
         for (parsed.all("fault")) |fault| try hooks.inject(fault);
-        if (try parsed.number(i64, "test-provider-inactivity-seconds")) |seconds| {
-            if (seconds < 1) return error.InvalidProviderInactivity;
-            _ = std.math.mul(i64, seconds, std.time.ns_per_s) catch return error.InvalidProviderInactivity;
-            limits.provider_inactivity_seconds = seconds;
-        }
+        if (try parsed.number(i64, "test-provider-inactivity-seconds")) |seconds| limits.provider_inactivity_seconds = seconds;
         if (parsed.get("test-retry-waits-ms")) |waits| limits.retry_waits_ms = try parseRetryWaits(waits);
         if (try parsed.number(i64, "test-before-launch-delay-ms")) |delay| {
-            if (delay < 0 or delay > 10_000) return error.InvalidLaunchDelay;
             hooks.pauses.getPtr(.action_launch).delay_ms = delay;
             hooks.pauses.getPtr(.model_launch).delay_ms = delay;
         }
         if (try parsed.number(i64, "test-before-result-delay-ms")) |delay| {
-            if (delay < 0 or delay > 10_000) return error.InvalidResultDelay;
             hooks.pauses.getPtr(.action_result).delay_ms = delay;
             hooks.pauses.getPtr(.model_result).delay_ms = delay;
         }
@@ -283,14 +275,8 @@ pub const Tuning = struct {
         hooks.models_dev_url = parsed.get("test-models-dev-url") orelse models_dev_env;
         hooks.retry_recovery_gate_path = parsed.get("test-retry-recovery-gate-path");
         hooks.inspection_reply.gate_path = parsed.get("test-inspection-reply-gate-path");
-        if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| {
-            if (delay < 0 or delay > 60_000) return error.InvalidInspectionReplyDelay;
-            hooks.inspection_reply.delay_ms = delay;
-        }
-        if (try parsed.number(u32, "test-client-send-buffer-bytes")) |bytes| {
-            if (bytes == 0 or bytes > std.math.maxInt(c_int)) return error.InvalidClientSendBuffer;
-            limits.client_send_buffer_bytes = bytes;
-        }
+        if (try parsed.number(i64, "test-inspection-reply-delay-ms")) |delay| hooks.inspection_reply.delay_ms = delay;
+        limits.client_send_buffer_bytes = try parsed.number(u32, "test-client-send-buffer-bytes");
         if (parsed.has("test-phase-trace")) hooks.phase_trace = true;
         if (try parsed.number(c_int, "test-observation-fd")) |fd| {
             hooks.observation_fd = fd;
@@ -312,23 +298,11 @@ pub const Tuning = struct {
         if (parsed.has("test-suppress-first-control-hint")) hooks.suppress_first_control_hint = true;
         if (parsed.has("test-sqlite-diagnostics")) hooks.sqlite_diagnostics = true;
         if (parsed.has("test-sqlite-cache-spill-off")) limits.sqlite_cache_spill = false;
-        if (try parsed.number(u32, "test-sqlite-cache-kib")) |kib| {
-            if (kib == 0 or kib > 4096) return error.InvalidSqliteCacheSize;
-            limits.sqlite_cache_kib = kib;
-        }
+        if (try parsed.number(u32, "test-sqlite-cache-kib")) |kib| limits.sqlite_cache_kib = kib;
         if (try parsed.number(u64, "test-request-scratch-limit")) |limit| limits.request_scratch_limit_bytes = limit;
-        if (try parsed.number(usize, "test-request-preparation-byte-allowance")) |allowance| {
-            if (allowance == 0) return error.InvalidRequestPreparationAllowance;
-            limits.request_preparation_byte_allowance = allowance;
-        }
-        if (try parsed.number(usize, "test-request-preparation-item-allowance")) |allowance| {
-            if (allowance == 0) return error.InvalidRequestPreparationAllowance;
-            limits.request_preparation_item_allowance = allowance;
-        }
-        if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| {
-            if (delay < 0) return error.InvalidRequestPreparationDelay;
-            hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
-        }
+        if (try parsed.number(usize, "test-request-preparation-byte-allowance")) |allowance| limits.request_preparation_byte_allowance = allowance;
+        if (try parsed.number(usize, "test-request-preparation-item-allowance")) |allowance| limits.request_preparation_item_allowance = allowance;
+        if (try parsed.number(i64, "test-request-preparation-advance-delay-ms")) |delay| hooks.pauses.getPtr(.preparation_advanced).delay_ms = delay;
         if ((control_gate_keys == null) != (control_gate_path == null)) return error.IncompleteControlGate;
         if ((transition == null) != (transition_gate_path == null)) return error.IncompleteTestTransitionGate;
         if (control_gate_keys) |keys| hooks.control_gate = .{ .keys = keys, .path = control_gate_path.? };
@@ -367,6 +341,9 @@ test "the hidden serve options narrow a Host" {
     // The grammar bounds each number; these are its edges.
     try std.testing.expectEqual(@as(?usize, 2), (try tuningFor(&.{ "--test-retention-entry-capacity", "2" }, null)).limits.retention_entry_capacity);
     try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-retention-entry-capacity", "1" }, null));
+    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-before-launch-delay-ms", "10001" }, null));
+    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-provider-inactivity-seconds", "0" }, null));
+    try std.testing.expectError(error.InvalidOptionValue, tuningFor(&.{ "--test-request-preparation-byte-allowance", "0" }, null));
     const held = try tuningFor(&.{ "--test-before-launch-delay-ms", "10000", "--test-before-result-delay-ms", "5" }, null);
     try std.testing.expectEqual(@as(i64, 10_000), held.hooks.pauses.get(.action_launch).delay_ms);
     try std.testing.expectEqual(@as(i64, 10_000), held.hooks.pauses.get(.model_launch).delay_ms);
