@@ -6,6 +6,7 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const tool_name = @import("tool_name.zig");
 const idempotency_key = @import("idempotency_key.zig");
 
 pub const wire_version = @import("wire_version.zig").wire_version;
@@ -40,11 +41,9 @@ pub const max_code_bytes = 96;
 /// at most 256 bytes plus a shortened mark, and their separator.
 pub const max_report_bytes = 2 * 256 + ": ".len + 2 * "…".len;
 pub const max_tool_description_bytes = 100;
-/// A tool name: 1-64 bytes of [A-Za-z0-9_-] (OpenAI's function name limit).
-pub const max_tool_name_bytes = 64;
-/// The most names one `tools` list holds, and their bytes together (D214).
-pub const max_tools = 128;
-pub const max_tool_list_name_bytes = 4096;
+pub const max_tool_name_bytes = tool_name.max_bytes;
+pub const max_tools = tool_name.max_tools;
+pub const max_tool_list_name_bytes = tool_name.max_list_name_bytes;
 /// A preset name passed at connect or named at Session creation.
 pub const max_preset_name_bytes = 64;
 /// A Session Label obeys the saved Bash description rule.
@@ -232,11 +231,8 @@ pub const ToolsField = struct {
     }
 };
 
-/// A `tools` list's names, one space apart.
-pub const max_tool_names_bytes = max_tool_list_name_bytes + max_tools - 1;
-
-/// A JSON list of validated tool names, including brackets, quotes and commas.
-pub const max_tool_names_json_bytes = 2 + max_tool_list_name_bytes + 2 * max_tools + max_tools - 1;
+pub const max_tool_names_bytes = tool_name.max_names_bytes;
+pub const max_tool_names_json_bytes = tool_name.max_names_json_bytes;
 
 pub const BuiltInTool = built_in_tool.BuiltInTool;
 pub const ToolSelection = built_in_tool.Selection;
@@ -252,12 +248,7 @@ comptime {
         if (std.mem.order(u8, @tagName(previous), @tagName(tool)) != .lt) @compileError("built-in tools in name order");
     }
 }
-/// Whether `name` is a tool name: 1-64 bytes of [A-Za-z0-9_-].
-pub fn validToolName(name: []const u8) bool {
-    if (name.len == 0 or name.len > max_tool_name_bytes) return false;
-    for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '_' and byte != '-') return false;
-    return true;
-}
+pub const validToolName = tool_name.valid;
 
 fn ConfigurationOf(comptime Custody: type) type {
     const ContentField = Requests(Custody).ContentField;

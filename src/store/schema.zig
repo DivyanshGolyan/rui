@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const protocol = @import("../protocol.zig");
+const tool_name = @import("../tool_name.zig");
 const Bounded = @import("../bounded.zig").Bounded;
 const wire_version = @import("../wire_version.zig").wire_version;
 const tool_catalog = @import("../tools.zig");
@@ -1445,7 +1446,7 @@ pub const mysql_session = [_][:0]const u8{
     "SET NAMES utf8mb4 COLLATE utf8mb4_0900_bin",
     "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_ALL_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION,NO_BACKSLASH_ESCAPES'",
     // `@list` of a Session's tool names whole: MySQL's default cuts at 1024.
-    std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{protocol.max_tool_names_bytes}),
+    std.fmt.comptimePrint("SET SESSION group_concat_max_len={d}", .{tool_name.max_names_bytes}),
 };
 
 const MysqlObjects = union(enum) { refused: []const u8, objects: []const Object };

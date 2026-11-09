@@ -3,6 +3,7 @@
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
+const tool_name = @import("../../tool_name.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const session_id = @import("../../session_id.zig");
@@ -291,7 +292,7 @@ pub const McpExecutionInput = struct {
     session: Bounded(session_id.max_reference_bytes),
     parent: ?Bounded(session_id.max_reference_bytes),
     root: Bounded(session_id.max_reference_bytes),
-    name: Bounded(protocol.max_tool_name_bytes),
+    name: Bounded(tool_name.max_bytes),
     server: Bounded(tool_catalog.max_server_bytes),
     input_schema: ContentReference,
     sender_handle: Bounded(32),
@@ -788,7 +789,7 @@ const mcp_input = rsql.Read(.{
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 AND action." ++ action_attempted_sql ++
         " AND action.resolution_code IS NULL AND " ++ mcpCallSql("action", "operation"),
     .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64 },
-    .Row = struct { position: ?rsql.Positive, session: *Bounded(session_id.max_reference_bytes), sender_handle: *Bounded(32), name: *Bounded(protocol.max_tool_name_bytes), server: *Bounded(tool_catalog.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive },
+    .Row = struct { position: ?rsql.Positive, session: *Bounded(session_id.max_reference_bytes), sender_handle: *Bounded(32), name: *Bounded(tool_name.max_bytes), server: *Bounded(tool_catalog.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive },
     .cardinality = .optional,
 });
 test "MCP execution input uses each engine's tool-name content layout" {

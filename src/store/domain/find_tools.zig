@@ -1,6 +1,7 @@
 //! Loading saved tools is one call-keyed command, revision and resolution.
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const core = @import("../../core_tools.zig");
 const tools = @import("../../tools.zig");
@@ -33,7 +34,7 @@ const candidates = rsql.Read(.{
 });
 
 const Candidates = struct {
-    rows: [protocol.max_tools]candidates.Row = undefined,
+    rows: [tool_name.max_tools]candidates.Row = undefined,
     count: usize = 0,
     invalid: bool = false,
 
@@ -112,7 +113,7 @@ fn matchesCandidate(a: anytype, scratch: *SearchScratch, words: *const core.Find
 fn includeLoadedNames(a: anytype, arena: std.mem.Allocator, loaded_set: u64, matches: *Matches) !void {
     const loaded = try arena.create(LoadedNames);
     loaded.* = .{};
-    a.readEach(loaded_names, .{ .set = loaded_set }, protocol.max_tools + 1, loaded);
+    a.readEach(loaded_names, .{ .set = loaded_set }, tool_name.max_tools + 1, loaded);
     try a.run();
     if (loaded.invalid) return error.CorruptStore;
     var names = loaded.names.iterator();
@@ -174,7 +175,7 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     if (refusal == null) {
         const pending = try arena.create(Candidates);
         pending.* = .{};
-        a.readEach(candidates, .{ .set = current.tool_set_id.get(), .loaded = current.loaded_set.get() }, protocol.max_tools + 1, pending);
+        a.readEach(candidates, .{ .set = current.tool_set_id.get(), .loaded = current.loaded_set.get() }, tool_name.max_tools + 1, pending);
         try a.run();
         if (pending.invalid) return error.CorruptStore;
         matches.remaining = pending.count;

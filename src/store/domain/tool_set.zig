@@ -6,6 +6,7 @@
 //! only the sets saved after it.
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const tool_catalog = @import("../../tools.zig");
 const rsql = @import("../rsql.zig");
@@ -61,7 +62,7 @@ pub fn maskSql(comptime set_column: []const u8) []const u8 {
 
 /// A Rui SQL expression for the names of the set `set_column`'s members,
 /// joined by commas in no set order, since ordering them would sort; NULL
-/// for an empty set. A name has no comma (`protocol.validToolName`), and
+/// for an empty set. A name has no comma (`tool_name.valid`), and
 /// a Session's names, as configure bounds them, fit `max_names_bytes`.
 pub fn namesSql(comptime set_column: []const u8) []const u8 {
     return "(SELECT @list(tool.name) FROM tool_set_member member " ++
@@ -69,7 +70,7 @@ pub fn namesSql(comptime set_column: []const u8) []const u8 {
 }
 
 /// The longest `namesSql` text of a Session's set.
-pub const max_names_bytes = protocol.max_tool_names_bytes;
+pub const max_names_bytes = tool_name.max_names_bytes;
 
 /// SQL for the mask of every built-in in any set of `session`'s revisions
 /// up to `revision`, until the wire names tools.
@@ -310,7 +311,7 @@ pub const Selection = struct {
     /// and finishSelection's inserted members must use the same source.
     pub fn ofSaved(a: anytype, source_set: u64, names: *const protocol.ToolsField) !Selection {
         var selected: SavedSelection = .{ .names = names };
-        a.readEach(selection_records, .{ .set = source_set }, protocol.max_tools + 1, &selected);
+        a.readEach(selection_records, .{ .set = source_set }, tool_name.max_tools + 1, &selected);
         try a.run();
         if (selected.count != names.count) return error.CorruptStore;
         return .{ .names = names, .digest = selected.digest.final() };

@@ -4,6 +4,7 @@
 const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const protocol = @import("../../protocol.zig");
+const tool_name = @import("../../tool_name.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const cli_value = @import("../../cli_value.zig");
 const provider_name = @import("../../provider_name.zig");
@@ -787,7 +788,7 @@ fn prepareLoadedTools(a: anytype, creating: bool, requested: *const wire_request
         reads.saved_tools.count = 0;
         reads.saved_tools.names.len = 0;
         var names: NameSelection = .{ .names = &reads.saved_tools };
-        a.readEach(selected_names, .{ .set = reads.next.tool_set_id }, protocol.max_tools + 1, &names);
+        a.readEach(selected_names, .{ .set = reads.next.tool_set_id }, tool_name.max_tools + 1, &names);
         try a.run();
         if (names.invalid) return error.CorruptStore;
         break :saved &reads.saved_tools;
@@ -797,7 +798,7 @@ fn prepareLoadedTools(a: anytype, creating: bool, requested: *const wire_request
         reads.saved_loaded.count = 0;
         reads.saved_loaded.names.len = 0;
         var names: NameSelection = .{ .names = &reads.saved_loaded, .filter = tools };
-        a.readEach(selected_names, .{ .set = reads.next.loaded_tool_set_id.? }, protocol.max_tools + 1, &names);
+        a.readEach(selected_names, .{ .set = reads.next.loaded_tool_set_id.? }, tool_name.max_tools + 1, &names);
         try a.run();
         if (names.invalid) return error.CorruptStore;
         break :saved &reads.saved_loaded;

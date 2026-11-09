@@ -4,6 +4,7 @@ const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
+const tool_name = @import("../../tool_name.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const built_in_tool = @import("../../built_in_tool.zig");
@@ -573,7 +574,7 @@ fn sortedToolNames(names: ?[]const u8, sorted: *[tool_catalog.max_tools][]const 
     if (names) |joined| {
         var each = std.mem.splitScalar(u8, joined, ',');
         while (each.next()) |name| : (count += 1) {
-            if (count == sorted.len or !protocol.validToolName(name)) return error.CorruptStore;
+            if (count == sorted.len or !tool_name.valid(name)) return error.CorruptStore;
             sorted[count] = name;
         }
     }
@@ -713,14 +714,14 @@ noinline fn renderRows(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, capt
 
 /// A list row and its rendered tools, kept in the Store's report scratch
 /// and not on a Host stack frame.
-const RowScratch = struct { row: ListRow, tools_json: [protocol.max_tool_names_json_bytes]u8 };
+const RowScratch = struct { row: ListRow, tools_json: [tool_name.max_names_json_bytes]u8 };
 
 /// Renders each `list_row` as it steps, in the page's order. A row that
 /// is not the next shown Session's, or a missing one, is `CorruptStore`;
 /// after a failure it renders nothing more.
 const RowsRender = struct {
     decoded: *ListRow,
-    tools_json: *[protocol.max_tool_names_json_bytes]u8,
+    tools_json: *[tool_name.max_names_json_bytes]u8,
     rows: []const ShownRow,
     now_ms: u64,
     capture: *SessionReportCapture,
@@ -740,7 +741,7 @@ const RowsRender = struct {
     }
 };
 
-fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow, tools_json: *[protocol.max_tool_names_json_bytes]u8) !void {
+fn renderListRow(capture: *SessionReportCapture, rows: []const ShownRow, index: usize, now_ms: u64, row: *const ListRow, tools_json: *[tool_name.max_names_json_bytes]u8) !void {
     if (index == rows.len or !std.mem.eql(u8, row.session_ref.slice(), rows[index].reference)) return error.CorruptStore;
     var sorted: [tool_catalog.max_tools][]const u8 = undefined;
     const names = try sortedToolNames(if (row.tools) |*tools| tools.slice() else null, &sorted);
@@ -1407,12 +1408,12 @@ fn renderUnresolved(capture: *SessionReportCapture, row: *const unresolved_actio
     const built_in = actionTool(&row.name_digest);
     const mcp = row.server != null;
     if (row.server) |server| {
-        if (!protocol.validToolName(server.slice()) or built_in != null) return error.CorruptStore;
+        if (!tool_name.valid(server.slice()) or built_in != null) return error.CorruptStore;
     }
     // A non-built-in Action must name an MCP member of its frozen offer.
     // Built-in checks remain strict; provider tools never create Actions.
     const name = if (mcp) row.tool_name.slice() else @tagName(built_in orelse return error.CorruptStore);
-    if (mcp and !protocol.validToolName(name)) return error.CorruptStore;
+    if (mcp and !tool_name.valid(name)) return error.CorruptStore;
     const core = !mcp and tool_catalog.Runner.of(tool_catalog.record(built_in.?)) == .core;
     // Settlement authorizes a core call at once, with no decision.
     if (core and !row.authorized) return error.CorruptStore;
