@@ -1754,60 +1754,66 @@ fn presentAdmission(self: *Self, end: AdmissionEnd) !void {
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
-    // A pending inspection supersedes a silent read it cancelled.
-    const mode: departure.Mode = if (self.upgrade_requested or self.input.queuedCommand() != null) .inspection else .active;
     // A fatal failure leaves command output for exit to print.
-    if (end.failure(mode)) |err| return err;
-    if (end != .complete and self.inspection.command_running) {
-        // Nothing to show: the command failed before writing output.
-        self.inspection.command_running = false;
-    }
-    if (end == .complete and self.reading.phase == .history) {
-        // What a seam's search found holds whatever the view now shows.
-        if (self.job.result.searched) |floor| if (self.live.lowest) |known| {
-            self.live.lowest = @max(known, floor);
-        };
-        // The user may have left the transcript while this page loaded.
-        const screen = self.terminal.screen;
-        if (screen.view == .transcript and self.job.transcript == self.transcript.id) {
-            const prepended = try screen.prependFile(self.init.io, self.files.inspection);
-            // The page's newest blocks are those its kept rows show.
-            const collapsed = &self.job.result.collapsed;
-            var older: [reads.Collected.capacity]?View.Collapsed = @splat(null);
-            const kept = @min(prepended.older, older.len);
-            for (0..kept) |index| {
-                const from_end = kept - index;
-                older[index] = if (from_end <= collapsed.count) collapsed.at(collapsed.count - from_end) else null;
-            }
-            self.transcript.blocks.prepend(older[0..kept]);
-            self.transcript.blocks.dropNewest(prepended.trimmed);
-            if (self.job.target == .listing) self.transcript.plan.listed(self.job.target.listing, self.job.result.listing) else {
-                self.transcript.older = self.job.result.history_cursor;
-                self.transcript.beginning = self.transcript.older == null;
-            }
-            try self.showOlderLabels();
-        }
-    } else if (end == .complete and self.reading.phase == .message) {
-        const request = self.expansion.reading.?;
-        self.expansion.reading = null;
-        if (reader_policy.messageShows(request.asked, self.pageAsked())) try self.terminal.screen.showMessage(self.init.io, self.files.inspection);
-    } else if (end == .complete and self.reading.phase == .recall) {
-        try self.showRecalled();
-    } else if (end == .complete and (self.reading.phase == .activity or self.reading.phase == .permission)) {
-        try self.showStaged();
-    } else if (end == .complete and self.reading.phase == .inspection and self.inspection.kind == .copy) {
-        try self.showCopy();
-        self.inspection.command_running = false;
-    } else if (end == .complete and (self.reading.phase == .details or self.reading.phase == .inspection)) {
-        if (self.reading.phase != .details or reader_policy.detailsShows(self.admission.details_sent, self.admission.sent)) try self.showInspection();
-        self.inspection.command_running = false; // Shown; exit no longer prints it.
-        // A /setup run over the page may have changed the defaults it shows.
-        if (self.reading.phase == .inspection and self.inspection.kind == .command and self.statusShown()) {
-            self.inspection.defaults = savedDefaults(self.home);
-            try self.refreshStatusPage();
-        }
+    if (end.failure(reader_policy.settleMode(self.upgrade_requested, self.input.queuedCommand() != null))) |err| return err;
+    const phase = self.reading.phase;
+    const inspection = self.readInspection();
+    if (end == .complete) switch (reader_policy.shows(phase, inspection)) {
+        .older => try self.showOlder(),
+        .message => {
+            const request = self.expansion.reading.?;
+            self.expansion.reading = null;
+            if (reader_policy.messageShows(request.asked, self.pageAsked())) try self.terminal.screen.showMessage(self.init.io, self.files.inspection);
+        },
+        .recalled => try self.showRecalled(),
+        .staged => try self.showStaged(),
+        .copy => try self.showCopy(),
+        .page => if (phase != .details or reader_policy.detailsShows(self.admission.details_sent, self.admission.sent)) try self.showInspection(),
+    };
+    // Shown, or never written: exit no longer prints it.
+    if (reader_policy.commandSettled(end == .complete, phase)) self.inspection.command_running = false;
+    if (end == .complete and reader_policy.defaultsChanged(phase, inspection, self.statusShown())) {
+        self.inspection.defaults = savedDefaults(self.home);
+        try self.refreshStatusPage();
     }
     try self.applyReader(end);
+}
+
+/// The inspection the joined read ran for, as settling needs it.
+fn readInspection(self: *const Self) reader_policy.Inspection {
+    return switch (self.inspection.kind) {
+        .copy => .copy,
+        .command => .command,
+        .status, .requests, .help => .other,
+    };
+}
+
+/// Prepends a completed older page to the transcript it was read for.
+fn showOlder(self: *Self) !void {
+    // What a seam's search found holds whatever the view now shows.
+    if (self.job.result.searched) |floor| if (self.live.lowest) |known| {
+        self.live.lowest = @max(known, floor);
+    };
+    // The user may have left the transcript while this page loaded.
+    const screen = self.terminal.screen;
+    if (screen.view == .transcript and self.job.transcript == self.transcript.id) {
+        const prepended = try screen.prependFile(self.init.io, self.files.inspection);
+        // The page's newest blocks are those its kept rows show.
+        const collapsed = &self.job.result.collapsed;
+        var older: [reads.Collected.capacity]?View.Collapsed = @splat(null);
+        const kept = @min(prepended.older, older.len);
+        for (0..kept) |index| {
+            const from_end = kept - index;
+            older[index] = if (from_end <= collapsed.count) collapsed.at(collapsed.count - from_end) else null;
+        }
+        self.transcript.blocks.prepend(older[0..kept]);
+        self.transcript.blocks.dropNewest(prepended.trimmed);
+        if (self.job.target == .listing) self.transcript.plan.listed(self.job.target.listing, self.job.result.listing) else {
+            self.transcript.older = self.job.result.history_cursor;
+            self.transcript.beginning = self.transcript.older == null;
+        }
+        try self.showOlderLabels();
+    }
 }
 
 /// What the queued row shows, if it shows (see `queued_line.unshown`): the
@@ -2027,12 +2033,9 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     if (end.preparationFailure()) {
         if (self.reading.phase == .history) self.transcript.older_failed = true;
         if (self.reading.pending_diagnostic == null)
-            self.notice = switch (self.reading.phase) {
-                .details => "! Details unavailable; draft retained.",
-                .message => "! Message unavailable; Ctrl-O to retry. Draft retained.",
-                .recall => "! Sent message unavailable; draft retained.",
-                .inspection => if (self.inspection.kind == .copy) self.copyFailure(end.failed.err) else "! Inspection unavailable; draft retained.",
-                else => "! Earlier messages unavailable; scroll up to retry. Draft retained.",
+            self.notice = switch (reader_policy.unavailable(self.reading.phase, self.readInspection())) {
+                .say => |text| text,
+                .copy => reader_policy.copyFailure(self.inspection.kind.copy == .file, end.failed.err),
             };
         self.dirty = true;
         return;
@@ -2234,14 +2237,6 @@ fn showCopy(self: *Self) !void {
 }
 
 /// Only a failure the person can act on is named.
-fn copyFailure(self: *const Self, err: anyerror) []const u8 {
-    if (self.inspection.kind.copy == .file) switch (err) {
-        error.AccessDenied, error.PermissionDenied, error.ReadOnlyFileSystem => return "! This directory is not writable; draft retained.",
-        else => {},
-    };
-    return "! Copy unavailable; draft retained.";
-}
-
 /// A settled scan's /status: the page asked for, or the shown page updated in
 /// place. An update keeps the reader's place, notice and consent.
 fn applyStatus(self: *Self) !void {
