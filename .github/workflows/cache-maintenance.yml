@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   prune:
-    needs: baseline
+    needs: [baseline, runner]
     # Job completion includes post-job saves. A successful matrix peer can save
     # even when another fails; workflow_run skips baseline but still cleans up.
     if: ${{ always() && !github.event.repository.private && github.ref == 'refs/heads/main' }}
@@ -74,6 +74,36 @@ jobs:
           test "$(uname -m)" = "$EXPECTED_ARCH"
           zig build -Doptimize=ReleaseSafe --summary all
           echo "Compilation cache baseline for $(git rev-parse HEAD) on $(uname -s)/$(uname -m). No test acceptance or release qualification." >> "$GITHUB_STEP_SUMMARY"
+  runner:
+    # Test shards restore the build runner compiled for their CPU model, which
+    # saves them a median 89 s, and only main saves it. Each Linux slot lands
+    # on a random model of the pool and saves only a model still missing; six
+    # cover about three quarters of shards per build.zig, more over pushes.
+    if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, mac]
+    runs-on: ${{ matrix.slot == 'mac' && 'macos-15' || 'ubuntu-24.04' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          compiled: 'true'
+      # Shards get packages from the producer artifact; this has none.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: zig-pkg
+          key: rui-packages-v1-${{ hashFiles('build.zig.zon') }}
+          restore-keys: rui-packages-v1-
+      - name: Compile and configure the build runner as a test shard does
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash src/fetch_dependencies.sh
   previous_release:
     # The upgrade check restores this; requested refs cannot publish caches.
     if: ${{ github.event_name != 'workflow_run' && !github.event.repository.private && github.ref == 'refs/heads/main' }}

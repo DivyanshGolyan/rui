@@ -122,8 +122,8 @@ test('cleanup follows every cache producer, including failed workflows with succ
   // complete YAML/Actions syntax; these assertions guard lifecycle ordering.
   const jobs = Object.fromEntries([...workflow.matchAll(/^  (\w+):\n((?: {4}[^\n]*\n|\n)+)/gm)]
     .map(([, name, body]) => [name, body]));
-  assert.match(jobs.prune, /^    needs: baseline\s*$/m,
-    'prune must wait for baseline post-job cache saves');
+  assert.match(jobs.prune, /^    needs: \[baseline, runner\]\s*$/m,
+    'prune must wait for baseline and runner post-job cache saves');
   assert.match(jobs.prune, /^    if:.*always\(\)/m,
     'successful matrix peers may save even if another peer fails');
   assert.doesNotMatch(jobs.prune, /needs\.baseline\.result|workflow_run\.conclusion/);
