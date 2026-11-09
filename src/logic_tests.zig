@@ -92,6 +92,7 @@ const cores = .{
     .{ "wire_field.zig", @import("wire_field.zig") },
     .{ "wire_version.zig", @import("wire_version.zig") },
     .{ "work_line.zig", @import("work_line.zig") },
+    .{ "workspace_path.zig", @import("workspace_path.zig") },
 };
 
 test {

@@ -9,6 +9,7 @@ const command_reply = @import("../../command_reply.zig");
 const word_search = @import("../../word_search.zig");
 const pages = @import("../../os/pages.zig");
 const protocol = @import("../../protocol.zig");
+const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
@@ -357,7 +358,7 @@ pub const SessionObservation = struct {
     found: bool = false,
     archive_state: session_archive.State = .active,
     session: Bounded(session_id.max_reference_bytes) = .{},
-    workspace: Bounded(protocol.max_workspace_bytes) = .{},
+    workspace: Bounded(workspace_path.max_bytes) = .{},
     provider: ?provider_name.Provider = null,
     model: Bounded(model_capability.max_model_bytes) = .{},
     revision: u64 = 0,
@@ -1002,7 +1003,7 @@ const page_session = rsql.Read(.{
         reasoning_effort: ?model_capability.ReasoningEffort,
         created_at: rsql.Positive,
         provider: provider_name.Provider,
-        workspace: *Bounded(protocol.max_workspace_bytes),
+        workspace: *Bounded(workspace_path.max_bytes),
     },
     .cardinality = .optional,
 });
@@ -1104,7 +1105,7 @@ const SearchScratch = struct {
     window: [content_domain.ContentReader.content_window_bytes]u8 = undefined,
     matcher: word_search.Matcher = undefined,
     item: protocol.ActivityItem = undefined,
-    workspace: Bounded(protocol.max_workspace_bytes) = undefined,
+    workspace: Bounded(workspace_path.max_bytes) = undefined,
 };
 
 /// Searches the page's public sources in one read access. SQL chooses only

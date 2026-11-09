@@ -3,6 +3,7 @@
 const std = @import("std");
 const catalog = @import("../../skills.zig");
 const protocol = @import("../../protocol.zig");
+const workspace_path = @import("../../workspace_path.zig");
 const content_string = @import("../../content_string.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const mutation_answer = @import("../../mutation_answer.zig");
@@ -50,7 +51,7 @@ pub const latest = rsql.Read(.{
     .Args = struct { session: []const u8 },
     .Row = struct {
         session: rsql.SessionHead,
-        workspace: *Bounded(protocol.max_workspace_bytes),
+        workspace: *Bounded(workspace_path.max_bytes),
         catalog_content_id: ?rsql.Positive,
         catalog_position: ?u64 = null,
         byte_length: ?u64,
@@ -126,7 +127,7 @@ pub fn reload(a: anytype, allocator: std.mem.Allocator, session: rsql.SessionHea
 }
 
 pub fn read(a: anytype, allocator: std.mem.Allocator, session: []const u8) !catalog.Catalog {
-    const workspace = try allocator.create(Bounded(protocol.max_workspace_bytes));
+    const workspace = try allocator.create(Bounded(workspace_path.max_bytes));
     var row: latest.Row = .{ .workspace = workspace, .session = undefined, .catalog_content_id = null, .byte_length = null, .digest = null };
     const access = @import("../access.zig");
     var found: access.Found = .missing;

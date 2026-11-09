@@ -5,6 +5,7 @@ const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const protocol = @import("../../protocol.zig");
+const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
@@ -610,7 +611,7 @@ pub const AgentStart = enum {
 const parent_settings = rsql.Read(.{
     .sql = "SELECT workspace,provider," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,permission_mode FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { workspace: *Bounded(protocol.max_workspace_bytes), provider: provider_name.Provider, tools_mask: c_int, permission_mode: u8 },
+    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: provider_name.Provider, tools_mask: c_int, permission_mode: u8 },
     .cardinality = .optional,
 });
 

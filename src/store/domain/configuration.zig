@@ -4,6 +4,7 @@
 const std = @import("std");
 const command_reply = @import("../../command_reply.zig");
 const protocol = @import("../../protocol.zig");
+const workspace_path = @import("../../workspace_path.zig");
 const provider_route = @import("../../provider_route.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const tool_name = @import("../../tool_name.zig");
@@ -126,7 +127,7 @@ pub fn checkLabel(label: []const u8) error{CorruptStore}!void {
 /// A Session's saved configuration. Its fields name, in order, the columns
 /// `saved_session` reads, so a read decodes into it in place.
 pub const CurrentConfiguration = struct {
-    workspace: Bounded(protocol.max_workspace_bytes) = .{},
+    workspace: Bounded(workspace_path.max_bytes) = .{},
     provider: provider_name.Provider = undefined,
     model: Bounded(model_capability.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
@@ -1077,14 +1078,14 @@ const insert_change = rsql.Write(.{
 /// buffer lives in this call's frame only, never in the configure frame
 /// that holds the whole next configuration.
 noinline fn sameWorkspace(io: std.Io, supplied: []const u8, existing: []const u8) !bool {
-    var canonical: Bounded(protocol.max_workspace_bytes) = .{ .len = 0 };
+    var canonical: Bounded(workspace_path.max_bytes) = .{ .len = 0 };
     try validateWorkspace(io, supplied, &canonical);
     return canonical.eql(existing);
 }
 
 /// Canonicalizes `supplied` straight into `destination`'s own bytes, with
 /// the UTF-8 check `Bounded.set` applies; no second path buffer.
-fn validateWorkspace(io: std.Io, supplied: []const u8, destination: *Bounded(protocol.max_workspace_bytes)) !void {
+fn validateWorkspace(io: std.Io, supplied: []const u8, destination: *Bounded(workspace_path.max_bytes)) !void {
     if (!std.fs.path.isAbsolute(supplied)) return error.WorkspaceMustBeAbsolute;
     if (std.mem.indexOfScalar(u8, supplied, 0) != null) return error.InvalidWorkspace;
     var directory = try std.Io.Dir.cwd().openDir(io, supplied, .{});

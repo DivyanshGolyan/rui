@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const protocol = @import("../../protocol.zig");
+const workspace_path = @import("../../workspace_path.zig");
 const store_path = @import("../../store_path.zig");
 const content_string = @import("../../content_string.zig");
 const session_id = @import("../../session_id.zig");
@@ -72,7 +73,7 @@ pub const HistoricalSettings = struct {
     codec: provider_name.Codec,
     provider: provider_name.Provider,
     model: Bounded(model_capability.max_model_bytes),
-    workspace: Bounded(protocol.max_workspace_bytes),
+    workspace: Bounded(workspace_path.max_bytes),
     /// The originating Operation's own address: canonical Store selector and
     /// exact Session reference, for the Rui-owned request context.
     store: Bounded(store_path.max_bytes),
@@ -703,7 +704,7 @@ const historical_settings = rsql.Read(.{
         provider_count: u64,
         provider: provider_name.Provider,
         session_ref: *Bounded(session_id.max_reference_bytes),
-        workspace: *Bounded(protocol.max_workspace_bytes),
+        workspace: *Bounded(workspace_path.max_bytes),
         compaction_trigger: ?u64,
         output_reservation: ?u64,
         reasoning_effort: ?model_capability.ReasoningEffort,

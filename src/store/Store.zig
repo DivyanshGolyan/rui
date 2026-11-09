@@ -7,6 +7,7 @@ const command_reply = @import("../command_reply.zig");
 const store_schema = @import("schema.zig");
 const attempt = @import("../attempt.zig");
 const protocol = @import("../protocol.zig");
+const workspace_path = @import("../workspace_path.zig");
 const store_path = @import("../store_path.zig");
 const provider_route = @import("../provider_route.zig");
 const outcome_code = @import("../outcome_code.zig");
@@ -594,7 +595,7 @@ pub const Store = struct {
     }
 
     pub const SkillsState = struct {
-        workspace: Bounded(protocol.max_workspace_bytes) = .{ .len = 0 },
+        workspace: Bounded(workspace_path.max_bytes) = .{ .len = 0 },
         catalog: @import("../skills.zig").Catalog = .{ .entries = &.{} },
     };
 

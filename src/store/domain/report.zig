@@ -4,6 +4,7 @@ const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const named_scratch = @import("../../named_scratch.zig");
 const protocol = @import("../../protocol.zig");
+const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
@@ -633,7 +634,7 @@ const list_row_bare = rsql.Read(.{
 const ListRow = struct {
     session_ref: SessionText,
     parent_ref: ?Bounded(session_id.bytes),
-    workspace: Bounded(protocol.max_workspace_bytes),
+    workspace: Bounded(workspace_path.max_bytes),
     provider: provider_name.Provider,
     model: Bounded(model_capability.max_model_bytes),
     tools: ?Bounded(tool_set.max_names_bytes),
@@ -1313,7 +1314,7 @@ pub const CurrentJson = struct {
         pub const json_shape = .{
             "{\"reference\":",                     H{ .string = session_id.max_reference_bytes },
             ",\"parent\":",                        H{ .optional_string = session_id.bytes },
-            ",\"workspace\":",                     H{ .string = protocol.max_workspace_bytes },
+            ",\"workspace\":",                     H{ .string = workspace_path.max_bytes },
             ",\"provider\":\"",                    H{ .tag = provider_name.Provider },
             "\",\"model\":",                       H{ .string = model_capability.max_model_bytes },
             ",\"compaction_trigger\":\"",          H.decimal,
@@ -2242,7 +2243,7 @@ const RevisionRow = struct {
     revision: rsql.Positive,
     newest: rsql.Positive,
     command_key: Bounded(128),
-    workspace: Bounded(protocol.max_workspace_bytes),
+    workspace: Bounded(workspace_path.max_bytes),
     provider: provider_name.Provider,
     model: Bounded(model_capability.max_model_bytes),
     compaction_trigger: ?rsql.Positive,

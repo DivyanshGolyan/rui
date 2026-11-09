@@ -3,6 +3,7 @@
 const std = @import("std");
 const attempt = @import("../../attempt.zig");
 const protocol = @import("../../protocol.zig");
+const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
 const tool_name = @import("../../tool_name.zig");
@@ -285,7 +286,7 @@ pub const ActionDispatchPermit = attempt.ActionDispatchPermit;
 pub const BashExecutionInput = struct {
     session: Bounded(session_id.max_reference_bytes),
     sender_handle: Bounded(32),
-    workspace: Bounded(protocol.max_workspace_bytes),
+    workspace: Bounded(workspace_path.max_bytes),
     arguments: ContentReference,
     timeout_ms: u64,
 };
@@ -398,7 +399,7 @@ const bash_input = rsql.Read(.{
     .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64 },
     .Row = struct {
         position: ?rsql.Positive,
-        workspace: *Bounded(protocol.max_workspace_bytes),
+        workspace: *Bounded(workspace_path.max_bytes),
         session: *Bounded(session_id.max_reference_bytes),
         sender_handle: *Bounded(32),
         timeout_ms: rsql.Positive,

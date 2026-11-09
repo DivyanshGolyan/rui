@@ -6,6 +6,7 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const store_id = @import("store_id.zig");
 const mutation_answer = @import("mutation_answer.zig");
+const workspace_path = @import("workspace_path.zig");
 const store_path = @import("store_path.zig");
 const provider_route = @import("provider_route.zig");
 const outcome_code = @import("outcome_code.zig");
@@ -29,7 +30,7 @@ pub const max_key_bytes = idempotency_key.max_bytes;
 pub const reserved_key_prefix = idempotency_key.reserved_prefix;
 pub const max_session_bytes = session_id.max_reference_bytes;
 pub const max_store_bytes = store_path.max_bytes;
-pub const max_workspace_bytes = 4096;
+pub const max_workspace_bytes = workspace_path.max_bytes;
 /// Content strings one request carries at most: a configure command's
 /// instructions and output schema.
 pub const max_request_contents = 2;
