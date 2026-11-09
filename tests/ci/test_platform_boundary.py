@@ -11,7 +11,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
 from platform_boundary import mac_path, python_sites, sites, violations, zig_sites  # noqa: E402
-from select_tests import CHECK_COVERS, select  # noqa: E402
+from select_tests import select  # noqa: E402
 from qualification import split_build  # noqa: E402
 
 
@@ -103,7 +103,8 @@ class PlatformBoundaryTest(unittest.TestCase):
     def test_executed_plan_runs_mac_on_every_normal_ready_pr_and_retains_platform_mapping(self):
         workflow = (Path(__file__).parents[2] / ".github/workflows/check.yml").read_text()
         script = textwrap.dedent(re.search(r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", workflow)[1])
-        cases = (("src/turn_policy.zig", "pull_request", True), ("src/os/socket.zig", "push", False),
+        # Ready PRs run Mac only for Mac paths; promotion runs it for every batch.
+        cases = (("src/turn_policy.zig", "pull_request", False), ("src/os/socket.zig", "push", False),
                  ("src/os/socket.zig", "pull_request", True), (".github/workflows/qualify-macos.yml", "pull_request", True),
                  ("README.md", "pull_request", False), ("README.md", "workflow_dispatch", False))
         for path, event, mac in cases:
@@ -112,7 +113,7 @@ class PlatformBoundaryTest(unittest.TestCase):
                     (root / "selection.json").write_text(json.dumps(selection))
                     (root / "output").write_text("")
                     subprocess.run([sys.executable, "-B", "-c", script], cwd=root, check=True,
-                                   env=dict(os.environ, STABLE="false", EVENT_NAME=event, GITHUB_REF_NAME="branch",
+                                   env=dict(os.environ, PROMOTION="false", EVENT_NAME=event, GITHUB_REF_NAME="branch",
                                             CANDIDATE_REF=selection["head"],
                                             GITHUB_OUTPUT=str(root / "output"), GITHUB_STEP_SUMMARY=str(root / "summary")))
                     outputs = dict(line.split("=", 1) for line in (root / "output").read_text().splitlines())
@@ -123,10 +124,7 @@ class PlatformBoundaryTest(unittest.TestCase):
                     self.assertEqual(outputs["macos_split"], str(split_build(native)).lower())
                     self.assertEqual(outputs["linux_split"], str(split_build(selection["targets"])).lower())
                     if mac:
-                        expected = (set(selection["native_targets"]) - CHECK_COVERS) | {"admission-debug-integration"}
-                        if "check-full" not in expected:
-                            expected.add("check")
-                        self.assertEqual(native, sorted(expected))
+                        self.assertEqual(native, selection["native_targets"] or ["check"])
                         self.assertTrue(json.loads(outputs["macos_matrix"])["include"])
                     else:
                         self.assertEqual(native, [])
@@ -134,19 +132,19 @@ class PlatformBoundaryTest(unittest.TestCase):
     def test_executed_plan_splits_the_final_native_selection(self):
         workflow = (Path(__file__).parents[2] / ".github/workflows/check.yml").read_text()
         script = textwrap.dedent(re.search(r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", workflow)[1])
-        for native, mac_required, split in (
-                ([], True, True),
-                (["test"], True, True),
-                (["check-full"], True, True),
-                (["test-logic"], True, True),
-                (["check"], False, True)):
+        for native, mac_required, expected, split in (
+                ([], True, ["check"], True),
+                (["test"], True, ["test"], False),
+                (["check-full"], True, ["check-full"], True),
+                (["test-logic"], True, ["test-logic"], False),
+                (["check"], False, [], False)):
             with self.subTest(native=native, mac_required=mac_required):
                 with committed_selection(".github/workflows/check.yml") as (root, selection):
                     selection.update(native_targets=native, mac_required=mac_required)
                     (root / "selection.json").write_text(json.dumps(selection))
                     (root / "output").write_text("")
                     subprocess.run([sys.executable, "-B", "-c", script], cwd=root, check=True,
-                                   env=dict(os.environ, EVENT_NAME="pull_request",
+                                   env=dict(os.environ, EVENT_NAME="pull_request", PROMOTION="false",
                                             GITHUB_REF_NAME="main", CANDIDATE_REF=selection["head"],
                                             GITHUB_OUTPUT=str(root / "output"),
                                             GITHUB_STEP_SUMMARY=str(root / "summary")))
@@ -154,10 +152,7 @@ class PlatformBoundaryTest(unittest.TestCase):
                     self.assertEqual(outputs["change_kind"], "normal")
                     self.assertEqual(outputs["macos_split"], str(split).lower())
                     self.assertEqual(outputs["linux_split"], "false")
-                    expected = (set(native) - CHECK_COVERS) | {"admission-debug-integration"}
-                    if "check-full" not in expected:
-                        expected.add("check")
-                    self.assertEqual(json.loads(outputs["native_targets"]), sorted(expected))
+                    self.assertEqual(json.loads(outputs["native_targets"]), expected)
                     self.assertEqual(outputs["retry"], "false")
 
 

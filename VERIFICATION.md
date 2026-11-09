@@ -45,6 +45,7 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | Subsystem | Landing-tip minimum | Exceptions and notes |
 | --- | --- | --- |
 | Portable turn, request encoding, answer rendering | `test-logic` | Value transitions do not change native adapters |
+| Native unit aggregate (`src/tests.zig`) | `test` | It is no product code; each file it newly lists selects its own owner's checks |
 | CLI, client, preferences, provider selection | `check`, `admission-debug-integration` | Covers preference publication and unnamed human CLI consumers |
 | Frontend consent, departure and submission recovery | `test-logic`, `test`, `admission-debug-integration`, `terminal-restoration-integration`, `canonical-failure-integration` | `Terminal*` owners omit `test`; the selector owns their exact mapping. Mixed strict or non-frontend code retains `check` |
 | Store SQL owners | Linux `check`, Mac `test`, `dispatch-debug-integration` on both systems, changed owning integration targets | The Debug failure-correlation subset checks saved provider bytes through reopen |
@@ -67,10 +68,11 @@ Long, churn, full Debug and H2 targets follow their mappings, not an uncondition
 | Standalone Current, reply-delivery and login-signal oracles | Owning integration target; login signal on Linux only | Neither composed gate runs them. Changes to their helpers keep these targets |
 | Canonical-failure oracle | `canonical-failure-integration` on both systems | Skip it when a composed gate is selected; the human CLI fixture runs all cases |
 | Build, dependencies or bootstrap | `check-full`, full Debug admission, long timeout and churn witnesses, relevant H2 and standalone targets, manual empty-cache evidence | Transport build, dependency pins and bootstrap select both H2 targets |
-| Main admission, every ready PR | Successful plan and Linux aggregate on the immutable merge candidate. Normal changes also require policy, native Mac core checks and the [upgrade check](.github/workflows/previous-release-upgrade.yml) on hosted Linux and macOS | The conservative documentation lane requires explicit empty product selections and skipped policy, native, upgrade and cache jobs. Normal acceptance is unchanged: `previous_release_upgrade.py` installs the pinned prior build, saves real work, then restarts the same Store under the candidate. Required admission runs before main |
+| Main admission, every ready PR | Successful plan and Linux aggregate on the immutable merge candidate: compile and format, `typecheck-macos`, `stack-frames` and the selected unit roots and integration targets. Normal changes also require policy. Native Mac runs only for [Mac paths](tests/ci/platform_boundary.py), and the [upgrade check](.github/workflows/previous-release-upgrade.yml) on hosted Linux and macOS only for upgrade, installer and Store-format paths | The conservative documentation lane requires explicit empty product selections and skipped policy, native, upgrade and cache jobs. Admission requires the exact Mac and upgrade results the plan selected: success when selected, skipped otherwise. Required admission runs before main |
+| Promotion, manual | [Promote](.github/workflows/promote.yml) on main HEAD: Linux and macOS `check-full`, `test-logic` and `admission-debug-integration` with the batch's selected targets, `stack-frames`, the upgrade check on both systems, [renderer contracts](#renderer-contracts), then cold release builds | A failing job bisects the batch since `stable` with its own command and files one `promotion-red` issue per cause. Only a fully green promotion publishes a release and advances `stable` |
 | Host stack frames (Zig under `src/` outside frontend owners, `build.zig`, `tests/ci/stack_frames.*`) | `stack-frames` on x86-64 Linux; `check` runs it, `check-full` does not | [stack_frames.py](tests/ci/stack_frames.py) reads the ReleaseSafe binary's prologues and direct calls. It fails on a frame over 8 KiB reachable from a Host thread or a function of a module in `host_modules` unless an exception in [stack_frames.json](tests/ci/stack_frames.json) names its cause, and on a thread whose deepest chain passes its `chain_ceiling`. Exceptions and ceilings only shrink. Calls through function pointers outside `host_modules` are not followed, and no other platform is measured |
 | Caller error coverage (`cli.zig`, `cli_args.zig`, `client.zig`, `preferences.zig` and root `caller_*.zig` under `src/`) | `python3 tests/ci/caller_errors.py`, the prepush driver and CI policy | Caller-facing CLI modules cannot use raw `@errorName`; every literal production error reference or declaration in that inventory needs a catalog mapping or an existing pending entry. The trusted `origin/main` pending set only shrinks; first rollout bootstraps from the same trusted CLI-owned sources and the exact pinned Zig standard library. Closed inferred sets also fail compilation through `caller_error.of`; unmapped errors widened from other owners remain `internal_unexpected`, exit 1 (unclassified), without extending the CLI inventory. |
-| CI policy | Selector tests, workflow validation and `test-logic` on both runner architectures | Exercise actual CI bootstrap |
+| CI policy | Selector tests, workflow validation and `test-logic` on both runner architectures | Exercise actual CI bootstrap. The policy job runs every `tests/ci` test except the self-checks in `POLICY_SELF_CHECKS` ([select_tests.py](tests/ci/select_tests.py)), each of which runs only when the diff changes a file it reads |
 | Provider locality (any Zig under `src/`) | `tests/ci` unit tests, which run [test_provider_locality.py](tests/ci/test_provider_locality.py) | Core production code imports no sign-in file, names no ChatGPT header, ChatGPT endpoint or OpenAI error code, and names no provider by its tag (`Provider.codex`, `.openai =>`); tests and comments are blanked first. The owners are listed in the script; one allowance (the transport's own Host field list) names why. Text checks: a renamed header or a code spelled another way passes |
 
 `test-logic` compiles `src/logic_tests.zig`, which includes answer-rendering tests absent from `src/tests.zig`.
@@ -78,7 +80,7 @@ Neither composed gate covers that root, so run it with a selected composed gate.
 The compiler and dependency setup action is bootstrap, not CI policy.
 An unavailable selection base is an error.
 PR selection uses its recorded base and immutable merge candidate.
-Normal changes retain required core native and historical-upgrade checks even for a narrow diff.
+Normal changes retain policy and the Linux aggregate even for a narrow diff.
 Only the explicit documentation classification can omit them; an empty target list alone cannot.
 
 Qualification Go changes select `measurement-check`.
@@ -89,37 +91,45 @@ Syntax checks, probe compilation and unrelated product tests do not qualify a re
 
 ### Landing cadence
 
-`main` is the releasable source branch.
-Required product correctness runs before merge, not between `main` and a release.
+`main` is the integration branch; `stable` and the latest release are what users run.
+Pull requests run the fast tier before merge; a manual promotion runs the expensive tier on a batch of merged commits before it reaches users.
 GitHub must require pull requests, an up-to-date base and the GitHub Actions `admission` check on `main`, with no bypass.
 Use squash merges under linear history.
 The checked PR merge commit and final squash commit have different identities; qualification applies to their identical source tree, not an identical commit SHA.
 A changed head or base requires current candidate checks before merge.
 
 [Selected checks](.github/workflows/check.yml) qualify each ready PR's immutable merge candidate.
-For normal changes, Linux runs the affected targets from [select_tests.py](tests/ci/select_tests.py).
-Native macOS runs the affected targets plus `check`, or its selected `check-full` superset, and full Debug admission recovery.
-The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs internally on Linux and macOS against that same candidate.
+For normal changes, Linux runs the affected targets from [select_tests.py](tests/ci/select_tests.py), `typecheck-macos` and, when selected, the `stack-frames` oracle.
+Native macOS runs the affected targets, or `check`, only when the change touches a [Mac path](tests/ci/platform_boundary.py).
+The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs on Linux and macOS against that same candidate only for upgrade, installer and Store-format paths and the check itself.
+Renderer contracts run nonblocking only for renderer and frontend owners.
 The documentation lane skips heavyweight policy, product builds and suites, and prior-release upgrades.
 It requires a successful plan with canonical empty product outputs and a successful Linux aggregate that verifies all product producers were skipped.
 The allowlist reads committed Git paths and modes against the selector's resolved base and candidate; any selected runtime, native, cache or resource obligation restores normal verification.
 Reference and consistency checks remain reviewed evidence, not automated link validation.
-The always-run `admission` aggregate requires the exact results for the declared change kind, including cache-execution checks when selected for normal changes.
-Failed, cancelled, missing or unexpectedly skipped required jobs do not qualify a candidate.
+The always-run `admission` aggregate requires the exact results for the declared change kind, including the selected Mac, upgrade and cache-execution checks for normal changes.
+Failed, cancelled, missing or unexpectedly skipped required jobs do not qualify a candidate, and an unselected Mac or upgrade job must be skipped.
 Draft development checks never satisfy admission.
 Correctness failures are fixed on the PR before it reaches `main`.
 
-[Release](.github/workflows/release.yml) is the only automatic publishing pipeline.
-A push to `main` selects that immutable commit for cold versioned builds and packaging.
-It publishes those artifacts without another native correctness campaign.
+[Promote](.github/workflows/promote.yml) is the only path to a release, and it starts only by manual dispatch on `main`: `gh workflow run promote.yml --ref main`.
+It qualifies main HEAD against the batch since `stable`, the last promoted commit, and runs everything the PR tier skips: Linux and macOS `check-full`, `test-logic` and full Debug admission recovery with the batch's selected targets, `stack-frames`, the upgrade check on both systems and the renderer contracts.
+A failing suite, upgrade or contract job replays its own command on the same runner: once at HEAD, then by binary search over the batch's first-parent commits.
+The verdict names the first commit where that job fails, or says the red did not reproduce at HEAD or already fails at `stable`; replay logs and the verdict are retained with the run.
+A job's replay covers all its targets or failed steps, so a job with several causes names only the earliest; each of its issues says so.
+The run then files one `promotion-red` issue per failure signature through [report_issue.py](tests/ci/report_issue.py), with the verdict on it.
+A red promotion publishes nothing and leaves `stable` where it is; fix forward on `main` through ordinary PRs and promote again.
+A bisect never turns a promotion green, and a promotion never merges or reverts.
+Only when every tier passes does it call [Release](.github/workflows/release.yml) with the qualified SHA for cold versioned builds and publication.
 The publisher owns release identity, schema compatibility checks, complete assets and monotonic publication.
-Its serialized recovery entry accepts only a commit on `main`; an arbitrary PR ref cannot publish.
-Pending runs may coalesce, so not every merge is promised its own release.
-The `stable` branch remains only a non-rewinding compatibility pointer to a successfully published release.
-No qualification dispatcher, completion callback or global open-issue hold owns that pointer.
+It accepts only a commit on `main`; an arbitrary PR ref cannot publish.
+The `stable` branch remains a non-rewinding pointer to the last successfully published, promoted release.
+Promote when something users need has landed; a batch of about 22 merges costs at most five replays of a failing target to bisect.
+No completion callback or global open-issue hold owns `stable`.
 
 There are no scheduled CI workflows.
 Manual qualification and resource campaigns remain diagnostics, not a second release authority.
+There is no automatic promotion trigger.
 Record recurring failures by fixture and assertion, preserve their counterexamples, and close them through the fixing commit.
 An unrelated issue does not freeze publication of qualified main commits.
 Report native architecture, skips and unrun cases; cross-compilation and skips are not native passes.
@@ -160,10 +170,11 @@ Artificial shared setup or pair deadlines and prelaunch fit reserves are not rou
 
 ### Renderer contracts
 
-[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch source or the harnesses, and on manual dispatch: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix with tmux smoke and Ghostty vectors, `direct-pty-controls`, `input-equivalence`, unattended input replay and `sequence-model`.
+[Renderer contracts](.github/workflows/renderer-contracts.yml) run nonblocking build targets on pull requests that touch renderer, frontend, terminal or `src/os` owners, `build.zig` or the harnesses, and on manual dispatch: `renderer-contracts-selftest`, the synthetic `direct-pty` key matrix with tmux smoke and Ghostty vectors, `direct-pty-controls`, `input-equivalence`, unattended input replay and `sequence-model`.
 No gate root imports their sources, and neither Selected checks nor merging requires them; a red result is a defect to fix, not a waiver.
+Every promotion requires them, and a failing contract bisects the batch.
 Manual dispatch adds the [renderer mutation runner](tests/ci/renderer_mutation.py) for `test`, `test-logic` and `sequence-model`.
-Failures remain visible in workflow results; there is no scheduled campaign or automatic issue report.
+PR failures remain visible in workflow results; there is no scheduled campaign, and only a promotion files issues.
 Its anchors are checked per change: [`renderer_mutation_test.py`](tests/ci/renderer_mutation_test.py), run by the Selected `policy` job, requires each mutation's anchor exactly once in current source, so moving a protection re-anchors its mutation in the same change.
 
 Run decoded-input replay with `zig build terminal-restoration-integration -- input-replay`; the default restoration gate excludes it.
@@ -291,14 +302,13 @@ zig build -Doptimize=ReleaseSafe -j2 --summary all
 
 ### Release publication
 
-Releases add no product correctness gate after main.
-[Release](.github/workflows/release.yml) starts on a main push and publishes the immutable event SHA that was admitted before merge.
-Only verified publication advances the `stable` compatibility pointer.
-To recover an admitted main commit, run `gh workflow run release.yml --ref main -f sha=<full main SHA>`.
+[Release](.github/workflows/release.yml) runs only inside a green [promotion](#landing-cadence) and publishes the immutable main SHA that promotion qualified.
+Only verified publication advances the `stable` pointer.
+To recover an interrupted publication, rerun the promotion's failed jobs: `gh run rerun <promotion run id> --failed`.
 
 [release.py](tests/ci/release.py) skips a SHA only when a verified public release already includes it, and can repair a missed pointer update without rebuilding.
 Drafts and orphan tags reserve a version for their exact SHA; recovery reuses that identity rather than skipping incomplete publication.
-A newer main SHA gets a newer version, so pending pushes may coalesce without promising a release for every merge.
+A newer main SHA gets a newer version; one release covers a whole promotion batch.
 Each platform's native runner builds the tagged commit with empty caches and ReleaseSafe.
 The targets are portable: a baseline CPU, glibc 2.34 on Linux and macOS 15 on Apple Silicon.
 Each build must report the version and exact SHA from `rui --version`.

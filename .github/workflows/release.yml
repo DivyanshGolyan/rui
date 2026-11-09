@@ -1,12 +1,11 @@
 name: Release
-# Main is admitted before merge. Release builds and publishes without requalification.
+# Only a green promotion (promote.yml) calls this, with the main SHA it qualified.
+# Recover a failed publication by rerunning that promotion's failed jobs.
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  workflow_call:
     inputs:
       sha:
-        description: Main commit SHA to recover (not a branch or PR ref)
+        description: Qualified main commit SHA (not a branch or PR ref)
         type: string
         required: true
 
@@ -17,7 +16,7 @@ permissions:
 cache-mode: read
 
 concurrency:
-  # Serialize numbering and publication. Pending pushes may coalesce to newer main.
+  # Serialize numbering and publication.
   group: release
   cancel-in-progress: false
 
@@ -41,7 +40,7 @@ jobs:
       - id: plan
         env:
           GH_TOKEN: ${{ github.token }}
-          SHA: ${{ github.event_name == 'push' && github.sha || inputs.sha }}
+          SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
           python3 -B tests/ci/release.py plan "$SHA" >> "$GITHUB_OUTPUT"

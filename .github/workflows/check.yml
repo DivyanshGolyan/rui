@@ -2,13 +2,27 @@ name: Selected checks
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('Selected checks from base {0}', inputs.base) || '' }}
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
+    # Edits and draft conversion never cancel a running candidate. A
+    # retargeted PR runs again on its next push, which the up-to-date rule
+    # requires; reopen it when its head already contains the new base.
+    types: [opened, synchronize, reopened, ready_for_review]
   # Diagnose a ref against a chosen base without publishing it.
   workflow_dispatch:
     inputs:
       base:
         description: Base commit; selection covers base..ref
         required: true
+  # Promotion qualifies main HEAD against the batch since stable (promote.yml).
+  workflow_call:
+    inputs:
+      base:
+        description: Last promoted commit; selection covers base..main HEAD
+        required: true
+        type: string
+      promotion:
+        description: Run the full suite on Linux and macOS and bisect a failing job over the batch
+        required: true
+        type: boolean
 
 permissions:
   contents: read
@@ -16,7 +30,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  group: selected-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event.pull_request.head.ref || github.ref_name }}${{ inputs.promotion && '-promotion' || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -30,6 +44,7 @@ jobs:
       targets: ${{ steps.select.outputs.targets }}
       native_targets: ${{ steps.select.outputs.native_targets }}
       native: ${{ steps.select.outputs.native }}
+      upgrade: ${{ steps.select.outputs.upgrade }}
       retry: ${{ steps.select.outputs.retry }}
       linux_memory: ${{ steps.select.outputs.linux_memory }}
       cache_execution: ${{ steps.select.outputs.cache_execution }}
@@ -38,6 +53,7 @@ jobs:
       linux_codegen: ${{ steps.select.outputs.linux_codegen }}
       macos_matrix: ${{ steps.select.outputs.macos_matrix }}
       macos_split: ${{ steps.select.outputs.macos_split }}
+      policy_skips: ${{ steps.select.outputs.policy_skips }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,6 +66,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || inputs.base }}
           PHASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'development' || 'review' }}
           EVENT_NAME: ${{ github.event_name }}
+          PROMOTION: ${{ inputs.promotion || false }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_REF"
@@ -67,7 +84,7 @@ jobs:
           kind = (classify(p['base'], p['head']) if os.environ['EVENT_NAME'] == 'pull_request'
                   else ChangeKind.NORMAL)
           # Future selector obligations must not be erased by the path allowlist.
-          if any(p[key] for key in ('targets', 'native_targets', 'native_required', 'mac_required',
+          if any(p[key] for key in ('targets', 'native_targets', 'native_required', 'mac_required', 'upgrade_required',
                                     'server_targets', 'cache_execution_checks', 'linux_memory_checks', 'manual_checks')):
               kind = ChangeKind.NORMAL
           p['change_kind'] = kind.value
@@ -78,13 +95,19 @@ jobs:
               p['cache_execution_checks'] = False
               p['linux_memory_checks'] = False
               p['retry'] = False
+          elif os.environ['PROMOTION'] == 'true':
+              # The batch's full suite on both systems, plus the selected
+              # standalone targets. check-full omits the portable logic root,
+              # the frame gate and the Debug recovery, so they run beside it.
+              core = {'check-full', 'test-logic', 'admission-debug-integration'}
+              p['targets'] = sorted((set(p['targets']) - CHECK_COVERS - {'check'}) | core | {'stack-frames'})
+              p['native_targets'] = sorted((set(p['native_targets']) - CHECK_COVERS - {'check'}) | core)
+              p['retry'] = False
           elif ready_pr:
               # Qualify the tested source tree, not the later final squash SHA.
-              # check-full already contains the core native acceptance suites.
-              native = (set(p['native_targets']) - CHECK_COVERS) | {'admission-debug-integration'}
-              if 'check-full' not in native:
-                  native.add('check')
-              p['native_targets'] = sorted(native)
+              # Linux predicts Mac except where code may differ by platform;
+              # promotion runs Mac for every batch.
+              p['native_targets'] = (p['native_targets'] or ['check']) if p['mac_required'] else []
               p['retry'] = False
           else:
               # Reduced draft feedback cannot qualify a merge candidate.
@@ -96,6 +119,7 @@ jobs:
           if p['linux_codegen']:
               p['targets'] = [t for t in p['targets'] if t != 'stack-frames']
           p['native_required'] = bool(p['native_targets'])
+          p['upgrade_required'] = ready_pr and kind == ChangeKind.NORMAL and p['upgrade_required']
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               print('change_kind=' + kind.value, file=f)
               print('candidate_ref=' + os.environ['CANDIDATE_REF'], file=f)
@@ -107,9 +131,11 @@ jobs:
               print('linux_codegen=' + str(p['linux_codegen']).lower(), file=f)
               print('macos_matrix=' + json.dumps(shards(p['native_targets'], 'macos')), file=f)
               print('native=' + str(p['native_required']).lower(), file=f)
+              print('upgrade=' + str(p['upgrade_required']).lower(), file=f)
               print('retry=' + str(p['retry']).lower(), file=f)
               print('linux_memory=' + str(p['linux_memory_checks']).lower(), file=f)
               print('cache_execution=' + str(p['cache_execution_checks']).lower(), file=f)
+              print('policy_skips=' + json.dumps(p['policy_skips']), file=f)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               print('Selection (not acceptance):\n```json\n' + json.dumps(p, indent=2) + '\n```', file=f)
           PY
@@ -144,7 +170,23 @@ jobs:
           publish-caches: 'false'
       - name: Check caller error coverage and shrink-only pending causes
         run: python3 -B tests/ci/caller_errors.py
-      - run: python3 -B -m unittest discover -s tests/ci -v
+      - name: Run tests/ci, less self-checks whose inputs are unchanged
+        env:
+          SKIPS: ${{ needs.plan.outputs.policy_skips }}
+        run: |
+          python3 -B - <<'PY'
+          import json, os, sys, unittest
+          skips = json.loads(os.environ['SKIPS'])
+          print('Self-checks with unchanged inputs (select_tests.POLICY_SELF_CHECKS):', skips or 'none')
+          def kept(suite):
+              for test in suite:
+                  if isinstance(test, unittest.TestSuite):
+                      yield from kept(test)
+                  elif not test.id().startswith(tuple(unit + '.' for unit in skips)):
+                      yield test
+          suite = unittest.TestSuite(kept(unittest.defaultTestLoader.discover('tests/ci')))
+          sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())
+          PY
       - name: Reject undefined fixture names before native builds
         run: |
           python3 -m pip install --disable-pip-version-check ruff==0.17.0
@@ -353,8 +395,9 @@ jobs:
     if: ${{ !cancelled() && needs.linux_build.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.linux_build_unit.result) }}
     runs-on: ubuntu-24.04
     # Ordinary shards take under ten minutes; a local rebuild after a rejected
-    # handoff compiles without the producer's cache.
-    timeout-minutes: 35
+    # handoff compiles without the producer's cache. A failed promotion shard
+    # also bisects its batch.
+    timeout-minutes: ${{ inputs.promotion && 300 || 35 }}
     strategy:
       # qualification.py packs Selected suites into at most ten shards, so
       # every shard starts at once.
@@ -433,6 +476,8 @@ jobs:
           python3 -B tests/integration/mysql_server.py wait rui-mysql "$RUNNER_TEMP/mysql-started" \
             || { cat "$RUNNER_TEMP/mysql-start.log"; exit 1; }
       - name: Run selected targets
+        id: run
+        timeout-minutes: 35
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
@@ -459,6 +504,25 @@ jobs:
           name: failure-linux-${{ matrix.name }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rui-failure-artifacts
           retention-days: 3
+          if-no-files-found: ignore
+      - name: Bisect the promotion batch with this shard's targets
+        if: ${{ failure() && inputs.promotion && steps.run.outcome == 'failure' }}
+        timeout-minutes: 240
+        env:
+          BASE: ${{ inputs.base }}
+          HEAD_SHA: ${{ needs.plan.outputs.candidate_ref }}
+          TARGETS: ${{ toJSON(matrix.targets) }}
+          CHECK_PART: ${{ matrix.part }}
+        run: |
+          python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect" \
+            -- python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"
+      - name: Retain the bisect's verdict and replay logs
+        if: ${{ failure() && inputs.promotion }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: promotion-bisect-linux-${{ matrix.name }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/promotion-bisect
+          retention-days: 14
           if-no-files-found: ignore
       - name: Existing Linux measurement-tool checks, not resource qualification
         if: ${{ needs.plan.outputs.linux_memory == 'true' && contains(matrix.targets, 'test-logic') }}
@@ -519,7 +583,7 @@ jobs:
     # A skipped unit producer is expected only for an unsplit selection.
     if: ${{ !cancelled() && needs.plan.outputs.native == 'true' && needs.macos_build.result == 'success' && needs.macos_build_unit.result == (needs.plan.outputs.macos_split == 'true' && 'success' || 'skipped') }}
     runs-on: macos-15
-    timeout-minutes: 35
+    timeout-minutes: ${{ inputs.promotion && 300 || 35 }}
     strategy:
       # Start alongside Linux; bound Mac occupancy while keeping suites isolated.
       fail-fast: false
@@ -541,6 +605,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -B tests/ci/build_artifact.py restore "$TARGETS" --artifact-id "$ARTIFACT_ID" --artifact-id "$UNIT_ARTIFACT_ID"
       - name: Run required native targets
+        id: run
+        timeout-minutes: 35
         env:
           TARGETS: ${{ toJSON(matrix.targets) }}
           CHECK_PART: ${{ matrix.part }}
@@ -558,6 +624,25 @@ jobs:
           name: failure-macos-${{ matrix.name }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/rui-failure-artifacts
           retention-days: 3
+          if-no-files-found: ignore
+      - name: Bisect the promotion batch with this shard's targets
+        if: ${{ failure() && inputs.promotion && steps.run.outcome == 'failure' }}
+        timeout-minutes: 240
+        env:
+          BASE: ${{ inputs.base }}
+          HEAD_SHA: ${{ needs.plan.outputs.candidate_ref }}
+          TARGETS: ${{ toJSON(matrix.targets) }}
+          CHECK_PART: ${{ matrix.part }}
+        run: |
+          python3 -B tests/ci/promotion.py --base "$BASE" --head "$HEAD_SHA" --logs "$RUNNER_TEMP/promotion-bisect" \
+            -- python3 -B tests/ci/run_selected.py "$TARGETS" --check-part "$CHECK_PART"
+      - name: Retain the bisect's verdict and replay logs
+        if: ${{ failure() && inputs.promotion }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: promotion-bisect-macos-${{ matrix.name }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/promotion-bisect
+          retention-days: 14
           if-no-files-found: ignore
   macos:
     # Keep the existing required status. A failed/cancelled matrix member must
@@ -581,7 +666,8 @@ jobs:
           test "$NATIVE_RESULT" = success
   previous_release_upgrade:
     needs: plan
-    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && needs.plan.outputs.change_kind == 'normal' }}
+    # Upgrade, installer and Store-format paths only; promotion runs it for every batch.
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && needs.plan.outputs.upgrade == 'true' }}
     uses: ./.github/workflows/previous-release-upgrade.yml
     with:
       candidate-ref: ${{ needs.plan.outputs.candidate_ref }}
@@ -610,6 +696,7 @@ jobs:
           MACOS_RESULT: ${{ needs.macos.result }}
           UPGRADE_RESULT: ${{ needs.previous_release_upgrade.result }}
           NATIVE: ${{ needs.plan.outputs.native }}
+          UPGRADE: ${{ needs.plan.outputs.upgrade }}
           CACHE_SELECTED: ${{ needs.plan.outputs.cache_execution }}
           CACHE_RESULT: ${{ needs.cache_execution.result }}
         run: |
@@ -622,6 +709,7 @@ jobs:
               test "$POLICY_RESULT" = skipped
               test "$NATIVE" = false
               test "$MACOS_RESULT" = skipped
+              test "$UPGRADE" = false
               test "$UPGRADE_RESULT" = skipped
               test "$CACHE_SELECTED" = false
               test "$TARGETS" = '[]'
@@ -634,9 +722,17 @@ jobs:
               test "$LINUX_MEMORY" = false ;;
             normal)
               test "$POLICY_RESULT" = success
-              test "$NATIVE" = true
-              test "$MACOS_RESULT" = success
-              test "$UPGRADE_RESULT" = success ;;
+              # Mac and the upgrade run for their own paths; promotion runs both.
+              case "$NATIVE" in
+                true) test "$MACOS_RESULT" = success ;;
+                false) test "$MACOS_RESULT" = skipped ;;
+                *) echo 'Missing or invalid native selection' >&2; exit 1 ;;
+              esac
+              case "$UPGRADE" in
+                true) test "$UPGRADE_RESULT" = success ;;
+                false) test "$UPGRADE_RESULT" = skipped ;;
+                *) echo 'Missing or invalid upgrade selection' >&2; exit 1 ;;
+              esac ;;
             *) echo 'Missing or invalid change kind' >&2; exit 1 ;;
           esac
           case "$CACHE_SELECTED" in

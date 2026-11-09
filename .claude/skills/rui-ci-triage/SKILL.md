@@ -1,6 +1,6 @@
 ---
 name: rui-ci-triage
-description: Triage CI: find why a Rui run is red and whether the commit under test caused it. Use when Selected checks, pre-merge admission or Release fails, or a job stalls, times out or shows cancelled.
+description: Triage CI: find why a Rui run is red and whether the commit under test caused it. Use when Selected checks, pre-merge admission, Promote or Release fails, or a job stalls, times out or shows cancelled.
 ---
 
 # rui-ci-triage
@@ -29,14 +29,15 @@ A run can fail in several jobs for different reasons.
 Read each failed job's own failing step before calling it derivative.
 The required `admission` job can fail because an upstream acceptance job failed or was cancelled.
 Read that upstream failure rather than blaming the aggregate.
-A Release failure concerns publication of an admitted main commit; recover that publication through the same workflow.
+A Promote failure runs the batch's bisect inside the failed job: read its `Promotion bisect:` line and the retained replay logs before diagnosing the commit it names.
+A Release failure inside a green promotion concerns publication only; rerun that promotion's failed jobs.
 
 ## 3. Decide whether the diff caused it
 
 Before blaming the commit under test or calling it a stale base, look up the signature on other SHAs and workflows: Selected and on-demand qualification runs.
 
 - **Intermittent** when the signature fails on SHAs that never touched the fixture or its owner (`git log <a>..<b> -- <paths>`), or when one SHA both passes and fails across workflows.
-  Ready PR admission includes native Mac core checks, so unrelated SHAs failing one fixture can expose a race rather than a stale base.
+  Promotion runs native Mac and the full suite over a batch, so unrelated SHAs failing one fixture can expose a race rather than a stale base.
 - **Caused by the diff** when the signature is new and the diff touches the fixture's owner.
 - **A job that stalled or hit its timeout** shows as cancelled, not failed, and has no per-fixture `timed out` record.
   Treat it as a failure.
