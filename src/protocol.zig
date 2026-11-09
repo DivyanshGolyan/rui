@@ -6,6 +6,7 @@ const model_list = @import("model_list.zig");
 const provider_name = @import("provider_name.zig");
 const named_scratch = @import("named_scratch.zig");
 const store_id = @import("store_id.zig");
+const mutation_answer = @import("mutation_answer.zig");
 pub const ScratchBudget = @import("ScratchBudget.zig");
 
 pub const wire_version = "10";
@@ -344,7 +345,7 @@ fn configureDigest(session: []const u8, configuration: *const Configuration, req
     return hash.finalResult();
 }
 
-pub const SkillsReloadStatus = enum { reloaded, unchanged };
+pub const SkillsReloadStatus = mutation_answer.SkillsReloadStatus;
 
 pub const SkillRequest = struct {
     operation: enum { invoke, reload } = .invoke,
@@ -445,7 +446,7 @@ pub const ModelInterruptionCommand = struct {
     }
 };
 
-pub const PermissionDecision = enum { allow_once, deny };
+pub const PermissionDecision = mutation_answer.PermissionDecision;
 
 // Reply and observation vocabulary. The Store produces these values and the
 // Host renders their tag names, so each reply's JSON shape can bound them.
@@ -515,10 +516,10 @@ pub const MessageRejection = enum {
 };
 pub const CommandKind = cli_value.CommandKind;
 pub const CommandObservationStatus = enum { absent, accepted, rejected };
-pub const SessionStopCompletion = enum { pending, completed };
+pub const SessionStopCompletion = mutation_answer.SessionStopCompletion;
 pub const SessionArchiveState = @import("session_archive.zig").State;
 pub const SessionArchiveFilter = @import("session_archive.zig").Filter;
-pub const SessionArchiveObservation = struct { archived: bool, completion: SessionStopCompletion };
+pub const SessionArchiveObservation = mutation_answer.SessionArchiveObservation;
 
 /// How a Turn ended, as its `turn_ended` Activity row names it.
 pub const TurnEnding = enum {
