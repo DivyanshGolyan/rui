@@ -189,9 +189,8 @@ jobs:
           sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())
           PY
       - name: Reject undefined fixture names before native builds
-        run: |
-          python3 -m pip install --disable-pip-version-check ruff==0.17.0
-          python3 -m ruff check --select F821 tests
+        # ruff is pinned in tests/ci/requirements.txt, which the pre-push hook installs too.
+        run: python3 -m ruff check --select F821 tests
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
