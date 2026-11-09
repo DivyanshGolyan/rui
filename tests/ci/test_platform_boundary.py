@@ -157,7 +157,7 @@ class PlatformBoundaryTest(unittest.TestCase):
     def test_mac_specific_paths(self):
         for path in ("src/os/socket.zig", "tests/integration/os_semantics.py", "src/host_launch.c",
                      "src/build_transport.sh", "tests/integration/session_list_release_probe.c",
-                     ".github/workflows/qualify-macos.yml", "install.sh", "build/darwin.zig", "build.zig",
+                     ".github/workflows/qualify-macos.yml", "install.sh", "build/darwin.zig",
                      "src/os/process.zig", "src/os/descriptor_limit.zig", "src/h2/Connection.zig",
                      "src/h2/testing/Peer.zig", "tests/integration/terminal_process.py",
                      "tests/integration/terminal_leader.py"):
@@ -165,7 +165,7 @@ class PlatformBoundaryTest(unittest.TestCase):
         for path in ("src/session_view.zig", "src/server.zig", "tests/integration/dispatch_integration.py",
                      ".github/workflows/check.yml", "README.md",
                      # Build plumbing: Linux runs it and typecheck-macos compiles for Darwin.
-                     "build.zig.zon", ".github/actions/setup/action.yml", "tests/ci/qualification.py"):
+                     "build.zig", "build.zig.zon", ".github/actions/setup/action.yml", "tests/ci/qualification.py"):
             self.assertFalse(mac_path(path), path)
 
     def test_selection_requires_mac_for_review_of_mac_specific_paths(self):

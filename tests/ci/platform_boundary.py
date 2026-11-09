@@ -33,12 +33,9 @@ MAC_PATHS = (
     "src/*.c", "src/*.h", "src/*.inc", "src/*.patch", "src/*.sh", "tests/integration/*.c",
     ".github/workflows/qualify-macos.yml",
     "install.sh", "release/*",
-    # build.zig's Darwin-only linking and test settings, which Linux never runs.
-    # build.zig stays until they move to build/darwin.zig: typecheck-macos
-    # skips addH2's Darwin SDK and framework linking.
-    "build/darwin.zig", "build.zig",
+    "build/darwin.zig",
 )
-# Other build plumbing (build.zig.zon, the setup action, the CI qualification
+# Other build plumbing (build.zig, build.zig.zon, the setup action, the CI qualification
 # helpers) is not here: Linux runs it, typecheck-macos compiles Rui for
 # Darwin on every PR, and promotion links and runs it on a Mac.
 

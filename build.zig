@@ -1,6 +1,7 @@
 const std = @import("std");
 const Translator = @import("translate_c").Translator;
 const unit_partition = @import("src/unit_test_partition.zig");
+const darwin = @import("build/darwin.zig");
 
 pub fn build(b: *std.Build) void {
     // PR fixtures need ReleaseSafe checks, not shipped LLVM code generation.
@@ -66,17 +67,13 @@ pub fn build(b: *std.Build) void {
         const root = unit_partition.roots[index];
         const compile = b.addTest(.{
             .name = if (test_filters.len != 0) "test" else b.fmt("unit-{s}", .{@tagName(root)}),
-            // Leave headroom for the OS on the 7 GiB Mac unit producer.
-            .max_rss = if (test_filters.len == 0 and target.result.os.tag == .macos) 3 * 1024 * 1024 * 1024 else 0,
+            .max_rss = darwin.unitMaxRss(test_filters.len, target),
             .use_llvm = if (target.result.cpu.arch == .x86_64) false else null,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/tests.zig"),
                 .target = target,
                 .optimize = .ReleaseSafe,
-                // LLVM DWARF dominates memory. Only Mac unit roots omit it;
-                // checks/optimization stay unchanged, and filtered reproductions
-                // keep full debug info. Never strip the stack-trace probes.
-                .strip = if (test_filters.len == 0 and target.result.os.tag == .macos) true else null,
+                .strip = darwin.unitStrip(test_filters.len, target),
             }),
             .filters = if (test_filters.len != 0) test_filters else unit_filters[index],
             .test_runner = if (unit_runner) |path| .{ .path = path, .mode = .server } else filtered_runner,
@@ -1410,8 +1407,7 @@ fn addH2(
     module.addObjectFile(pinned.output.path(b, "lib/libnghttp2.a"));
     // SecTrust verifies h2's sessions under system trust on macOS.
     if (target.result.os.tag == .macos) {
-        module.linkFramework("Security", .{});
-        module.linkFramework("CoreFoundation", .{});
+        darwin.linkTrust(module);
     }
     return module;
 }
@@ -1421,11 +1417,7 @@ fn addH2(
 fn addPinnedPaths(b: *std.Build, target: std.Build.ResolvedTarget, pinned: PinnedTransport, module: *std.Build.Module, bindings: Translator) void {
     bindings.addIncludePath(pinned.output.path(b, "include"));
     if (target.result.os.tag == .macos) {
-        module.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
-        module.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
-        module.addLibraryPath(pinned.output.path(b, "sdk/usr/lib"));
-        bindings.addSystemFrameworkPath(pinned.output.path(b, "sdk/System/Library/Frameworks"));
-        bindings.addSystemIncludePath(pinned.output.path(b, "sdk/usr/include"));
+        darwin.addSdkPaths(b, module, bindings, pinned.output);
     } else {
         module.linkSystemLibrary("pthread", .{});
         module.linkSystemLibrary("dl", .{});
