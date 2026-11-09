@@ -121,9 +121,12 @@ def package(targets, destination, binaries=None, part="all"):
 
 
 def unpack(archive, receipt, targets):
-    if (receipt["run_id"], receipt["run_attempt"], receipt["source_sha"]) != (
-            int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"]),
-            git("rev-parse", "HEAD")):
+    # "Re-run failed jobs" keeps the passed producer and its earlier attempt's
+    # artifact; that is the same build of this run and source. Rejecting it
+    # recompiled every rerun from the network, so a mirror outage that failed
+    # the first attempt failed the retry too.
+    if ((receipt["run_id"], receipt["source_sha"]) != (int(os.environ["GITHUB_RUN_ID"]), git("rev-parse", "HEAD"))
+            or not 1 <= receipt["run_attempt"] <= int(os.environ["GITHUB_RUN_ATTEMPT"])):
         raise Mismatch("Compiled origin differs: run, attempt or source SHA")
     inputs = identity(targets, receipt["inputs"].get("part"))
     if receipt["inputs"] != inputs:

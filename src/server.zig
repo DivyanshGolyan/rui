@@ -2729,25 +2729,54 @@ test "Conversation stream native delivery reads each byte once and closes on fai
     defer _ = std.c.close(sockets[1]);
     const Peer = struct {
         fd: std.posix.fd_t,
+        /// Readable once delivery has returned, when every byte it wrote is queued.
+        returned: std.posix.fd_t,
         received: [expected.len + 320]u8 = undefined,
         used: usize = 0,
         failed: bool = false,
 
+        /// Darwin can mark a Unix socket's end without waking a reader
+        /// blocked on it: in #934, recv saw EOF while this peer's read slept
+        /// 1200 s. So the peer never waits for EOF. It waits for bytes or
+        /// for delivery to return, and reads only what is already queued.
         fn drain(self: *@This()) void {
-            while (self.used < self.received.len) {
-                const count = std.c.read(self.fd, self.received[self.used..].ptr, self.received.len - self.used);
-                if (count < 0) {
-                    if (std.posix.errno(count) == .INTR) continue;
+            while (true) {
+                var ready = [_]std.c.pollfd{
+                    .{ .fd = self.fd, .events = std.posix.POLL.IN, .revents = 0 },
+                    .{ .fd = self.returned, .events = std.posix.POLL.IN, .revents = 0 },
+                };
+                const polled = std.c.poll(&ready, ready.len, -1);
+                if (polled < 0) {
+                    if (std.posix.errno(polled) == .INTR) continue;
                     self.failed = true;
                     return;
                 }
-                if (count == 0) return;
-                self.used += @intCast(count);
+                while (true) {
+                    if (self.used == self.received.len) {
+                        self.failed = true; // More bytes than the response.
+                        return;
+                    }
+                    const count = std.c.recv(self.fd, self.received[self.used..].ptr, self.received.len - self.used, std.c.MSG.DONTWAIT);
+                    if (count < 0) switch (std.posix.errno(count)) {
+                        .INTR => continue,
+                        .AGAIN => break,
+                        else => {
+                            self.failed = true;
+                            return;
+                        },
+                    };
+                    if (count == 0) return;
+                    self.used += @intCast(count);
+                }
+                if (ready[1].revents != 0) return;
             }
-            self.failed = true; // A full buffer is not evidence of EOF.
         }
     };
-    var peer = Peer{ .fd = sockets[1] };
+    var returned: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&returned));
+    defer _ = std.c.close(returned[0]);
+    defer _ = std.c.close(returned[1]);
+    var peer = Peer{ .fd = sockets[1], .returned = returned[0] };
     storage.testing_content_work = .{};
     {
         // Drain during delivery: the response exceeds Darwin's socket queue.
@@ -2755,7 +2784,7 @@ test "Conversation stream native delivery reads each byte once and closes on fai
         // including when delivery fails before the assertions below.
         const thread = try std.Thread.spawn(.{}, Peer.drain, .{&peer});
         defer {
-            _ = socket_os.shutdown(sockets[0], std.c.SHUT.WR);
+            std.debug.assert(std.c.write(returned[1], "r", 1) == 1);
             thread.join();
         }
         try deliverConversationContent(&host, sockets[0], command);

@@ -12,8 +12,12 @@ from host_process import is_peer_disconnect
 RUI, ACTOR = map(lambda value: pathlib.Path(value).resolve(), sys.argv[1:3])
 
 
-def status(store):
-    result = subprocess.run([ACTOR, store], capture_output=True, text=True, timeout=10)
+def status(store, *, timed=False):
+    # Untimed, the actor classifies whatever the peer sends, however late a
+    # loaded runner schedules the peer (#967). Only probes of the Host-info
+    # deadline itself run timed.
+    result = subprocess.run([ACTOR, store] if timed else [ACTOR, "untimed", store],
+        capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
 

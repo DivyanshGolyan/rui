@@ -7,6 +7,16 @@ pub const SessionToken = @import("change_ring.zig").SessionToken;
 const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
 const transport_policy = @import("transport_policy.zig");
+const wire_field = @import("wire_field.zig");
+const mutation_answer = @import("mutation_answer.zig");
+comptime {
+    std.debug.assert(mutation_answer.max_code_bytes == protocol.max_code_bytes);
+    std.debug.assert(mutation_answer.max_session_bytes == protocol.max_session_bytes);
+}
+pub const JsonString = wire_field.JsonString;
+pub const JsonEnum = wire_field.JsonEnum;
+pub const OmittableJson = wire_field.OmittableJson;
+pub const decimalId = wire_field.decimalId;
 
 pub const ConversationCursor = struct {
     end: u64,
@@ -78,23 +88,23 @@ pub const ConversationPage = struct {
         var fixed = std.heap.FixedBufferAllocator.init(&storage);
         const wire = std.json.parseFromSliceLeaky(Wire, fixed.allocator(), bytes, .{ .ignore_unknown_fields = true }) catch return error.InvalidConversationPage;
         if (!wire.version.eql(protocol.wire_version) or !wire.type.eql("conversation_page") or !wire.direction.eql("newest_first")) return error.InvalidConversationPage;
-        var page: ConversationPage = .{ .end = try mutationId(wire.end, true), .count = wire.items.count, .more = wire.more };
+        var page: ConversationPage = .{ .end = try decimalId(wire.end, true), .count = wire.items.count, .more = wire.more };
         if (page.end > std.math.maxInt(i64) or (cursor.end != 0 and page.end != cursor.end) or (page.more and page.count != page.items.len)) return error.InvalidConversationPage;
         var position = cursor.before_position;
         var ordinal = cursor.before_ordinal;
         for (wire.items.values[0..page.count], page.items[0..page.count]) |row, *item| {
             const hosted = row.kind.value == .hosted_call;
             if (hosted == (row.content != null)) return error.InvalidConversationPage;
-            item.* = .{ .position = try mutationId(row.position, false), .ordinal = try mutationId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = 0, .digest = protocol.contentDigest("") } };
+            item.* = .{ .position = try decimalId(row.position, false), .ordinal = try decimalId(row.ordinal, true), .kind = row.kind.value, .content = .{ .bytes = 0, .digest = protocol.contentDigest("") } };
             item.presentation = if (row.presentation) |p| p.value else null;
-            item.admitted_at = if (row.admitted_at) |second| try mutationId(second, false) else null;
+            item.admitted_at = if (row.admitted_at) |second| try decimalId(second, false) else null;
             item.sender = if (row.sender) |sender| sender.peer() catch return error.InvalidConversationPage else null;
             if ((item.kind == .tool_result or hosted) != (item.presentation != null) or (item.kind == .user) != (item.admitted_at != null) or
                 (item.kind != .user and item.sender != null) or
                 (item.admitted_at orelse 0) > std.math.maxInt(i64)) return error.InvalidConversationPage;
             if (item.presentation) |p| if (p.publication_position != item.position or (hosted and p.description == null)) return error.InvalidConversationPage;
             if (row.content) |reference| {
-                item.content.bytes = try mutationId(reference.bytes, true);
+                item.content.bytes = try decimalId(reference.bytes, true);
                 if (!reference.display.eql("omitted") or reference.sha256.slice().len != 64) return error.InvalidConversationPage;
                 _ = std.fmt.hexToBytes(&item.content.digest, reference.sha256.slice()) catch return error.InvalidConversationPage;
             }
@@ -106,7 +116,7 @@ pub const ConversationPage = struct {
         }
         if (page.more) {
             if (wire.before_position == null or wire.before_ordinal == null or
-                try mutationId(wire.before_position.?, false) != position or try mutationId(wire.before_ordinal.?, true) != ordinal) return error.InvalidConversationPage;
+                try decimalId(wire.before_position.?, false) != position or try decimalId(wire.before_ordinal.?, true) != ordinal) return error.InvalidConversationPage;
         } else if (wire.before_position != null or wire.before_ordinal != null) return error.InvalidConversationPage;
         return page;
     }
@@ -325,7 +335,7 @@ pub const ActivityPage = struct {
     }
 
     fn id(value: anytype, zero: bool) !u64 {
-        const result = try mutationId(value, zero);
+        const result = try decimalId(value, zero);
         if (result > std.math.maxInt(i64)) return error.InvalidActivityPage;
         return result;
     }
@@ -1026,7 +1036,7 @@ fn ReportNumber(comptime allow_zero: bool) type {
         value: u64,
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
             const text = try JsonString(20).jsonParse(allocator, source, options);
-            const value = try mutationId(text, allow_zero);
+            const value = try decimalId(text, allow_zero);
             if (value > std.math.maxInt(i64)) return error.InvalidObservation;
             return .{ .value = value };
         }
@@ -1351,7 +1361,7 @@ pub const SessionListPage = struct {
                 }
                 if (wire.next) |next| {
                     if (next.after != null or next.ceiling != null or result.count != protocol.session_list_page_size) return error.InvalidSessionPage;
-                    const through = mutationId(next.through orelse return error.InvalidSessionPage, true) catch return error.InvalidSessionPage;
+                    const through = decimalId(next.through orelse return error.InvalidSessionPage, true) catch return error.InvalidSessionPage;
                     const reference = next.after_reference orelse return error.InvalidSessionPage;
                     if (through != result.since.generation or !reference.eql(result.rows[result.count - 1].reference.slice())) return error.InvalidSessionPage;
                     result.next = .{ .since = since, .changed = .{ .through = through, .after_reference = reference.value.bytes[0..protocol.session_id_bytes].* } };
@@ -1364,8 +1374,8 @@ pub const SessionListPage = struct {
                 if (keyset.after != 0 and keyset.after == keyset.ceiling and result.count != 0) return error.InvalidSessionPage;
                 if (wire.next) |next| {
                     if (next.through != null or next.after_reference != null) return error.InvalidSessionPage;
-                    const after = mutationId(next.after orelse return error.InvalidSessionPage, false) catch return error.InvalidSessionPage;
-                    const ceiling = mutationId(next.ceiling orelse return error.InvalidSessionPage, false) catch return error.InvalidSessionPage;
+                    const after = decimalId(next.after orelse return error.InvalidSessionPage, false) catch return error.InvalidSessionPage;
+                    const ceiling = decimalId(next.ceiling orelse return error.InvalidSessionPage, false) catch return error.InvalidSessionPage;
                     if (result.count != protocol.session_list_page_size or after <= keyset.after or after >= ceiling or
                         ceiling > std.math.maxInt(i64) or (keyset.after != 0 and ceiling != keyset.ceiling)) return error.InvalidSessionPage;
                     result.next = .{ .after = after, .ceiling = ceiling };
@@ -1443,7 +1453,7 @@ pub const CommandObservation = struct {
     interruption_target: ?struct { session: protocol.Bounded(protocol.max_session_bytes), turn: u64, operation: u64 } = null,
     permission_target: ?struct { action: u64, decision: protocol.PermissionDecision } = null,
 
-    pub const ContentReference = struct { bytes: u64, digest: [32]u8 };
+    pub const ContentReference = mutation_answer.ContentReference;
 
     pub const Recovery = struct {
         unknown_outcomes: [protocol.message_recovery_limit]protocol.MessageUnknownOutcome = undefined,
@@ -1600,32 +1610,32 @@ pub const CommandObservation = struct {
         inline for (.{ "target", "code" }) |name| if (@field(facts, name).value) |value| {
             @field(observed, name) = value.value;
         };
-        if (facts.revision.value) |value| observed.revision = try mutationId(value, false);
+        if (facts.revision.value) |value| observed.revision = try decimalId(value, false);
         if (facts.input.value) |value| observed.input = try decodeReference(value);
         if (facts.state.value) |value| observed.state = value.value;
-        if (facts.queue.value) |value| observed.queue = .{ .admission = try mutationId(value.admission, false), .admitted_at = try mutationId(value.admitted_at, false) };
-        if (facts.binding.value) |value| observed.binding = .{ .turn = try mutationId(value.turn, false), .operation = try mutationId(value.operation, false), .attempt = try mutationId(value.attempt, true) };
+        if (facts.queue.value) |value| observed.queue = .{ .admission = try decimalId(value.admission, false), .admitted_at = try decimalId(value.admitted_at, false) };
+        if (facts.binding.value) |value| observed.binding = .{ .turn = try decimalId(value.turn, false), .operation = try decimalId(value.operation, false), .attempt = try decimalId(value.attempt, true) };
         if (facts.result.value) |value| observed.result = .{ .status = value.status.value, .code = if (value.code.value) |code| code.value else null, .text = if (value.text.value) |text| try decodeReference(text) else null };
-        if (facts.work.value) |value| observed.work = .{ .state = value.state.value, .first_action = if (value.first_action) |action| try mutationId(action, false) else null };
+        if (facts.work.value) |value| observed.work = .{ .state = value.state.value, .first_action = if (value.first_action) |action| try decimalId(action, false) else null };
         if (facts.recovery.value) |value| {
             var recovery: Recovery = .{ .more = value.more };
             for (value.unknown_outcomes.rows[0..value.unknown_outcomes.count]) |row| {
                 if (row.description) |description| if (!protocol.ToolPresentation.validDescription(description.slice())) return error.InvalidObservation;
                 recovery.unknown_outcomes[recovery.count] = .{
-                    .action_id = try mutationId(row.action, false),
-                    .operation_id = try mutationId(row.operation, false),
-                    .call = try mutationId(row.call, true),
+                    .action_id = try decimalId(row.action, false),
+                    .operation_id = try decimalId(row.operation, false),
+                    .call = try decimalId(row.call, true),
                     .description = if (row.description) |description| description.value else null,
-                    .at = try mutationId(row.at, false),
+                    .at = try decimalId(row.at, false),
                 };
                 recovery.count += 1;
             }
             observed.recovery = recovery;
         }
-        if (facts.selection.value) |value| observed.selection = .{ .turn = if (value.turn) |turn| try mutationId(turn, false) else null, .admission_cutoff = try mutationId(value.admission_cutoff, true) };
+        if (facts.selection.value) |value| observed.selection = .{ .turn = if (value.turn) |turn| try decimalId(turn, false) else null, .admission_cutoff = try decimalId(value.admission_cutoff, true) };
         if (facts.completion.value) |value| observed.completion = value.status.value;
-        if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try mutationId(value.turn, true), .operation = try mutationId(value.operation, true) };
-        if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try mutationId(value.action, true), .decision = value.decision.value };
+        if (facts.interruption_target.value) |value| observed.interruption_target = .{ .session = value.session.value, .turn = try decimalId(value.turn, true), .operation = try decimalId(value.operation, true) };
+        if (facts.permission_target.value) |value| observed.permission_target = .{ .action = try decimalId(value.action, true), .decision = value.decision.value };
         try observed.validate();
         if (since) |token| {
             const target = observed.target orelse return error.InvalidObservation;
@@ -1635,7 +1645,7 @@ pub const CommandObservation = struct {
     }
 
     fn decodeReference(value: anytype) !ContentReference {
-        var result: ContentReference = .{ .bytes = try mutationId(value.bytes, true), .digest = undefined };
+        var result: ContentReference = .{ .bytes = try decimalId(value.bytes, true), .digest = undefined };
         if (value.sha256.slice().len != 64) return error.InvalidObservation;
         _ = std.fmt.hexToBytes(&result.digest, value.sha256.slice()) catch return error.InvalidObservation;
         return result;
@@ -1696,39 +1706,14 @@ pub const CommandObservation = struct {
     }
 };
 
-/// The durable mutations. Tag names are the captured-record and
-/// observation spelling; `rui request recover --kind` uses the hyphenated spelling.
-pub const MutationTarget = union(protocol.CommandKind) {
-    configure,
-    message: struct { bytes: u64, digest: [32]u8, creates_session: bool = false, invokes_skill: bool = false },
-    session_stop,
-    session_archive: struct { archived: bool },
-    model_interruption: struct { turn: u64, operation: u64 },
-    permission_decision: struct { action: u64, decision: protocol.PermissionDecision },
-};
+pub const MutationTarget = mutation_answer.Target;
+pub const MutationAnswer = mutation_answer.Answer;
+pub const InvocationDiagnostic = mutation_answer.InvocationDiagnostic;
 
-pub const MutationAnswer = struct {
-    /// Validated Host-owned input identity, including captured native skills.
-    input: ?CommandObservation.ContentReference = null,
-    result: union(enum) {
-        accepted: union(enum) {
-            configure: struct { revision: u64, created: bool, skills: ?protocol.SkillsReloadStatus = null },
-            message: struct { admission: u64 },
-            session_stop: struct { turn: ?u64, admission_cutoff: u64, completion: protocol.SessionStopCompletion },
-            session_archive: protocol.SessionArchiveObservation,
-            model_interruption,
-            permission_decision,
-        },
-        rejected: protocol.Bounded(protocol.max_code_bytes),
-        conflict,
-    },
-    replayed: bool,
-};
-
-pub const InvocationDiagnostic = struct {
-    type: protocol.Bounded(32),
-    code: protocol.Bounded(protocol.max_code_bytes),
-};
+/// The shared authority rule, against this protocol's wire version.
+pub fn validateInvocationDiagnostic(status: u16, version: []const u8, diagnostic: InvocationDiagnostic) error{InvalidResponse}!void {
+    return mutation_answer.validateInvocationDiagnostic(protocol.wire_version, status, version, diagnostic);
+}
 
 /// Owned facts and original request context survive buffer reuse and capture
 /// closure. An answer error is unconfirmed, never rejection or noncommit.
@@ -1737,7 +1722,7 @@ pub const MutationReply = struct {
     diagnostic: ?InvocationDiagnostic = null,
     context: MutationIdentity,
     target: MutationTarget,
-    answer: error{ CanonicalStoreFailure, HostInvocationFailed, InvalidResponse, RequestBindingMismatch }!MutationAnswer,
+    answer: mutation_answer.Error!MutationAnswer,
 
     /// Preserve the existing machine-readable unconfirmed reason vocabulary.
     /// Human presentation classifies these failures separately as caller codes.
@@ -1755,36 +1740,6 @@ pub const MutationReply = struct {
         return answer.result == .accepted;
     }
 };
-
-pub fn JsonString(comptime limit: usize) type {
-    return struct {
-        value: protocol.Bounded(limit) = .{},
-
-        pub fn slice(self: *const @This()) []const u8 {
-            return self.value.slice();
-        }
-
-        pub fn eql(self: *const @This(), value: []const u8) bool {
-            return self.value.eql(value);
-        }
-
-        pub fn jsonStringify(self: @This(), jw: anytype) !void {
-            try jw.write(self.value.slice());
-        }
-
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, _: std.json.ParseOptions) !@This() {
-            if (try source.peekNextTokenType() != .string) return error.UnexpectedToken;
-            const token = try source.nextAllocMax(allocator, .alloc_if_needed, limit);
-            defer if (token == .allocated_string) allocator.free(token.allocated_string);
-            var result: @This() = .{};
-            result.value.set(switch (token) {
-                .string, .allocated_string => |value| value,
-                else => unreachable,
-            }) catch return error.InvalidCharacter;
-            return result;
-        }
-    };
-}
 
 pub const JsonAddress = struct {
     store: JsonString(protocol.max_store_bytes),
@@ -1923,7 +1878,7 @@ pub const JsonWorkState = struct {
     }
 
     fn number(text: JsonString(20), zero: bool) !u64 {
-        const value = try mutationId(text, zero);
+        const value = try decimalId(text, zero);
         if (value > std.math.maxInt(i64)) return error.InvalidResponse;
         return value;
     }
@@ -1942,7 +1897,7 @@ pub const JsonToolPresentation = struct {
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
         const Wire = struct { description: ?JsonString(protocol.max_tool_description_bytes), code: JsonEnum(protocol.ToolPresentation.Code), publication_position: ?JsonString(20) };
         const wire = try std.json.innerParse(Wire, allocator, source, options);
-        const position = if (wire.publication_position) |p| mutationId(p, false) catch return error.InvalidCharacter else null;
+        const position = if (wire.publication_position) |p| decimalId(p, false) catch return error.InvalidCharacter else null;
         if (position) |p| if (p > std.math.maxInt(i64)) return error.InvalidCharacter;
         if (wire.description) |d| if (!protocol.ToolPresentation.validDescription(d.slice())) return error.InvalidCharacter;
         if (wire.description == null) switch (wire.code.value) {
@@ -2294,54 +2249,6 @@ test "canonical presentation releases allocations on acceptance and late rejecti
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Check.run, .{true});
 }
 
-pub fn JsonEnum(comptime T: type) type {
-    const limit = comptime blk: {
-        var longest: usize = 0;
-        for (@typeInfo(T).@"enum".field_names) |name| longest = @max(longest, name.len);
-        break :blk longest;
-    };
-    return struct {
-        value: T,
-
-        pub fn jsonStringify(self: @This(), jw: anytype) !void {
-            try jw.write(@tagName(self.value));
-        }
-
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-            const string = try JsonString(limit).jsonParse(allocator, source, options);
-            return .{ .value = std.meta.stringToEnum(T, string.slice()) orelse return error.InvalidEnumTag };
-        }
-    };
-}
-
-// The containing field's default represents omission. A present field must
-// parse as T, not ?T: JSON null cannot stand in for an absent outcome/diagnostic.
-pub fn OmittableJson(comptime T: type) type {
-    return struct {
-        value: ?T = null,
-
-        pub fn isPresent(self: @This()) bool {
-            return self.value != null;
-        }
-        pub fn jsonStringify(self: @This(), jw: anytype) !void {
-            try jw.write(self.value);
-        }
-
-        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
-            return .{ .value = try std.json.innerParse(T, allocator, source, options) };
-        }
-    };
-}
-
-pub fn mutationId(value: JsonString(20), allow_zero: bool) !u64 {
-    const bytes = value.slice();
-    if (bytes.len == 0 or (bytes.len > 1 and bytes[0] == '0')) return error.InvalidResponse;
-    for (bytes) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidResponse;
-    const id = std.fmt.parseInt(u64, bytes, 10) catch return error.InvalidResponse;
-    if (!allow_zero and id == 0) return error.InvalidResponse;
-    return id;
-}
-
 pub fn decodeReadFailure(reply: CommandReply, result_read: bool) !ReadFailure {
     if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
     const Wire = struct {
@@ -2379,30 +2286,6 @@ pub fn decodeMutationReply(reply: CommandReply, session: []const u8, target: Mut
 
 fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: MutationTarget, diagnostic: *?InvocationDiagnostic, resolved_session: *protocol.Bounded(protocol.max_session_bytes)) @FieldType(MutationReply, "answer") {
     if (reply.body.len > protocol.max_response_bytes) return error.InvalidResponse;
-    const Wire = struct {
-        version: JsonString(8),
-        type: JsonString(32),
-        code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
-        answer: OmittableJson(struct {
-            status: JsonString(16),
-            replayed: bool,
-            session: OmittableJson(JsonString(protocol.max_session_bytes)) = .{},
-            code: OmittableJson(JsonString(protocol.max_code_bytes)) = .{},
-            revision: OmittableJson(JsonString(20)) = .{},
-            created: OmittableJson(bool) = .{},
-            skills: OmittableJson(JsonEnum(protocol.SkillsReloadStatus)) = .{},
-            admission: OmittableJson(JsonString(20)) = .{},
-            action: OmittableJson(JsonString(20)) = .{},
-            decision: OmittableJson(JsonString(16)) = .{},
-            archived: OmittableJson(bool) = .{},
-            selection: OmittableJson(struct { turn: ?JsonString(20), admission_cutoff: JsonString(20) }) = .{},
-            target: OmittableJson(struct { session: JsonString(protocol.max_session_bytes), turn: JsonString(20), operation: JsonString(20) }) = .{},
-        }) = .{},
-        input: OmittableJson(struct { type: JsonString(8), bytes: JsonString(20), sha256: JsonString(64) }) = .{},
-        queue: OmittableJson(struct { status: JsonString(16), admission: JsonString(20) }) = .{},
-        execution: OmittableJson(struct { status: JsonString(16), reason: OmittableJson(JsonString(64)) = .{} }) = .{},
-        completion: OmittableJson(struct { status: JsonString(16) }) = .{},
-    };
     // Strings are copied into bounded values and immediately freed. Reserve
     // scanner nesting first, as in the canonical classifier; no payload arena.
     const capacity = comptime std.ArrayList(u8).growCapacity((protocol.max_response_bytes + 7) / 8) + std.ArrayList(u8).growCapacity(protocol.max_response_bytes);
@@ -2411,128 +2294,11 @@ fn decodeMutationAnswer(reply: CommandReply, session: []const u8, target: Mutati
     var scanner = std.json.Scanner.initCompleteInput(fixed.allocator(), reply.body);
     defer scanner.deinit();
     scanner.ensureTotalStackCapacity(protocol.max_response_bytes) catch unreachable;
-    const wire = std.json.parseFromTokenSourceLeaky(Wire, fixed.allocator(), &scanner, .{ .ignore_unknown_fields = true }) catch return error.InvalidResponse;
-    if (wire.code.value) |code| {
-        if (wire.answer.value != null or wire.input.value != null or wire.queue.value != null or wire.execution.value != null or wire.completion.value != null) return error.InvalidResponse;
-        const parsed = InvocationDiagnostic{ .type = wire.type.value, .code = code.value };
-        try validateInvocationDiagnostic(reply.status, wire.version.slice(), parsed);
-        diagnostic.* = parsed;
-        if (parsed.code.eql("canonical_store_failure")) return error.CanonicalStoreFailure;
-        return error.HostInvocationFailed;
-    }
-    if (reply.status != 200 and reply.status != 409) return error.InvalidResponse;
-    const expected_type = switch (target) {
-        .configure => "configuration_reply",
-        .message => "message_reply",
-        .session_stop => "session_stop_reply",
-        .session_archive => "session_archive_reply",
-        .model_interruption => "model_interruption_reply",
-        .permission_decision => "permission_decision_reply",
-    };
-    if (!wire.version.eql(protocol.wire_version) or !wire.type.eql(expected_type) or wire.code.value != null) return error.InvalidResponse;
-    const answer = wire.answer.value orelse return error.InvalidResponse;
-    if (target == .model_interruption) {
-        const echoed = answer.target.value orelse return error.InvalidResponse;
-        if (answer.session.value != null or !echoed.session.eql(session) or try mutationId(echoed.turn, true) != target.model_interruption.turn or
-            try mutationId(echoed.operation, true) != target.model_interruption.operation) return error.RequestBindingMismatch;
-    } else {
-        const echoed = answer.session.value orelse return error.InvalidResponse;
-        if (answer.target.value != null) return error.RequestBindingMismatch;
-        if (target == .configure and session.len == 0 and answer.status.eql("accepted")) {
-            if (!protocol.validSessionId(echoed.slice()) or answer.created.value != true) return error.RequestBindingMismatch;
-            resolved_session.* = echoed.value;
-        } else if (target == .message and target.message.creates_session and session.len == 0 and answer.status.eql("accepted")) {
-            if (!protocol.validSessionId(echoed.slice())) return error.RequestBindingMismatch;
-            resolved_session.* = echoed.value;
-        } else if (!echoed.eql(session)) return error.RequestBindingMismatch;
-    }
-    if (target == .permission_decision) {
-        if (try mutationId(answer.action.value orelse return error.InvalidResponse, true) != target.permission_decision.action or
-            !(answer.decision.value orelse return error.InvalidResponse).eql(@tagName(target.permission_decision.decision))) return error.RequestBindingMismatch;
-    } else if (answer.action.value != null or answer.decision.value != null) return error.InvalidResponse;
-    const accepted = answer.status.eql("accepted");
-    const conflict = answer.status.eql("conflict");
-    if ((!accepted and !conflict and !answer.status.eql("rejected")) or (reply.status == 409) != conflict) return error.InvalidResponse;
-    if (answer.skills.value != null and (!accepted or target != .configure or answer.created.value != false)) return error.InvalidResponse;
-    if (accepted) {
-        if (!protocol.validSessionId(resolved_session.slice())) return error.InvalidResponse;
-        if (answer.code.value != null) return error.InvalidResponse;
-    } else {
-        const code = answer.code.value orelse return error.InvalidResponse;
-        if (code.slice().len == 0 or answer.revision.value != null or answer.created.value != null or answer.admission.value != null or answer.selection.value != null or answer.archived.value != null) return error.InvalidResponse;
-        if (conflict and (!code.eql("idempotency_key_conflict") or answer.replayed)) return error.InvalidResponse;
-    }
-    var value: @FieldType(@FieldType(MutationAnswer, "result"), "accepted") = undefined;
-    var confirmed_input: ?CommandObservation.ContentReference = null;
-    switch (target) {
-        .configure => {
-            const execution = wire.execution.value orelse return error.InvalidResponse;
-            if (!execution.status.eql("unavailable") or !(execution.reason.value orelse return error.InvalidResponse).eql("direct_reply_does_not_wait_for_model_processing")) return error.InvalidResponse;
-            if (accepted) value = .{ .configure = .{ .revision = try mutationId(answer.revision.value orelse return error.InvalidResponse, false), .created = answer.created.value orelse return error.InvalidResponse, .skills = if (answer.skills.value) |skills_value| skills_value.value else null } };
-        },
-        .message => |expected| {
-            if (!(wire.execution.value orelse return error.InvalidResponse).status.eql("queued")) return error.InvalidResponse;
-            if (conflict) {
-                if (wire.input.value != null or wire.queue.value != null) return error.InvalidResponse;
-            } else {
-                const input = wire.input.value orelse return error.InvalidResponse;
-                var digest: [32]u8 = undefined;
-                if (!input.type.eql("text") or input.sha256.slice().len != 64) return error.InvalidResponse;
-                _ = std.fmt.hexToBytes(&digest, input.sha256.slice()) catch return error.InvalidResponse;
-                const input_bytes = try mutationId(input.bytes, true);
-                confirmed_input = .{ .bytes = input_bytes, .digest = digest };
-                if (!expected.invokes_skill and (input_bytes != expected.bytes or !std.mem.eql(u8, &digest, &expected.digest))) return error.RequestBindingMismatch;
-                if (accepted) {
-                    const admission = try mutationId(answer.admission.value orelse return error.InvalidResponse, false);
-                    const queue = wire.queue.value orelse return error.InvalidResponse;
-                    if (!queue.status.eql("queued") or try mutationId(queue.admission, false) != admission) return error.InvalidResponse;
-                    value = .{ .message = .{ .admission = admission } };
-                } else if (wire.queue.value != null) return error.InvalidResponse;
-            }
-        },
-        .session_stop => {
-            const completion = wire.completion.value orelse return error.InvalidResponse;
-            if (accepted) {
-                const selection = answer.selection.value orelse return error.InvalidResponse;
-                value = .{ .session_stop = .{
-                    .turn = if (selection.turn) |turn| try mutationId(turn, false) else null,
-                    .admission_cutoff = try mutationId(selection.admission_cutoff, true),
-                    .completion = std.meta.stringToEnum(@FieldType(@FieldType(@TypeOf(value), "session_stop"), "completion"), completion.status.slice()) orelse return error.InvalidResponse,
-                } };
-            } else if (!completion.status.eql("unavailable")) return error.InvalidResponse;
-        },
-        .session_archive => |expected| {
-            const completion = wire.completion.value orelse return error.InvalidResponse;
-            if (accepted) {
-                const archived = answer.archived.value orelse return error.InvalidResponse;
-                if (archived != expected.archived) return error.RequestBindingMismatch;
-                value = .{ .session_archive = .{
-                    .archived = archived,
-                    .completion = std.meta.stringToEnum(protocol.SessionStopCompletion, completion.status.slice()) orelse return error.InvalidResponse,
-                } };
-            } else if (!completion.status.eql("unavailable")) return error.InvalidResponse;
-        },
-        .model_interruption => if (accepted) {
-            value = .model_interruption;
-        },
-        .permission_decision => if (accepted) {
-            value = .permission_decision;
-        },
-    }
-    if ((target != .configure and (answer.revision.value != null or answer.created.value != null)) or
-        (target != .message and (answer.admission.value != null or wire.input.value != null or wire.queue.value != null)) or
-        (target != .configure and target != .message and wire.execution.value != null) or
-        (target != .session_stop and answer.selection.value != null) or
-        (target != .session_archive and answer.archived.value != null) or
-        (target != .session_stop and target != .session_archive and wire.completion.value != null)) return error.InvalidResponse;
-    return .{
-        .input = confirmed_input,
-        .replayed = answer.replayed,
-        .result = if (accepted) .{ .accepted = value } else if (conflict) .conflict else .{ .rejected = answer.code.value.?.value },
-    };
+    const wire = std.json.parseFromTokenSourceLeaky(mutation_answer.Wire, fixed.allocator(), &scanner, .{ .ignore_unknown_fields = true }) catch return error.InvalidResponse;
+    return mutation_answer.decide(protocol.wire_version, wire, reply.status, session, target, diagnostic, resolved_session);
 }
 
-test "mutation decoder checks binding queue ambiguity and fixed reply bounds" {
+test "mutation decoder bounds reply bytes and rejects trailing input" {
     const digest = protocol.contentDigest("a\nµ");
     const target: MutationTarget = .{ .message = .{ .bytes = 4, .digest = digest } };
     const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2q\\u0078\",\"admission\":\"7\"}";
@@ -2540,163 +2306,13 @@ test "mutation decoder checks binding queue ambiguity and fixed reply bounds" {
     const suffix = try std.fmt.bufPrint(&suffix_storage, ",\"input\":{{\"type\":\"text\",\"bytes\":\"4\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"7\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{std.fmt.bytesToHex(digest, .lower)});
     var body: [protocol.max_response_bytes + 1]u8 = undefined;
     const valid = try std.fmt.bufPrint(&body, "{s}{s}", .{ prefix, suffix });
-    const reply: CommandReply = .{ .status = 200, .body = valid };
-    try std.testing.expectEqual(@as(u64, 7), (try decodeMutationReply(reply, "k7m2qx", target).answer).result.accepted.message.admission);
-    const captured = try decodeMutationReply(reply, "k7m2qx", .{ .message = .{ .bytes = 0, .digest = protocol.contentDigest(""), .invokes_skill = true } }).answer;
-    try std.testing.expectEqual(@as(u64, 4), captured.input.?.bytes);
-    try std.testing.expectEqualSlices(u8, &digest, &captured.input.?.digest);
-    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "09azvw", target).answer);
-    var changed = target;
-    changed.message.bytes = 5;
-    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "k7m2qx", changed).answer);
-    changed = target;
-    changed.message.digest[3] ^= 1;
-    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(reply, "k7m2qx", changed).answer);
-    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 409, .body = valid }, "k7m2qx", target).answer);
+    _ = try decodeMutationReply(.{ .status = 200, .body = valid }, "k7m2qx", target).answer;
     @memset(body[valid.len..protocol.max_response_bytes], ' ');
     _ = try decodeMutationReply(.{ .status = 200, .body = body[0..protocol.max_response_bytes] }, "k7m2qx", target).answer;
     body[protocol.max_response_bytes] = ' ';
     try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = &body }, "k7m2qx", target).answer);
-    for ([_][]const u8{
-        "{\"version\":" ++ protocol.wire_version ++ ",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}",
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"sta\\u0074us\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"7\"}",
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"admission\":\"07\"}",
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":false,\"session\":\"k7m2qx\",\"code\":\"unknown_session\"}",
-    }) |invalid_prefix| {
-        const invalid = try std.fmt.bufPrint(&body, "{s}{s}", .{ invalid_prefix, suffix });
-        try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = invalid }, "k7m2qx", target).answer);
-    }
-    const conflicting_queue = try std.fmt.bufPrint(&body, "{s},\"input\":{{\"type\":\"text\",\"bytes\":\"4\",\"sha256\":\"{s}\"}},\"queue\":{{\"status\":\"queued\",\"admission\":\"8\"}},\"execution\":{{\"status\":\"queued\"}}}}", .{ prefix, std.fmt.bytesToHex(digest, .lower) });
-    try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = conflicting_queue }, "k7m2qx", target).answer);
     const malformed = try std.fmt.bufPrint(&body, "{s}{s} trailing", .{ prefix, suffix });
     try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = malformed }, "k7m2qx", target).answer);
-}
-
-test "skills reload reply facts apply only to accepted existing Configure mutations" {
-    const input = ",\"input\":{\"type\":\"text\",\"bytes\":\"0\",\"sha256\":\"" ++ @as([64]u8, @splat('0')) ++ "\"}";
-    const cases = [_]struct {
-        target: MutationTarget,
-        reply_type: []const u8,
-        binding: []const u8 = ",\"session\":\"k7m2qx\"",
-        accepted_fields: []const u8 = "",
-        accepted_tail: []const u8 = "",
-        rejected_tail: []const u8 = "",
-        conflict_tail: []const u8 = "",
-    }{
-        .{
-            .target = .configure,
-            .reply_type = "configuration_reply",
-            .accepted_fields = ",\"revision\":\"31\",\"created\":false",
-            .accepted_tail = ",\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}",
-            .rejected_tail = ",\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}",
-            .conflict_tail = ",\"execution\":{\"status\":\"unavailable\",\"reason\":\"direct_reply_does_not_wait_for_model_processing\"}",
-        },
-        .{
-            .target = .{ .message = .{ .bytes = 0, .digest = @splat(0) } },
-            .reply_type = "message_reply",
-            .accepted_fields = ",\"admission\":\"7\"",
-            .accepted_tail = input ++ ",\"queue\":{\"status\":\"queued\",\"admission\":\"7\"},\"execution\":{\"status\":\"queued\"}",
-            .rejected_tail = input ++ ",\"execution\":{\"status\":\"queued\"}",
-            .conflict_tail = ",\"execution\":{\"status\":\"queued\"}",
-        },
-        .{
-            .target = .session_stop,
-            .reply_type = "session_stop_reply",
-            .accepted_fields = ",\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"}",
-            .accepted_tail = ",\"completion\":{\"status\":\"completed\"}",
-            .rejected_tail = ",\"completion\":{\"status\":\"unavailable\"}",
-            .conflict_tail = ",\"completion\":{\"status\":\"unavailable\"}",
-        },
-        .{
-            .target = .{ .session_archive = .{ .archived = true } },
-            .reply_type = "session_archive_reply",
-            .accepted_fields = ",\"archived\":true",
-            .accepted_tail = ",\"completion\":{\"status\":\"completed\"}",
-            .rejected_tail = ",\"completion\":{\"status\":\"unavailable\"}",
-            .conflict_tail = ",\"completion\":{\"status\":\"unavailable\"}",
-        },
-        .{
-            .target = .{ .model_interruption = .{ .turn = 3, .operation = 4 } },
-            .reply_type = "model_interruption_reply",
-            .binding = ",\"target\":{\"session\":\"k7m2qx\",\"turn\":\"3\",\"operation\":\"4\"}",
-        },
-        .{
-            .target = .{ .permission_decision = .{ .action = 9, .decision = .deny } },
-            .reply_type = "permission_decision_reply",
-            .binding = ",\"session\":\"k7m2qx\",\"action\":\"9\",\"decision\":\"deny\"",
-        },
-    };
-    const reload_fields = [_]struct { bytes: []const u8, expected: ?protocol.SkillsReloadStatus }{
-        .{ .bytes = "", .expected = null },
-        .{ .bytes = ",\"skills\":\"reloaded\"", .expected = .reloaded },
-        .{ .bytes = ",\"skills\":\"unchanged\"", .expected = .unchanged },
-    };
-    var buffer: [1024]u8 = undefined;
-    for (cases) |case| {
-        for ([_][]const u8{ "accepted", "rejected", "conflict" }) |status| {
-            const accepted = std.mem.eql(u8, status, "accepted");
-            const conflict = std.mem.eql(u8, status, "conflict");
-            const fields = if (accepted) case.accepted_fields else if (conflict) ",\"code\":\"idempotency_key_conflict\"" else ",\"code\":\"unknown_session\"";
-            const tail = if (accepted) case.accepted_tail else if (conflict) case.conflict_tail else case.rejected_tail;
-            for (reload_fields) |reload| {
-                const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"{s}\",\"answer\":{{\"status\":\"{s}\",\"replayed\":false{s}{s}{s}}}{s}}}", .{ protocol.wire_version, case.reply_type, status, case.binding, fields, reload.bytes, tail });
-                const reply = decodeMutationReply(.{ .status = if (conflict) 409 else 200, .body = body }, "k7m2qx", case.target);
-                if (reload.expected != null and (!accepted or case.target != .configure)) {
-                    try std.testing.expectError(error.InvalidResponse, reply.answer);
-                } else {
-                    const answer = try reply.answer;
-                    try std.testing.expect(!answer.replayed);
-                    try std.testing.expectEqualStrings(status, @tagName(answer.result));
-                    if (accepted) {
-                        try std.testing.expectEqualStrings(@tagName(case.target), @tagName(answer.result.accepted));
-                        if (case.target == .configure) {
-                            try std.testing.expectEqual(@as(u64, 31), answer.result.accepted.configure.revision);
-                            try std.testing.expect(!answer.result.accepted.configure.created);
-                            try std.testing.expectEqual(reload.expected, answer.result.accepted.configure.skills);
-                        }
-                    } else if (!conflict) try std.testing.expectEqualStrings("unknown_session", answer.result.rejected.slice());
-                }
-            }
-        }
-    }
-    // Ordinary creation remains valid; a reload cannot also create a Session.
-    for ([_][]const u8{ "false", "true" }) |created| {
-        for (reload_fields) |reload| {
-            const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"configuration_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"31\",\"created\":{s}{s}}}{s}}}", .{ protocol.wire_version, created, reload.bytes, cases[0].accepted_tail });
-            const creating = std.mem.eql(u8, created, "true");
-            const reply = decodeMutationReply(.{ .status = 200, .body = body }, if (creating) "" else "k7m2qx", .configure);
-            if (creating and reload.expected != null) {
-                try std.testing.expectError(error.InvalidResponse, reply.answer);
-            } else {
-                const answer = try reply.answer;
-                try std.testing.expectEqual(creating, answer.result.accepted.configure.created);
-                try std.testing.expectEqual(reload.expected, answer.result.accepted.configure.skills);
-                try std.testing.expectEqualStrings("k7m2qx", reply.context.session.slice());
-            }
-        }
-    }
-    for ([_][]const u8{ "null", "7", "true", "\"invented\"", "[]", "\"reloaded\",\"skills\":\"unchanged\"" }) |invalid| {
-        const body = try std.fmt.bufPrint(&buffer, "{{\"version\":\"{s}\",\"type\":\"configuration_reply\",\"answer\":{{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\",\"revision\":\"31\",\"created\":false,\"skills\":{s}}}{s}}}", .{ protocol.wire_version, invalid, cases[0].accepted_tail });
-        try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = body }, "k7m2qx", .configure).answer);
-    }
-}
-
-test "mutation decoder preserves invalid-target domain rejection not false fatal certainty" {
-    const body = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"model_interruption_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"target\":{\"session\":\"s\",\"turn\":\"0\",\"operation\":\"18446744073709551615\"},\"code\":\"invalid_target\"}}";
-    const target: MutationTarget = .{ .model_interruption = .{ .turn = 0, .operation = std.math.maxInt(u64) } };
-    const answer = try decodeMutationReply(.{ .status = 200, .body = body }, "s", target).answer;
-    try std.testing.expectEqualStrings("invalid_target", answer.result.rejected.slice());
-    try std.testing.expect(answer.replayed);
-    for ([_][]const u8{
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"unavailable\"}",
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"message_reply\",\"answer\":{\"status\":\"infrastructure_failure\",\"code\":\"canonical_store_failure\"}}",
-    }) |unknown| {
-        const reply = decodeMutationReply(.{ .status = 500, .body = unknown }, "s", target);
-        try std.testing.expectError(if (std.mem.indexOf(u8, unknown, "unavailable") != null) error.HostInvocationFailed else error.InvalidResponse, reply.answer);
-        try std.testing.expect(!reply.isAccepted());
-        if (std.mem.indexOf(u8, unknown, "unavailable") != null)
-            try std.testing.expectEqualStrings("unavailable", reply.diagnostic.?.code.slice());
-    }
 }
 
 test "mutation diagnostics own complete validated metadata without raw reply lifetime" {
@@ -2709,27 +2325,6 @@ test "mutation diagnostics own complete validated metadata without raw reply lif
     try std.testing.expectEqualStrings("busy/µ", reply.diagnostic.?.code.slice());
     try std.testing.expectEqualStrings("invocation_error", reply.diagnostic.?.type.slice());
     try std.testing.expectEqualStrings("original/session", reply.context.session.slice());
-    for ([_][]const u8{
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"canonical_store_failure\"}",
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"busy\",\"code\":\"capacity_exhausted\"}",
-    }, [_]u16{ 500, 503 }) |valid, status| {
-        const value = decodeMutationReply(.{ .status = status, .body = valid }, "s", .configure);
-        try std.testing.expectError(if (status == 500) error.CanonicalStoreFailure else error.HostInvocationFailed, value.answer);
-        try std.testing.expect(value.diagnostic != null);
-    }
-    const prefix = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"busy\"";
-    for ([_][]const u8{
-        prefix ++ ",\"co\\u0064e\":\"other\"}",
-        prefix ++ ",\"extra\":[}",
-        prefix ++ "} trailing",
-        prefix ++ ",\"answer\":{\"status\":\"accepted\",\"replayed\":false}}",
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"busy\",\"code\":\"canonical_store_failure\"}",
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":[98]}",
-    }) |invalid| {
-        const value = decodeMutationReply(.{ .status = 500, .body = invalid }, "s", .configure);
-        try std.testing.expectError(error.InvalidResponse, value.answer);
-        try std.testing.expect(value.diagnostic == null);
-    }
 }
 
 pub const MutationIdentity = struct {
@@ -2738,12 +2333,6 @@ pub const MutationIdentity = struct {
     session: protocol.Bounded(protocol.max_session_bytes) = .{},
     kind: protocol.CommandKind,
 };
-
-// Shared authority rule for operation replies and static read/error envelopes.
-pub fn validateInvocationDiagnostic(status: u16, version: []const u8, diagnostic: InvocationDiagnostic) error{InvalidResponse}!void {
-    if (status == 200 or !std.mem.eql(u8, version, protocol.wire_version) or diagnostic.type.len == 0 or diagnostic.code.len == 0) return error.InvalidResponse;
-    if (diagnostic.code.eql("canonical_store_failure") and (status != 500 or !diagnostic.type.eql("invocation_error"))) return error.InvalidResponse;
-}
 
 // Remaining snapshot/report/Action callers check canonical failure here;
 // mutation and keyed-read callers own diagnostics from their envelope parse.
@@ -4025,26 +3614,4 @@ test "keyed observation requires valid delta since and shape-specific facts" {
     }) |fields| {
         try std.testing.expectError(error.InvalidObservation, ObservationReply.parse(.{ .status = 200, .body = prefix ++ fields ++ "}" }, "k", token));
     }
-}
-
-test "session archive mutation reply binds intent and completion on accepted replies" {
-    const head = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_archive_reply\",\"answer\":{\"status\":\"accepted\",\"replayed\":false,\"session\":\"k7m2qx\"";
-    const accepted = head ++ ",\"archived\":false},\"completion\":{\"status\":\"completed\"}}";
-    const target: MutationTarget = .{ .session_archive = .{ .archived = false } };
-    const answer = try decodeMutationReply(.{ .status = 200, .body = accepted }, "k7m2qx", target).answer;
-    try std.testing.expect(!answer.result.accepted.session_archive.archived);
-    try std.testing.expectEqual(.completed, answer.result.accepted.session_archive.completion);
-    try std.testing.expectError(error.RequestBindingMismatch, decodeMutationReply(.{ .status = 200, .body = accepted }, "k7m2qx", .{ .session_archive = .{ .archived = true } }).answer);
-    inline for (.{
-        head ++ "},\"completion\":{\"status\":\"completed\"}}",
-        head ++ ",\"archived\":null},\"completion\":{\"status\":\"completed\"}}",
-        head ++ ",\"archived\":false},\"completion\":{\"status\":\"unavailable\"}}",
-        head ++ ",\"archived\":false}}",
-        head ++ ",\"archived\":false,\"selection\":{\"turn\":null,\"admission_cutoff\":\"0\"}},\"completion\":{\"status\":\"completed\"}}",
-        head ++ ",\"archived\":false},\"completion\":{\"status\":\"completed\"},\"execution\":{\"status\":\"queued\"}}",
-    }) |invalid| try std.testing.expectError(error.InvalidResponse, decodeMutationReply(.{ .status = 200, .body = invalid }, "k7m2qx", target).answer);
-    const rejected = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_archive_reply\",\"answer\":{\"status\":\"rejected\",\"replayed\":true,\"session\":\"k7m2qx\",\"code\":\"archive_pending\"},\"completion\":{\"status\":\"unavailable\"}}";
-    const refusal = try decodeMutationReply(.{ .status = 200, .body = rejected }, "k7m2qx", target).answer;
-    try std.testing.expect(refusal.replayed);
-    try std.testing.expectEqualStrings("archive_pending", refusal.result.rejected.slice());
 }

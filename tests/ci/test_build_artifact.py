@@ -120,6 +120,14 @@ else:
         self.assertEqual(self.receipt['runner'], ['ubuntu24', '20261012.334.1'])
         self.assertIn('Using verified producer artifact 101', (self.root / 'summary').read_text())
 
+    def test_a_rerun_of_failed_jobs_executes_the_earlier_attempts_producer_without_fetching(self):
+        self.receipt['run_attempt'] = 1
+        self.refresh_download()
+        build_artifact.restore(['101'], ['test'])
+        self.assertEqual(self.gates(), ['producer'])
+        self.assertFalse((self.root / 'compiled').exists())
+        self.assertEqual((self.root / 'zig-pkg/pinned-source').read_text(), 'downloaded source')
+
     def test_stalled_download_retries_once_from_empty_then_verifies_producer(self):
         for failure in ('curl stall', 'subprocess timeout'):
             with self.subTest(failure=failure):
@@ -199,7 +207,7 @@ else:
         mismatches = [('inputs', field, value) for field, value in [
             ('tree', 'foreign-tree'), ('targets', ['test-full']), ('system', 'Darwin'),
             ('pr_ci', True), ('machine', 'arm64'), ('compiler', 'd' * 64), ('format', 2)]]
-        mismatches += [(None, 'source_sha', 'foreign'), (None, 'run_id', 456), (None, 'run_attempt', 1)]
+        mismatches += [(None, 'source_sha', 'foreign'), (None, 'run_id', 456), (None, 'run_attempt', 3), (None, 'run_attempt', 0)]
         for scope, field, value in mismatches:
             with self.subTest(field=field):
                 self.receipt = copy.deepcopy(original)

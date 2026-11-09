@@ -747,7 +747,14 @@ test "viewport retention is finite and split Unicode is not rendered early" {
     try view.append("\x98\x80Z");
     try std.testing.expectEqualStrings("A😀Z", view.text());
     const chunk = "0123456789\n";
-    for (0..30_000) |_| try view.append(chunk);
+    // One append per thousand chunks: each full-document append shifts the
+    // retained bytes, so thirty thousand tiny appends cost seconds.
+    const block = comptime block: {
+        var bytes: [chunk.len * 1000]u8 = undefined;
+        for (0..1000) |index| @memcpy(bytes[index * chunk.len ..][0..chunk.len], chunk);
+        break :block bytes;
+    };
+    for (0..30) |_| try view.append(&block);
     try view.prepare();
     try std.testing.expect(view.length <= capacity);
     try std.testing.expect(view.origin != 0);

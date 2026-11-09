@@ -1566,6 +1566,14 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                         self.assertFalse(root.exists())
                 finally:
                     if group is not None:
+                        # Deliver the lost signal now that nothing needs the
+                        # held descendant. Closing its release FIFO is not
+                        # enough: one that opens the FIFO after the last
+                        # writer closed waits for a writer forever (#662).
+                        try:
+                            killpg(group, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                         self.wait_for_group_retirement(group, time.monotonic() + 5)
                     if root is not None and root.exists():
                         rmtree(root)

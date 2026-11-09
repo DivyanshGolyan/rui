@@ -1445,6 +1445,7 @@ fn expectRendered(input: []const u8, expected: []const u8) !void {
 
 fn expectRenderedHome(input: []const u8, expected: []const u8, home: []const u8) !void {
     for (0..input.len + 1) |split| {
+        if (!windowEdge(input, split)) continue;
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
         var renderer: Renderer = .{ .out = &output.writer, .home = home };
@@ -1453,6 +1454,19 @@ fn expectRenderedHome(input: []const u8, expected: []const u8, home: []const u8)
         try renderer.finish();
         try std.testing.expectEqualStrings(expected, output.written());
     }
+}
+
+/// Every split for short inputs. Rendering is quadratic in the split count,
+/// so long inputs split near their ends and near each change of byte, where
+/// state changes, and every 61st byte inside long runs of one byte.
+fn windowEdge(input: []const u8, split: usize) bool {
+    const near = 8;
+    if (input.len <= 512 or split % 61 == 0) return true;
+    if (split <= near or input.len - split <= near) return true;
+    for (split - near..split + near) |index| {
+        if (input[index] != input[index + 1]) return true;
+    }
+    return false;
 }
 
 fn linked(comptime address: []const u8, comptime text: []const u8) []const u8 {

@@ -346,17 +346,6 @@ pub fn frozenAction(comptime keys: anytype, decoded: Input.Decoded) ?@TypeOf(key
 
 const Selection = keymap.Selection;
 
-/// Unpasted Enter uses the composer's key semantics, including LF under ICRNL.
-pub fn plainEnter(decoded: Input.Decoded) bool {
-    return switch (decoded) {
-        .event => |value| !value.pasted and switch (value.event) {
-            .key_press => |pressed| classify(pressed) == .enter,
-            else => false,
-        },
-        else => false,
-    };
-}
-
 pub fn select(comptime keys: anytype, decoded: Input.Decoded) Selection(@TypeOf(keys).Action) {
     const value = switch (decoded) {
         .none, .report => return .none,
@@ -1464,27 +1453,5 @@ test "Shift held with a binding's key is never that binding, whatever text the k
         // Shift-Enter is the one bound Shift chord here: it adds a line.
         const expected: []const u8 = if (std.mem.eql(u8, chord, "\x1b[13;2;13u")) "ok\n" else "ok";
         try std.testing.expectEqualStrings(expected, storage[0..editor.length]);
-    }
-}
-
-test "archive confirmation accepts normalized CR LF and encoded Enter but not modified Enter or paste" {
-    for ([_][]const u8{ "\r", "\n", "\x1b[13u", "\x1b[27;1;13~", "\x1b[106;5u", "\x1b[27;5;106~" }) |wire| {
-        var input: Input = .{};
-        var confirmed: usize = 0;
-        for (wire) |byte| {
-            var decoded = input.feed(byte, 0);
-            while (decoded != .none) : (decoded = input.next()) if (plainEnter(decoded)) {
-                confirmed += 1;
-            };
-        }
-        errdefer std.debug.print("confirmation wire={any}\n", .{wire});
-        try std.testing.expectEqual(@as(usize, 1), confirmed);
-    }
-    for ([_][]const u8{ "\x1b[13;2u", "\x1b[13;3u", "\x1b[13;5u", "\x1b[27;2;13~", "\x1b[27;3;13~", "\x1b[27;5;13~", "\x1b\r", "\x1b\n", "\x1b[200~\r\x1b[201~", "\x1b[200~\n\x1b[201~" }) |wire| {
-        var input: Input = .{};
-        for (wire) |byte| {
-            var decoded = input.feed(byte, 0);
-            while (decoded != .none) : (decoded = input.next()) try std.testing.expect(!plainEnter(decoded));
-        }
     }
 }

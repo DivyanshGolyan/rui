@@ -8164,9 +8164,10 @@ test "Full lists grow linearly on a mixed history" {
     // most 4.5 times those at N. A statement whose chunks reopened a walk
     // of the call-free Operations after the current one grew 10 and 12
     // times (a9a0f7eb's calls, 15413 to 160133 steps, and results, 23494
-    // to 290902).
-    const small = try mixedHistorySteps(128);
-    const large = try mixedHistorySteps(512);
+    // to 290902). Fitted as aN^2+bN, those would grow 8.4 and 10.4 times
+    // from 64 to 256.
+    const small = try mixedHistorySteps(64);
+    const large = try mixedHistorySteps(256);
     var linear = true;
     inline for (report_domain.full_pages, small, large) |S, at_n, at_4n| {
         if (at_4n * 2 > at_n * 9) {

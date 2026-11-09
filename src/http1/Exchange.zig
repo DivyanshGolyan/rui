@@ -138,7 +138,13 @@ pub fn advance(self: *Exchange) Error!Event {
             switch (std.posix.errno(std.c.getpeername(self.fd, @ptrCast(&peer), &peer_len))) {
                 .SUCCESS => self.state = .open,
                 .NOTCONN => return .waiting,
-                else => return error.LocalFailure,
+                else => {
+                    // A refusal that lands between the two reads leaves the
+                    // socket disconnected (EINVAL on macOS) with its error
+                    // now pending.
+                    if (std.c.getsockopt(self.fd, std.c.SOL.SOCKET, std.c.SO.ERROR, &result, &result_len) == 0 and result != 0) return error.ConnectFailed;
+                    return error.LocalFailure;
+                },
             }
         },
         .open => {
