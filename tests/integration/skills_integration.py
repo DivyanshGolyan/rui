@@ -16,7 +16,7 @@ import threading
 
 import host_process
 import model_fixture as fixture
-from control_integration import raw_request
+from control_fixture import raw_request
 from host_process import canonical_fixture_root, dispose_all, retain_failure_state, start_ready_process, stop_process, wait_for
 
 

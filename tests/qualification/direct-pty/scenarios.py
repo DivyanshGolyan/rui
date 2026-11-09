@@ -11,8 +11,8 @@ import time
 from driver import DirectPty, defer_signals
 from host_process import canonical_fixture_root, dispose_all
 import model_fixture as model
-import codex_integration as codex
-from canonical_failure_integration import ReplyProxy
+import codex_fixture as codex
+from canonical_fixture import ReplyProxy
 
 
 def assert_submitted(requests, expected):

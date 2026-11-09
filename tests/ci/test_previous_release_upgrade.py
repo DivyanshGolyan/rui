@@ -74,6 +74,20 @@ class DialectTest(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "No command help"):
                 upgrade.Dialect(Path("/installed/rui"))
 
+    def test_upgrade_compares_bindings_in_each_installed_reply(self):
+        identity = {"turn": "1", "operation": "2", "attempt": "1"}
+        # CLI grammar is probed from installed help; observation shape comes
+        # from each reply, never a checkout's protocol source.
+        dialect = upgrade.Dialect.__new__(upgrade.Dialect)
+        self.assertEqual(dialect.binding({"state": "processing", "binding": identity}), identity)
+        self.assertEqual(dialect.binding({"state": "completed", "binding": identity}), identity)
+        self.assertTrue(dialect.terminal({"state": "completed"}))
+        self.assertFalse(dialect.terminal({"state": "processing", "result": {"status": "completed"}}))
+        self.assertEqual(dialect.binding({"processing": identity}), identity)
+        self.assertTrue(dialect.terminal({"result": {"status": "completed"}}))
+        self.assertFalse(dialect.terminal({"processing": identity}))
+        self.assertTrue(dialect.terminal({"state": "cancelled", "result": {"status": "cancelled"}}))
+
 
 class SupportedRangeTest(unittest.TestCase):
     def test_range_comes_from_target_migrations_not_version_punctuation(self):

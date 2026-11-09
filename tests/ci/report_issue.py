@@ -104,10 +104,14 @@ def zig_paths(test):
 
 
 def raising_line(parsed, path):
-    """The last traceback's deepest source line inside the fixture, with its exception."""
+    """The last traceback's deepest source line inside the fixture, with its exception.
+
+    A fixture's own code is its script and the cases library it runs, if any
+    (canonical_failure_integration.py runs canonical_failure_cases.py)."""
+    own = tuple("/" + name for name in (path, re.sub(r"_integration\.py$", "_cases.py", path)))
     found = None
     for frames, error in parsed:
-        inside = [code for file, code in frames if file.endswith("/" + path)]
+        inside = [code for file, code in frames if file.endswith(own)]
         if inside:
             found = inside[-1], error
     return found

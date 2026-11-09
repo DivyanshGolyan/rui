@@ -4812,3 +4812,194 @@ test "skills native conversation is append-only across invoke reload replay and 
     defer std.testing.allocator.free(report);
     try std.testing.expect(std.mem.indexOf(u8, report, "\"turn\":null") != null);
 }
+
+test "historical accepted assistant output completeness and provenance fence reads" {
+    const Store = store.Store;
+    const testingStore = store.testing.testingSqliteStore;
+    const configureTestSession = store.testing.configureTestSession;
+    const submitTestMessage = store.testingSubmitMessage;
+    const testing_absent_model_evidence = store.testing.testing_absent_model_evidence;
+    const sqlite = store.testingSqlite;
+    const OutputMetadataWriter = output_format.OutputMetadataWriter;
+    // Replay trusts each item's saved kind, identity and bytes once their
+    // digest matches; acceptance judged them, and the rows below the
+    // admission boundary are immutable.
+    const Incompatibility = enum { none, model };
+    for ([_]struct { fault: ?[:0]const u8 = null, incompatible: Incompatibility = .none, tied_owners: bool = false, failure: anyerror = error.CorruptStore }{
+        .{ .tied_owners = true, .fault = "DELETE FROM model_output_item WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count+1 WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count-1 WHERE operation_id=(SELECT max(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "DELETE FROM model_output_item WHERE operation_id=(SELECT min(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count+1 WHERE operation_id=(SELECT min(operation_id) FROM model_output_item)" },
+        .{ .tied_owners = true, .fault = "UPDATE model_operation SET output_item_count=output_item_count-1 WHERE operation_id=(SELECT min(operation_id) FROM model_output_item)" },
+        .{ .fault = "DELETE FROM model_output_item" },
+        .{ .fault = "DELETE FROM model_output_item WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET item_ordinal=9 WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET session_position=session_position+100 WHERE item_ordinal=1" },
+        .{ .fault = "UPDATE model_output_item SET session_position=session_position+100 WHERE item_ordinal IN (0,1); " ++
+            "UPDATE model_output_item SET session_position=session_position-99-2*item_ordinal WHERE item_ordinal IN (0,1)" },
+        .{ .fault = "UPDATE model_output_item SET attempt_ordinal=attempt_ordinal+1" },
+        .{ .fault = "UPDATE model_output_item SET session_ref='f0re1g'" },
+        .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1" },
+        .{ .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE item_ordinal=1)" },
+        // Once continuation is unavailable, later items are not read.
+        .{ .incompatible = .model, .fault = "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE item_ordinal=0)", .failure = error.ContinuationUnavailable },
+        .{ .fault = "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='future' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE model_operation SET resolution_code='tool_proposals' WHERE output_item_count IS NOT NULL" },
+        .{ .fault = "UPDATE turn SET session_ref='f0re1g' WHERE turn_id=(SELECT turn_id FROM model_operation WHERE output_item_count IS NOT NULL)" },
+        .{ .incompatible = .model, .failure = error.ContinuationUnavailable },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var database: Store = undefined;
+        try testingStore(&database, &tmp, std.testing.io);
+        defer database.close() catch unreachable;
+        const session = try configureTestSession(&database, "output-config");
+        try submitTestMessage(&database, &tmp, "output-input", "output-input", session.slice(), "first");
+        var source_binding = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+        const reasoning = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"opaque\"}";
+        const answer = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}";
+        const sse = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ reasoning ++ "}\n\n" ++
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ answer ++ "}\n\n" ++
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n";
+        const source = try tmp.dir.createFile(std.testing.io, "output-source", .{ .read = true });
+        defer source.close(std.testing.io);
+        try source.writeStreamingAll(std.testing.io, sse);
+        var root: [protocol.max_store_bytes]u8 = undefined;
+        const length = try tmp.dir.realPath(std.testing.io, &root);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var metadata = try OutputMetadataWriter.init(std.testing.io, root[0..length], "output-metadata", .{ .used = &used, .limit = 4096 }, false, &retained);
+        defer metadata.deinit();
+        var event_data: output_decode.EventData = undefined;
+        try event_data.init(std.testing.io, root[0..length], "output-event-data", .{ .used = &used, .limit = 4096 }, false, &retained);
+        defer event_data.deinit();
+        var interpreted: output_decode.Interpretation = undefined;
+        output_decode.interpret(output_decode.testingInterpret(), .@"openai-responses/1", std.testing.io, source, sse.len, &metadata, &event_data, .assistant_response, .{}, output_decode.testingProviderFailure(), &interpreted);
+        if (interpreted != .accepted) return error.TestUnexpectedResult;
+        const validated = &interpreted.accepted.output;
+        for (0..@as(usize, if (case.tied_owners) 2 else 1)) |index| {
+            if (index != 0) {
+                try submitTestMessage(&database, &tmp, "output-second", "output-second", session.slice(), "second");
+                source_binding = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            try database.settleModelSuccess(source_binding, &.{
+                .source = validated.source,
+                .source_length = validated.source_length,
+                .metadata = metadata.file,
+                .item_count = validated.item_count,
+                .call_count = validated.call_count,
+                .answer_item_ordinal = validated.answer_item_ordinal,
+                .answer_length = validated.answer_length,
+                .answer_digest = validated.answer_digest,
+                .response_id = validated.evidence.response_id,
+                .model_evidence = testing_absent_model_evidence,
+                .request_id = .{},
+            }, .{});
+        }
+        var reconfigure: wire_request.ConfigureCommand = .{};
+        try reconfigure.key.set("output-reconfigure");
+        reconfigure.session = session;
+        try std.testing.expect(database.configure(&reconfigure, .{}) == .accepted);
+        try submitTestMessage(&database, &tmp, "output-next", "output-next", session.slice(), "next");
+        const binding = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+        switch (case.incompatible) {
+            .none => {},
+            .model => try database.setHistoricalModelForTesting(source_binding, "different-model"),
+        }
+        try sqlite.exec(database.sqliteDatabase(), "PRAGMA foreign_keys=OFF");
+        if (case.tied_owners) try store.testing.sqlite_only.exec(&database, "UPDATE model_operation SET admission_position=" ++
+            "(SELECT min(admission_position) FROM model_operation WHERE output_item_count IS NOT NULL) WHERE output_item_count IS NOT NULL", .{});
+        // Deliberately bypass the message-certificate CHECK too: these cases
+        // exercise read-time detection of damaged persisted item kinds.
+        try sqlite.exec(database.sqliteDatabase(), "PRAGMA ignore_check_constraints=ON");
+        if (case.fault) |fault| try sqlite.exec(database.sqliteDatabase(), fault);
+        try sqlite.exec(database.sqliteDatabase(), "PRAGMA ignore_check_constraints=OFF");
+        try sqlite.exec(database.sqliteDatabase(), "PRAGMA foreign_keys=ON");
+        var preparation: Preparation = undefined;
+        try database.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        defer if (preparation.state.active) preparation.cancel();
+        while (true) {
+            const progress = preparation.advance(7, 2);
+            switch (progress) {
+                .pending => {},
+                .failed => |err| {
+                    try std.testing.expectEqual(case.failure, err);
+                    break;
+                },
+                .prepared => |request| {
+                    request.deinit(std.testing.io, preparation.writer.budget);
+                    return error.MissingCorruptionFailure;
+                },
+            }
+        }
+        try std.testing.expectEqual(case.failure == error.CorruptStore, database.isFenced());
+        preparation.cancel();
+        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+    }
+}
+
+test "historical preparation fences a served call that does not match its certificate" {
+    const Store = store.Store;
+    const testingStore = store.testing.testingSqliteStore;
+    const configureTestSession = store.testing.configureTestSession;
+    const submitTestMessage = store.testingSubmitMessage;
+    const TestingCall = store.TestingCall;
+    const settleCallsForTesting = store.settleCallsForTesting;
+    const sqlite = store.testingSqlite;
+    // A call binds its Tool Results through its admission certificate; replay
+    // reads each call's bytes against their digest.
+    for ([_][:0]const u8{
+        "UPDATE content SET payload=zeroblob(byte_length) WHERE private=1",
+        "UPDATE content SET payload=zeroblob(byte_length) WHERE content_id=(SELECT extras_content_id FROM model_output_item WHERE item_ordinal=1)",
+        "UPDATE model_tool_call SET arguments_content_id=name_content_id",
+        "UPDATE model_operation SET resolution_code='answer' WHERE output_item_count IS NOT NULL",
+        "UPDATE model_operation SET resolution_code='compacted' WHERE output_item_count IS NOT NULL",
+        "UPDATE model_operation SET resolution_code='failed' WHERE output_item_count IS NOT NULL",
+    }) |fault| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var database: Store = undefined;
+        try testingStore(&database, &tmp, std.testing.io);
+        defer database.close() catch unreachable;
+        const session = try configureTestSession(&database, "incompatible-config");
+        try submitTestMessage(&database, &tmp, "incompatible-input", "incompatible-input", session.slice(), "tools");
+        const source = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+        const calls = [_]TestingCall{
+            .{ .item_id = "a", .name = "unknown", .encoded_call_id = "a", .decoded_call_id = "a", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+            .{ .item_id = "b", .name = "unknown", .encoded_call_id = "b", .decoded_call_id = "b", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+        };
+        try settleCallsForTesting(&database, &tmp, source, "incompatible-output", &calls);
+        const binding = (try database.admitNextModelAttempt(.{})).?.permit.binding;
+        try sqlite.exec(database.sqliteDatabase(), fault);
+        var root: [protocol.max_store_bytes]u8 = undefined;
+        const length = try tmp.dir.realPath(std.testing.io, &root);
+        var used: std.atomic.Value(u64) = .init(0);
+        var retained: ?named_scratch.Owner = null;
+        var preparation: Preparation = undefined;
+        try database.openHistoricalView(binding, &preparation.view);
+        try preparation.init(std.testing.io, root[0..length], .{ .used = &used, .limit = 1024 * 1024 }, protocol.routesAll(.endpoint), null, .{}, &retained);
+        defer if (preparation.state.active) preparation.cancel();
+        while (true) {
+            const progress = preparation.advance(1, 1);
+            switch (progress) {
+                .pending => {},
+                .failed => |err| {
+                    try std.testing.expectEqual(error.CorruptStore, err);
+                    break;
+                },
+                .prepared => |request| {
+                    request.deinit(std.testing.io, preparation.writer.budget);
+                    return error.MissingCompatibilityFailure;
+                },
+            }
+        }
+        try std.testing.expect(database.isFenced());
+        preparation.cancel();
+        try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expect(retained == null);
+    }
+}

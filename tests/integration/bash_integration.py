@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import base64
 import json
 import os
 import pathlib
@@ -7,7 +6,6 @@ import re
 import shlex
 import shutil
 import signal
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -19,92 +17,7 @@ import model_fixture as fixture
 import host_process
 from host_process import HostDiagnostics, assert_caller_error, ReleaseGate, canonical_fixture_root, dispose_all, retain_failure_state
 import os_semantics
-
-
-def assert_cleanup_population(diagnostics, *, actions, models, inspection_limit):
-    # Reap/drain validates final native loss and sequence first. Endpoints cannot
-    # be supplied by this census after their original waits have expired.
-    def owners(phase):
-        return Counter((r.get("turn"), r.get("operation"), r.get("attempt"), r.get("action"))
-                       for r in diagnostics.matching(phase))
-
-    # Only Bash delivery closure starts delayed, gated cleanup; a model
-    # Attempt releases custody when it completes.
-    started = owners("cleanup_started")
-    assert all(count == 1 for count in started.values()), started
-    assert Counter(owner[3] for owner in started) == Counter(map(str, actions)), started
-    completed = owners("cleanup_completed")
-    assert all(count == 1 for count in completed.values()), completed
-    assert Counter({owner: count for owner, count in completed.items() if owner[3] is not None}) == started, diagnostics.records
-    assert sum(1 for owner in completed if owner[3] is None) == models, completed
-    assert owners("cleanup_release_observed") == started, diagnostics.records
-    inspections = diagnostics.matching("inspection_captured")
-    assert len(inspections) <= inspection_limit, inspections
-    assert len(diagnostics.records) == sum(started.values()) * 2 + sum(completed.values()) + len(inspections), diagnostics.records
-
-
-def detached_shell(command):
-    encoded = base64.b64encode(command.encode()).decode()
-    program = (
-        "import base64,os,sys;"
-        "os.setsid();"
-        "os.execl('/bin/sh','sh','-c',base64.b64decode(sys.argv[1]).decode())"
-    )
-    return " ".join(
-        (shlex.quote(sys.executable), "-c", shlex.quote(program), shlex.quote(encoded))
-    )
-
-
-def start_detached_shell(command, ready_path):
-    ready = shlex.quote(str(ready_path))
-    return f"{detached_shell(command)} & while [ ! -s {ready} ]; do :; done"
-
-
-def publish_pid(path, value="$$"):
-    """Publish a fixture-owned shell PID expression atomically for exists waits."""
-    temporary = shlex.quote(str(path.with_suffix(".tmp")))
-    return (
-        f'printf "%s" "{value}" > {temporary} && '
-        f"mv {temporary} {shlex.quote(str(path))}"
-    )
-
-
-def configure(state, store, key, permission="ask", workspace=fixture.ROOT):
-    result = fixture.command(
-        "session", "configure",
-        "--store",
-        store,
-        "--record",
-        state / f"{key}.json",
-        "--key",
-        key,
-        "--workspace",
-        workspace,
-        "--provider",
-        "codex",
-        "--model",
-        "gpt-6-sol",
-        "--tools",
-        "bash",
-        "--permission-mode",
-        permission,
-    )
-    assert result["answer"]["status"] == "accepted", result
-    session = result["context"]["session"]
-    assert len(session) == 6 and all(c in "0123456789abcdefghjkmnpqrstvwxyz" for c in session), result
-    assert result["answer"]["created"] is True, result
-    return session
-
-
-def actions_for(store, session, count):
-    report = fixture.command("session", "inspect", "--store", store, "--session", session)
-    unresolved = report["actions"]["unresolved"]
-    return unresolved if len(unresolved) == count else None
-
-
-def action_for(store, session):
-    actions = actions_for(store, session, 1)
-    return actions[0] if actions is not None else None
+from bash_fixture import action_for, actions_for, add_exchange, allow, assert_cleanup_population, configure, execution_custody_idle, process_exists, process_resources, publish_pid, resolution, result_text, rows, source_revision, start_detached_shell
 
 
 def action_rows_by_id(store, session):
@@ -122,46 +35,6 @@ def action_rows_by_id(store, session):
     }
 
 
-def allow(state, store, key, session, action):
-    result = fixture.command(
-        "action", "allow",
-        "--store",
-        store,
-        "--record",
-        state / f"{key}.json",
-        "--key",
-        key,
-        "--session",
-        session,
-        "--action",
-        action,
-    )
-    assert result["answer"]["status"] == "accepted", result
-    return result
-
-
-def rows(store, sql, parameters=()):
-    database = sqlite3.connect(store / "rui.sqlite3")
-    try:
-        return database.execute(sql, parameters).fetchall()
-    finally:
-        database.close()
-
-
-def process_resources(process):
-    process_root = pathlib.Path(f"/proc/{process.pid}")
-    if not process_root.exists():
-        return {"process_resources": "unavailable"}
-    status = {}
-    for line in (process_root / "status").read_text().splitlines():
-        if line.startswith(("VmRSS:", "VmHWM:")):
-            name, value, unit = line.split()
-            assert unit == "kB", line
-            status[name[:-1]] = int(value) * 1024
-    status["descriptors"] = len(os.listdir(process_root / "fd"))
-    return status
-
-
 def scratch_resources(store):
     files = list((store / "scratch").iterdir())
     return {
@@ -174,49 +47,6 @@ def execution_idle(store, session):
     report = fixture.command("session", "inspect", "--store", store, "--session", session)
     execution = report["execution"]
     return report if execution["custody_occupied"] == "0" and execution["scratch_used_bytes"] == "0" else None
-
-
-def execution_custody_idle(store, session):
-    report = fixture.command("session", "inspect", "--store", store, "--session", session)
-    return report if report["execution"]["custody_occupied"] == "0" else None
-
-
-def process_exists(pid):
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-
-
-def resolution(store, session):
-    report = fixture.command(
-        "session", "inspect", "--store", store, "--session", session, "--profile", "full"
-    )
-    actions = report["full"]["actions"]
-    return actions[0]["resolution"] if len(actions) == 1 else None
-
-
-def result_text(store, session):
-    report = fixture.command(
-        "session", "inspect", "--store", store, "--session", session, "--profile", "full"
-    )
-    actions = report["full"]["actions"]
-    assert len(actions) == 1 and actions[0]["resolution"] is not None, report
-    return actions[0]["result"]["text"]
-
-
-def add_exchange(responses, name, command, answer="continued", timeout_ms=None, stdin=None):
-    arguments = {"cmd": command, "timeout_ms": timeout_ms, "description": f"Run {name} command"}
-    if stdin is not None:
-        arguments["stdin"] = stdin
-    responses.append(
-        fixture.sse_tool_calls(
-            f"{name}-calls",
-            [("bash", f"{name}-call", json.dumps(arguments, separators=(",", ":")))],
-        )
-    )
-    responses.append(fixture.sse_answer(f"{name}-answer", f"{name}-reasoning", f"{name}-message", answer)[0])
 
 
 def prove_stdin(state):
@@ -734,20 +564,6 @@ def show_command(*args, input=None):
 
 def show_observation(message):
     print(f"  -> {message}", flush=True)
-
-
-def source_revision():
-    try:
-        result = subprocess.run(
-            ["git", "describe", "--always", "--dirty"],
-            cwd=fixture.ROOT,
-            text=True,
-            capture_output=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return "unavailable-source-export"
-    return result.stdout.strip() if result.returncode == 0 else "unavailable-source-export"
 
 
 def walkthrough():
