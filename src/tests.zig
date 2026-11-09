@@ -8,6 +8,11 @@ test {
     _ = @import("Composer.zig");
     _ = @import("Transcript.zig");
     _ = @import("Root.zig");
+    _ = @import("Chip.zig");
+    _ = @import("StatusRow.zig");
+    _ = @import("FactsRow.zig");
+    _ = @import("ActivityBlock.zig");
+    _ = @import("Shortcuts.zig");
     _ = @import("TerminalApp.zig");
     _ = @import("Installation.zig");
     _ = @import("release_candidate.zig");
