@@ -632,12 +632,17 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(execution_batches(["current-facts-integration", "server-delivery-integration"]),
                          [["current-facts-integration"], ["server-delivery-integration"]])
 
-    def test_model_scenarios_do_not_select_shared_fixture_consumers(self):
-        result = select(["tests/integration/dispatch_integration.py"], "review", AVAILABLE)
+    def test_a_helper_reached_through_another_fixture_module_keeps_its_consumer(self):
+        # codex_h2_integration borrows transport_h2_integration.closed_host_request,
+        # which calls control_integration.read_http_response (Codex P2 on #1102).
+        for path in ("tests/integration/control_integration.py", "tests/integration/transport_h2_integration.py"):
+            with self.subTest(path=path):
+                result = select([path], "review", AVAILABLE)
+                for family in ("targets", "native_targets"):
+                    self.assertIn("codex-h2-integration", result[family])
+        scenarios = select(["tests/integration/dispatch_integration.py"], "review", AVAILABLE)
         for family in ("targets", "native_targets"):
-            self.assertTrue({"dispatch-debug-integration", "dispatch-integration"} <= set(result[family]))
-            self.assertNotIn("check", result[family])
-            self.assertNotIn("control-integration", result[family])
+            self.assertTrue({"dispatch-debug-integration", "dispatch-integration"} <= set(scenarios[family]))
 
     def test_helper_modules_select_the_fixtures_that_import_them(self):
         # A helper selects every fixture that imports it, and check once it

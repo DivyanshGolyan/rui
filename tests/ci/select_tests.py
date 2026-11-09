@@ -138,8 +138,6 @@ PYTHON_IMPORT = re.compile(r"^\s*(?:from\s+([A-Za-z_]\w*)\S*\s+import\b|import\s
 # or joins it under the repository's "src" path.
 SOURCE_READ = re.compile(r"\b(src/[\w./-]+)")
 SOURCE_JOIN = re.compile(r'/\s*"src"\s*/\s*"([\w./-]+)"')
-# A module that holds a fixture's cases rather than shared helpers.
-FIXTURE_MODULE = re.compile(r"_(integration|test)\.py$")
 
 
 class Graph:
@@ -214,20 +212,10 @@ class Graph:
         self.every[name] = self.production[name].union(*map(resolve, tested))
 
     def scripts(self, scripts):
-        """The modules and source files fixture scripts use. Another fixture's
-        module counts with the helpers it uses, not the fixtures it imports:
-        a fixture reuses another's functions, not its whole suite."""
-        reached, expanded, pending = set(scripts), set(), list(scripts)
-        while pending:
-            name = pending.pop()
-            if name in expanded:
-                continue
-            expanded.add(name)
-            for imported in self.python.get(name, ()):
-                if name in scripts or not FIXTURE_MODULE.search(name) or not FIXTURE_MODULE.search(imported):
-                    reached.add(imported)
-                    pending.append(imported)
-        return reached
+        """The modules and source files fixture scripts use, transitively: a
+        function a fixture borrows from another fixture's module may call any
+        helper that module imports."""
+        return self.closure(self.python, scripts)
 
     @staticmethod
     def closure(edges, roots):
