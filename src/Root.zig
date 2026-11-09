@@ -7,6 +7,7 @@ const Self = @This();
 
 overview: vxfw.Widget,
 session: ?vxfw.Widget = null,
+pasting: bool = false,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .captureHandler = capture, .eventHandler = event, .drawFn = draw };
@@ -28,8 +29,14 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     ctx.redraw = true;
 }
 
-fn capture(_: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
-    if (input == .key_release) ctx.consumeEvent();
+fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    switch (input) {
+        .paste_start => self.pasting = true,
+        .paste_end => self.pasting = false,
+        .key_release => ctx.consumeEvent(),
+        else => {},
+    }
 }
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {

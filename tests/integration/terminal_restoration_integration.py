@@ -3280,7 +3280,11 @@ def app_resize_cases():
 
 def app_consent_cases():
     binary = pathlib.Path(os.environ["RUI_TEST_TERMINAL_NOTICE"]).resolve()
-    for replaced in (True, False):
+    for replaced, keys, expected in (
+        (True, b"\r", b"decision=none\n"),
+        (False, b"\r", b"decision=17:allow_once\n"),
+        (False, b"\x1b[13;0u", b"decision=none\n"),
+    ):
         master, slave = open_pty()
         ready_read, ready_write = os.pipe()
         caller = None
@@ -3302,16 +3306,15 @@ def app_consent_cases():
                     os.write(master, b"\x1b[?1;2c")
                 if select.select([ready_read], [], [], 0)[0]:
                     assert os.read(ready_read, 1) == b"x"
-                    os.write(master, b"\r")
+                    os.write(master, keys)
                     return True
                 return False
 
             fixture.wait_for(enter_sent, "Enter after the card draws its request", timeout=5)
             _, diagnostic = human.terminal_exit(caller, master)
             assert caller.returncode == 0, (replaced, caller.returncode, diagnostic)
-            expected = b"confirmed=false\n" if replaced else b"confirmed=true\n"
             assert diagnostic == expected, (replaced, diagnostic)
-            print(f"App consent: request-replaced={replaced}, {diagnostic.decode().strip()}", flush=True)
+            print(f"App consent: request-replaced={replaced}, keys={keys!r}, {diagnostic.decode().strip()}", flush=True)
         finally:
             dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
                         lambda: os.close(master), lambda: os.close(slave),
@@ -3331,7 +3334,7 @@ def app_ready_failure_case():
         _, diagnostic = human.terminal_exit(caller, master)
         assert caller.returncode == 1, (caller.returncode, diagnostic)
         assert b"error: BrokenPipe" in diagnostic, diagnostic
-        assert b"confirmed=" not in diagnostic, diagnostic
+        assert b"decision=" not in diagnostic, diagnostic
         restored = termios.tcgetattr(slave)[3]
         assert restored & termios.ICANON and restored & termios.ECHO
         print("App readiness write failure: run returned BrokenPipe and terminal is usable", flush=True)

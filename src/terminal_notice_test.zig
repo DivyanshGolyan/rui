@@ -23,8 +23,12 @@ pub fn main(init: std.process.Init) !void {
         defer runtime.deinit();
         var probe: ConsentProbe = .{ .replace_request = std.mem.eql(u8, args[1], "consent-replaced") };
         var root: @import("Root.zig") = .{ .overview = probe.widget() };
+        probe.pasting = &root.pasting;
         try runtime.run(root.widget());
-        std.debug.print("confirmed={}\n", .{probe.confirmed});
+        if (probe.decision) |decision|
+            std.debug.print("decision={d}:{s}\n", .{ decision.action, @tagName(decision.choice) })
+        else
+            std.debug.print("decision=none\n", .{});
         return;
     }
     if (args.len == 2 and std.mem.eql(u8, args[1], "app-signal")) {
@@ -104,8 +108,9 @@ const ConsentProbe = struct {
     const vxfw = @import("vaxis").vxfw;
     consent: @import("ActionConsent.zig") = .{},
     card: @import("PermissionCard.zig") = undefined,
+    pasting: *const bool = undefined,
     replace_request: bool,
-    confirmed: bool = false,
+    decision: ?@import("session_consent.zig").Decision = null,
     text: vxfw.Text = .{ .text = "$ true" },
 
     fn widget(self: *ConsentProbe) vxfw.Widget {
@@ -117,9 +122,9 @@ const ConsentProbe = struct {
         switch (input) {
             .init => {
                 self.consent.adopt(17);
-                self.card = .{ .consent = &self.consent, .description = "Run the probe", .body = self.text.widget(), .userdata = self, .on_decision = decided };
+                self.card = .{ .consent = &self.consent, .pasting = self.pasting, .description = "Run the probe", .body = self.text.widget(), .userdata = self, .on_decision = decided };
             },
-            .key_press => {
+            .key_press, .invalid_key => {
                 if (self.replace_request) self.consent.adopt(29);
                 try self.card.widget().handleEvent(ctx, input);
                 ctx.quit = true;
@@ -131,7 +136,7 @@ const ConsentProbe = struct {
 
     fn decided(raw: *anyopaque, _: *vxfw.EventContext, decision: @import("session_consent.zig").Decision) !void {
         const self: *ConsentProbe = @ptrCast(@alignCast(raw));
-        self.confirmed = decision.action == 17 and decision.choice == .allow_once;
+        self.decision = decision;
     }
 
     fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {

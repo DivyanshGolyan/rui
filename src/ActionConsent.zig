@@ -7,17 +7,17 @@ const Self = @This();
 request: ?u64 = null,
 drawn: ?u64 = null,
 highlight: policy.Choice = .allow_once,
-pasting: bool = false,
+pressed: ?policy.Decision = null,
 
 pub const Input = union(enum) {
     left,
     right,
     enter,
-    click: policy.Choice,
+    press: ?policy.Choice,
+    release: ?policy.Choice,
+    cancel,
     other,
     invalid,
-    paste_start,
-    paste_end,
 };
 
 pub fn adopt(self: *Self, action: u64) void {
@@ -25,12 +25,14 @@ pub fn adopt(self: *Self, action: u64) void {
     self.request = action;
     self.drawn = null;
     self.highlight = .allow_once;
+    self.pressed = null;
 }
 
 pub fn withdraw(self: *Self) void {
     self.request = null;
     self.drawn = null;
     self.highlight = .allow_once;
+    self.pressed = null;
 }
 
 /// Called when the card draws the current request. Authorization is immediate;
@@ -41,22 +43,22 @@ pub fn draw(self: *Self) bool {
     return changed and self.drawn != null;
 }
 
-pub fn handle(self: *Self, input: Input) ?policy.Decision {
-    switch (input) {
-        .paste_start => {
-            self.pasting = true;
-            return null;
-        },
-        .paste_end => {
-            self.pasting = false;
-            return null;
-        },
-        else => {},
-    }
-    if (self.pasting) return null;
+pub fn handle(self: *Self, input: Input, pasting: bool) ?policy.Decision {
+    const pressed = self.pressed;
+    self.pressed = null;
+    if (pasting) return null;
     const request = self.request orelse return null;
     if (self.drawn != request) return null;
     const choice: policy.Choice = switch (input) {
+        .press => |choice| {
+            if (choice) |value| self.pressed = .{ .action = request, .choice = value };
+            return null;
+        },
+        .release => |choice| release: {
+            const held = pressed orelse return null;
+            if (held.action != request or choice != held.choice) return null;
+            break :release held.choice;
+        },
         .left => {
             self.highlight = .allow_once;
             return null;
@@ -66,9 +68,7 @@ pub fn handle(self: *Self, input: Input) ?policy.Decision {
             return null;
         },
         .enter => self.highlight,
-        .click => |choice| choice,
-        .other, .invalid => return null,
-        .paste_start, .paste_end => unreachable,
+        .other, .invalid, .cancel => return null,
     };
     const decision: policy.Decision = .{ .action = self.drawn.?, .choice = choice };
     self.withdraw();
@@ -78,46 +78,46 @@ pub fn handle(self: *Self, input: Input) ?policy.Decision {
 test "Action consent decides only the request the card drew" {
     var consent: Self = .{};
     consent.adopt(41);
-    try std.testing.expectEqual(null, consent.handle(.enter));
+    try std.testing.expectEqual(null, consent.handle(.enter, false));
     try std.testing.expect(consent.draw());
     try std.testing.expect(!consent.draw());
     consent.adopt(52);
-    try std.testing.expectEqual(null, consent.handle(.enter));
-    try std.testing.expectEqual(null, consent.handle(.{ .click = .deny }));
+    try std.testing.expectEqual(null, consent.handle(.enter, false));
+    try std.testing.expectEqual(null, consent.handle(.{ .press = .deny }, false));
+    try std.testing.expectEqual(null, consent.handle(.{ .release = .deny }, false));
     try std.testing.expect(consent.draw());
-    try std.testing.expectEqual(policy.Decision{ .action = 52, .choice = .allow_once }, consent.handle(.enter).?);
-    try std.testing.expectEqual(null, consent.handle(.enter));
+    try std.testing.expectEqual(policy.Decision{ .action = 52, .choice = .allow_once }, consent.handle(.enter, false).?);
+    try std.testing.expectEqual(null, consent.handle(.enter, false));
 }
 
 test "Action consent ignores typing and defaults each request to Allow once" {
     var consent: Self = .{};
     consent.adopt(17);
     _ = consent.draw();
-    try std.testing.expectEqual(null, consent.handle(.right));
+    try std.testing.expectEqual(null, consent.handle(.right, false));
     consent.adopt(17);
-    for ([_]Input{ .other, .invalid }) |input| try std.testing.expectEqual(null, consent.handle(input));
-    try std.testing.expectEqual(policy.Decision{ .action = 17, .choice = .deny }, consent.handle(.enter).?);
+    for ([_]Input{ .other, .invalid }) |input| try std.testing.expectEqual(null, consent.handle(input, false));
+    try std.testing.expectEqual(policy.Decision{ .action = 17, .choice = .deny }, consent.handle(.enter, false).?);
     consent.adopt(29);
     _ = consent.draw();
-    _ = consent.handle(.right);
-    _ = consent.handle(.left);
-    try std.testing.expectEqual(policy.Decision{ .action = 29, .choice = .allow_once }, consent.handle(.enter).?);
+    _ = consent.handle(.right, false);
+    _ = consent.handle(.left, false);
+    try std.testing.expectEqual(policy.Decision{ .action = 29, .choice = .allow_once }, consent.handle(.enter, false).?);
     consent.adopt(31);
     _ = consent.draw();
     try std.testing.expectEqual(policy.Choice.allow_once, consent.highlight);
-    try std.testing.expectEqual(policy.Decision{ .action = 31, .choice = .deny }, consent.handle(.{ .click = .deny }).?);
+    try std.testing.expectEqual(null, consent.handle(.{ .press = .deny }, false));
+    try std.testing.expectEqual(policy.Decision{ .action = 31, .choice = .deny }, consent.handle(.{ .release = .deny }, false).?);
 }
 
 test "Action consent marked paste never chooses even across request replacement" {
     var consent: Self = .{};
     consent.adopt(17);
     _ = consent.draw();
-    _ = consent.handle(.paste_start);
     consent.withdraw();
     consent.adopt(29);
     _ = consent.draw();
-    for ([_]Input{ .left, .right, .enter, .{ .click = .deny }, .other, .invalid }) |input|
-        try std.testing.expectEqual(null, consent.handle(input));
-    _ = consent.handle(.paste_end);
-    try std.testing.expectEqual(policy.Decision{ .action = 29, .choice = .allow_once }, consent.handle(.enter).?);
+    for ([_]Input{ .left, .right, .enter, .{ .press = .deny }, .{ .release = .deny }, .other, .invalid }) |input|
+        try std.testing.expectEqual(null, consent.handle(input, true));
+    try std.testing.expectEqual(policy.Decision{ .action = 29, .choice = .allow_once }, consent.handle(.enter, false).?);
 }

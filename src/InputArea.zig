@@ -111,7 +111,8 @@ test "InputArea permission hides and restores the draft and its caret after deci
     const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 9 };
     var consent: Consent = .{};
     const command: vxfw.Text = .{ .text = "$ zig build test-store" };
-    var card: PermissionCard = .{ .consent = &consent, .description = "Run tests", .body = command.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    const pasting = false;
+    var card: PermissionCard = .{ .consent = &consent, .pasting = &pasting, .description = "Run tests", .body = command.widget(), .userdata = &owner, .on_decision = Owner.decide };
     var input: Self = .{ .composer = .{ .editor = &editor } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
